@@ -1,0 +1,650 @@
+# Deploying Applications to Azure Container Instances with Radius
+
+**Source:** https://techcommunity.microsoft.com/blog/azurecompute/use-radius-to-deploy-your-applications-to-azure-container-instances/4428551
+
+**Topics:** Radius, Azure Container Instances, ACI, Cloud-Native, Platform Engineering, IDP
+
+---
+
+## Overview
+
+Radius is a CNCF open-source application platform that enables platform engineers to construct internal developer platforms. The tool facilitates improved collaboration between application teams and platform engineering groups.
+
+Radius now supports deploying applications to additional container platforms, beginning with Azure Container Instances.
+
+## What is Azure Container Instances?
+
+Azure Container Instances (ACI) represents a serverless container platform within Microsoft Azure. The service permits deployment of containerized applications without managing underlying infrastructure like virtual machines or complex orchestration systems. ACI offers a lightweight compute environment where containers launch within seconds with configurable CPU and memory resources, making it ideal for cloud-native applications and task automation.
+
+## Why Radius with ACI?
+
+The integration provides several advantages:
+
+- **Abstraction Layer**: Radius brings an application model to ACI that abstracts away the deployment process, allowing developers to focus on application logic.
+
+- **Platform Agnosticism**: Applications defined in Radius can deploy across Kubernetes, ACI, and future platforms like ECS without rewriting deployment logic.
+
+- **Separation of Concerns**: Developers use the `rad` CLI without understanding infrastructure complexity, while platform teams enforce cost, security, and operational requirements.
+
+## Prerequisites
+
+Before deploying to ACI using Radius:
+
+1. An Azure subscription with active provider configuration
+2. Radius control plane installed
+3. A managed identity (required for ACI deployments)
+4. User-assigned managed identity assigned to:
+   - Contributor role
+   - Azure Container Instances Contributor role
+5. Azure resource group access
+
+## Configuration: Creating an ACI Environment
+
+### Bicep Environment Definition
+
+```bicep
+resource env 'Applications.Core/environments@2023-10-01-preview' = {
+  name: 'aci-demo'
+  properties: {
+    compute: {
+      kind: 'aci'
+      resourceGroup: '/subscriptions/<subscription-id>/resourceGroups/<resource-group>'
+      identity: {
+        kind: 'userAssigned'
+        managedIdentity: ['/subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<identity-name>']
+      }
+    }
+    providers: {
+      azure: {
+        scope: '/subscriptions/<subscription-id>/resourceGroups/<resource-group>'
+      }
+    }
+  }
+}
+```
+
+Key configuration elements:
+
+| Property | Description |
+|----------|-------------|
+| `compute.kind` | Set to `'aci'` to designate ACI as the platform |
+| `resourceGroup` | Target Azure resource group identifier |
+| `identity` | Specifies managed identity for authentication |
+| `providers.azure.scope` | Azure subscription and resource group scope |
+
+## Deployment Instructions
+
+### Step 1: Deploy the Environment
+
+Execute the environment deployment using Radius CLI:
+
+```bash
+rad deploy ./environment.bicep
+```
+
+Radius automatically provisions:
+- Virtual network and subnet
+- Internal load balancer for traffic management
+- Network Security Group with appropriate rules
+- Container group profiles for consistent configurations
+
+### Step 2: Define Your Application
+
+Specify your application in a Bicep file (e.g., `app.bicep`) including:
+- Container specifications
+- Environment variables
+- Resource connections
+- Port configurations
+
+Application definitions remain consistent whether targeting Kubernetes or ACI.
+
+### Step 3: Deploy the Application
+
+Deploy to the ACI environment:
+
+```bash
+rad deploy ./app.bicep --environment aci-demo
+```
+
+Or using workspace configuration:
+
+```bash
+rad deploy ./app.bicep --workspace aci-workspace
+```
+
+### Step 4: Verify Deployment
+
+View provisioned resources:
+
+```bash
+rad app graph
+```
+
+Sample output showing deployed architecture:
+
+```
+Name: frontend (Applications.Core/containers)
+Connections:
+  gateway (Applications.Core/gateways) -> frontend
+  frontend -> database (Applications.Datastores/redisCaches)
+Resources:
+  frontend (Microsoft.ContainerInstance/containerGroupProfiles)
+  frontend (Microsoft.ContainerInstance/nGroups)
+  frontend (Microsoft.Network/loadBalancers/applications)
+  frontend (Microsoft.Network/virtualNetworks/subnets)
+```
+
+## Azure Resources Provisioned
+
+Radius automatically creates and manages these Azure resources:
+
+### Network Components
+
+| Resource | Purpose |
+|----------|---------|
+| Virtual Network | Required for ACI networking and security |
+| Subnet | Isolated network segment for container deployment |
+| Network Security Group | Controls inbound/outbound traffic with application-specific rules |
+| Load Balancer | Internal load balancer directing traffic to container instances |
+
+### Container Resources
+
+| Resource | Purpose |
+|----------|---------|
+| Container Group Profiles | Define common settings for multiple container groups |
+| Container NGroups | Manage multiple application container instances using a single API call |
+| Container Instances | Actual running containers based on application definitions |
+
+## Architecture Overview
+
+The integration leverages ACI NGroups functionality, enabling Radius to orchestrate multiple container instances using a unified template approach. This orchestration capability allows:
+
+- Single API call management of N container instances
+- Common template-based instance configuration
+- Simplified scaling and updates
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Radius Control Plane                      │
+├─────────────────────────────────────────────────────────────┤
+│  rad CLI  ──►  Environment Definition  ──►  Azure Provider  │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Azure Resources                           │
+├─────────────────────────────────────────────────────────────┤
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │    VNet      │  │     NSG      │  │ Load Balancer│      │
+│  └──────────────┘  └──────────────┘  └──────────────┘      │
+│                              │                               │
+│                              ▼                               │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │              Container Group (NGroups)                │  │
+│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐              │  │
+│  │  │Container│  │Container│  │Container│  ...          │  │
+│  │  │    1    │  │    2    │  │    N    │              │  │
+│  │  └─────────┘  └─────────┘  └─────────┘              │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Key Capabilities
+
+| Capability | Description |
+|------------|-------------|
+| Application Consistency | Define applications once, deploy across multiple compute environments without modification |
+| Managed Dependencies | Radius handles all resource translation from application models to Azure infrastructure |
+| Seamless Integration | Platform engineers enforce organizational policies through environment definitions |
+
+## Example: Complete Application Deployment
+
+### 1. Environment Definition (environment.bicep)
+
+```bicep
+resource env 'Applications.Core/environments@2023-10-01-preview' = {
+  name: 'production-aci'
+  properties: {
+    compute: {
+      kind: 'aci'
+      resourceGroup: '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myapp-rg'
+      identity: {
+        kind: 'userAssigned'
+        managedIdentity: ['/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myapp-rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/radius-identity']
+      }
+    }
+    providers: {
+      azure: {
+        scope: '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/myapp-rg'
+      }
+    }
+  }
+}
+```
+
+### 2. Application Definition (app.bicep)
+
+```bicep
+import radius as radius
+
+resource app 'Applications.Core/applications@2023-10-01-preview' = {
+  name: 'myapp'
+}
+
+resource frontend 'Applications.Core/containers@2023-10-01-preview' = {
+  name: 'frontend'
+  properties: {
+    application: app.id
+    container: {
+      image: 'myregistry.azurecr.io/frontend:latest'
+      ports: {
+        http: {
+          containerPort: 80
+        }
+      }
+      env: {
+        BACKEND_URL: 'http://backend:8080'
+      }
+    }
+  }
+}
+```
+
+### 3. Deploy
+
+```bash
+# Deploy environment
+rad deploy ./environment.bicep
+
+# Deploy application
+rad deploy ./app.bicep --environment production-aci
+
+# Verify
+rad app graph -a myapp
+```
+
+## Future Development
+
+The Radius maintainers plan to implement a compute platform extensibility model leveraging Radius Recipes. This redesign will enable:
+
+- Architectural separation of core logic from platform provisioning
+- Community-contributed platform extensions
+- Platform-specific capability support (e.g., confidential containers in ACI)
+
+## Additional Resources
+
+- [Radius Documentation](https://docs.radapp.io)
+- [Azure Container Instances Documentation](https://docs.microsoft.com/azure/container-instances/)
+- [Radius GitHub Repository](https://github.com/radius-project/radius)
+- Community engagement through GitHub, Discord, and monthly meetings
+# Radius Containers: Complete Technical Documentation
+
+**Source:** https://docs.radapp.io/guides/author-apps/containers/overview/
+
+**Topics:** Radius, Containers, Kubernetes, Azure Container Instances, Platform Engineering
+
+---
+
+## Overview
+
+Radius containers enable you to run container workloads as part of your application across different platforms and runtimes. They support various workload types including frontend UIs, backend APIs, databases, and other containerized services.
+
+## Supported Runtimes
+
+### Kubernetes
+
+Containers deploy to the same Kubernetes cluster as your Radius installation within the application-defined namespace. Radius provides customization mechanisms through:
+
+- **Base Kubernetes YAML**: Supply a foundation YAML definition upon which Radius builds containers, enabling incremental adoption of Radius by starting with your existing YAML definition.
+- **Pod Patching**: Apply PodSpec definitions to override Radius behaviors and access all Kubernetes Pod features
+
+Supported Kubernetes resources for customization include:
+- Deployments
+- ServiceAccounts
+- Services
+- Secrets
+- ConfigMaps
+
+### Azure Container Instances
+
+Containers can deploy to Azure Container Instances using the `aci` runtime for serverless environments without needing to manage any infrastructure.
+
+## Container Definition
+
+Containers are defined with specifications for:
+- Image
+- Ports
+- Environment variables
+- Volumes
+- Additional configuration
+
+### Basic Container Definition (Bicep)
+
+```bicep
+import radius as radius
+
+resource app 'Applications.Core/applications@2023-10-01-preview' = {
+  name: 'myapp'
+}
+
+resource container 'Applications.Core/containers@2023-10-01-preview' = {
+  name: 'mycontainer'
+  properties: {
+    application: app.id
+    container: {
+      image: 'myregistry/myimage:latest'
+      ports: {
+        http: {
+          containerPort: 80
+          protocol: 'TCP'
+        }
+      }
+      env: {
+        MY_VAR: 'value'
+      }
+    }
+  }
+}
+```
+
+## Ports Configuration
+
+Ports expose containers to incoming network traffic.
+
+```bicep
+ports: {
+  http: {
+    containerPort: 80
+    protocol: 'TCP'
+  }
+  grpc: {
+    containerPort: 9090
+    protocol: 'TCP'
+  }
+}
+```
+
+## Volumes
+
+### Ephemeral Volumes
+
+Share the container's lifecycle, created and deleted with the container instance. They provide empty directories mounted to the container.
+
+```bicep
+container: {
+  image: 'myimage:latest'
+  volumes: {
+    temp: {
+      kind: 'ephemeral'
+      managedStore: 'memory'  // or 'disk'
+      mountPath: '/tmp/data'
+    }
+  }
+}
+```
+
+### Persistent Volumes
+
+Maintain independent lifecycles separate from containers. Multiple containers can mount these volumes, and data persists across container restarts.
+
+```bicep
+resource volume 'Applications.Core/volumes@2023-10-01-preview' = {
+  name: 'myvolume'
+  properties: {
+    application: app.id
+    kind: 'azure.com.keyvault'
+    secrets: {
+      mysecret: {
+        name: 'secret-name'
+      }
+    }
+    resource: keyvault.id
+  }
+}
+
+resource container 'Applications.Core/containers@2023-10-01-preview' = {
+  name: 'mycontainer'
+  properties: {
+    application: app.id
+    container: {
+      image: 'myimage:latest'
+      volumes: {
+        secrets: {
+          kind: 'persistent'
+          source: volume.id
+          mountPath: '/secrets'
+        }
+      }
+    }
+  }
+}
+```
+
+## Health Probes
+
+### Readiness Probe
+
+Detects when containers begin accepting traffic through three mechanisms:
+
+| Probe Type | Description |
+|------------|-------------|
+| `httpGet` | HTTP GET requests validate readiness; codes 200-399 indicate success |
+| `tcp` | Port listening validation |
+| `exec` | Command execution with 0 return code indicating success |
+
+```bicep
+container: {
+  image: 'myimage:latest'
+  readinessProbe: {
+    kind: 'httpGet'
+    containerPort: 80
+    path: '/health/ready'
+    initialDelaySeconds: 10
+    periodSeconds: 5
+  }
+}
+```
+
+### Liveness Probe
+
+Identifies broken container states and triggers restarts using identical probe mechanisms (httpGet, tcp, exec) to restore health.
+
+```bicep
+container: {
+  image: 'myimage:latest'
+  livenessProbe: {
+    kind: 'tcp'
+    containerPort: 80
+    initialDelaySeconds: 30
+    periodSeconds: 10
+  }
+}
+```
+
+## Connections
+
+Connections link containers to other Radius resources, automatically injecting environment variables with connection metadata. This eliminates manual URI, connection string, or credential configuration.
+
+### Environment Variable Pattern
+
+`CONNECTION_{NAME}_{PROPERTY}`
+
+### MongoDB Connection Example
+
+| Variable | Value |
+|----------|-------|
+| `CONNECTION_DATABASE_CONNECTIONSTRING` | Database connection string |
+| `CONNECTION_DATABASE_DATABASE` | Database name |
+| `CONNECTION_DATABASE_USERNAME` | Authentication username |
+| `CONNECTION_DATABASE_PASSWORD` | Authentication password |
+
+```bicep
+resource container 'Applications.Core/containers@2023-10-01-preview' = {
+  name: 'backend'
+  properties: {
+    application: app.id
+    container: {
+      image: 'backend:latest'
+    }
+    connections: {
+      database: {
+        source: mongoDb.id
+      }
+      cache: {
+        source: redis.id
+      }
+    }
+  }
+}
+```
+
+Connection information is securely managed by the Radius Environment, ensuring it is stored and mounted correctly.
+
+## Extensions
+
+### Kubernetes Metadata Extension
+
+Configures Kubernetes-specific metadata including labels and annotations for containers.
+
+```bicep
+extensions: [
+  {
+    kind: 'kubernetesMetadata'
+    labels: {
+      'app.kubernetes.io/name': 'myapp'
+      'app.kubernetes.io/version': 'v1.0.0'
+    }
+    annotations: {
+      'prometheus.io/scrape': 'true'
+      'prometheus.io/port': '9090'
+    }
+  }
+]
+```
+
+### Manual Scaling Extension
+
+Sets the number of replica instances for compute resources.
+
+```bicep
+extensions: [
+  {
+    kind: 'manualScaling'
+    replicas: 3
+  }
+]
+```
+
+### Dapr Sidecar Extension
+
+Adds and configures a Dapr sidecar to your application, enabling distributed application patterns.
+
+```bicep
+extensions: [
+  {
+    kind: 'daprSidecar'
+    appId: 'myapp'
+    appPort: 80
+  }
+]
+```
+
+## Complete Container Example
+
+```bicep
+import radius as radius
+
+resource app 'Applications.Core/applications@2023-10-01-preview' = {
+  name: 'ecommerce'
+}
+
+resource frontend 'Applications.Core/containers@2023-10-01-preview' = {
+  name: 'frontend'
+  properties: {
+    application: app.id
+    container: {
+      image: 'myregistry.azurecr.io/frontend:v1.2.3'
+      ports: {
+        http: {
+          containerPort: 3000
+          protocol: 'TCP'
+        }
+      }
+      env: {
+        NODE_ENV: 'production'
+        API_URL: 'http://backend:8080'
+      }
+      readinessProbe: {
+        kind: 'httpGet'
+        containerPort: 3000
+        path: '/health'
+        initialDelaySeconds: 5
+        periodSeconds: 10
+      }
+      livenessProbe: {
+        kind: 'httpGet'
+        containerPort: 3000
+        path: '/health'
+        initialDelaySeconds: 15
+        periodSeconds: 20
+      }
+    }
+    connections: {
+      backend: {
+        source: backend.id
+      }
+    }
+    extensions: [
+      {
+        kind: 'manualScaling'
+        replicas: 3
+      }
+      {
+        kind: 'kubernetesMetadata'
+        labels: {
+          'app': 'frontend'
+          'tier': 'web'
+        }
+      }
+    ]
+  }
+}
+
+resource backend 'Applications.Core/containers@2023-10-01-preview' = {
+  name: 'backend'
+  properties: {
+    application: app.id
+    container: {
+      image: 'myregistry.azurecr.io/backend:v2.0.0'
+      ports: {
+        http: {
+          containerPort: 8080
+        }
+      }
+    }
+    connections: {
+      database: {
+        source: mongodb.id
+      }
+    }
+  }
+}
+```
+
+## Runtime Comparison
+
+| Feature | Kubernetes | Azure Container Instances |
+|---------|------------|---------------------------|
+| Orchestration | Full K8s features | Simplified, serverless |
+| Scaling | HPA, VPA, manual | Manual via NGroups |
+| Networking | Services, Ingress | VNet integration, LB |
+| Persistent Storage | PV/PVC | Azure Files, Disks |
+| Cost Model | Cluster-based | Per-container billing |
+| Best For | Production workloads | Dev/test, batch jobs |
+
+## Additional Resources
+
+- [Container Resource Schema](https://docs.radapp.io/reference/resource-schema/core-schema/container/)
+- [Application Networking Guide](https://docs.radapp.io/guides/author-apps/networking/)
+- [Connect to Dependencies](https://docs.radapp.io/guides/author-apps/containers/connect-dependencies/)
+- [Mount Volumes](https://docs.radapp.io/guides/author-apps/containers/volumes/)

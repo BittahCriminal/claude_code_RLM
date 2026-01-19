@@ -1,0 +1,487 @@
+# Score Workload Specification
+
+**Source:** https://docs.score.dev/ and https://score.dev/
+
+**Topics:** Score, Workload Specification, Platform-Agnostic, CNCF, Docker Compose, Kubernetes, IDP
+
+---
+
+## Overview
+
+Score is an open-source, platform-agnostic, container-based workload specification and a Cloud Native Computing Foundation (CNCF) Sandbox project. It enables developers to define workloads once and deploy them across multiple platforms including Docker Compose, Kubernetes, Fly.io, and Google Cloud Run.
+
+The core value proposition reduces developer burden by establishing a single vendor-neutral configuration file, eliminating the need to learn platform-specific syntax.
+
+## Key Problems Score Solves
+
+| Problem | Score Solution |
+|---------|----------------|
+| **Cognitive Load** | Reduces need for developers to become experts in multiple technologies |
+| **Config Drift** | Prevents inconsistencies between local and remote environment configurations |
+| **YAML Bloat** | Eliminates repetitive, environment-specific configuration files |
+| **Feature Focus** | Lets developers prioritize shipping features over infrastructure management |
+| **Environment Transitions** | Simplifies moving workloads from local to production setups |
+
+## Core Characteristics
+
+### 1. Platform-Agnostic
+Works across various container orchestration systems and tools without vendor lock-in.
+
+### 2. Environment-Agnostic
+The `score.yaml` file maintains consistent configuration across environments while accepting environment-specific parameters for runtime resolution.
+
+### 3. Tightly Scoped
+Focuses exclusively on workload-level properties rather than attempting comprehensive infrastructure definition.
+
+### 4. Declarative
+Developers specify requirements; the platform resolves them during execution.
+
+## How Score Works
+
+Three core components interact:
+
+```
+┌─────────────────────┐
+│    score.yaml       │  Platform-independent workload spec
+│  (Developer writes) │
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│ Score Implementation│  CLI tool (score-compose, score-k8s)
+│   (Translates)      │
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│ Platform Config     │  docker-compose.yaml, K8s manifests
+│   (Generated)       │
+└─────────────────────┘
+```
+
+## Score Specification Reference
+
+### Top-Level Structure
+
+```yaml
+apiVersion: score.dev/v1b1
+metadata:
+  name: my-workload
+  annotations:
+    key: value
+
+containers:
+  my-container:
+    image: my-image:latest
+    # ... container config
+
+service:
+  ports:
+    www:
+      port: 80
+      targetPort: 8080
+
+resources:
+  database:
+    type: postgres
+```
+
+### Workload Definition
+
+| Property | Description |
+|----------|-------------|
+| `apiVersion` | Current version: `score.dev/v1b1` |
+| `metadata.name` | Workload identifier (required) |
+| `metadata.annotations` | Optional metadata passthrough |
+| Custom properties | Supported for reference via placeholders |
+
+### Container Specification
+
+```yaml
+containers:
+  my-container:
+    image: myregistry/myimage:v1.0.0
+    command: ["/bin/sh"]
+    args: ["-c", "echo hello"]
+    variables:
+      DATABASE_URL: "${resources.db.connection_string}"
+      APP_NAME: "${metadata.name}"
+    files:
+      - target: /etc/config/app.conf
+        mode: "0644"
+        content: |
+          server.port=8080
+    volumes:
+      - source: ${resources.data}
+        target: /data
+    resources:
+      limits:
+        memory: "256Mi"
+        cpu: "500m"
+      requests:
+        memory: "128Mi"
+        cpu: "250m"
+    livenessProbe:
+      httpGet:
+        path: /health
+        port: 8080
+      initialDelaySeconds: 10
+      periodSeconds: 30
+    readinessProbe:
+      httpGet:
+        path: /ready
+        port: 8080
+```
+
+#### Container Properties
+
+| Property | Description |
+|----------|-------------|
+| `image` | Container image identifier (can be "." for runtime supply) |
+| `command` | Entrypoint override |
+| `args` | Arguments to entrypoint |
+| `variables` | Environment variables with placeholder support |
+| `files` | Mounted file configurations |
+| `volumes` | Storage mount points |
+| `resources` | CPU/memory limits and requests |
+| `livenessProbe` | Health check for container lifecycle |
+| `readinessProbe` | Health check for traffic readiness |
+
+### Service Definition
+
+```yaml
+service:
+  ports:
+    www:
+      port: 80
+      protocol: TCP
+      targetPort: 8080
+    grpc:
+      port: 9090
+      targetPort: 9090
+```
+
+| Property | Description |
+|----------|-------------|
+| `ports` | Named port mappings |
+| `port` | Public/exposed port number |
+| `protocol` | TCP (default) or UDP |
+| `targetPort` | Container port (defaults to port if unspecified) |
+
+### Resources Section
+
+Resources define external dependencies that the workload needs:
+
+```yaml
+resources:
+  db:
+    type: postgres
+    class: default
+    metadata:
+      annotations:
+        score.dev/description: "Main application database"
+    params:
+      extensions:
+        - pg_trgm
+
+  cache:
+    type: redis
+
+  storage:
+    type: volume
+
+  dns:
+    type: dns
+
+  route:
+    type: route
+    params:
+      host: ${resources.dns.host}
+      path: /api
+      port: 80
+```
+
+#### Resource Properties
+
+| Property | Description |
+|----------|-------------|
+| `type` | Resource classification (postgres, redis, volume, dns, route, etc.) |
+| `class` | Optional specialization (e.g., "production", "dev") |
+| `id` | Optional external identifier for cross-workload reference |
+| `params` | Configuration parameters (accepts placeholder values) |
+| `metadata.annotations` | Implementation-specific directives |
+
+#### Common Resource Types
+
+| Type | Description | Typical Outputs |
+|------|-------------|-----------------|
+| `postgres` | PostgreSQL database | `host`, `port`, `name`, `username`, `password`, `connection_string` |
+| `mysql` | MySQL database | `host`, `port`, `name`, `username`, `password` |
+| `redis` | Redis cache | `host`, `port`, `username`, `password` |
+| `volume` | Persistent storage | `source` |
+| `dns` | DNS/hostname | `host` |
+| `route` | HTTP routing/ingress | `host`, `path` |
+| `s3` | Object storage | `bucket`, `region`, `access_key`, `secret_key` |
+
+## Placeholder System
+
+Score uses placeholders to reference values dynamically:
+
+### Metadata References
+```yaml
+variables:
+  APP_NAME: "${metadata.name}"
+  CUSTOM_VALUE: "${metadata.annotations.my-key}"
+```
+
+### Resource References
+```yaml
+variables:
+  DATABASE_URL: "${resources.db.connection_string}"
+  DB_HOST: "${resources.db.host}"
+  DB_PORT: "${resources.db.port}"
+  DB_NAME: "${resources.db.name}"
+  DB_USER: "${resources.db.username}"
+  DB_PASS: "${resources.db.password}"
+  REDIS_HOST: "${resources.cache.host}"
+```
+
+### Escaping Placeholders
+Use `$${}` to escape:
+```yaml
+variables:
+  LITERAL: "$${not.expanded}"  # Results in: ${not.expanded}
+```
+
+### Disabling Expansion
+Use `noExpand: true` on files:
+```yaml
+files:
+  - target: /etc/template.txt
+    noExpand: true
+    content: "${this.stays.literal}"
+```
+
+## Score Implementations
+
+### score-compose
+
+Reference implementation for Docker Compose environments.
+
+```bash
+# Install
+brew install score-spec/tap/score-compose
+
+# Initialize
+score-compose init
+
+# Generate docker-compose.yaml
+score-compose generate score.yaml
+
+# Run
+docker compose up
+```
+
+**Features:**
+- Generates `docker-compose.yaml` from `score.yaml`
+- Provisions local resources (postgres, redis via containers)
+- Supports resource provisioners for custom resource handling
+- Patch templates for customization
+
+### score-k8s
+
+Reference implementation for Kubernetes environments.
+
+```bash
+# Install
+brew install score-spec/tap/score-k8s
+
+# Initialize
+score-k8s init
+
+# Generate Kubernetes manifests
+score-k8s generate score.yaml
+
+# Deploy
+kubectl apply -f manifests/
+```
+
+**Features:**
+- Generates Kubernetes Deployments, Services, ConfigMaps
+- Supports Helm chart generation
+- Resource provisioners for cloud-native resources
+- Patch templates for K8s-specific customization
+
+## Complete Example
+
+### Web Application with Database
+
+```yaml
+apiVersion: score.dev/v1b1
+metadata:
+  name: my-web-app
+  annotations:
+    score.dev/description: "Web application with PostgreSQL backend"
+
+containers:
+  web:
+    image: myregistry/webapp:v2.1.0
+    variables:
+      PORT: "8080"
+      DATABASE_URL: "postgresql://${resources.db.username}:${resources.db.password}@${resources.db.host}:${resources.db.port}/${resources.db.name}"
+      REDIS_URL: "redis://${resources.cache.host}:${resources.cache.port}"
+      APP_ENV: "production"
+    resources:
+      limits:
+        memory: "512Mi"
+        cpu: "1000m"
+      requests:
+        memory: "256Mi"
+        cpu: "500m"
+    livenessProbe:
+      httpGet:
+        path: /health
+        port: 8080
+      initialDelaySeconds: 15
+      periodSeconds: 20
+    readinessProbe:
+      httpGet:
+        path: /ready
+        port: 8080
+      initialDelaySeconds: 5
+      periodSeconds: 10
+
+service:
+  ports:
+    http:
+      port: 80
+      targetPort: 8080
+
+resources:
+  db:
+    type: postgres
+    class: default
+    params:
+      extensions:
+        - pg_trgm
+        - uuid-ossp
+
+  cache:
+    type: redis
+
+  dns:
+    type: dns
+
+  route:
+    type: route
+    params:
+      host: ${resources.dns.host}
+      path: /
+      port: 80
+```
+
+## Best Practices
+
+### 1. Keep Workloads Focused
+One workload per `score.yaml` - don't try to define entire systems.
+
+### 2. Use Resource Abstractions
+Define resources by type, let implementations handle provisioning:
+```yaml
+# Good - abstract
+resources:
+  db:
+    type: postgres
+
+# Avoid - implementation-specific details
+resources:
+  db:
+    type: postgres
+    params:
+      aws_instance_type: db.t3.micro  # Too specific
+```
+
+### 3. Leverage Placeholders
+Always use placeholders for resource connections:
+```yaml
+# Good
+DATABASE_URL: "${resources.db.connection_string}"
+
+# Avoid - hardcoded
+DATABASE_URL: "postgresql://localhost:5432/mydb"
+```
+
+### 4. Define Resource Requirements
+Specify CPU/memory to ensure consistent behavior:
+```yaml
+resources:
+  limits:
+    memory: "256Mi"
+    cpu: "500m"
+```
+
+### 5. Include Health Checks
+Always define probes for production workloads:
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 8080
+```
+
+## Workflow Integration
+
+### Development Workflow
+
+```bash
+# 1. Create score.yaml
+cat > score.yaml << 'EOF'
+apiVersion: score.dev/v1b1
+metadata:
+  name: my-service
+containers:
+  app:
+    image: .
+    variables:
+      PORT: "8080"
+service:
+  ports:
+    http:
+      port: 8080
+EOF
+
+# 2. Local development with Docker Compose
+score-compose init
+score-compose generate score.yaml
+docker compose up --build
+
+# 3. Deploy to Kubernetes
+score-k8s init
+score-k8s generate score.yaml
+kubectl apply -f manifests/
+```
+
+### CI/CD Integration
+
+```yaml
+# GitHub Actions example
+- name: Generate K8s Manifests
+  run: |
+    score-k8s generate score.yaml -o manifests/
+
+- name: Deploy
+  run: |
+    kubectl apply -f manifests/
+```
+
+## Additional Resources
+
+- [Score Documentation](https://docs.score.dev/)
+- [Score Specification](https://github.com/score-spec/spec)
+- [score-compose GitHub](https://github.com/score-spec/score-compose)
+- [score-k8s GitHub](https://github.com/score-spec/score-k8s)
+- [CNCF Score Project](https://www.cncf.io/projects/score/)
