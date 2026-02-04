@@ -1,0 +1,2031 @@
+es to address the crisis.
+
+Utilizing autoscaling
+On the cloud, it is highly recommended to use the autoscaling solutions we discussed earlier. The horizontal pod autoscaler is a no-brainer. The cluster autoscaler is great too, if your cluster deals with a very dynamic workload and you don't want to overprovision on a regular basis. The vertical autoscaler is probably best for fine-tuning your resource requests at this point.
+
+Rolling your own automated provisioning
+If you have more sophisticated needs, you can always roll your own. Kubernetes encourages both running your own controllers that can watch for different events and respond by provisioning some resources or even running some tools locally, or as part of your CI/CD pipeline, that check the state of the cluster and make some provisioning decisions.
+Once your cluster is properly provisioned, you should start thinking about performance. Performance is interesting because there are so many trade-offs you need to take into account.
+
+Getting performance right
+Performance is important for many reasons, which we will delve into soon. It is very important to understand when is the right time to try and improve performance. My guiding principle is: make it work, make it right, make it fast. That is, first, just get the system to do whatever it needs to do, however slow and clunky. Then, clean up the architecture and the code. Now, you are ready to take on performance and consider refactoring, changes, and many other factors that can impact performance.
+But there is a preliminary step for performance improvements, and that's profiling and benchmarking. Trying to improve performance without measuring what you try to improve is just like trying to make your code work correctly without writing any tests. Not only is it futile, but, even if you actually got lucky and improved the performance, how would you know without measurements?
+Let's understand something about performance. It makes everything complicated. However, it is often a necessary evil. Improving performance is important when it affects the user experience or cost. To make things worse, improving the user experience often comes at a cost. Finding the sweet spot is difficult. Unfortunately, the sweet spot doesn't stay put. Your system evolves, the number of users grow, technologies change, and the costs of your resources change. For example, a small social media startup has no business building its own data centers, but a social media giant like Facebook now designs their own custom servers to squeeze a little bit more performance and save costs. Scale changes a lot.
+The bottom line is, that in order to make those decisions, you must understand how your system works and be able to measure every component and the impact on the performance of changes that have been made to your system.
+
+Performance and user experience
+The user experience is all about perceived performance. How fast do I see pretty pictures on my screen after I click a button? Obviously, you can improve the real performance of your system, buy faster hardware, run things in parallel, improve your algorithms, upgrade your dependencies to newer and more performant versions, and so on. But, very often, it is more about smarter architecture and doing less work by adding caches, providing approximate results, and pushing work to the client. Then, there are methods like pre-fetching, where you try to do work before it is needed in order to anticipate the user's needs.
+User experience decisions can significantly impact performance. Consider a chat program where the clients constantly poll the server every second for every keystroke versus just checking once every minute for new messages. That's a different user experience with a 60x performance price tag.
+
+Performance and high availability
+One of the worst routine things that can happen on a system is a timeout. A timeout means that the user will not get an answer on time. A timeout means that you did a lot of work that is now wasted. You may have retry logic and the user will eventually get their answer, but performance will take a hit. When your system and all its components are highly available (as well as not overloaded), you can minimize the occurrence of timeouts. If your system is very redundant, you can even send the same request multiple times to different backends and, whenever one of them responds, you have the answer.
+On the other hand, a highly available and redundant system sometimes requires syncing with all the shards/backends (or at least a quorum) to make sure you have the latest, most up-to-date answer. Of course, inserting or updating data is also more complicated and often takes longer on a highly available system. If the redundancy is across multiple availability zones, regions, or continents, it can add orders of magnitude to the response time.
+
+Performance and cost
+Performance and cost have a very interesting relationship. There are many ways to improve performance. Some of them reduce costs, like optimizing your code, compressing the data you send, or pushing computation to the client. However, other ways to improve performance increase the cost, like running on stronger hardware, replicating your data to multiple locations close to your client, and pre-fetching unrequested data.
+In the end, this is a business decision. Even win-win performance improvements are not always like improving your algorithms is, at the high-priority. For example, you can invest a lot of time in coming up with an algorithm that runs 10x faster than the previous algorithm. But the computation time might be negligible in the overall time to process a request because it's dominated by access to the database, serializing the data, and sending it to the client. In this case, you just wasted time that could have been used for developing something more useful, you potentially destabilized your code and introduced bugs, and made your code harder to understand. Again, good metrics and profiling will help you identify the hot spots in your system that are worth improvement performance-wise and cost-wise.
+
+Performance and security
+Performance and security are generally at odds. Security typically pushes toward encryption across the board, outside and inside the cluster. There are strong authentication and authorization methods, may be necessary, but has performance overhead. However, security sometimes indirectly helps performance by advocating to cut unnecessary features and reduce the surface area of the system. This spartan approach that produces tighter systems allows you to focus on a smaller target to improve performance. Typically, secure systems don't just add arbitrary features that can hurt performance without careful consideration.
+Later, we will explore how to collect and use metrics with Kubernetes, but first let's take a look at logging, which is another pillar of monitoring your system.
+
+Logging
+Logging is the ability to record messages during the operation of your system. Log messages are typically structured and timestamped. They are often indispensable when trying to diagnose problems and troubleshoot your system. They are also critical when doing post-mortems and discovering root causes after the fact. In a large-scale distributed system, there will be many components that log messages. Collecting, organizing, and sifting through them is a non-trivial task. But first, let's consider what information is useful to log.
+
+What should you log?
+This is the million dollar question. A simplistic approach is to log
+everything
+. You can never have too much data, and it's difficult to predict what data you'll need when trying to figure out what's wrong with your system. However, what does everything mean exactly? You can obviously go too far. For example, you can log every call to every little function in your code, including all the parameters, as well as the current state, or log the payload of every network call. Sometimes, there are security and regulatory restrictions that prevent you from logging certain data, like
+protected health information
+(
+PHI
+) and
+personally identifiable information
+(
+PII
+). You'll need to understand your system well enough to decide what kind of information is relevant for you. A good starting point is logging any incoming requests and interactions between your microservices and between your microservices and third-party services.
+
+Logging versus error reporting
+Errors are a special kind of information. There are errors that your code can handle (for example, with retries or using some alternative). However, there are also errors that must be handled as soon as possible or the system will suffer partial or complete outage. But even errors that are not urgent sometimes require that you record a lot of information. You could log errors just like any other information, but it is often worthwhile to record errors to a dedicated error reporting service like Rollbar or Sentry. One of the crucial pieces of information with errors is a stack trace that includes the state (local variables) of each frame in the stack. For a production system, I recommend that you use a dedicated error reporting service, in addition to just logging.
+
+The quest for the perfect Go logging interface
+Delinkcious is primarily implemented with Go, so let's talk about logging in Go. There is a standard library Logger, which is a struct and not an interface. It is configurable, and you can pass an
+io.Writer
+object when you create it. However, the methods of the
+Logger
+struct are rigid and don't support log levels or structured logging. Also, the fact that there is just one output writer may be a limitation in some cases. Here is the specification for the standard Logger:
+type Logger struct { ... } // Not an interface!
+func New(out io.Writer, prefix string, flag int) *Logger
+// flag controls date, time, µs, UTC, caller
+// Log
+func (l *Logger) Print(v ...interface{})
+func (l *Logger) Printf(format string, v ...interface{})
+func (l *Logger) Println(v ...interface{})
+// Log and call os.Exit(1)
+func (l *Logger) Fatal(v ...interface{})
+func (l *Logger) Fatalf(format string, v ...interface{})
+func (l *Logger) Fatalln(v ...interface{})
+// Log and panic
+func (l *Logger) Panic(v ...interface{})
+func (l *Logger) Panicf(format string, v ...interface{})
+func (l *Logger) Panicln(v ...interface{})
+func (l *Logger) Output(calldepth int, s string) error
+If you need those capabilities, you need to use another library that sits on top of the standard library
+Logger
+. There are several packages that provide various flavors:
+glog
+:
+https://godoc.org/github.com/golang/glog
+logrus
+:
+https://github.com/Sirupsen/logrus
+loggo
+:
+https://godoc.org/github.com/juju/loggo
+log15
+:
+https://github.com/inconshreveable/log15
+They address the interface, comparability, and playability in different ways. However, we're using Go-kit, which has its own take on logging.
+
+Logging with Go-kit
+Go-kit has the simplest interface ever. There is just one method,
+Log()
+, that accepts a list of keys and values that can be of any type:
+type Logger interface {
+Log(keyvals ...interface{}) error
+}
+The basic idea here is that Go-kit has no opinions about how you log your messages. Do you always add a timestamp? Do you have logging levels? What levels? The answers to all these questions are up to you. You get a totally generic interface and you decide what key-values you want to log.
+
+Setting up a logger with Go-kit
+OK. The interface is generic, but we need an actual logger object to work with. Go-kit supports several writers and logger objects that generate familiar log formats like JSON, logfmt, or logrus out of the box. Let's set up a logger with JSON formatter and a sync writer. A sync writer is safe to use from multiple Go routines, and a JSON formatter formats the key values into a JSON string. In addition, we can add some default fields, such as the service name, which is where the log message is coming from in the source code and the current timestamp. Since we may want to use the same logger specification from multiple services, let's put it in a package all the services can use. One last thing is to add also a
+Fatal()
+function that will forward to the standard
+log.Fatal()
+function. This allows code that currently uses
+Fatal()
+to continue working without changes. Here is the Delinkcious log package that contains a factory function for the logger and the
+Fatal()
+function:
+package log
+import (
+kit_log "github.com/go-kit/kit/log"
+std_log "log"
+"os"
+)
+func NewLogger(service string) (logger kit_log.Logger) {
+w := kit_log.NewSyncWriter(os.Stderr)
+logger = kit_log.NewJSONLogger(w)
+logger = kit_log.With(logger, "service", service)
+logger = kit_log.With(logger, "timestamp", kit_log.DefaultTimestampUTC)
+logger = kit_log.With(logger, "called from", kit_log.DefaultCaller)
+return
+}
+func Fatal(v ... interface{}) {
+std_log.Fatal(v...)
+}
+The writer just writes to the standard error stream, which will be captured and sent to the container logs on Kubernetes.
+To see our logger in action, let's attach it to our link service.
+
+Using a logging middleware
+Let's think about where we want to instantiate our logger and then where we want to use it and log messages. This is important because we need to make sure that the logger is available to all the places in the code that need to log messages. A trivial approach is to just add a logger parameter to all our interfaces and propagate the logger in this way. However, this is very disruptive and will violate our clean object model. Logging is really an implementation and operational detail. Ideally, it should not appear in our object model types or interfaces. Also, it is a Go-kit type and, so far, we've managed to keep our object model and even our domain packages totally oblivious to the fact that they are wrapped by Go-kit. The Delinkcious services under SVC are the only part of the code that is Go-kit aware.
+Let's try to keep it this way. Go-kit provides the middleware concept, which allows us to chain multiple middleware components in a loosely coupled way. All the middleware components for a service implement the service interface, and a little shim allows Go-kit to call them one after the other. Let's begin with the shim, which is just a function type that accepts a
+LinkManager
+interface and returns a
+LinkManager
+interface:
+type linkManagerMiddleware func(om.LinkManager) om.LinkManager
+The
+logging_middleware.go
+file has a factory function called
+newLoggingMiddlware()
+that takes a logger object and returns a function that matches
+linkManagerMiddleware
+. That function, in turn, instantiates the
+loggingMiddelware
+struct, passing it the next component in the chain and the logger:
+// implement function to return ServiceMiddleware
+func newLoggingMiddleware(logger log.Logger) linkManagerMiddleware {
+return func(next om.LinkManager) om.LinkManager {
+return loggingMiddleware{next, logger}
+}
+}
+This may be very confusing, but the basic idea is having the ability to chain arbitrary middleware components that do some work and let the rest of the computation go on. The reason that we have all these layers of indirection is that Go-kit doesn't know anything about our types and interfaces, so we have to assist by writing this boilerplate code. As I mentioned earlier, all of it can, and should be, auto-generated. Let's examine the
+loggingMiddleware
+struct and its methods. The struct itself has a
+linkManager
+interface, which is the next component in the chain and the logger object:
+type loggingMiddleware struct {
+next om.LinkManager
+logger log.Logger
+}
+As a
+LinkManager
+middleware component, it must implement the
+LinkManager
+interface methods. Here is the implementation of
+GetLinks()
+. It uses the logger to log a few values, specifically, the method name, that is,
+GetLinks
+, the request object, the result, and the duration. Then, it calls the
+GetLinks()
+method on the next component in the chain:
+func (m loggingMiddleware) GetLinks(request om.GetLinksRequest) (result om.GetLinksResult, err error) {
+defer func(begin time.Time) {
+m.logger.Log(
+"method", "GetLinks",
+"request", request,
+"result", result,
+"duration", time.Since(begin),
+)
+}(time.Now())
+result, err = m.next.GetLinks(request)
+return
+}
+For simplicity, the other methods just call the next component in the chain doing anything:
+func (m loggingMiddleware) AddLink(request om.AddLinkRequest) error {
+return m.next.AddLink(request)
+}
+func (m loggingMiddleware) UpdateLink(request om.UpdateLinkRequest) error {
+return m.next.UpdateLink(request)
+}
+func (m loggingMiddleware) DeleteLink(username string, url string) error {
+return m.next.DeleteLink(username, url)
+}
+The middleware chain concept is very powerful. The middleware can preprocess inputs before passing them on to the next component, it can short circuit and return immediately without calling the next component, or it can postprocess the result coming from the next component.
+Let's see the log output from the link service when running our smoke test. It looks a bit messy for humans, but all the necessary information is there, clearly marked and ready for large-scale analysis if needed. It's easy to grep and it's easy to use tools like
+jq
+to dig deeper:
+$ kubectl logs svc/link-manager
+{"called from":"link_service.go:133","msg":"*** listening on ***","port":"8080","service":"link manager","timestamp":"2019-05-13T02:44:42.588578835Z"}
+{"called from":"logging_middleware.go:25","duration":"1.526953ms","method":"GetLinks","request":{"UrlRegex":"","TitleRegex":"","DescriptionRegex":"","Username":"Gigi Sayfan","Tag":"","StartToken":""},"result":{"Links":[],"NextPageToken":""},"service":"link manager","timestamp":"2019-05-13T02:45:05.302342532Z"}
+{"called from":"logging_middleware.go:25","duration":"591.148µs","method":"GetLinks","request":{"UrlRegex":"","TitleRegex":"","DescriptionRegex":"","Username":"Gigi Sayfan","Tag":"","StartToken":""},"result":{"Links":[{"Url":"https://github.com/the-gigi","Title":"Gigi on Github","Description":"","Status":"pending","Tags":null,"CreatedAt":"2019-05-13T02:45:05.845411Z","UpdatedAt":"2019-05-13T02:45:05.845411Z"}],"NextPageToken":""},"service":"link manager","timestamp":"2019-05-13T02:45:06.134842509Z"}
+{"called from":"logging_middleware.go:25","duration":"911.499µs","method":"GetLinks","request":{"UrlRegex":"","TitleRegex":"","DescriptionRegex":"","Username":"Gigi Sayfan","Tag":"","StartToken":""},"result":{"Links":[{"Url":"https://github.com/the-gigi","Title":"Gigi on Github","Description":"","Status":"pending","Tags":null,"CreatedAt":"2019-05-13T02:45:05.845411Z","UpdatedAt":"2019-05-13T02:45:05.845411Z"}],"NextPageToken":""},"service":"link manager","timestamp":"2019-05-13T02:45:09.438915897Z"}
+Thanks to Go-kit, we have a strong and flexible logging mechanism in place. However, manually fetching logs with
+kubectl logs
+doesn't scale. For real-world systems, we need centralized log management.
+
+Centralized logging with Kubernetes
+In Kubernetes, containers write to the standard output and standard error streams. Kubernetes makes those logs available (for example, via
+kubectl logs
+). You can even get logs of the previous run of a container if it crashed by using
+kubectl logs -p
+, but, if the pod is rescheduled, then its containers and their logs disappear. If the node itself crashes, you'll lose the logs too. Even when all the logs are available for a cluster with a lot of services, it is a non-trivial task to sift through the container logs and try to make sense of the state of the system. Enter centralized logging. The idea is to have a log agent running, either as a side container in each pod, or as daemon set on each node, listen to all the logs, and ship them in real time to a centralized location where they can be aggregated, filtered, and sorted. Of course, you can explicitly log from your containers directly to the centralized logging service too.
+The simplest and most robust approach in my opinion is the demon set. The cluster admin makes sure that a log agent is installed on each node and that's it. There's no need to change your pod spec to inject side containers, no need to depend on special libraries to communicate with remote logging services. Your code writes to standard output and standard error, and you're done. Most other services you may use, like web servers and databases, can be configured to write to the standard output and standard error, too.
+One of the most popular log agents on Kubernetes is Fluentd (
+https://www.fluentd.org
+). It is also a CNCF graduated project. You should use Fluentd unless you have a very good reason to use another logging agent. Here is a diagram that illustrates how Fluentd fits into Kubernetes as a DaemonSet that is deployed into each node, pulls all the logs of all the pods, and sends them to a centralized log management system:
+Fluentd
+Let's talk about the log management system. In the open source world, the ELK stack
+–
+ElasticSearch, LogStash, and Kibana
+–
+are a very popular combination. ElasticSearch stores the logs and provides various ways to slice and dice them. LogStash is the log ingest pipeline and Kibana is a powerful visualization solution. Fluentd can replace LogStash as the logging agent, and you get the EFK stack
+–
+ElasticSearch. Fluentd and Kibana work very well on Kubernetes. There's also Helm charts and the GitHub repository, which can install EFK on your Kubernetes cluster in one click. However, you should also consider out of cluster logging service. As we discussed previously, logs are very helpful for troubleshooting and post mortems. If your cluster is in trouble, you might not be able to access your logs at the time you need them the most. Fluentd can integrate with a plethora of data outputs. Check the full list here:
+https://www.fluentd.org/dataoutputs
+. We've got logging covered, so now it's time to talk about metrics.
+
+Collecting metrics on Kubernetes
+Metrics are a key component that enables many interesting use cases like self-healing, autoscaling, and alerting. Kubernetes, as a distributed platform, has a very strong offering around metrics, with a powerful yet generic and flexible metrics API.
+Kubernetes always had support for metrics via cAdvisor (integrated into kube-proxy) and Heapster (
+https://github.com/kubernetes-retired/heapster
+). However, cAdvisor was removed in Kubernetes 1.12 and Heapster was removed in Kubernetes 1.13. You can still install them (like we did earlier on minikube using the Heapster add-on), but they aren't part of Kubernetes and aren't recommended  anymore. The new way to do metrics on Kubernetes is by using the metrics API and the metrics server (
+https://github.com/kubernetes-incubator/metrics-server
+).
+
+Introducing the Kubernetes metrics API
+The Kubernetes metrics API is very generic. It supports node and pod metrics, as well as custom metrics. A metric has a usage field, a timestamp, and a window (the time range the metric was collected in). Here is the API definition for node metrics:
+// resource usage metrics of a node.
+type NodeMetrics struct {
+metav1.TypeMeta
+metav1.ObjectMeta
+// The following fields define time interval from which metrics were
+// collected from the interval [Timestamp-Window, Timestamp].
+Timestamp metav1.Time
+Window metav1.Duration
+// The memory usage is the memory working set.
+Usage corev1.ResourceList
+}
+// NodeMetricsList is a list of NodeMetrics.
+type NodeMetricsList struct {
+metav1.TypeMeta
+// Standard list metadata.
+// More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#types-kinds
+metav1.ListMeta
+// List of node metrics.
+Items []NodeMetrics
+}
+The usage field type is
+ResourceList
+, but it's actually a map of a resource name to a quantity:
+// ResourceList is a set of (resource name, quantity) pairs.
+type ResourceList map[ResourceName]resource.Quantity
+There are two other metrics-related APIs: the external metrics API and the custom metrics API. They are designed for extending the Kubernetes metrics with arbitrary custom metrics or metrics coming from outside Kubernetes, such as cloud providers monitoring. You can annotate those additional metrics and use them for autoscaling.
+
+Understanding the Kubernetes metrics server
+The Kubernetes metric server is a modern replacement for Heapster and cAdvisor. It implements the metrics API and provides the nodes and pods metrics. Those metrics are used by the various autoscalers and by the Kubernetes scheduler itself when dealing with best effort scenarios. Depending on your Kubernetes distribution, the metrics server may or may not be installed. If you need to install it, you can use helm. For example, on AWS EKS, you have to install the metrics server yourself using the following command (you can choose any namespace):
+helm install stable/metrics-server \
+--name metrics-server \
+--version 2.0.4 \
+--namespace kube-system
+Typically, you don't interact with the metrics server directly. You can access the metrics using the
+kubectl get --raw
+command:
+$ kubectl get --raw "/apis/metrics.k8s.io/v1beta1/nodes" | jq .
+{
+"kind": "NodeMetricsList",
+"apiVersion": "metrics.k8s.io/v1beta1",
+"metadata": {
+"selfLink": "/apis/metrics.k8s.io/v1beta1/nodes"
+},
+"items": [
+{
+"metadata": {
+"name": "ip-192-168-13-100.ec2.internal",
+"selfLink": "/apis/metrics.k8s.io/v1beta1/nodes/ip-192-168-13-100.ec2.internal",
+"creationTimestamp": "2019-05-17T20:05:29Z"
+},
+"timestamp": "2019-05-17T20:04:54Z",
+"window": "30s",
+"usage": {
+"cpu": "85887417n",
+"memory": "885828Ki"
+}
+}
+]
+}
+In addition, you can use the very useful
+kubectl
+command, that is,
+kubectl top
+, which gives you a quick overview of the performance of your nodes or pods:
+$ kubectl top nodes
+NAME                        CPU(cores) CPU%  MEMORY(bytes)  MEMORY%
+ip-192-168-13-100.ec2.internal   85m   4%     863Mi           11%
+$ kubectl top pods
+NAME                                    CPU(cores)   MEMORY(bytes)
+api-gateway-795f7dcbdb-ml2tm            1m           23Mi
+link-db-7445d6cbf7-2zs2m                1m           32Mi
+link-manager-54968ff8cf-q94pj           0m           4Mi
+nats-cluster-1                          1m           3Mi
+nats-operator-55dfdc6868-fj5j2          2m           11Mi
+news-manager-7f447f5c9f-c4pc4           0m           1Mi
+news-manager-redis-0                    1m           1Mi
+social-graph-db-7565b59467-dmdlw        1m           31Mi
+social-graph-manager-64cdf589c7-4bjcn   0m           1Mi
+user-db-0                               1m           32Mi
+user-manager-699458447-6lwjq            1m           1Mi
+Note that as of Kubernetes 1.15 (current version at the time of writing) the Kubernetes dashboard doesn't integrate with the metrics server for performance yet. It still requires Heapster. I'm sure you will be able to work with the metrics-server soon.
+The metrics-server is the standard Kubernetes metrics solution for CPU and memory, but, if you want to go further and consider custom metrics, there is one obvious choice: Prometheus. Unlike most things Kubernetes, where you have a plethora of options in the metrics arena, Prometheus stands head and shoulders above all the other free and open source options.
+
+Using Prometheus
+Prometheus (
+https://prometheus.io/
+) is an open source and CNCF graduated project (the second after Kubernetes itself). It is the de facto standard metrics collection solution for Kubernetes. It has an impressive set of features, a large installation base on Kubernetes, and an active community. Some of the prominent features are as follows:
+A generic multi-dimensional data model where each metric is modeled as a time series of key-value pairs
+A powerful query language, called PromQL, that lets you generate reports, graphs, and tables
+A built-in alerting engine where alerts are defined and triggered by PromQL queries
+Powerful visualization
+–
+Grafana, console template language, and more
+Many integrations with other infrastructure components beyond Kubernetes
+Let's look at the following references:
+Monitoring your Kubernetes Deployments with Prometheus
+:
+https://supergiant.io/blog/monitoring-your-kubernetes-deployments-with-prometheus/
+Configure Kubernetes Autoscaling With Custom Metrics
+:
+https://docs.bitnami.com/kubernetes/how-to/configure-autoscaling-custom-metrics/
+
+Deploying Prometheus into the cluster
+Prometheus is a large project with many capabilities, options, and integrations. Deploying it and managing it is not a trivial task. There a couple of projects that can help. The Prometheus operator (
+https://github.com/coreos/prometheus-operator
+) provides a way to deeply configure Prometheus using Kubernetes resources.
+The operator concept (
+https://coreos.com/blog/introducing-operators.html
+) was introduced in 2016 by CoreOS (who was acquired by RedHat, who was acquired by IBM). A Kubernetes operator is a controller that is responsible for managing stateful applications inside a cluster using Kubernetes CRDs. Operators, in practice, extend the Kubernetes API to provide a seamless experience when managing foreign components like Prometheus. Actually, the Prometheus operator was the first operator (along with the Etcd operator):
+Prometheus operator
+The kube-promethus (
+https://github.com/coreos/kube-prometheus
+) project is built on top of the Prometheus operator and adds the following:
+Grafana visualization
+A highly available Prometheus cluster
+A highly available
+Alertmanager
+cluster
+An adapter for the Kubernetes Metrics APIs
+Kernel and OS metrics via the Prometheus node exporter
+Various metrics on the state of Kubernetes objects via
+kube-state-metrics
+The Prometheus operator brings the ability to launch a Prometheus instance into a Kubernetes namespace, configure it, and target services via labels to the table.
+For now, we'll just use helm to deploy a full-fledged installation of Prometheus:
+$ helm install --name prometheus stable/prometheus
+This will create service accounts, RBAC roles, RBAC bindings, deployments, services and even a daemon set. In addition it will print the following information to connect to different components:
+The Prometheus server can be accessed via port
+80
+on the following DNS name from within your cluster:
+prometheus-server.default.svc.cluster.local
+.
+Get the Prometheus server URL by running the following commands in the same shell:
+export POD_NAME=$(kubectl get pods --namespace default -l "app=prometheus,component=server" -o jsonpath="{.items[0].metadata.name}")
+kubectl --namespace default port-forward $POD_NAME 9090
+The Prometheus
+alertmanager
+can be accessed via port
+80
+on the following DNS name from within your cluster:
+prometheus-alertmanager.default.svc.cluster.local
+Get the
+Alertmanager
+URL by running the following commands in the same shell:
+export POD_NAME=$(kubectl get pods --namespace default -l "app=prometheus,component=alertmanager" -o jsonpath="{.items[0].metadata.name}")
+kubectl --namespace default port-forward $POD_NAME 9093
+The Prometheus
+pushgateway
+can be accessed via port 9091 on the following DNS name from within your cluster:
+prometheus-pushgateway.default.svc.cluster.local
+Get the
+PushGateway
+URL by running the following commands in the same shell:
+export POD_NAME=$(kubectl get pods --namespace default -l "app=prometheus,component=pushgateway" -o jsonpath="{.items[0].metadata.name}")
+kubectl --namespace default port-forward $POD_NAME 9091
+Let's see what services were installed:
+$ kubectl get svc -o name | grep prom
+service/prometheus-alertmanager
+service/prometheus-kube-state-metrics
+service/prometheus-node-exporter
+service/prometheus-pushgateway
+service/prometheus-server
+Everything seems in order. Let's follow the instructions and check out the Prometheus web UI:
+$ export POD_NAME=$(kubectl get pods --namespace default -l "app=prometheus,component=server" -o jsonpath="{.items[0].metadata.name}")
+$ kubectl port-forward $POD_NAME 9090
+Forwarding from 127.0.0.1:9090 -> 9090
+Forwarding from [::1]:9090 -> 9090
+We can now browse to
+localhost:9090
+and do some checks. Let's check the number of goroutines in the cluster:
+Prometheus web UI
+The number of metrics that have been collected by Prometheus is mind-numbing. There are hundreds of different built-in metrics. Check out how small the scroll thumb on the right is when opening the metric selection dropdown:
+Prometheus dropdown
+There are way more metrics than you will ever need, but each one of them can be important for some specific troubleshooting task.
+
+Recording custom metrics from Delinkcious
+OK: Prometheus is installed and collecting standard metrics automatically, but we want to record our own custom metrics too. Prometheus works in pull mode. A service that want to provide metrics needs to expose a
+/metrics
+endpoint (it is possible to push metrics to Prometheus too, using its Push Gateway). Let's utilize the middleware concept of Go-kit and add a metrics middleware that's similar to the logging middleware. We will take advantage of the Go client library provided by Prometheus.
+The client library provides several primitives like counter, summary, histogram, and gauge. For the purpose of understanding how to record metrics from a Go service, we will instrument each endpoint of the link service to record the number of requests (a counter), as well as a summary of all requests (a summary). Let's start by providing factory functions in a separate library called pkg/metrics. The library provides a convenient wrapper around the Prometheus Go client. Go-kit has its own abstraction layer on top of the Prometheus Go client, but it doesn't provide a lot of value, unless you plan to switch to another metrics provider like
+statsd
+. This is unlikely for Delinkcious and probably for your system too. The service name, metric name, and help string will be used to construct the fully qualified metric name later:
+package metrics
+import (
+"github.com/prometheus/client_golang/prometheus"
+"github.com/prometheus/client_golang/prometheus/promauto"
+)
+func NewCounter(service string, name string, help string) prometheus.Counter {
+opts := prometheus.CounterOpts{
+Namespace: "",
+Subsystem: service,
+Name: name,
+Help: help,
+}
+counter := promauto.NewCounter(opts)
+return counter
+}
+func NewSummary(service string, name string, help string) prometheus.Summary {
+opts := prometheus.SummaryOpts{
+Namespace: "",
+Subsystem: service,
+Name: name,
+Help: help,
+}
+summary := promauto.NewSummary(opts)
+return summary
+}
+The next step is to construct the middleware. It should look very familiar, as it is almost identical to the logging middleware. The
+newMetricsMiddleware()
+function creates a counter and a summary metrics for each endpoint and returns it as the generic
+linkManagerMiddleware
+function we defined earlier (a function that accepts the next middleware and returns itself to assemble a chain of components that all implement the
+om.LinkManager
+interface):
+package service
+import (
+"github.com/prometheus/client_golang/prometheus"
+"github.com/the-gigi/delinkcious/pkg/metrics"
+om "github.com/the-gigi/delinkcious/pkg/object_model"
+"strings"
+"time"
+)
+// implement function to return ServiceMiddleware
+func newMetricsMiddleware() linkManagerMiddleware {
+return func(next om.LinkManager) om.LinkManager {
+m := metricsMiddleware{next,
+map[string]prometheus.Counter{},
+map[string]prometheus.Summary{}}
+methodNames := []string{"GetLinks", "AddLink", "UpdateLink", "DeleteLink"}
+for _, name := range methodNames {
+m.requestCounter[name] = metrics.NewCounter("link",
+strings.ToLower(name)+"_count",
+"count # of requests")
+m.requestLatency[name] = metrics.NewSummary("link",
+strings.ToLower(name)+"_summary",
+"request summary in milliseconds")
+}
+return m
+}
+The
+metricsMiddleware
+struct stores the next middleware and two maps. One map is a mapping of method names to Prometheus counters, while the other map is a mapping of method names to Prometheus summaries. They are used by the
+LinkManager
+interface methods to record metrics separately for each method:
+type metricsMiddleware struct {
+next om.LinkManager
+requestCounter map[string]prometheus.Counter
+requestLatency map[string]prometheus.Summary
+}
+The middleware methods use the pattern of performing an action, which, in this case, is recording metrics and then calling the next component. Here is the
+GetLinks()
+method:
+func (m metricsMiddleware) GetLinks(request om.GetLinksRequest) (result om.GetLinksResult, err error) {
+defer func(begin time.Time) {
+m.recordMetrics("GetLinks", begin)
+}(time.Now())
+result, err = m.next.GetLinks(request)
+return
+}
+The actual metric recording is done by the
+recordMetrics()
+method, which takes the method name (
+GetLinks
+here) and beginning time. It is deferred until the end of the
+GetLinks()
+method, which allows it to calculate the duration of the
+GetLinks()
+method itself. It uses the counter and summary from the maps that match the method name:
+func (m metricsMiddleware) recordMetrics(name string, begin time.Time) {
+m.requestCounter[name].Inc()
+durationMilliseconds := float64(time.Since(begin).Nanoseconds() * 1000000)
+m.requestLatency[name].Observe(durationMilliseconds)
+}
+At this point, we have our metrics middleware ready to go, but we still need to hook it up to the middleware chain and expose it as the
+/metrics
+endpoint. Since we've done all the preliminary work, these are just two lines in the link service's
+Run()
+method:
+// Hook up the metrics middleware
+svc = newMetricsMiddleware()(svc)
+...
+// Expose the metrics endpoint
+r.Methods("GET").Path("/metrics").Handler(promhttp.Handler())
+Now, we can query the
+/metrics
+endpoint and see our metrics being returned. Let's run the smoke test three times and check the metrics of the
+GetLinks()
+and
+AddLink()
+methods. As expected, the
+AddLink()
+method was called once per smoke test (three times total) and the
+GetLinks()
+method was called three times per test and nine times total. We can also see the help strings.
+The summary quantiles are very useful when dealing with large datasets:
+$ http http://localhost:8080/metrics | grep 'link_get\|add'
+# HELP link_addlink_count count # of requests
+# TYPE link_addlink_count counter
+link_addlink_count 3
+# HELP link_addlink_summary request summary in milliseconds
+# TYPE link_addlink_summary summary
+link_addlink_summary{quantile="0.5"} 2.514194e+12
+link_addlink_summary{quantile="0.9"} 2.565382e+12
+link_addlink_summary{quantile="0.99"} 2.565382e+12
+link_addlink_summary_sum 7.438251e+12
+link_addlink_summary_count 3
+# HELP link_getlinks_count count # of requests
+# TYPE link_getlinks_count counter
+link_getlinks_count 9
+# HELP link_getlinks_summary request summary in milliseconds
+# TYPE link_getlinks_summary summary
+link_getlinks_summary{quantile="0.5"} 5.91539e+11
+link_getlinks_summary{quantile="0.9"} 8.50423e+11
+link_getlinks_summary{quantile="0.99"} 8.50423e+11
+link_getlinks_summary_sum 5.710272e+12
+link_getlinks_summary_count 9
+Custom metrics are great. However, beyond looking at a lot of numbers and graphs and histograms and admiring your handiwork, the real value of metrics is to inform an automated system or you about changes in the state of the system. That's where alerting comes in.
+
+Alerting
+Alerting is super important for critical systems. You can plan and build resiliency features as much as you want, but you will never build a failproof system. The right mindset for building robust and reliable systems is to try to minimize failures, but also acknowledge that failures will happen. When failures do happen, you need quick detection and have to alert the right people so that they can investigate and address the problem. Note that I said explicitly
+alerting people
+. If your system has self-healing capabilities, then you may be interested in viewing a report of the issues that the system was able to rectify itself. I don't consider those failures, because the system is designed to handle them. For example, containers can crash as much as they want; the kubelet will keep restarting them. A container crash is not considered a failure from a Kubernetes point of view. If your application running inside the container is not designed to handle such crashes and restarts, then you may want to configure an alert for this case, but that's your decision.
+The main point I want to raise is that failure is a big word. Many things that could be considered failures are processes running out of memory, a server crashing, a corrupted disk, an intermittent or prolonged network outage, and a data center going offline. However, if you design for it and put mitigating measures in place, they are not failures of the system. The system will keep running as designed, possibly in a reduced capacity, but still running. If those incidents happen a lot and degrade to the total throughput of the system or the user experience in a significant way, you may want to investigate the root causes and address them. This is all part of defining
+service-level objectives
+(
+SLOs
+) and
+service-level agreements
+(
+SLAs
+). As long as you operate within your SLAs, the system is not failing, even if multiple components are failing and even if a service doesn't meet its SLO.
+
+Embracing component failure
+Embracing failure means recognizing that components will fail all the time in a large system. This is not an unusual situation. You want to minimize component failures because each failure has various costs, even if the system as a whole continues to work. But it will happen. Most component failures can be handled either automatically or without urgency by having redundancy in place. However, systems evolve all the time and most systems are not in the perfect position where every component failure has mitigation in place for each type of failure. As a result, theoretically preventable component failures might become system failures. For example, if you write your logs to a local disk and you don't rotate your log files, then, eventually, you'll run out of disk space (very common failure), and, if the server using this disk is running some critical component with no redundancy, then you've got a system failure on your hands.
+
+Grudgingly accepting system failure
+So, system failures will happen. Even the largest cloud providers have outages from time to time. There are different levels of system failures, ranging from temporary short failure of a non-critical subsystem, through to total outage of the entire system for a prolonged time, all the way to massive data loss. An extreme example is when malicious attackers target a company and all its backups, which can put it out of business. This is more related to security, but it's good to understand the full spectrum of system failures.
+Common approaches for dealing with system failures are redundancy, backups, and compartmentalization. These are solid approaches, but are expensive, and, as we mentioned earlier, will not prevent all failures. The next step after minimizing the likelihood and impact of system failures is to plan for quick disaster recovery.
+
+Taking human factors into account
+Now, we're strictly in the domain of people responding to an actual incident. Some critical systems may have 24/7 live monitoring by people watching the system state diligently and ready to act. Most companies will have alerts based on various triggers. Note that, even if you have live 24/7 monitoring for complex systems, you still need to surface alerts to the people monitoring the system because, for such systems, there is typically a huge amount of data and information that describe the current state.
+Let's look at several aspects of a reasonable alerting plan that work well for people.
+
+Warnings versus alerts
+Let's consider our out of disk space situation again. This is a case were the state gets worse over time. The disk space is gradually reduced as more and more data is logged to the log files. If you've got nothing in place, you will discover that you've ran out of disk space when an application starts to issue strange errors, often downstream from the actual failure, and you'll have to trace it back to the source. I've been there and done that; it's no fun. A better approach is to check the disk space regularly and raise an alert when it exceeds a certain threshold (for example, 95%). But why wait until the situation becomes critical? In such gradually worsening situations, it is much better to detect the problem early (for example, 75%) and issue a warning through some mechanism. This will give the system operator ample time to respond without causing an unnecessary crisis.
+
+Considering severity levels
+This brings us to alert severity levels. Different severity levels deserve different responses. Different organizations may define their own levels. For example, PagerDuty has a 1-5 scale that follows the DEFCON ladder. I personally prefer two levels for alerts:
+wake me up at 3 AM
+and
+it can wait to the morning
+. I like to think of severity levels in practical terms. What kind of response or follow up do you perform for each severity level? If you always do the same thing for severity levels 3 -5, then what's the benefits of classifying them as 3, 4, and 5 as opposed to just grouping them together into a single low-priority severity level?
+Your situation may be different, so make sure that you consider all stakeholders. Production incidents are not fun.
+
+Determining alert channels
+Alert channels are tightly coupled to severity levels. Let's consider the following options:
+Wake-up call to on-call engineer
+Instant message to a public channel
+Email
+Often, the same incident will be broadcasted to multiple channels. Obviously, the wake-up call is the most intrusive, the instant message (for example, slack) may pop up as a notification, but someone has to be around and look at it. The email is often more informative in nature. It is common to combine multiple channels. For example, the on-call engineer gets the wake up call, the team incident channel gets a message, and the group manager gets and email.
+
+Fine-tuning noisy alerts
+Noisy alerts are a problem. If there are too many alerts
+–
+especially low-priority ones
+–
+then there are two major problems:
+It is distracting to all the people that get notified (especially to the poor engineer being woke up in the middle of the night).
+It might lead to people ignoring alerts.
+You don't want to miss an important alert because of a lot of noisy low-priority alerts. Fine-tuning your alerts is an art and an ongoing process.
+I recommend reading and adopting
+My Philosophy on Alerting
+(
+https://docs.google.com/document/d/199PqyG3UsyXlwieHaqbGiWVa8eMWi8zzAn0YfcApr8Q/edit
+) by Rob Ewaschuk (ex-Google site reliability engineer).
+
+Utilizing the Prometheus alert manager
+Alerts naturally feed off metrics. Prometheus, in addition to being a fantastic metrics collector, also provides an alert manager. We've already installed it as part of the overall Prometheus installation:
+$ kubectl get svc prometheus-alertmanager
+NAME                      TYPE     CLUSTER-IP EXTERNAL-IP PORT(S) AGE
+prometheus-alertmanager  ClusterIP  10.100.109.90 <none>  80/TCP   24h
+We're not going to configure any alerts because I don't want to be on call for Delinkcious.
+The Alert manager has a conceptual model that includes the following:
+Groupings
+Integrations
+Inhibition
+Silences
+Grouping deals with consolidating multiple signals into a single notification. For example, if many of your services use AWS S3 and it suffers an outage, then a lot of services might trigger alerts. But with grouping, you can configure the alert manager to send just one notification.
+Integrations are notification targets. The alert manager supports many targets out of the box like email, PagerDuty, Slack, HipChat, PushOver, OpsGenie, VictoOps, and WeChat. For all other integrations, the recommendation is to use the generic HTTP webhook integration.
+Inhibition is an interesting concept where you can skip sending notifications for alerts if other alerts are already firing. This is another way on top of grouping to avoid sending multiple notifications for the same high-level problem.
+Silences are just a mechanism to temporarily mute some alerts. This is useful if your alerting rules are not neatly configured with grouping and inhibitions, or even if some valid alerts keep firing, but you are already handling the situation and you don't need more notifications at the moment. You can configure silences in the web UI.
+
+Configuring alerts in Prometheus
+You can raise alerts by configuring rules in the Prometheus server configuration file. Those alerts are handled by the alert manager which decides, based on its configuration, what to do about them. Here is an example:
+groups:
+- name: link-manager
+rules:
+- alert: SlowAddLink
+expr: link_addlink_summary{quantile="0.5"} > 5
+for: 1m
+labels:
+severity: critical
+annotations:
+description: the AddLink() method takes more than 5 seconds for more than half of the request in the last minute
+summary: the AddLink() method takes too long
+The rule has an expression, which, if true, triggers the alert. There is a period of time (1 minute here) where the condition must be true, so that you can avoid triggering one-off anomalies (if you so choose). There is severity associated with the alert and some annotations.
+With metrics and alerts covered, let's move on and see what to do when an alert fires and we get notified of a problem.
+
+Distributed tracing
+The notifications that alert you that something is wrong can be as vague as
+Something is wrong with the website
+. Well, that's not very useful for troubleshooting, detecting the root cause, and fixing it. This is especially true for microservice-based architectures where every user request can be handled by a large number of microservices and each component might fail in interesting ways. There are several ways to try and narrow down the scope:
+Look at recent deployments and configuration changes.
+Check whether any of your third-party dependencies suffered an outage.
+Consider similar issues if the root cause hasn't been fixed yet.
+If you're lucky, you can just diagnose the problem right away. However, when debugging large-scale distributed systems, you don't really want to rely on luck. It's much better to have a methodical approach in place. Enter distributed tracing.
+We will use the Jaeger (
+https://www.jaegertracing.io/
+) distributed tracing system. It is yet another CNCF project that started as an Uber open source project. The problems Jaeger can help with are as follows:
+Distributed transaction monitoring
+Performance and latency optimization
+Root cause analysis
+Service dependency analysis
+Distributed context propagation
+Before we can use Jaeger, we need to install it into the cluster.
+
+Installing Jaeger
+The best way to install Jaeger is using the Jaeger-operator, so let's install the operator first:
+$ kubectl create -f https://raw.githubusercontent.com/jaegertracing/jaeger-operator/master/deploy/crds/jaegertracing_v1_jaeger_crd.yaml
+customresourcedefinition.apiextensions.k8s.io/jaegers.jaegertracing.io created
+$ kubectl create -f https://raw.githubusercontent.com/jaegertracing/jaeger-operator/master/deploy/service_account.yaml
+serviceaccount/jaeger-operator created
+$ kubectl create -f https://raw.githubusercontent.com/jaegertracing/jaeger-operator/master/deploy/role.yaml
+clusterrole.rbac.authorization.k8s.io/jaeger-operator created
+$ kubectl create -f https://raw.githubusercontent.com/jaegertracing/jaeger-operator/master/deploy/role_binding.yaml
+clusterrolebinding.rbac.authorization.k8s.io/jaeger-operator created
+$ kubectl create -f https://raw.githubusercontent.com/jaegertracing/jaeger-operator/master/deploy/operator.yaml
+deployment.apps/jaeger-operator created
+Once the operator has been installed, we can create a Jaeger instance using the following manifest:
+apiVersion: jaegertracing.io/v1
+kind: Jaeger
+metadata:
+name: jaeger-in-memory
+spec:
+agent:
+strategy: DaemonSet
+This is a simple in-memory instance. You can also create instances that are backed up by Elasticsearch and Cassandra:
+Jaeger UI
+Jaeger has a very slick web UI that lets you drill down and explore distributed workflows.
+
+Integrating tracing into your services
+There are several steps here, but the gist of it is that you can think of tracing as another form of middleware. The core abstraction is a span. A request spans multiple microservices, and you record those spans and associate logs with them.
+Here is the tracing middleware, which is similar to the logging middleware, except that it starts a span for the
+GetLinks()
+method instead of logging. As usual, there is the factory function that returns a
+linkManagerMiddleware
+function that calls the next middleware in the chain. The factory function accepts a tracer, which can start and finish a span:
+package service
+import (
+"github.com/opentracing/opentracing-go"
+om "github.com/the-gigi/delinkcious/pkg/object_model"
+)
+func newTracingMiddleware(tracer opentracing.Tracer) linkManagerMiddleware {
+return func(next om.LinkManager) om.LinkManager {
+return tracingMiddleware{next, tracer}
+}
+}
+type tracingMiddleware struct {
+next om.LinkManager
+tracer opentracing.Tracer
+}
+func (m tracingMiddleware) GetLinks(request om.GetLinksRequest) (result om.GetLinksResult, err error) {
+defer func(span opentracing.Span) {
+span.Finish()
+}(m.tracer.StartSpan("GetLinks"))
+result, err = m.next.GetLinks(request)
+return
+}
+Let's add the following function to create a Jaeger tracer:
+// createTracer returns an instance of Jaeger Tracer that samples
+// 100% of traces and logs all spans to stdout.
+func createTracer(service string) (opentracing.Tracer, io.Closer) {
+cfg := &jaegerconfig.Configuration{
+ServiceName: service,
+Sampler: &jargerconfig.SamplerConfig{
+Type: "const",
+Param: 1,
+},
+Reporter: &jaegerconfig.ReporterConfig{
+LogSpans: true,
+},
+}
+logger := jaegerconfig.Logger(jaeger.StdLogger)
+tracer, closer, err := cfg.NewTracer(logger)
+if err != nil {
+panic(fmt.Sprintf("ERROR: cannot create tracer: %v\n", err))
+}
+return tracer, closer
+}
+Then, the
+Run()
+function creates a new tracer and a tracing middleware that it hooks up to the chain of middlewares:
+// Create a tracer
+tracer, closer := createTracer("link-manager")
+defer closer.Close()
+...
+// Hook up the tracing middleware
+svc = newTracingMiddleware(tracer)(svc)
+After running the smoke test, we can search the logs for reports of spans. We expect three spans since the smoke test calls
+GetLinks()
+three times:
+$ kubectl logs svc/link-manager | grep span
+2019/05/20 16:44:17 Reporting span 72bce473b1af5236:72bce473b1af5236:0:1
+2019/05/20 16:44:18 Reporting span 6e9f45ce1bb0a071:6e9f45ce1bb0a071:0:1
+2019/05/20 16:44:21 Reporting span 32dd9d1edc9e747a:32dd9d1edc9e747a:0:1
+There is much more to tracing and Jaeger. This is barely starting to scratch the surface. I encourage you to read more on it, experiment with it, and integrate it into your systems.
+
+Summary
+In this chapter, we covered a large number of topics, including self-healing, autoscaling, logging, metrics, and distributed tracing. Monitoring a distributed system is tough. Just installing and configuring the various monitoring services like Fluentd, Prometheus, and Jaeger is a non-trivial project. Managing the interactions between them and how your services support logging, instrumentation, and tracing adds another level of complexity. We've seen how Go-kit, with its middleware concept, makes it somewhat easier to add those operational concerns in a decoupled way from the core business logic. Once you have all the monitoring for those systems in place, there's a new set of challenges to take into account
+–
+how do you gain insights from all the data? How can you integrate it into your alerting and incident response process? How can you continuously improve your understanding of the system and improve your processes? These are all hard questions that you'll have to answer for yourself, but you may find some guidance in the
+Further reading
+section that follows.
+In the next chapter, we will look at the exciting world of service meshes and Istio. Service meshes are a true innovation that can really offload many operational concerns from the services and let them focus on their core domain. However, a service mesh like Istio has a large surface area and there is a significant learning curve to overcome. Do the benefits of the service mesh compensate for the added complexity? We'll find out soon.
+
+Further reading
+Refer to the following links to find out more about what was covered in this chapter:
+Kubernetes federation
+:
+https://github.com/kubernetes-sigs/federation-v2
+Kubernetes autoscaler
+:
+https://github.com/kubernetes/autoscaler
+The hunt for a logger interface
+:
+https://go-talks.appspot.com/github.com/ChrisHines/talks/structured-logging/structured-logging.slide#1
+Gradener
+:
+https://gardener.cloud
+Prometheus
+:
+https://prometheus.io/docs/introduction/overview/
+Fluentd
+:
+https://www.fluentd.org/
+Cluster-level logging
+:
+https://kubernetes.io/docs/concepts/cluster-administration/logging/#cluster-level-logging-architectures
+Monitoring best practices
+:
+https://docs.google.com/document/d/199PqyG3UsyXlwieHaqbGiWVa8eMWi8zzAn0YfcApr8Q/edit#
+Jaeger
+:
+https://github.com/jaegertracing/jaeger
+
+Service Mesh - Working with Istio
+In this chapter, we will review the hot topic of service meshes and, in particular,
+Istio
+. This is exciting because service meshes are a real game changer. They remove many complicated tasks from services into independent proxies. This is a huge win, especially in a polyglot environment, where different services are implemented in different programming languages or if you need to migrate some legacy applications into your cluster.
+We will cover the following topics in this chapter:
+What a service mesh is
+What Istio brings to the table
+Delinkcious on Istio
+Alternatives to Istio
+
+Technical requirements
+In this chapter, we will work with Istio. I chose to use
+Google Kubernetes Engine
+(
+GKE
+) in this chapter because Istio can be enabled on GKE as an add-on and doesn't require you to install it. This has the following two benefits:
+It saves time on installation
+It demonstrates that Delinkcious can run in the cloud and not just locally
+To install Istio, you simply have to enable it in the GKE console and select an mTLS mode, which is the mutual authentication between services. I chose permissive, which means that the internal communication inside the cluster is not encrypted by default, and the services will accept both encrypted and non-encrypted connections. You can override it per service. For production clusters, I recommend using the strict mTLS mode, where all connections must be encrypted:
+Istio gets installed in its own
+istio-system
+namespace, as follows:
+$ kubectl -n istio-system get po
+NAME READY STATUS RESTARTS AGE
+istio-citadel-6995f7bd9-69qhw 1/1 Running 0 11h
+istio-cleanup-secrets-6xkjx 0/1 Completed 0 11h
+istio-egressgateway-57b96d87bd-8lld5 1/1 Running 0 11h
+istio-galley-6d7dd498f6-pm8zz 1/1 Running 0 11h
+istio-ingressgateway-ddd557db7-b4mqq 1/1 Running 0 11h
+istio-pilot-5765d76b8c-l9n5n 2/2 Running 0 11h
+istio-policy-5b47b88467-tfq4b 2/2 Running 0 11h
+istio-sidecar-injector-6b9fbbfcf6-vv2pt 1/1 Running 0 11h
+istio-telemetry-65dcd9ff85-dxrhf 2/2 Running 0 11h
+promsd-7b49dcb96c-cn49l 2/2 Running 1 11h
+
+The code
+You can find the updated Delinkcious application at
+https://github.com/the-gigi/delinkcious/releases/tag/v0.11
+.
+
+What is a service mesh?
+Let's start by reviewing the problems microservices face compared to monoliths, see how service mesh addresses them, and then you'll see why I'm so excited about them. When designing and writing Delinkcious, the application code was fairly simple. We keep track of users, their links, and their follower/following relationships. We also do some link checking and store recent links in the news service. Finally, we expose all of this functionality through an API.
+
+Comparing monoliths to microservices
+It would have been pretty easy to implement all this functionality in a single monolith. It would also be pretty simple to deploy, monitor, and debug a Delinkcious monolith. However, as Delinkcious grows in functionality, as well as users and the team developing it, the downsides of monolith applications become much more pronounced. That's why we embarked on this journey with the microservice-based approach. However, along the way, we had to write a lot of code, install a lot of additional tools, and configure many components that have nothing to do with the Delinkcious application itself. We wisely took advantage of Kubernetes and Go kit to cleanly separate all of these additional concerns from the Delinkcious domain code, but it was a lot of hard work.
+For example, if security is a high priority, you would want to authenticate and authorize inter-service calls in your system. We have done this in Delinkcious by introducing a mutual secret between the link service and the social graph service. We have to configure a secret, make sure it is accessible only to these two services, and add code to verify that each call is coming from the correct service. Maintaining (for example, rotating secrets) and evolving this across many services is not an easy task.
+Another example of this is distributed tracing. In a monolith, the entire chain of calls can be captured by a stack trace. In Delinkcious, you have to install a distributed tracing service, such as Jaeger, and modify the code to record spans.
+Centralized logging in a monolith is trivial since the monolith is already a single centralized entity.
+The bottom line is that microservices bring a lot of benefits, but they are much harder to manage and reign in.
+
+Using a shared library to manage the cross-cutting concerns of microservices
+One of the most common approaches is to implement all these concerns in a library or a set of libraries. All the microservices include or depend on the shared library that takes care of all these cross-cutting aspects, such as configuration, logging, secret management, tracing, rate limiting, and fault tolerance. This sounds great in theory; let the services deal with the application domain and let a shared library or libraries deal with the common concerns. Hystrix from Netflix is a great example of a Java library that takes care of managing latency and fault tolerance. Finagle from Twitter is another good example of a Scala library (targeting the JVM). Many organizations use a collection of such libraries and often write their own.
+In practice, however, this approach has severe downsides. The first issue is that, being a programming language library, it is naturally implemented in a specific language (for example, Java, in the case of Hystrix). Your system may have microservices in multiple languages (even Delinkcious has both Go and Python services). Having microservices implemented in different programming languages is one of the greatest benefits. A shared library (or libraries) significantly hinders this aspect. This is because you end up with several unappealing options, as follows:
+You restrict all your microservices to a single programming language.
+You maintain cross-language shared libraries for each programming language you use that behaves the same.
+You accept that different services will interact differently with your centralized services (for example, different logging formats or missing tracing).
+All of these options are pretty bad. But that's not the end of it; let's say you've picked a combination of the preceding options. This will very likely include a significant amount of custom code, because no off-the-shelve library will provide you with everything that you need. Now, you want to update your shared code library. Since it's shared by all or most of your services, this means you have to do an across-the-board upgrade of all your services. However, it's likely that you can't just shut down your system and upgrade all the services at once.
+Instead, you'll have to do it in the form of a rolling update. Even blue-green deployment can't be done instantly across multiple services. The problem is that, often, the shared code is related to how you manage mutual secrets or authentication between services. For example, if service A upgrades to the new version of the shared library and service B is still on the previous version, they might not be able to communicate. This results in an outage, which can cascade and impact many services. You can find a way to introduce changes in a backward-compatible way, but this is more difficult and error-prone.
+Okay, so shared libraries across all services are useful but hard to manage. Let's take a look at how a service mesh can help.
+
+Using a service mesh to manage the cross-cutting concerns of microservices
+A service mesh is a set of intelligent proxies and additional control infrastructure components. The proxies are deployed on every node in your cluster. The proxies intercept all communication between the services and can do a lot of work on your behalf that previously had to be done by the service (or a shared library used by the service). Some of the responsibilities of a service mesh are as follows:
+Reliable delivery of requests between services through retries and automatic failovers
+Latency-aware load balancing
+Route requests based on flexible and dynamic routing rules (this is also known as traffic shaping)
+Circuit breaking through deadlines
+Service-to-service authentication and authorization
+Report metrics and support for distributed tracing
+All of these capabilities are important for many large-scale cloud-native applications. Offloading them from the services is a huge win. Features such as smart traffic shaping require building dedicated and reliable services without a service mesh.
+The following diagram illustrates how a service mesh is embedded into a Kubernetes cluster:
+Service meshes sound revolutionary indeed. Let's take a look at how they fit into Kubernetes.
+
+Understanding the relationship between Kubernetes and a service mesh
+At first glance, the service mesh sounds very similar to Kubernetes itself. Kubernetes deploys the kubelet and the kube-proxy into each node and the service mesh deploys its own proxy. Kubernetes has a control plane that kubelet/kube-proxy interacts with, and the service mesh has its own control plane that the mesh proxies interact with.
+I like to think of a service mesh as a complement to Kubernetes. Kubernetes is primarily in charge of scheduling pods and providing it with the flat networking model and service discovery, so different pods and services can communicate with each other. This is where the service mesh takes over and manages this service-to-service communication in a much more fine-grained way. There is a thin layer of overlap in responsibilities around load balancing and network policies but, overall, the service mesh is a great complement to Kubernetes.
+It's also important to realize that these two amazing technologies don't depend on each other. Obviously, you can run a Kubernetes cluster without a service mesh. Additionally, many service meshes can work with other non-Kubernetes platforms, such as Mesos, Nomad, Cloud Foundry, and Consul-based deployments.
+Now that we understand what a service mesh is, let's take a look at a specific example.
+
+What does Istio bring to the table?
+Istio is a service mesh that was originally developed by Google, IBM, and Lyft. It was introduced in mid-2017 and took off like a rocket. It brings a coherent model with a control and data plane, is built around the Envoy proxy, has a lot of momentum, and already serves as the foundation for additional projects. It is, of course, open source and a
+Cloud Native Computing Foundation
+(
+CNCF
+) project. In Kubernetes, each Envoy proxy is injected as a sidecar container to each pod that participates in the mesh.
+Let's explore the Istio architecture, and then dive into the services that it provides.
+
+Getting to know the Istio architecture
+Istio is a large framework that provides a lot of capabilities, and it has multiple parts that interact with each other and with Kubernetes components (mostly indirectly and unobtrusively). It is divided into a control plane and a data plane. The data plane is a set of proxies (one per pod). Their control plane is a set of components that are responsible for configuring the proxies and collecting telemetry of data.
+The following diagram illustrates the different parts of Istio, how they are related to each other, and what information is exchanged between them:
+Let's go a little deeper into each component, starting with the Envoy proxy.
+
+Envoy
+Envoy is a high-performance proxy that's implemented in C++. It was developed by Lyft and functions as the data plane of Istio, but it is also an independent CNCF project and can be used on its own. For each pod in the service mesh, Istio injects (either automatically or through the
+istioctl
+CLI) an Envoy side container that does the heavy lifting:
+Proxy HTTP, HTTP/2, and gRPC traffic between pods
+Sophisticated load balancing
+mTLS termination
+HTTP/2 and gRPC proxies
+Providing service health
+Circuit breaking for unhealthy services
+Percent-based traffic shaping
+Injecting faults for testing
+Detailed metrics
+The Envoy proxy controls all the incoming and outgoing communication to its pod. It is, by far, the most important component of Istio. The configuration of Envoy is not trivial, and this is a large part of what the Istio control plane deals with.
+The next component is Pilot.
+
+Pilot
+Pilot is responsible for platform-agnostic service discovery, dynamic load balancing, and routing. It translates high-level routing rules and resiliency from its own rules API into an Envoy configuration. This abstraction layer allows Istio to run on multiple orchestration platforms. Pilot takes all the platform-specific information, converts it into the Envoy data plane configuration format, and propagates it to each Envoy proxy with the Envoy data plane API. Pilot is stateless; in Kubernetes, all the configuration is stored as
+custom resources definitions
+(
+CRDs
+) on etcd.
+
+Mixer
+Mixer is responsible for abstracting the metrics collection and policies. These aspects are typically implemented in services by accessing APIs directly for specific backends. This has the benefit of offloading this burden from service developers and putting the control into the hands of the operators that configure Istio. It also allows you to switch backends easily without code changes. The types of backends that Mixer can work with include the following:
+Logging
+Authorization
+Quota
+Telemetry
+Billing
+The interaction between the Envoy proxy and Mixer is straightforward – before each request, the proxy calls Mixer for precondition checks, which might cause the request to be rejected; after each request, the proxy reports the metrics to Mixer. Mixer has an adapter API to facilitate extensions for arbitrary infrastructure backends. It is a major part of its design.
+
+Citadel
+Citadel is responsible for certificate and key management in Istio. It integrates with various platforms and aligns with their identity mechanisms. For example, in Kubernetes, it uses service accounts; on AWS, it uses AWS IAM; and on GCP/GKE, it can use GCP IAM. The Istio PKI is based on Citadel. It uses X.509 certificates in SPIFEE format as a vehicle for service identity.
+Here is the workflow in Kubernetes:
+Citadel creates certificates and key pairs for existing service accounts.
+Citadel watches the Kubernetes API server for new service accounts to provision with a certificate a key pair.
+Citadel stores the certificates and keys as Kubernetes secrets.
+Kubernetes mounts the secrets into each new pod that is associated with the service account (this is standard Kubernetes practice).
+Citadel automatically rotates the Kubernetes secrets when the certificates expire.
+Pilot generates secure naming information that associates a service account with an Istio service. Pilot then passes the secure naming information to the Envoy proxy.
+The final major component that we will cover is Galley.
+
+Galley
+Galley is a relatively simple component. Its job is to abstract away the user configuration on different platforms. It provides the ingested configuration to Pilot and Mixer.
+Now that we have broken down Istio into its major components, let's take a look at how it accomplishes its duties as a service mesh. The number one capability is traffic management.
+
+Managing traffic with Istio
+Istio operates at the network level inside the cluster between your services, as well as managing how you expose your services to the world. It provides many capabilities, such as request routing, load balancing, automatic retries, and fault injection. Let's review all of these, starting with routing requests.
+
+Routing requests
+Istio introduces its own virtual services as a CRD. Istio services have a concept of a version that doesn't exist for Kubernetes services. The same image can be deployed as different versions of a virtual service. For example, you can represent the production or staging environment as different versions of the same service. Istio allows you to configure rules that determine how to route traffic to different versions of a service.
+The way this works is that Pilot sends ingress and egress rules to the proxies that determine where requests should be handled. You then define the rules as a CRD in Kubernetes. Here is a simple example that defines a virtual service for the
+link-manager
+service:
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+name: link-manager
+spec:
+hosts:
+- link-manager # same as link-manager.default.svc.cluster.local
+http:
+- route:
+- destination:
+host: link-manager
+Let's take a look at how Istio does load balancing.
+
+Load balancing
+Istio has its own platform-independent service discovery with adapters for the underlying platform (for example, Kubernetes). It relies on the existence of a service registry that the underlying platform manages, and removes unhealthy instances in order to update its load balancing pools. There are currently three supported load balancing algorithms:
+Round robin
+Random
+Weighted least request
+Envoy has a few more algorithms, such as Maglev, ring hash, and weighted round robin, that Istio doesn't support yet.
+Istio also performs periodic health checks to verify that instances in the pool are actually healthy, and can remove them from load balancing temporarily if they fail the configured health check threshold.
+You can configure load balancing through the destination rules in a separate
+DestinationRule
+CRD, as follows:
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+name: link-manager
+spec:
+host: link-manager
+trafficPolicy:
+loadBalancer:
+simple: ROUND_ROBIN
+You can specify different algorithms by the port, as follows:
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+name: link-manager
+spec:
+host: link-manager
+trafficPolicy:
+portLevelSettings:
+- port:
+number: 80
+loadBalancer:
+simple: LEAST_CONN
+- port:
+number: 8080
+loadBalancer:
+simple: ROUND_ROBIN
+Now, let's take a look at how Istio can help us deal with failures automatically.
+
+Handling failures
+Istio provides many mechanisms to deal with failure, including the following:
+Timeouts
+Retries (including backoff and jitter)
+Rate limiting
+Health checks
+Circuit breakers
+All of these can be configured through Istio CRDs.
+For example, the following code demonstrates how to set the connection limits and timeout for the
+link-manager
+service at the TCP level (HTTP is supported too):
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+name: link-manager
+spec:
+host: link-manager
+trafficPolicy:
+connectionPool:
+tcp:
+maxConnections: 200
+connectTimeout: 45ms
+tcpKeepalive:
+time: 3600s
+interval: 75s
+Circuit breaking is done by explicitly checking for application errors (for example, the 5XX HTTP status code) within a given time period. This is done in an
+outlierDetection
+section. The following example checks for 10 consecutive errors
+every 2 minutes
+. If the service crosses this threshold, the instance will be ejected from the pool for a period of 5 minutes:
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+name: link-manager
+spec:
+host: link-manager
+trafficPolicy:
+outlierDetection:
+consecutiveErrors: 10
+interval: 2m
+baseEjectionTime: 5m
+Note that, as far as Kubernetes is concerned, the service may be fine because the container is running.
+It's great that Istio provides so many ways to deal with errors and failures at the operational level. When testing distributed systems, it is important to test the behavior when certain components fail. Istio supports this use case by allowing you to inject faults on purpose.
+
+Injecting faults for testing
+The failure handling mechanisms of Istio don't magically fix errors. Automatic retries can automatically address intermittent failures, but some failures need to be handled by the application or even a human operator. In fact, the misconfiguration of Istio failure handling can itself cause failures (for example, configuring
+timeouts that are too short
+). Testing how the system behaves in the presence of failures can be done by artificially injecting faults. There are two types of faults that Istio can inject: aborts and delays. You can configure fault injection at the virtual service level.
+Here is an example of where a delay of 5 seconds is added to 10% of all requests to the
+link-manager
+service in order to simulate a heavy load on the system:
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+name: link-manager
+spec:
+hosts:
+- link-manager
+http:
+- fault:
+delay:
+percent: 10
+fixedDelay: 5s
+Testing under stress and in the presence of faults is a tremendous boon, but all testing is incomplete. When it's time to deploy the new version, you may want to deploy it to a small percentage of users or have the new version handle just a small percentage of all requests. This is where canary deployments come in.
+
+Doing canary deployments
+We previously discovered how to perform canary deployments in Kubernetes. If we want to divert 10% of requests to our canary version, we have to deploy nine pods of the current version and one canary pod to get the correct ratio. Kubernetes' load balancing is tightly coupled to deployed pods. This is suboptimal. Istio has a better load balancing approach since it operates at the network level. You can simply configure two versions of your service and decide what percentage of requests go to each version, regardless of how many pods run each version.
+Here is an example of where Istio will split the traffic and send 95% to v1 of the service and 5% to v2 of the service:
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+name: link-service
+spec:
+hosts:
+- reviews
+http:
+- route:
+- destination:
+host: link-service
+subset: v1
+weight: 95
+- destination:
+host: reviews
+subset: v2
+weight: 5
+The subsets named v1 and v2 are defined in a destination rule based on labels. In this case, the label are
+version: v1
+and
+version: v2
+:
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+name: link-manager
+spec:
+host: link-manager
+subsets:
+- name: v1
+labels:
+version: v1
+- name: v2
+labels:
+version: v2
+This was a pretty comprehensive coverage of the traffic management capabilities of Istio, but there is much more to discover. Let's turn our attention to security.
+
+Securing your cluster with Istio
+The security model of Istio revolves around three themes: identity, authentication, and authorization.
+
+Understanding Istio identity
+Istio manages its own identity model, which can represent human users, services, or groups of services. In Kubernetes, Istio uses Kubernetes' service account to represent identity. Istio uses its PKI (through Citadel) to create a strong cryptographic identity for each pod that it manages. It creates a x.509 certificate (in SPIFEE format) and a key pair for each service account and injects them as secrets to the pod. Pilot manages a map between the DNS service names and the identities that are allowed to run them. When clients call into services, they can verify that the services are indeed run by allowed identities and can detect rogue services. With a strong identity in place, let's take a look at how authentication works with Istio.
+
+Authenticating users with Istio
+Istio authentication is based on policies. There are two kinds of policies: namespace policies and mesh policies. A namespace policy applies to a single namespace. A mesh policy applies to the entire cluster. There can be only one mesh policy with a kind of
+MeshPolicy
+and it must be named
+default
+. Here is an example of a mesh policy that requires all services to use mTLS:
+apiVersion: "authentication.istio.io/v1alpha1"
+kind: "MeshPolicy"
+metadata:
+name: "default"
+spec:
+peers:
+- mtls: {}
+Namespace policies have a kind of
+Policy
+. If you don't specify a namespace, then it will apply to the default namespace. There can be only one policy per namespace and it must be called
+default
+too. The following policy uses the targets selector to apply only to the
+api-gateway
+service and port
+8080
+of the link service:
+apiVersion: "authentication.istio.io/v1alpha1"
+kind: "Policy"
+metadata:
+name: "default"
+namespace: "some-ns"
+spec:
+targets:
+- name: api-gateway
+- name: link-manager
+ports:
+- number: 8080
+The idea is to avoid ambiguity; policies are resolved from a service to a namespace to a mesh. If a narrow policy exists, it takes precedence.
+Istio provides either peer authentication through mTLS or origin authentication through JWT.
+You can configure peer authentication through the
+peers
+section, as follows:
+peers:
+- mtls: {}
+You can configure the origin through the
+origins
+section, as follows:
+origins:
+- jwt:
+issuer: "https://accounts.google.com"
+jwksUri: "https://www.googleapis.com/oauth2/v3/certs"
+trigger_rules:
+- excluded_paths:
+- exact: /healthcheck
+As you can see, origin authentication can be configured for specific paths (through the include or exclude paths). In the preceding example, the
+/healthcheck
+path is exempt from authentication, which makes sense for a health check endpoint that often needs to be called from a load balancer or remote monitoring service.
+By default, peer authentication is used if there is a peers section. If not, then authentication will not be set. To force origin authentication, you can add the following to the policy:
+principalBinding: USE_ORIGIN
+Now that we've discovered how Istio authenticates requests, let's take a look at how it does authorization.
+
+Authorizing requests with Istio
+Services usually expose multiple endpoints. Service A may be allowed to call only specific endpoints of service B. Service A must first authenticate against service B, and then the specific request must be authorized as well. Istio supports this by extending the
+role-based access control
+(
+RBAC
+) that Kubernetes uses to authorize requests to its API server.
+It's important to note that authorization is turned off by default. To turn it on, you can create a
+ClusterRbacConfig
+object. The mode controls how authorization is enabled, as follows:
+OFF
+means authorization is disabled (the default).
+ON
+means authorization is enabled for all the services in the entire mesh.
+ON_WITH_INCLUSION
+means authorization is enabled for all the included namespaces and services.
+ON_WITH_EXCLUSION
+means authorization is enabled for all namespaces and services except the excluded ones.
+Here is an example of when authorization is enabled on all the namespaces except
+kube-system
+and
+development
+:
+apiVersion: "rbac.istio.io/v1alpha1"
+kind: ClusterRbacConfig
+metadata:
+name: default
+spec:
+mode: 'ON_WITH_EXCLUSION'
+exclusion:
+namespaces: ["kube-system", "development"]
+The actual authorization operates at the service level and is very similar to the RBAC model of Kubernetes. Where in Kubernetes there is
+Role
+,
+ClusterRole
+,
+RoleBinding
+, and
+ClusterRoleBinding
+, in Istio, there is
+ServiceRole
+and
+ServiceRoleBinding
+.
+The basic level of granularity is
+namespace/service/path/method
+. You can use wildcards for grouping. For example, the following role grants GET and HEAD access to all the Delinkcious managers and the API gateway in the default namespace:
+apiVersion: "rbac.istio.io/v1alpha1"
+kind: ServiceRole
+metadata:
+name: full-access-reader
+namespace: default
+spec:
+rules:
+- services: ["*-manager", "api-gateway"]
+paths:
+methods: ["GET", "HEAD"]
+However, Istio offers even further control with constraints and properties. You can limit a rule by the source namespace or the IP, labels, request headers, and other attributes.
+You can refer to
+https://istio.io/docs/reference/config/authorization/constraints-and-properties/
+for more details.
+Once you have a
+ServiceRole
+, you need to associate it with a list of subjects (such as service accounts or human users) that will be allowed to perform the requested operations. Here is how you can define
+ServiceRoleBinding
+:
+apiVersion: "rbac.istio.io/v1alpha1"
+kind: ServiceRoleBinding
+metadata:
+name: test-binding-products
+namespace: default
+spec:
+subjects:
+- user: "service-account-delinkcious"
+- user: "istio-ingress-service-account"
+properties:
+request.auth.claims[email]: "the.gigi@gmail.com"
+roleRef:
+kind: ServiceRole
+name: "full-access-reader"
+You can make a role publicly available to authenticated or unauthenticated users by setting the subject user to
+*
+.
+There is much to Istio authorization that we can cover here. You can read up on the following topics:
+Authorization for TCP protocols
+Permissive mode (experimental)
+Debugging authorization problems
+Authorization through Envoy filters
+Once a request is authorized there, it may still be rejected if it fails to comply with policy checks.
+
+Enforcing policies with Istio
+Istio policy enforcement is similar to the way admission controllers work in Kubernetes. Mixer has a set of adapters that are invoked before and after a request is processed. Before we dive in further, it's important to note that policy enforcement is disabled by default. If you install Istio using helm, you can enable it by providing the following flag:
+--set global.disablePolicyChecks=false.
+On GKE, it is enabled; here is how to check this:
+$ kubectl -n istio-system get cm istio -o jsonpath="{@.data.mesh}" | grep disablePolicyChecks
+disablePolicyChecks: false
+If the result is
+disablePolicyChecks: false
+, then it's already enabled. Otherwise, enable it by editing the Istio ConfigMap and setting it to false.
+One common type of policy is rate limiting. You can enforce rate limits by configuring quota objects, binding them to specific services, and defining mixer rules. A good example from the Istio demo application can be found at
+https://raw.githubusercontent.com/istio/istio/release-1.1/samples/bookinfo/policy/mixer-rule-productpage-ratelimit.yaml
+.
+You can also add your own policies by creating a Mixer adapter. There are three built-in types of adapters, as follows:
+Check
+Quota
+Report
+This is not trivial; you'll have to implement a gRPC service that can handle the data specified in a dedicated template. Now, let's take a look at the metrics Istio collects for us.
+
+Collecting metrics with Istio
+Istio collects metrics after each request. The metrics are sent to Mixer. Envoy is the primary producer of metrics, but you can add your own metrics if you wish. The configuration model for metrics is based on multiple Istio concepts: attributes, instances, templates, handlers, rules, and Mixer adapters.
+Here is a sample instance that counts all the requests and reports them as the
+request-count
+metric:
+apiVersion: config.istio.io/v1alpha2
+kind: instance
+metadata:
+name: request-count
+namespace: istio-system
+spec:
+compiledTemplate: metric
+params:
+value: "1" # count each request
+dimensions:
+reporter: conditional((context.reporter.kind | "inbound") == "outbound", "client", "server")
+source: source.workload.name | "unknown"
+destination: destination.workload.name | "unknown"
+message: '"counting requests..."'
+monitored_resource_type: '"UNSPECIFIED"'```
+Now, we can configure a Prometheus handler to receive the metrics. Prometheus is a compiled adapter (which is part of Mixer), so we can just use it in the spec. The
+spec | params | metrics
+section has a kind of
+COUNTER
+, a Prometheus metric name (
+request_count
+), and, most importantly, the instance name that we just defined, which is the source of the metrics:
+apiVersion: config.istio.io/v1alpha2
+kind: handler
+metadata:
+name: request-count-handler
+namespace: istio-system
+spec:
+compiledAdapter: prometheus
+params:
+metrics:
+- name: request_count # Prometheus metric name
+instance_name: request-count.instance.istio-system # Mixer instance name (fully-qualified)
+kind: COUNTER
+label_names:
+- reporter
+- source
+- destination
+- message
+Finally, we tie it all together with a rule, as follows:
+apiVersion: config.istio.io/v1alpha2
+kind: rule
+metadata:
+name: prom-request-counter
+namespace: istio-system
+spec:
+actions:
+- handler: request-count-handler
+instances: [ request-count ]
+Okay, so Istio is amazingly powerful. But are there any situations where you shouldn't use Istio?
+
+When should you avoid Istio?
+Istio provides a lot of value. However, this value is not without a cost. The intrusive nature of Istio and its complexity have some significant downsides. You should consider these downsides before you adopt Istio:
+Additional concepts and management systems on top of the already complex Kubernetes make the learning curve very steep.
+Troubleshooting configuration issues is challenging.
+Integration with other projects might be missing or partial (for example, NATS and Telepresence).
+The proxies add latency and consume CPU and memory resources.
+If you're just starting with Kubernetes, I recommend waiting until you get the hang of it before you even consider using Istio.
+Now that we understand what Istio is all about, let's explore how Delinkcious can benefit from Istio.
+
+Delinkcious on Istio
+With Istio, Delinkcious can potentially shed a lot of extra baggage. So, why is it a good idea to move this functionality from Delinkcious services or Go kit middleware to Istio?
+Well, the reason is that this functionality is often unrelated to the application domain. We invested a lot of work to carefully separate concerns and isolate the Delinkcious domain from the way they are deployed and managed. However, as long as all of those concerns are addressed by the microservices themselves, we will need to make changes to the code and rebuild them every time we want to make an operational change. Even if a lot of this is data-driven, it can make it difficult to troubleshoot and debug issues because, when a failure happens, it's not always easy to determine whether it was due to a bug in the domain code or the operational code.
+Let's take a look at some specific examples where Istio can simplify Delinkcious.
+
+Removing mutual authentication between services
+As you may recall, in
+Chapter 6
+,
+Securing Microservices on Kubernetes
+, we created a mutual secret between the
+link-manager
+service and the
+social-graph-manager
+service:
+$ kubectl get secret | grep mutual
+link-mutual-auth             Opaque          1      9d
+social-graph-mutual-auth    Opaque          1      5d19h
+It required a lot of coordination and explicit work to encode the secrets, and then mount the secrets into the containers:
+spec:
+containers:
+- name: link-manager
+image: g1g1/delinkcious-link:0.3
+imagePullPolicy: Always
+ports:
+- containerPort: 8080
+envFrom:
+- configMapRef:
+name: link-manager-config
+volumeMounts:
+- name: mutual-auth
+mountPath: /etc/delinkcious
+readOnly: true
+volumes:
+- name: mutual-auth
+secret:
+secretName: link-mutual-auth
+Then, the link manager had to get the secret through the
+auth_util
+package we had to implement, and inject it as a header to the request:
+// encodeHTTPGenericRequest is a transport/http.EncodeRequestFunc that
+// JSON-encodes any request to the request body. Primarily useful in a client.
+func encodeHTTPGenericRequest(_ context.Context, r *http.Request, request interface{}) error {
+var buf bytes.Buffer
+if err := json.NewEncoder(&buf).Encode(request); err != nil {
+return err
+}
+r.Body = ioutil.NopCloser(&buf)
+if os.Getenv("DELINKCIOUS_MUTUAL_AUTH") != "false" {
+token := auth_util.GetToken(SERVICE_NAME)
+r.Header["Delinkcious-Caller-Token"] = []string{token}
+}
+return nil
+}
+Finally, the social graph manager has to be aware of this scheme and explicitly check whether the caller is allowed:
+func decodeGetFollowersRequest(_ context.Context, r *http.Request) (interface{}, error){
+if os.Getenv("DELINKCIOUS_MUTUAL_AUTH") != "false" {
+token := r.Header["Delinkcious-Caller-Token"]
+if len(token) == 0 || token[0] == "" {
+return nil, errors.New("Missing caller token")
+}
+if !auth_util.HasCaller("link-manager", token[0]) {
+return nil, errors.New("Unauthorized caller")
+}
+}
+...
+}
+That's a lot of work that has nothing to do with the service itself. Imagine managing access to hundreds of interacting microservices with thousands of methods. This approach is cumbersome, error-prone, and requires code changes being made to two services whenever you add or remove an interaction.
+With Istio, we can externalize this completely as a role and a role binding. Here is a role that allows you to call the GET method of the
+/following
+endpoint:
+apiVersion: "rbac.istio.io/v1alpha1"
+kind: ServiceRole
+metadata:
+name: get-following
+namespace: default
+spec:
+rules:
+- services: ["social-graph.default.svc.cluster.local"]
+paths: ["/following"]
+methods: ["GET"]
+In order to allow only the link service to call the method, we can bind the role to the
+link-manager
+service account as the subject user:
+apiVersion: "rbac.istio.io/v1alpha1"
+kind: ServiceRoleBinding
+metadata:
+name: get-following
+namespace: default
+spec:
+subjects:
+- user: "cluster.local/ns/default/sa/link-manager"
+roleRef:
+kind: ServiceRole
+name: "get-following"
+If, later, we need to allow other services to call the
+/following
+endpoint, we can add more subjects to this role binding. The social service itself doesn't need to know what service is allowed to call its methods. The calling services don't need to provide any credentials explicitly. The service mesh takes care of all that.
+Another area where Istio can really help Delinkcious is with canary deployments.
+
+Utilizing better canary deployments
+In
+Chapter 11
+,
+Deploying Microservices
+, we used Kubernetes deployments and services to do canary deployments. In order to divert 10% of the traffic to a canary version, we scaled the current version to nine replicas and created a canary deployment, with one replica for the new version. We used the same labels (
+svc: link
+and
+app: manager
+) for both deployments.
+The
+link-manager
+service in front of both deployments distributed the load evenly between all the pods, creating the 90/10 split we were aiming for:
+$ kubectl scale --replicas=9 deployment/green-link-manager
+deployment.extensions/green-link-manager scaled
+$ kubectl get po -l svc=link,app=manager
+NAME                                 READY  STATUS    RESTARTS   AGE
+green-link-manager-5874c6cd4f-2ldfn   1/1   Running   10         15h
+green-link-manager-5874c6cd4f-9csxz   1/1   Running   0          52s
+green-link-manager-5874c6cd4f-c5rqn   1/1   Running   0          52s
+green-link-manager-5874c6cd4f-mvm5v   1/1   Running   10         15h
+green-link-manager-5874c6cd4f-qn4zj   1/1   Running   0          52s
+green-link-manager-5874c6cd4f-r2jxf   1/1   Running   0          52s
+green-link-manager-5874c6cd4f-rtwsj   1/1   Running   0          52s
+green-link-manager-5874c6cd4f-sw27r   1/1   Running   0          52s
+green-link-manager-5874c6cd4f-vcj9s   1/1   Running   10         15h
+yellow-link-manager-67847d6b85-n97b5  1/1   Running   4          6m20s
+This works, but it couples canary deployments with scaling deployments. This can be expensive, especially if you need to run the canary deployment for a while until you are confident that it is okay. Ideally, you shouldn't need to create more pods just to divert a certain percentage of your traffic to a new version.
+The traffic shaping capabilities with the subset concepts of Istio address this use case perfectly. The following virtual service splits the traffic into a ratio of 90/10 between a subset called
+v0.5
+and another subset called
+canary
+:
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+name: social-graph-manager
+spec:
+hosts:
+- social-graph-manager
+http:
+- route:
+- destination:
+host: social-graph-manager
+subset: v0.5
+weight: 90
+- destination:
+host: social-graph-manager
+subset: canary
+weight: 10
+Doing canary deployments with Istio's virtual services and subsets is great for Delinkcious. Istio can help with logging and error reporting, too.
+
+Automatic logging and error reporting
+When running Delinkcious on GKE with the Istio add-on, you get automatic integration with Stackdriver, which is a one-stop shop for monitoring, including metrics, centralized logging, error reporting, and distributed tracing. Here is the Stackdriver log viewer for when you are searching for the
+link-manager
+logs:
+Alternatively, you can filter by service name through the drop-down list. Here is what it looks like when specifying the api-gateway:
+Sometimes, the error reporting view is what you need:
+Then, you can drill down into any error and get a lot of additional information that will help you understand what went wrong and how to fix it:
+While Istio provides a lot of value and, in the case of Stackdriver, you benefit from automatic setup too, it is not always smooth riding – it has some limitations and rough edges.
+
+Accommodating NATS
+One of the limitations I discovered when deploying Istio into the Delinkcious cluster is that NATS doesn't work with Istio because it requires direct connections and it breaks when the Envoy proxy hijacks the communication. The solution is to prevent Istio from injecting the sidecar container and accepting that NATS will not be managed. Adding the
+NatsCluster
+CRD
+to the following annotation to the pod spec does the work for us:
+sidecar.istio.io/inject: "false"
+:
+apiVersion: nats.io/v1alpha2
+kind: NatsCluster
+metadata:
+name: nats-cluster
+spec:
+pod:
+# Disable istio on nats pods
+annotations:
+sidecar.istio.io/inject: "false"
+size: 1
+version: "1.4.0"
+The preceding code is the complete
+NatsCluster
+resource definition with the annotation in place.
+
+Examining the Istio footprint
+Istio deploys a lot of stuff into the cluster, so let's review some of it. Mercifully, the Istio control plane is isolated in its own
+istio-system
+namespace, but CRDs are always cluster-wide and Istio doesn't skimp on those:
+$ kubectl get crd -l k8s-app=istio -o custom-columns="NAME:.metadata.name"
+NAME
+adapters.config.istio.io
+apikeys.config.istio.io
+attributemanifests.config.istio.io
+authorizations.config.istio.io
+bypasses.config.istio.io
+checknothings.config.istio.io
+circonuses.config.istio.io
+deniers.config.istio.io
+destinationrules.networking.istio.io
+edges.config.istio.io
+envoyfilters.networking.istio.io
+fluentds.config.istio.io
+gateways.networking.istio.io
+handlers.config.istio.io
+httpapispecbindings.config.istio.io
+httpapispecs.config.istio.io
+instances.config.istio.io
+kubernetesenvs.config.istio.io
+kuberneteses.config.istio.io
+listcheckers.config.istio.io
+listentries.config.istio.io
+logentries.config.istio.io
+memquotas.config.istio.io
+metrics.config.istio.io
+noops.config.istio.io
+opas.config.istio.io
+prometheuses.config.istio.io
+quotas.config.istio.io
+quotaspecbindings.config.istio.io
+quotaspecs.config.istio.io
+rbacconfigs.rbac.istio.io
+rbacs.config.istio.io
+redisquotas.config.istio.io
+reportnothings.config.istio.io
+rules.config.istio.io
+servicecontrolreports.config.istio.io
+servicecontrols.config.istio.io
+serviceentries.networking.istio.io
+servicerolebindings.rbac.istio.io
+serviceroles.rbac.istio.io
+signalfxs.config.istio.io
+solarwindses.config.istio.io
+stackdrivers.config.istio.io
+statsds.config.istio.io
+stdios.config.istio.io
+templates.config.istio.io
+tracespans.config.istio.io
+virtualservices.networking.istio.io
+In addition to all of those CRDs, Istio installs all its components into the Istio namespace:
+$ kubectl -n istio-system get all -o name
+pod/istio-citadel-6995f7bd9-7c7x9
+pod/istio-egressgateway-57b96d87bd-cnc2s
+pod/istio-galley-6d7dd498f6-b29sk
+pod/istio-ingressgateway-ddd557db7-glwm2
+pod/istio-pilot-5765d76b8c-d9hq7
+pod/istio-policy-5b47b88467-x7pqf
+pod/istio-sidecar-injector-6b9fbbfcf6-fhc4k
+pod/istio-telemetry-65dcd9ff85-bkjtd
+pod/promsd-7b49dcb96c-wrfs8
+service/istio-citadel
+service/istio-egressgateway
+service/istio-galley
+service/istio-ingressgateway
+service/istio-pilot
+service/istio-policy
+service/istio-sidecar-injector
+service/istio-telemetry
+service/promsd
+deployment.apps/istio-citadel
+deployment.apps/istio-egressgateway
+deployment.apps/istio-galley
+deployment.apps/istio-ingressgateway
+deployment.apps/istio-pilot
+deployment.apps/istio-policy
+deployment.apps/istio-sidecar-injector
+deployment.apps/istio-telemetry
+deployment.apps/promsd
+replicaset.apps/istio-citadel-6995f7bd9
+replicaset.apps/istio-egressgateway-57b96d87bd
+replicaset.apps/istio-galley-6d7dd498f6
+replicaset.apps/istio-ingressgateway-ddd557db7
+replicaset.apps/istio-pilot-5765d76b8c
+replicaset.apps/istio-policy-5b47b88467
+replicaset.apps/istio-sidecar-injector-6b9fbbfcf6
+replicaset.apps/istio-telemetry-65dcd9ff85
+replicaset.apps/promsd-7b49dcb96c
+horizontalpodautoscaler.autoscaling/istio-egressgateway
+horizontalpodautoscaler.autoscaling/istio-ingressgateway
+horizontalpodautoscaler.autoscaling/istio-pilot
+horizontalpodautoscaler.autoscaling/istio-policy
+horizontalpodautoscaler.autoscaling/istio-telemetry
+Finally, Istio, of course, installs its sidecar proxies into each pod (except Nats, where we disabled it). As you can see, each pod in the default namespace has two containers (2/2 under the
+READY
+column). One container does the work and the other is the Istio proxy sidecar container:
+$ kubectl get po
+NAME READY STATUS RESTARTS AGE
+api-gateway-5497d95c74-zlgnm 2/2 Running 0 4d11h
+link-db-7445d6cbf7-wdfsb 2/2 Running 0 4d22h
+link-manager-54968ff8cf-vtpqr 2/2 Running 1 4d13h
+nats-cluster-1 1/1 Running 0 4d20h
+nats-operator-55dfdc6868-2b57q 2/2 Running 3 4d22h
+news-manager-7f447f5c9f-n2v2v 2/2 Running 1 4d20h
+news-manager-redis-0 2/2 Running 0 4d22h
+social-graph-db-7d8ffb877b-nrzxh 2/2 Running 0 4d11h
+social-graph-manager-59b464456f-48lrn 2/2 Running 1 4d11h
+trouble-64554479d-rjszv 2/2 Running 0 4d17h
+user-db-0 2/2 Running 0 4d22h
+user-manager-699458447-9h64n 2/2 Running 2 4d22h
+If you think that Istio is too big and complicated, you may still want to enjoy the benefits of a service mesh by pursuing one of the alternatives.
+
+Alternatives to Istio
+Istio has a lot of momentum, but it's not necessarily the best service mesh for you. Let's take a look at some other service meshes and consider their attributes.
+
+Linkerd 2.0
+Buoyant is the company that coined the term
+Service Mesh
+in 2016 and came out with the first service mesh – Linkerd. It was based on Twitter's Finagle and was implemented in Scala. Since then, Buoyant developed a new service mesh that focused on Kubernetes, called Conduit (which was implemented in Rust and Go), and later (in July 2018) renamed it to Linkerd 2.0. It is a CNCF project like Istio. Linkerd 2.0 also uses sidecar containers that can be automatically or manually injected.
+Due to its lightweight design and tighter implementation of the data plane proxies in Rust, Linkerd 2.0 is supposed to outperform Istio and consume far fewer resources in the control plane. You can refer to the following resources for more information:
+CPU and memory
+:
+https://istio.io/docs/concepts/performance-and-scalability/#cpu-and-memory
+Linkerd 2.0 and Istio Performance Benchmark
+:
+https://medium.com/@ihcsim/linkerd-2-0-and-istio-performance-benchmark-df290101c2bb
+Benchmarking Istio and Linkerd CPU
+:
+https://medium.com/@michael_87395/benchmarking-istio-linkerd-cpu-c36287e32781
+Buoyant is a smaller company and it seems to lag slightly behind Istio in functionality.
+
+Envoy
+The Istio data plane is Envoy, which does all the heavy lifting. You may find the Istio control plane too complicated and prefer to remove this layer of indirection and build your own control plane to interact directly with Envoy. This can be useful in some specialized circumstances; for example, if you want to use a load balancing algorithm offered by Envoy that Istio doesn't support.
+
+HashiCorp Consul
+Consul doesn't tick all the checkboxes for a service mesh, but it provides service discovery, service identity, and mTLS authorization. It is not Kubernetes-specific and isn't endorsed by the CNCF. If you already use Consul or other HashiCorp products, you may prefer to use it as a service mesh too.
+
+AWS App Mesh
+If you run your infrastructure on AWS, you should consider the AWS App Mesh. It is a newer project, AWS-specific, and also uses Envoy as its data plane. It is safe to assume that it will integrate the best with AWS IAM networking and monitoring technologies. It's not clear at this point as to whether AWS App Mesh is going to be a better service mesh for Kubernetes or if its main purpose is to provide service mesh benefits for ECS – AWS' proprietary container orchestration solution.
+
+Others
+There a few other service meshes out there. I will just mention them here so that you can pursue them further if you're interested. Some of them have some form of integration with Istio. It's not always clear what their value is since they are not open:
+Aspen Mesh
+Kong Mesh
+AVI Networks Universal Service Mesh
+
+The no mesh option
+You can always avoid a service mesh completely and use a library such as Go kit, Hystrix, or Finagle. You might lose the benefits of the external service mesh, but if you tightly control all your microservices and they all use the same programming language, then the library approach may work just fine for you. It is conceptually and operationally simpler and it shifts the responsibility for managing cross-cutting concerns toward developers.
+
+Summary
+In this chapter, we've looked at service meshes and Istio in particular. Istio is a complex project; it sits on top of Kubernetes and creates a type of shadow cluster with its proxies. Istio has outstanding features; it can shape traffic at a very fine-grained level, provide sophisticated authentication and authorization, enforce advanced policies, collect a lot of information, and help scale your cluster.
+We covered the Istio architecture, its powerful capabilities, and explored how Delinkcious can benefit from these capabilities.
+However, Istio is far from simple. It creates a plethora of custom resources, and it overlaps and extends existing Kubernetes resources in complex ways (VirtualService versus Service).
+We also reviewed alternatives to Istio, including Linkerd 2.0, straight Envoy, AWS App Mesh, and Consul.
+At this point, you should have a good understanding of the benefits of service meshes and what Istio can do for your projects. You may have to do some extra reading and experimentation to make an informed decision of whether you should incorporate Istio into your system right away, consider one of the alternatives, or just wait.
+I believe that services meshes and Istio, in particular, will be very important and will become a standard best practice to incorporate into large Kubernetes clusters.
+In the next chapter, which is the last chapter, we will continue our discussion about the future of microservices, Kubernetes, and other emerging trends, such as serverless.
+
+Further reading
+You can refer to the following resources for more information regarding what was covered in this chapter:
+Istio
+:
+https://istio.io
+Hystrix
+:
+https://github.com/Netflix/Hystrix
+Finagle
+:
+https://twitter.github.io/finagle/
+Envo
+:
+https://www.envoyproxy.io/
+Spiffe
+:
+https://spiffe.io
+Configuration
+:
+https://istio.io/docs/reference/config/
+
+The Future of Microservices and Kubernetes
+The software systems of tomorrow will be bigger, more complicated, will be able to handle more data, and will have an even bigger impact on our world. Just think about self-driving cars and ubiquitous robots. The human capacity to deal with complexity will not scale. That means that we will have to use a divide-and-conquer approach to build those complex software systems. Microservice-based architectures will continue to replace monoliths. Then, the challenge will shift into coordinating all those microservices into a coherent whole. This is where Kubernetes comes in as the standard orchestration solution.
+In this chapter, we will discuss the near future of microservices and Kubernetes. We will focus on the near future, because the innovation pace is amazing and trying to look much further ahead is futile. The long-term vision is that AI will probably advance to the point where most software development can be automated. At this point, human limits of handling complexity may not apply, and the software developed by AI will not be understandable by humans.
+So, let's leave the far future alone and, in the spirit of being hands-on, discuss the emerging technologies, standards, and trends that will be relevant in the next few years, of which you may want to become aware.
+The topics we will cover include some microservices themes, such as the following:
+Microservices versus serverless functions
+Microservices, containers, and orchestration
+gRPC/gRPC-Web
+HTTP/3
+GraphQL
+We will also discuss some Kubernetes themes:
+Kubernetes extensibility
+Service mesh integration
+Serverless computing on Kubernetes
+Kubernetes and VMs
+Cluster autoscaling
+Using operators
+Let's start with microservices.
+
+The future of microservices
+Microservices are the dominant approach for building modern, large-scale systems today. But, are they going to remain the top choice? Let's find out.
+
+Microservices versus serverless functions
+One of the biggest questions regarding the future of microservices is whether serverless functions are going to make microservices obsolete. The answer is absolutely not. There are are many great benefits to serverless functions, as well as some serious limitations, such as cold start and time limits. Those limitations accumulate when you have functions invoking other functions. The execution time limits for function are very problematic if you want to apply retry logic with exponential backoff. A long-running service can keep local state and connections to data stores, and respond quicker to requests. But, for me, the biggest issue with serverless functions is that they represent a single function, which equates to a single endpoint of a service. I find a lot of value in the abstraction of a service that encapsulates a complete domain. If you try to port a service with 10 methods to serverless functions, then you'll run into management issues.
+All those 10 functions will need access to the same data store, and multiple functions might need to be modified. All the functions will need similar access, configuration, and credentials to access various dependencies. Microservices will remain the backbone of large, cloud-native distributed systems. However, a lot of work will be offloaded to serverless functions, which makes sense. We will probably see some systems composed solely from serverless functions, but these will be forced and will have to make compromises.
+Let's see the symbiotic relationship between microservices and containers.
+
+Microservices, containers, and orchestration
+When you break up a monolith into microservices, or start building a microservice-based system from scratch, you end up with a lot of services. You need to package, deploy, upgrade, and configure all those microservices. Containers address the packaging problem. Without containers, it is very difficult to scale microservice-based systems. As the number of microservices in the system grows orchestrating, the various containers and optimal scheduling requires a dedicated solution. This is where Kubernetes excels. The future of distributed systems is more microservices, packaged into more containers, which require Kubernetes to manage them. I say Kubernetes here, because in 2019, Kubernetes won the container orchestration wars.
+Another aspect of many microservices is that they need to communicate with each other over a network. Where as in a monolith, most interactions are just function calls, in a microservice environment, a lot of interactions require hitting an endpoint or making a remote procedure call. Enter gRPC.
+
+gRPC and gRPC-Web
+gRPC is Google's remote procedure call protocol. Over the years, there were many RPC protocols. I still remember the days of CORBA and DCOM, and Java RMI. Fast-forward to the modern web, where REST beat SOAP to become the big gorilla in the arena of web APIs. But, these days, gRPC is beating REST. gRPC provides a contract-based model with strong typing, efficient payload based on protobuf, and is automatically generating client code. The combination is very powerful. The last refuge of REST was its ubiquity and the ease of calling REST APIs bearing JSON payloads from web applications running in the browser.
+But, even this advantage is fading away. You could always put a REST-compatible gRPC gateway in front of your gRPC service, but I consider it a kludge. On the other hand, gRPC-web is a full-fledged JavaScript library that lets web applications simply invoke gRPC services. See
+https://github.com/grpc/grpc-web/tree/master/packages/grpc-web
+.
+
+GraphQL
+If gRPC is the REST killer inside the cluster, then GraphQL is the REST killer at the edge. GraphQL is simply a superior paradigm. It gives the frontend developers a lot of freedom to evolve their designs. It decouples the needs of the frontend from the rigid APIs of the backend and serves as the perfect BFF (backends-for-frontends) pattern. See
+https://samnewman.io/patterns/architectural/bff/
+.
+Similar to gRPC contracts, the structured schema of a GraphQL service is very enticing for large-scale systems.
+In addition, GraphQL solves the dreaded
+N+1
+problems of traditional REST APIs, where you first fetch a list of
+N
+resources from a REST endpoint and then you have to make
+N
+more calls (one per resource) to get related resources on each of the
+N
+items in the list.
+I expect GraphQL to gain more and more mindshare as developers become more comfortable, awareness grows, tooling improves, and learning materials become more available.
+
+HTTP/3 is coming
+The web is built on HTTP. There is no question about it. It's pretty amazing how well this protocol fared. Here is a quick recap: in 1991, Tim-Berneres-Lee proposes HTTP 0.9 to support his idea for a World Wide Web. In 1996, The HTTP Working Group publishes HTTP 1.0 as the informational RFC 1945 to enable the internet boom of the late 1990s.  In 1997, the first official RFC 2068 for HTTP 1.1 is published. In 1999, RFC 2616 adds a number of improvements to HTTP 1.1 and remains the dominant standard for two decades. In 2015, HTTP/2 is published, based on the SPDY protocol by Google, and all major browsers add support for it.
+gRPC is built on top of HTTP/2, which fixes a lot of issues with previous revisions of the HTTP and provides the following features:
+Binary framing and compression
+Multiplexing using streams (multiple requests on the same TCP connection)
+Better flow control
+Server push
+That sounds great. What will HTTP/3 give us? It offers the same feature set of HTTP/2. However, HTTP/2 is based on TCP, which doesn't offer streams. That means that streams are implemented at the HTTP/2 level. HTTP/3 is based on QUIC, a reliable transport over UDP. The details are out of scope, but the bottom line is that HTTP/3 will have much better performance and is always secure.
+It may still take a while for broad HTTP/3 adoption, because many enterprises block or rate limit UDP on their networks. However, the benefits are compelling and gRPC over HTTP/3 will have even a bigger edge in performance compared to REST APIs.
+Those are the primary future trends that will impact microservices. Let's see what is next for Kubernetes.
+
+The future of Kubernetes
+Kubernetes is here to stay. I will make a bold prediction and say that it will be around for decades. It is undeniably the current leader in the container orchestration space, but more importantly, it is designed in a super-extensible way. Any potential improvement can be built on top of the nice building blocks that Kubernetes provides (for example, service mesh) or replace those building blocks (such as network plugins, storage plugins, and custom schedulers). It is hard to imagine a brand new platform that will make Kubernetes obsolete, as opposed to improving and integrating it.
+In addition, the industry momentum behind Kubernetes and the way it is developed in the open and managed by the CNCF is inspiring. Even though it originated from Google, there is no sentiment that it is Google's project. It is perceived as a true open source project that benefits everyone.
+Now, consider that Kubernetes caters to the needs of the entire spectrum, from hobbyists playing with local Kubernetes on their laptops, through developers, testing locally or in the cloud, all the way to large enterprises that require certification and support for their own on-premises data centers.
+Pretty much the only criticism there is against Kubernetes is that it is hard to learn. This is true at the moment, but it will get easier and easier. There is a lot of good training material. Developers and operators will gain experience. It's easy to find information and the community is large and vibrant.
+A lot of people say that Kubernetes will become boring soon and will become an invisible infrastructure layer. I don't subscribe to this point of view. Some hard parts of the Kubernetes experience, such as setting up a cluster and installing a lot of additional software into the cluster, will become boring, but I think we'll see a lot of innovation across the board in the next 5 years.
+Let's dive into specific technologies and trends.
+
+Kubernetes extensibility
+This is an easy call. Kubernetes was always designed as an extensible platform. But, some of the extension mechanisms required merging into the main Kubernetes repository. The Kubernetes developers recognized early the limitations and, across the board, introduced more loosely coupled mechanisms to extend Kubernetes and replace pieces that were considered core components in the past.
+
+Abstracting the container runtime
+Docker used to be the only container runtime that Kubernetes supported. Then it added special support to the now-defunct RKT runtime. However, later, it introduced the
+Container Runtime Interface
+(
+CRI
+) as a way to integrate any container runtime through a standard interface. Here are some of the runtimes that implement CRI and can be used in Kubernetes:
+Docker (of course)
+CRI-O (supports any OCI image)
+Containerd (became an CNCF graduate in February 2019)
+Frakti (Kata containers)
+PouchContainer (P2P image distribution, optional VM-based)
+
+Abstracting networking
+Kubernetes networking always required a
+Container Networking Interface
+(
+CNI
+) plugin. It is yet another CNCF project. It allows a lot of innovation in the networking and network security space.
+You can find here a long list of platforms that support CNI (beyond Kubernetes) and an even longer list of plugins at
+https://github.com/containernetworking/cni.
+I expect the CNI to remain the standard interface for networking solutions. A very interesting project is Cilium, which utilizes the
+extended Berkeley Packet Filter
+(
+eBPF
+) to provide very high-performance networking and security at the Linux-kernel level, which may offset some of the overhead of service mesh sidecar proxies.
+
+Abstracting storage
+Kubernetes has an abstract storage model, based on volumes and persistent volume claims. It supports a large number of storage solution in-trees. This means those storage solutions had to be built into the Kubernetes code base.
+Early on (in Kubernetes 1.2), the Kubernetes team introduced a special type of plugin called FlexVolume that provided an interface for out-of-tree plugins. Storage providers could provide their own drivers that implement the FlexVolume interface and could serve as a storage layer without modifying Kubernetes itself. But, the FlexVolume approach was still pretty clunky. It required installing special drivers on each node and, in some cases, on the master too.
+In Kubernetes 1.13, the
+Container Storage Interface
+(
+CSI
+) matured to
+generally available
+(
+GA
+) status and provides a modern gRPC-based interface for implementing out-of-tree storage plugins. Soon, Kubernetes will even support raw block storage via CSI (introduced as beta in Kubernetes 1.14).
+The following diagram illustrates the place of CSI in the Kubernetes cluster and how it neatly isolates storage providers:
+Container Storage Interface
+The trend is to replace all the in-tree and FlexVolume plugins with CSI-based implementations, which will allow removing a significant chunk of functionality from the core Kubernetes code base.
+
+The cloud provider interface
+Kubernetes has seen a lot of success with cloud platforms, such as Google's GKE, Microsoft's AKS, Amazon's EKS, Alibaba's AliCloud, IBM's cloud Kubernetes service, DigitalOcean's Kubernetes service, VMware's Cloud PKS, and Oracle's container engine for Kubernetes.
+In the early days, integrating Kubernetes into a cloud platform required a lot of effort and involved customizing multiple Kubernetes control plane components, such as the API server, the kubelet, and the controller manager.
+To make things easier on cloud platform providers, Kubernetes introduced the
+Cloud Controller Manager
+(
+CCM
+). The CCM abstracts away, through a set of stable interfaces, all the parts that a cloud provider needs to implement. Now, the touch points between Kubernetes and the cloud provider are formalized and it's simpler to reason about and ensure that the integration is successful. Let's have a look at the following diagram:
+Cloud Controller Manager
+The preceding diagram illustrates the interactions between a Kubernetes cluster and a host cloud platform.
+
+Service mesh integration
+I mentioned at the end of the
+Chapter 13
+,
+Service Mesh - Working with Istio
+, that service meshes are important. They complement Kubernetes and add a lot of value. While Kubernetes provides the management and scheduling of resources and the extensible API, a service mesh provides the next layer of managing the traffic flowing between the containers in the cluster.
+This symbiosis is very powerful. On GKE, Istio is already just a button-click away. I expect most Kubernetes distribution to provide the option to install Istio (or maybe the AWS app mesh, in the case of EKS) as part of the initial setup.
+At this point, I expect a lot of other solutions to consider Istio as a standard component and build on top of it. An interesting project to watch in this space is Kyma (
+https://kyma-project.io/
+), which aims to easily install a slew of best-of-breed cloud-native components. Kyna takes the extensible and open Kubernetes and adds an opinionated set of well-integrated components, such as the following:
+Helm
+Dex
+Istio
+Knative
+Prometheus
+Grafana
+Jeager
+Kubeless
+Loki
+Velero (formerly, Ark)
+Minio
+
+Serverless computing on Kubernetes
+As we discussed in
+Chapter 9
+,
+Running Serverless Tasks on Kubernetes
+, serverless computing is all the rage. There are many solutions out there. Let's distinguish between two separate solutions here:
+Function as a Service
+(
+FaaS
+)
+Server as a Service
+(
+SaaS
+)
+FaaS
+SaaS
+FaaS
+means that you launch a function either as source code that gets packaged into an image, or as a pre-packaged image you build. This image then gets scheduled on your cluster and it runs to completion. You still need to manage and scale the nodes in your cluster and make sure you have enough capacity for your long-running services and your functions.
+SaaS
+means that you don't need to provision and manage the nodes in your cluster. Your cluster auto-magically grows and shrinks according to the load. The Kubernetes cluster autoscaler provides this capability on Kubernetes.
+Obviously, you can mix and match, and run the Kubernetes cluster autoscaler and also run some function as a service framework to get the benefits of both.
+So far, so good. But, Kubernetes is often deployed on public cloud platforms that have their own non-Kubernetes solutions to the same problem. For example, in AWS, you have Lambda functions (FaaS) as well as Fargate (SaaS). Microsoft Azure has Azure Functions and container instances that use a virtual kubelet and you can elastically grow your AKS cluster. Google has Cloud Functions and Cloud Run.
+It will interesting to see how the public cloud providers integrate their offerings with Kubernetes. Google Cloud Run is built on top on Knative and can already run either on your GKE cluster or on Google's infrastructure (so it's independent of Kubernetes).
+I predict that Knative will become yet another standard component that other FaaS solutions use as a building block on Kubernetes because it is so portable and supported by major players, such as Google and Pivotal. It is designed from the get-go as a loosely coupled collection of pluggable components that let you swap in your preferred components.
+
+Kubernetes and VMs
+Kubernetes started as an orchestration platform for Docker containers. A lot of Docker-specific assumptions were built in. Kubernetes 1.3 added special support for CoreOS rkt and started the journey toward a decoupled runtime experience. Kubernetes 1.5 introduced the CRI, where the kubelet talks to the container runtime engine via gRPC. The CRI graduated to stable in Kubernetes 1.6.
+As I mentioned earlier when discussing the abstraction of the container runtime, the CRI opened the door to multiple runtime implementations. One class of runtime extensions are lightweight or micro VMs. This may seem a little counter-productive because one of the biggest motivations for the container movement was that VMs are too heavyweight for dynamic cloud applications.
+It turned out that containers are not fool-proof when it comes to isolation. Security concerns override any other concern for many use cases. The solution is to bring back VMs, but with a lighter touch. Now that the industry has some decent experience with containers, it is possible to design the next generation of VMs that will find the sweet spot between iron-clad isolation and high performance/low resource.
+The following are some of the most prominent projects:
+gVisor
+Firecracker
+Kata containers
+
+gVisor
+gVisor is an open source project from Google. It is a user-space kernel sandbox that sits in front of the host kernel. It exposes an
+Open Container Initiative
+(
+OCI
+) interface called runsc. It also has a CRI plugin to interface directly with Kubernetes. The protection offered by gVisor is only partial. If there is a container breach, then the user kernel and a special secomp policy provide extra layers of security, but it is not a complete isolation. gVisor is used by Google AppEngine.
+
+Firecracker
+Firecracker is an open source project from AWS. It is a VM monitor using KVM to manage micro VMs. It is designed specifically to run secure multi-tenant containers and functions as as a service. It currently runs only on Intel CPUs, but support is planned for AMD and ARM.
+AWS Lambda and AWS Fargate use Firecracker already. Currently, Firecracker can't be used easily on Kubernetes. The plan is to provide container integration via containerd. Refer to the link:
+https://github.com/firecracker-microvm/firecracker-containerd/
+.
+
+Kata containers
+This is another open source solution managed by the
+OpenStack Foundation
+(
+OSF
+), in the form of Kata containers. It combines technology from Intel's clear containers and Hyper.sh RunV. It supports multiple hypervisors, such QEMU, NEMU, and even Firecracker. The goal of the Kata containers is to build a secure container runtime based on hardware virtualization for workload isolation. Kata containers can already be used on Kubernetes via containerd.
+It's hard to tell how it will all shake up. There was already some consolidation. There is strong demand for safe and secure container runtimes. All the projects can either be used on Kubernetes already, or there are plans to integrate them soon. This will probably be one of the most important, yet invisible, improvements to the cloud-native landscape. The main concern is that those lightweight VMs might introduce too much of a performance overhead for some use cases.
+
+Cluster autoscaling
+If you deal with fluctuating load (and it's safe to say that any non-trivial system does), then you have three options:
+Over provision your cluster.
+Try to find a magic ideal size and deal with outages, timeout, and slow performance.
+Grow and shrink your cluster based on demand.
+Let's discuss the preceding options in more detail:
+Option 1 is expensive. You pay for resources, you don't fully utilize most of the time. It does buy you some peace and quiet, but eventually, you may run into a spike of demand that temporarily
+exceeds
+even your over provisioned capacity.
+Option 2 is not really an option. You may find yourself there if you opted for over provisioning and underestimated.
+Option 3 is where you want to be. Your cluster's capacity matches your workload. You can always satisfy your SLOs and SLAs and you don't pay for unused capacity. However, trying to elastically manage your cluster manually is a no-starter.
+The solution is to do it automatically. This is where the cluster autoscaler comes in. I believe that, for large-scale clusters, the cluster autoscaler will become a standard component. There may be additional custom controllers that also adjust the cluster size based on custom metrics, or adjust other resources beyond nodes.
+I fully expect all the large cloud providers to invest and address all the current gotchas and issues related to the cluster autoscaler and ensure it works flawlessly on their platforms.
+Another prominent trend in the Kubernetes community that became a best practice is to provide complex components through Kubernetes operators.
+
+Using operators
+A Kubernetes operator is a controller that encapsulates operational knowledge of some application. It can manage installation, configuration, updates, fail-overs, and more. Operators often rely on CRDs to keep their own state and can automatically respond to events. Providing an operator is quickly
+becoming
+the way to release new, complicated software.
+Helm charts are fine for installing the bits onto the cluster (and operators may use Helm charts for that purpose), but there is a lot of ongoing management associated with complex components, such as data stores, monitoring solutions, CI/CD pipelines, message brokers, and serverless frameworks.
+The trend here is very clear: complex projects will provide operators as a standard feature.
+There are two interesting projects that support this trend.
+OperatorHub (
+https://operatorhub.io/
+) is a curated index of Kubernetes operators, where people can go and find well-packaged software to install on their cluster. OperatorHub was started by RedHat (now part of IBM), Amazon, Microsoft, and Google. It is very well-organized by category and provider and is easily searchable. Here is a screenshot of the main page:
+Operator hub
+Operators are very useful, but they require pretty good knowledge of how Kubernetes works, controllers, the concept of reconciliation logic, how to create CRDs, and how to interact with the Kubernetes API server. It is not rocket science, but it's not trivial either. If you want to develop your own operators, there is a project called the Operator Framework (
+https://github.com/operator-framework
+). The Operator Framework provides an SDK to make it easy to start with your operators. There are guides for writing operators in Go, using Ansible or Helm.
+Operators significantly reduce complexity, but what if you need to manage many clusters? This is where cluster federation comes in.
+
+Federation
+Managing a single large Kubernetes cluster is not simple. Managing multiple geo-distributed clusters is much harder. It is especially difficult if you try to treat multiple clusters as one big logical cluster. Many challenges arise around high availability, fail-over, load balancing, security, and latency.
+For many very large systems, multiple clusters are a necessity. Sometimes, it is necessary for smaller systems too. The following are some use cases:
+Hybrid on-premises/cloud
+Geo-distributed redundancy and availability
+Multi-provider redundancy and availability
+Very large systems (more nodes than a single Kubernetes cluster can handle)
+Kubernetes attempted to address the problem with the Kubernetes Federation V1 proposal and implementation. It failed and never made it to GA. But, then came V2, at
+https://github.com/kubernetes-sigs/federation-v2.
+All big cloud providers have products for a hybrid on-premises/cloud systems. These include the following:
+Google Anthos
+GKE on-premises - AWS Outposts: Microsoft Azure Stack
+In addition, many third-party Kubernetes solutions offer cross-cloud and even bare-metal management of multiple clusters. One of the most promising projects in this area is Gardener (
+https://gardener.cloud/
+) that lets you manage potentially thousands of clusters. It operates by having a garden cluster that manages many seed clusters (as custom resources) that can have shoot clusters.
+I see it as a natural progression. Once the industry masters the art of managing a single cluster, then mastering a collection of clusters will become the next challenge.
+
+Summary
+In this chapter, we looked at where microservices and Kubernetes are going next. All the indicators show that both microservices and Kubernetes will continue to be major factors when designing, building, evolving, and operating cloud-native, large-scale, distributed systems. This is good news. Small programs, scripts, and mobile apps will not disappear, but the backend systems will become large, deal with more data, and be responsible for managing larger and larger aspects of our lives. Technologies such as virtual reality, sensors, and AI will require ever-growing amounts of data to be processed and stored.
+The short-term development in the microservices world will see gRPC emerge as a popular transport for inter-service communication, as well as a public interface. Web clients will be able to consume gRPC via the gRPC for web. GraphQL is another innovation that is a major improvement compared to the REST API. The industry still needs some time to understand how to design and build microservice-based architectures. Building a single microservice is simple. Building a whole system of coordinated microservices is a whole other story.
+Containers and Kubernetes solve some of the hard problems that microservice-based architectures present. New technologies, such as service mesh, will gain mindshare very quickly. Serverless computing (both SaaS and FaaS) will help developers to deploy and update applications even faster. The merging of containers and virtualization will result in more secure systems. Operators will make bigger and more useful building blocks a reality. Cluster federation will be the new frontier of scalable systems.
+At this point, you should have a good idea of what is coming down the line and what to expect. This knowledge will allow you to plan ahead and make your own assessments regarding which technologies to invest in right now, and which technologies need to mature some more.
+In short, we are at the beginning of an exciting, new era, where we will learn how to create reliable systems at an unprecedented scale. Keep learning, stay on top of all the amazing technologies available to you, build your own systems, and contribute back to the community.
+
+Further reading
+The reading list is quite extensive because we discussed a lot of up-and-coming projects and technologies that are worth monitoring and following up on:
+gRPC
+:
+https://grpc.io/
+The Frakti runtime
+:
+https://github.com/kubernetes/frakti
+Containerd
+:
+https://containerd.io/
+PouchContainer
+:
+https://github.com/alibaba/pouch
+Kata Containers
+:
+https://katacontainers.io/
+Kubernetes and Cloud Providers
+:
+https://medium.com/@the.gigi/kubernetes-and-cloud-providers-b7a6227d3198
+Extending Kubernetes
+:
+https://www.youtube.com/watch?v=qVZnU8rXAEU
+Azure Functions
+:
+https://azure.microsoft.com/en-us/services/functions/
+Azure Container Instances
+:
+https://azure.microsoft.com/en-us/services/container-instances/
+Google Cloud Run
+:
+https://cloud.google.com/blog/products/serverless/announcing-cloud-run-the-newest-member-of-our-serverless-compute-stack
+gVisor
+:
+https://gvisor.dev/
+Firecracker
+:
+https://firecracker-microvm.github.io/
+Kata Containers
+:
+https://katacontainers.io/
+Gardener
+:
+https://gardener.cloud/
+The Operator Framework
+:
+https://github.com/operator-framework/operator-sdk
+HTTP/3 explained
+:
+https://http3-explained.haxx.se
+
+Other Books You May Enjoy
+If you enjoyed this book, you may be interested in these other books by Packt:
+Kubernetes Cookbook - Second Edition
+Hideto Saito, Hui-Chuan Chloe Lee, Et al
+ISBN: 978-1-78883-760-6
+Build your own container cluster
+Deploy and manage highly scalable, containerized applications with Kubernetes
+Build high-availability Kubernetes clusters
+Build a continuous delivery pipeline for your application
+Track metrics and logs for every container running in your cluster
+Streamline the way you deploy and manage your applications with large-scale container orchestration
+Mastering Kubernetes - Second Edition
+Gigi Sayfan
+ISBN: 978-1-78899-978-6
+Architect a robust Kubernetes cluster for long-time operation
+Discover the advantages of running Kubernetes on GCE, AWS, Azure, and bare metal
+Understand the identity model of Kubernetes, along with the options for cluster federation
+Monitor and troubleshoot Kubernetes clusters and run a highly available Kubernetes
+Create and configure custom Kubernetes resources and use third-party resources in your automation workflows
+Enjoy the art of running complex stateful applications in your container environment
+Deliver applications as standard packages
+
+Leave a review - let other readers know what you think
+Please share your thoughts on this book with others by leaving a review on the site that you bought it from.
+If you purchased the book from Amazon, please leave us an honest review on this book's Amazon page.
+This is vital so that other potential readers can see and use your unbiased opinion to make purchasing decisions, we can understand what our customers think about our products, and our authors can see your feedback on the title that they have worked with Packt to create. It will only take a few minutes of your time, but is valuable to other potential customers, our authors, and Packt. Thank you!

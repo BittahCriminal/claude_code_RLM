@@ -1,0 +1,5903 @@
+ndrei Alexandrescu will conclude this section:
+"Measuring gives you a leg up on experts who don't need to measure."
+- Andrei Alexandrescu, 2015, Writing Fast Code I, code::dive conference 2015, https://codedive.pl/2015/writing-fast-code-part-1.
+Summary
+In this chapter, you learned how to compare the efficiency of algorithms by using big O notation. You now know that the C++ standard library provides complexity guarantees for algorithms and data structures. All standard library algorithms specify their worst-case or average-case performance guarantees, whereas containers and iterators specify amortized or exact complexity.
+You also discovered how to quantify software performance by measuring latency and throughput.
+Lastly, you learned how to detect hot spots in your code by using CPU profilers and how to perform microbenchmarkings to improve isolated parts of your program.
+In the next chapter, you will find out how to use data structures provided by the C++ standard library efficiently.
+
+4
+Data Structures
+In the last chapter, we discussed how to analyze time and memory complexity and how to measure performance. In this chapter, we are going to talk about how to choose and use data structures from the standard library. To understand why certain data structures work very well on the computers of today, we first need to cover some basics about computer memory. In this chapter, you will learn about:
+The properties of computer memory
+The standard library containers: sequence containers and associative containers
+The standard library container adaptors
+Parallel arrays
+Before we start walking through the containers offered by the standard library and some other useful data structures, we will briefly discuss some properties of computer memory.
+The properties of computer memory
+C++ treats
+memory as a sequence of cells. The size of each cell is 1 byte, and each cell has an address. Accessing a byte in memory by its address is a constant-time operation,
+O(1)
+, in other words, it's independent of the total number of memory cells. On a 32-bit machine, you can theoretically address 2
+32
+bytes, that is, around 4 GB, which restricts the amount of memory a process is allowed to use at once. On a 64-bit machine, you can theoretically address 2
+64
+bytes, which is so big that there is hardly any risk of running out of addresses.
+The following figure shows a sequence of memory cells laid out in memory. Each cell contains 8 bits. The hexadecimal numbers are the addresses of the memory cells:
+Figure 4.1: A sequence of memory cells
+Since accessing a byte by its address is an
+O(1)
+operation, from a programmer's perspective, it's tempting to believe that each memory cell is equally quick to access. This approach to memory is simple and useful in many cases, but when choosing data structures for efficient use, you need to take into account the memory hierarchy that exists in modern computers. The importance of the memory hierarchy has increased, since the time it takes to read and write from the main memory has become more expensive when compared to the speed of today's processors. The following figure shows the architecture of a machine
+with one CPU and four cores:
+Figure 4.2: An example of a processor with four cores; the boxes labeled L1i, L1d, L2, and L3 are memory caches
+I'm currently writing this chapter on a MacBook Pro from 2018, which is equipped with an Intel Quad-Core i7 CPU. On this processor, each core has its own L1 and L2 caches, whereas the L3 cache is shared among all four cores. Running the following command from a terminal:
+sysctl -a hw
+gives me, among other things, the following information:
+hw.memsize:
+17179869184
+hw.cachelinesize:
+64
+hw.l1icachesize:
+32768
+hw.l1dcachesize:
+32768
+hw.l2cachesize:
+262144
+hw.l3cachesize:
+8388608
+The reported
+hw.memsize
+is the total amount of main memory, which is 16 GB in this case.
+The
+hw.cachelinesize
+, which is reported to
+be 64 bytes, is the size of the cache lines, also known as blocks. When
+accessing a byte in memory, the machine is not only fetching the byte that is asked for; instead, the machine always fetches a cache line, which, in this case, is 64 bytes. The various caches between the CPU and main memory keep track of 64-byte blocks, instead of individual bytes.
+The
+hw.l1icachesize
+is the size of the L1 instruction cache. This is a 32 KB cache dedicated to storing instructions that have been recently used by the CPU. The
+hw.l1dcachesize
+is also 32 KB and is dedicated to data, as opposed to instructions.
+Lastly, we can read the size of the L2 cache and the L3 cache, which is 256 KB and 8 MB, respectively. An important observation is that the caches are tiny compared to the amount of main memory available.
+Without presenting any detailed facts about the actual number of cycles required to access data from each layer in the cache hierarchy, a very rough guideline is that there are orders of magnitude differences of latency between two adjacent layers (for example, L1 and L2). The following table shows an extract from the latency numbers presented in an article by Peter Norvig called
+Teach yourself programming in ten years, 2001
+(
+http://norvig.com/21-days.html
+). The full table is usually referred to as
+Latency numbers every programmer should know
+and is credited to Jeff Dean:
+L1 cache reference
+0.5 ns
+L2 cache reference
+7 ns
+Main memory reference
+100 ns
+Structuring the data in such a way that the caches can be fully utilized can have a dramatic effect on performance. Accessing data that has recently been used and, therefore, potentially already resides in
+the cache will make your program faster. This is known as
+temporal locality
+.
+Also, accessing data located near some other data you are using will increase the likelihood that the data you need is already in a cache line
+that was fetched from the main memory earlier. This is known as
+spatial locality
+.
+Constantly wiping out the
+cache lines in inner loops might result in very bad performance. This is
+sometimes called
+cache thrashing
+. Let's look at an example:
+constexpr
+auto
+kL1CacheCapacity =
+32768
+;
+// The L1 Data cache size
+constexpr
+auto
+kSize = kL1CacheCapacity /
+sizeof
+(
+int
+);
+using
+MatrixType =
+std
+::
+array
+<
+std
+::
+array
+<
+int
+, kSize>, kSize>;
+auto
+cache_thrashing
+(MatrixType& matrix)
+{
+auto
+counter =
+0
+;
+for
+(
+auto
+i =
+0
+; i < kSize; ++i) {
+for
+(
+auto
+j =
+0
+; j < kSize; ++j) {
+      matrix[i][j] = counter++;
+    }
+  }
+}
+This version takes about 40 ms to run on my computer. However, by only changing the line in the inner loop to the following, the time it takes to complete the function increases from 40 ms to over 800 ms:
+matrix[j][i] = counter++;
+In the first example, when using
+matrix[i][j]
+, most of the time we will access memory that is already in the L1 cache, whereas, in the modified version using
+matrix[j][i]
+, every access will generate an L1 cache miss. A few images might help you to understand what's going on. Instead of drawing the full 32768 x 32768 matrix, a tiny 3 x 3 matrix, as shown here, will serve as an example:
+Figure 4.3: A 3x3 matrix
+Even if this might be our mental image of how a matrix resides in memory, there is no such thing as 2-dimensional memory. Instead, when this matrix is laid out in a 1-dimensional memory space, it looks like this:
+Figure 4.4: A 2-dimensional matrix in a 1-dimensional memory space
+That is, it's a contiguous
+array of elements laid out row by row. In the fast version of our algorithm, the numbers are accessed sequentially in the same order in which they are contiguously laid out in memory, like this:
+Figure 4.5: Fast sequential stride-1 accesses
+Whereas in the slow version of the algorithm, the elements are accessed in a completely different pattern. Accessing the first four elements using the slow version would now look like this instead:
+Figure 4.6: Slow access using a larger stride
+Accessing data in this way is substantially slower due to poor spatial locality. Modern processors are usually also
+equipped with a
+prefetcher
+, which can automatically recognize memory access patterns and try to prefetch data from memory into the caches that are likely to be accessed in the near future. Prefetchers tend to perform best for smaller strides. You can read a lot more about this in the excellent book,
+Computer Systems, A Programmer's Perspective
+, by Randal E. Bryant and David R. O'Hallaron.
+To summarize this section, even if
+memory accesses are constant-time operations, caching can have dramatic effects on the actual time it takes to access the memory. This is something to always bear in mind when using or implementing new data structures.
+Next, I will introduce a set of data structures from the C++ standard library, called containers.
+The standard library containers
+The C++ standard library offers a set
+of very useful container types. A container is a data structure that contains a collection of elements. The container manages the memory of the elements it holds. This means that we don't have to explicitly create and delete the objects that we put in a container. We can pass objects created on the stack to a container and the container will copy and store them on the free store.
+Iterators are used to access elements in containers, and are, therefore, a fundamental concept for understanding algorithms and data structures from the standard library. The iterator concept is covered in
+Chapter 5
+,
+Algorithms
+. For this chapter, it's enough to know that an iterator can be thought of
+as a pointer to an element and that iterators have different operators defined depending on the container they belong to. For example, array-like data structures provide random access iterators to their elements. These iterators support arithmetic expressions using
++
+and
+-
+, whereas an iterator to a linked list, for example, only supports
+++
+and
+--
+operators.
+The containers are divided into three categories: sequence containers, associative containers, and container adaptors. This section will contain a brief introduction to the containers in each of the three categories and also address the most important things to consider when performance is an issue.
+Sequence containers
+Sequence containers keep the elements
+in the order we
+specify when adding the elements to the container. The sequence containers from the standard library are
+std::array
+,
+std::vector
+,
+std::deque
+,
+std::list
+, and
+std::forward_list
+. I will also address
+std::basic_string
+in this section, although it's not formally a generic sequence container because it only handles elements of character types.
+We should know the answers to the following questions before choosing a sequence container:
+What is the number of elements (order of magnitude)?
+What are the
+usage patterns? How often are you going to add data? Read/traverse data? Delete data? Rearrange data?
+Where in the sequence are you going to add data most often? At the end, at the beginning, or in the middle of the sequence?
+Do you need to sort the elements? Or do you even care about the order?
+Depending on the answers to these questions, we can determine which sequence containers are more or less suitable for our needs. But, to do that, we need a basic understanding of the interfaces and performance characteristics of each type of sequence container.
+The sections that follow will briefly present the different sequence containers, starting with one of the most widely used containers overall.
+Vectors and arrays
+std::vector
+is probably the most commonly used container type, and for good reason. A vector is an array that
+grows dynamically when needed. The elements added to a vector are guaranteed to be laid out contiguously in memory, which means that you can access any element in the array by its index in constant time. It also means that it provides excellent performance when traversing the elements in the order they are laid out, thanks to the spatial locality mentioned earlier.
+A vector has a
+size
+and a
+capacity
+. The size is the number of elements that are currently held in the container, and the capacity is the number of elements that the vector can hold until it needs to allocate more space:
+Figure 4.7: Size and capacity of a std::vector
+Adding elements to the end of a vector using the
+push_back()
+function is fast, as long as the size is less than the capacity. When adding an element and there is no room for more, the vector will allocate a new internal buffer and then move all of the elements to the new space. The capacity will grow in such a way that resizing the buffer rarely happens, thus making
+push_back()
+an amortized constant-time operation, as we discussed in
+Chapter 3
+,
+Analyzing and Measuring Performance
+.
+A vector template
+instance of type
+std::vector<Person>
+will store
+Person
+objects by value. When the vector needs to rearrange the
+Person
+objects (for example, as a result of an insert), the values will be copy constructed or moved. Objects will be moved if they have a
+nothrow
+move constructor. Otherwise, the objects will be copy constructed in order to guarantee strong exception safety:
+Person(Person&& other) {
+// Will be copied
+// ...
+} 
+Person(Person&& other)
+noexcept
+{
+// Will be moved
+// ...
+}
+Internally,
+std::vector
+uses
+std::move_if_noexcept
+in order to determine whether the object should be copied or moved. The
+<type_traits>
+header can help you to verify at compile time that your classes are guaranteed to not throw an exception when moved:
+static_assert
+(
+std
+::is_nothrow_move_constructible<Person>::value);
+If you are adding newly created objects to the vector, you can take advantage of the
+emplace_back()
+function, which will create the object in place for you, instead of creating an object and then copying/moving it to the vector using the
+push_back()
+function:
+persons.emplace_back(
+"John"
+,
+65
+);
+The capacity of the vector can change in the following ways:
+By adding an element to the vector when the
+capacity == size
+By calling
+reserve()
+By calling
+shrink_to_fit()
+Other than that, the vector will not change the capacity, and hence will not allocate or deallocate dynamic memory. For example, the member function
+clear()
+empties a vector, but it does not change its capacity. These memory guarantees make the vector usable even in real-time contexts.
+Since C++20, there are also two free functions that erase elements from a
+std::vector
+. Prior to C++20, we had to use the
+erase-remove idiom
+, which we will discuss in
+Chapter 5
+,
+Algorithms
+. However, now the recommended way to erase elements from a
+std::vector
+is by using
+std::erase()
+and
+std::erase_if()
+. Here is a short example of how to use these functions:
+auto
+v =
+std
+::
+vector
+{
+-1
+,
+5
+,
+2
+,
+-3
+,
+4
+,
+-5
+,
+5
+};
+std
+::erase
+(v,
+5
+);
+// v: [-1,2,-3,4,-5]
+std
+::erase_if
+(v, [](
+auto
+x) {
+return
+x <
+0
+; });
+// v: [2, 4]
+As an alternative to the
+dynamically sized vector, the standard library also provides a fixed size version named
+std::array
+that manages its elements by using the stack as opposed to the free store. The size of the array is a template argument specified at compile time, which means that the size and type elements become a part of the concrete type:
+auto
+a =
+std
+::
+array
+<
+int
+,
+16
+>{};
+auto
+b =
+std
+::
+array
+<
+int
+,
+1024
+>{};
+In this example,
+a
+and
+b
+are not the same type, which means that you have to specify the size when using the type as a function parameter:
+auto
+f
+(
+const
+std
+::
+array
+<
+int
+,
+1024
+>& input)
+{
+// ...
+} 
+ 
+f(a);
+// Does not compile, f requires an int array of size 1024
+This might seem a bit tedious at first, but this is, in fact, the big advantage over the built-in array type (the C arrays), which loses the size information when passed to a function, since it automatically converts a pointer into the first element of the array:
+// input looks like an array, but is in fact a pointer
+auto
+f
+(
+const
+int
+input[])
+{
+// ...
+}
+int
+a[
+16
+];
+int
+b[
+1024
+]; 
+f(a);
+// Compiles, but unsafe
+An array losing its size information is usually referred to as
+array decay
+. You will see later on in this
+chapter how array decay can be avoided by using
+std::span
+when passing contiguous data to functions.
+Deque
+Sometimes, you'll find yourself in
+a situation where you need to frequently add elements to both the beginning and end of a sequence. If you are using a
+std::vector
+and need to speed up the inserts at the front, you can instead use
+std::deque
+, which is short for
+double-ended queue
+.
+std::deque
+is usually implemented as a collection of fixed-size arrays, which makes it possible to access elements by their index in constant time. However, as you can see in the following figure, all of the elements are not stored contiguously in memory, which is the case with
+std::vector
+and
+std::array
+.
+Figure 4.8: A possible layout of std::deque
+List and forward_list
+The
+std::list
+is a
+doubly linked list
+, meaning that each
+element has one link to the next element and
+one link to its previous element. This makes it possible to iterate over the list both backward and forward. There is also a
+singly linked list
+named
+std::forward_list
+. The reason you wouldn't always choose the doubly linked list over
+std::forward_list
+is because of the excessive memory that is occupied by the back pointers in the doubly linked list. So, if you don't need to traverse the list backward, use
+std::forward_list
+. Another interesting feature of the forward list is that it's optimized for very short lists. When the list is empty, it only occupies one word, which makes it a viable data structure for sparse data.
+Note that even if the elements are ordered in a sequence, they are
+not
+laid out contiguously in memory like the vector and array are, which means that iterating a linked list will most likely generate a
+lot more cache misses compared to the vector.
+To recap, the
+std::list
+is a doubly linked list with pointers to the next and previous elements:
+Figure 4.9: std::list is a doubly linked list
+The
+std::forward_list
+is a singly linked list with pointers to the next element:
+Figure 4.10: std::forward_list is a singly linked list
+The
+std::forward_list
+is more memory efficient
+since it only has one pointer to the next element.
+Lists are also the only containers that support
+splicing
+, which is a way to transfer elements between lists without copying or moving the elements. This means, for example, that it is possible to concatenate two lists into one in constant time,
+O(1)
+. Other containers require at least linear time for such operations.
+The basic_string
+The last template class that we will
+cover in this section is the
+std::basic_string
+. The
+std::string
+is a
+typedef
+for
+std::basic_string<char>
+. Historically,
+std::basic_string
+was not guaranteed to be laid out contiguously in memory. This changed with C++17, which makes it possible to pass the string to APIs that require an array of characters. For example, the following code reads an entire file into a string:
+auto
+in =
+std
+::ifstream{
+"file.txt"
+,
+std
+::ios::binary |
+std
+::ios::ate};
+if
+(in.is_open()) {
+auto
+size = in.tellg();
+auto
+content =
+std
+::
+string
+(size,
+'\0'
+); 
+  in.seekg(
+0
+); 
+  in.read(&content[
+0
+], size);
+// "content" now contains the entire file
+}
+By opening the file using
+std::ios::ate
+, the position indicator is set to the end of the stream so that we can use
+tellg()
+to retrieve the size of the file. After that, we set the input position to the beginning of the stream and start reading.
+Most implementations of
+std::basic_string
+utilize
+something called
+small object optimization
+, which means that they do not allocate any dynamic memory if the size of the string is small. We will discuss
+small object optimization later in the book. For now, let's move on to discuss associative containers.
+Associative containers
+The associative containers place
+their elements based on the element itself. For example, it's not possible to add an element at the back
+or front in an associative container as we do with
+std::vector::push_back()
+or
+std::list::push_front()
+. Instead, the elements are added in a way that makes it possible to find the element without the need to scan the entire container. Therefore, the associative containers have some requirements for the objects we want to store in a container. We will look at these requirements later.
+There are two main categories of associative containers:
+Ordered associative containers
+: These containers are based on trees; the containers use a tree for storing their
+elements. They require that the elements are ordered by the less than operator (
+<
+). The functions for adding, deleting, and finding elements are all O(log n) in the tree-based containers. The containers are named
+std::set
+,
+std::map
+,
+std::multiset
+, and
+std::multimap
+.
+Unordered associative containers
+: These containers are based on hash tables; the containers use a hash
+table for storing their elements. They require that the elements are compared with the equality operator (
+==
+) and that there is a way to compute a hash value based on an element. More on that later. The functions for adding, deleting, and finding elements are all
+O(1)
+in the hash table-based containers. The containers are named
+std::unordered_set
+,
+std::unordered_map
+,
+std::unordered_multiset
+, and
+std::unordered_multimap
+.
+Since C++20, all associative containers are equipped with a function named
+contains()
+, which should be used when you want to know whether a container contains some specific elements. In earlier versions of C++, it was necessary to use
+count()
+or
+find()
+to find out whether
+a container contained an element.
+Always use the specialized functions, such as
+contains()
+and
+empty()
+, instead of using
+count() > 0
+or
+size() == 0
+. The specialized functions are guaranteed to be the most efficient ones.
+Ordered sets and maps
+The ordered associative containers guarantee
+that insert, delete, and search can be done in logarithmic time,
+O(log n)
+. How that is achieved is up to the implementation of the standard library. However, the implementations we know about do use some kind of self-balancing binary search tree. The fact that the tree stays approximately balanced is necessary for controlling the height of the tree, and, hence, also the worst-case running time when accessing elements. There is no need for the tree to pre-allocate memory, so, typically, a tree will allocate memory on the free store each time an element is inserted and also free up memory whenever elements are erased. Take a look at the following diagram, which shows that the height of a balanced tree is
+O(log n)
+:
+Figure 4.11: The height of the tree is O(log n) if it's balanced
+Unordered sets and maps
+The unordered versions of sets and maps offer
+a hash-based alternative to
+the tree-based versions. This data structure is, in general, referred to as hash tables. In theory, hash tables offer amortized constant-time insert, add, and delete operations, which can be compared to the tree-based versions that operate in
+O(log n)
+. However, in practice, the difference might not be so obvious, especially if you are not storing a very large number of elements in your container.
+Let's see how a hash table can offer
+O(1)
+operations. A hash table keeps its elements in some sort of array of buckets. When adding an element to the hash table, an integer is computed for the element using a hash function. The
+integer is usually called the
+hash
+of the element. The hash value is then
+limited to the size of the array (by using the modulo operation, for example) so that the new limited value can be used as an index in the array. Once the index is computed, the hash table can store the element in the array at that index. The lookup of an element works in a similar manner by first computing a hash value for the element we are looking for and then accessing the array.
+Apart from computing the
+hash value, this technique seems straightforward. This is just half of the story, though. What if two different elements generate the same index, either because they produced the same hash value, or because two different hash values are being limited to the same index? When two non-equal elements end up at the same index, we call that a
+hash collision
+. This is not just an edge case: this will happen a lot, even if we are using a good hash function, and especially if the array is small when compared to the number of elements we are adding. There are various ways of dealing with hash collisions. Here, we will
+focus on the one that is being used in the standard library, which is called
+separate chaining
+.
+Separate chaining solves the problem of two unequal elements ending up at the same index. Instead of just storing the elements directly in the array, the array is a sequence of
+buckets
+. Each bucket can contain multiple elements, that is, all of the elements that are hashed to the same index. So, each bucket is also some sort of container. The exact data structure used for the buckets is not defined, and it can vary for different implementations. However, we can think of it as a linked list and assume that finding an element in a specific bucket is slow, since it needs to scan the elements in the buckets linearly.
+The following figure shows a hash table with eight buckets. The elements have landed in three separate buckets. The bucket with index
+2
+contains four elements, the bucket with index
+4
+contains two elements, and the bucket with index
+5
+contains only one element. The other buckets are empty:
+Figure 4.12: Each bucket contains 0 or more elements
+Hash and equals
+The hash value, which can be
+computed in constant time with respect to the size
+of the container, determines which bucket an element will be placed in. Since it's possible that more than one object will generate the same hash value, and therefore end up in the same bucket, each key also needs to provide an equals function, which is used to compare the key we are looking for with all of the keys in the bucket.
+If two keys are equal, they are required to generate the same hash value. However, it's perfectly legal for two objects to return the same hash value while not being equal to each other.
+A good hash function is quick to compute and will also distribute the keys evenly among the buckets in order to minimize the number of elements in each bucket.
+The following is an example of a
+very bad
+, but valid, hash function:
+auto
+my_hash = [](
+const
+Person& person) {
+return
+47
+;
+// Bad, don't do this!
+};
+It is valid because it will return the same hash value for two objects that are equal. The hash function is also very quick. However, since all elements will produce the same hash value, all keys will end up in the same bucket, which means finding an element will be
+O(n)
+instead of
+O(1)
+, which we are aiming for.
+A good hash function, on the other hand, ensures that the elements are distributed evenly among the buckets to minimize hash collisions. The C++ standard actually has a note about this, which states that it should be very rare for a hash function to produce the same hash value for two different objects. Fortunately, the standard library already provides us with good hash functions for basic types. In many cases, we can reuse these functions when writing our own hash functions for user-defined types.
+Suppose we want to use a
+Person
+class as a key in an
+unorordered_set
+. The
+Person
+class has two data members:
+age
+, which is an
+int
+, and
+name
+, which is a
+std::string
+. We start by writing the equal predicate:
+auto
+person_eq = [](
+const
+Person& lhs,
+const
+Person& rhs) {
+return
+lhs.name() == rhs.name() && lhs.age() == rhs.age();
+};
+For two
+Person
+objects to be equal, they need
+to have the same name and the same age. We can now define the hash predicate by combining the hash
+values of all of the data members that are included in the equals predicate. Unfortunately, there is no function in the C++ standard yet to combine hash values, but there is a good one available in Boost, which we will use here:
+#
+include
+<boost/functional/hash.hpp>
+auto
+person_hash = [](
+const
+Person& person) {
+auto
+seed =
+size_t
+{
+0
+};
+  boost::hash_combine(seed, person.name()); 
+  boost::hash_combine(seed, person.age());
+return
+seed;
+};
+If, for some reason, you cannot use Boost,
+boost::hash_combine()
+is really just a one-liner that can be copied from the documentation found at
+https://www.boost.org/doc/libs/1_55_0/doc/html/hash/reference.html#boost.hash_combine
+.
+With the equality and hash functions defined, we can finally create our
+unordered_set
+:
+using
+Set =
+std
+::
+unordered_set
+<Person,
+decltype
+(person_hash),
+decltype
+(person_eq)>;
+auto
+persons = Set{
+100
+, person_hash, person_eq};
+A good rule of thumb is to always use all of the data members that are being used in the equal function when producing the hash value. That way, we adhere to the contract between equals and hash, and, at the same time, this enables us to provide an effective hash value. For example, it would be correct but inefficient to only use the name when computing the hash value, since that would mean that all
+Person
+objects with the same name would end up in the same bucket. Even worse, though, would be to include data members in the hash function that are not being used in the equals function. This would most likely result in a disaster
+where you
+cannot find objects in your
+unordered_set
+that, in fact, compare equally.
+Hash policy
+Apart from creating hash
+values that distribute the keys evenly among the buckets, we can reduce the number of collisions by having many buckets. The average number of elements per bucket is called the
+load factor
+. In the preceding example, we created an
+unordered_set
+with 100 buckets. If we add 50
+Person
+objects to the set,
+load_factor()
+would return 0.5. The
+max_load_factor
+is an upper limit of the load factor, and when that value is reached, the set will need to increase the number of buckets, and, as a consequence, also rehash all the elements that are currently in the set. It's also possible to trigger a rehash manually with the
+rehash()
+and
+reserve()
+member functions.
+Let's move on to look at the third category: container adaptors.
+Container adaptors
+There are three container adaptors in
+the standard library:
+std::stack
+,
+std::
+queue
+, and
+std::
+priority_queue
+. Container adaptors are quite different from sequence containers
+and associative containers because they represent
+abstract data types
+that can be implemented by the underlying sequence container. For example, the stack, which is a
+last in, first out
+(
+LIFO
+) data structure
+supporting push and pop on the top of the stack, can be implemented by using a
+vector
+,
+list
+,
+deque
+, or any other custom sequence container that supports
+back()
+,
+push_back()
+, and
+pop_back()
+. The same goes for
+queue
+, which is a
+first in, first out
+(
+FIFO
+) data
+structure, and
+priortiy_queue
+.
+In this section, we will focus on
+std::priority_queue
+, which is a pretty useful data structure that is easy to forget.
+Priority queues
+A
+priority queue
+offers a constant-time
+lookup of the element with the highest priority. The priority is defined using the less than operator of the elements. Insert and delete both run in logarithmic time. A priority queue is a partially ordered data structure, and it might not be obvious when to use one instead of a completely sorted data structure, for example, a tree or a sorted vector. However, in some cases, a priority queue can offer you the functionality you need, and for a lower cost than a completely sorted container.
+The standard library already provides a partial sort algorithm, so we don't need to write our own. But let's look at how we can implement a partial sort algorithm using a priority queue. Suppose that we are writing a
+program for searching documents given a query. The matching documents (search hits) should be ordered by rank, and we are only interested in finding the first 10 search hits with the highest rank.
+A document is represented by the following class:
+class
+Document
+{
+public
+:  
+  Document(
+std
+::
+string
+title) : title_{
+std
+::move(title)} {}
+private
+:
+std
+::
+string
+title_;
+// ...
+};
+When searching, an algorithm selects the documents that match the query and computes a rank of the search hits. Each matching document is represented by a
+Hit
+:
+struct
+Hit
+{
+float
+rank_{};
+std
+::
+shared_ptr
+<Document> document_; 
+};
+Finally, we need to sort the hits and return the top
+m
+documents. What are the options for sorting the hits? If the hits are contained in a container that provides random access iterators, we could use
+std::sort()
+and only return the
+m
+first elements. Or, if the total number of hits is much larger than the
+m
+documents we are to return, we could use
+std::partial_sort()
+, which would be more efficient than
+std::sort()
+.
+But what if we don't have random access iterators? Maybe the matching algorithm only provides forward iterators to the hits. In that case, we could use a priority queue and still come up with an efficient solution. Our sort interface would look like this:
+template
+<
+typename
+It>
+auto
+sort_hits
+(It begin, It end,
+size_t
+m) ->
+std
+::
+vector
+<Hit> {
+We could call this function with any iterator that has the increment operator defined. Next, we create a
+std::priority_queue
+backed by a
+std::vector
+, using a custom compare function for keeping the
+lowest
+ranking hits at the top of the queue:
+auto
+cmp = [](
+const
+Hit& a,
+const
+Hit& b) {
+return
+a.rank_ > b.rank_;
+// Note, we are using greater than
+};
+auto
+queue =
+std
+::priority_queue<Hit,
+std
+::
+vector
+<Hit>,
+decltype
+(cmp)>{cmp};
+We will only insert, at most,
+m
+elements in the priority queue. The priority queue will contain the highest-ranking hits seen so far. Among the elements that are currently in the priority queue, the hit with the
+lowest rank will be the topmost element:
+for
+(
+auto
+it = begin; it != end; ++it) {
+if
+(queue.size() < m) { 
+      queue.push(*it); 
+    }
+else
+if
+(it->rank_ > queue.top().rank_) { 
+      queue.pop(); 
+      queue.push(*it); 
+    } 
+  }
+Now, we have collected the highest-ranking hits in the priority queue, so the only thing left to do is to put them in a vector in reverse order and return the
+m
+-sorted hits:
+auto
+result =
+std
+::
+vector
+<Hit>{};
+while
+(!queue.empty()) { 
+    result.push_back(queue.top()); 
+    queue.pop(); 
+  }
+std
+::reverse(result.begin(), result.end());
+return
+result; 
+}
+// end of sort_hits()
+What is the complexity of this algorithm? If we denote the number of hits with n and the number of returned hits with
+m
+, we can see that the memory consumption is
+O(m)
+, whereas the time complexity is
+O(n * log m)
+, since we are iterating over
+n
+elements. Additionally, in each iteration, we might have to do a push and/or pop, which both run in
+O(log m)
+time.
+We will now leave the standard library containers and focus on a couple of new useful class templates that are closely related to standard containers.
+Using views
+In this section, we will
+discuss some relatively new class templates in the C++ standard library:
+std::string_view
+from C++17 and
+std::span
+, which was introduced in C++20.
+These class templates are not containers but lightweight views (or slices) of a sequence of contiguous elements. Views are small objects that are meant to be copied by value. They don't allocate memory, nor do they provide any guarantees regarding the lifetime of the memory they point to. In other words, they are non-owning reference types, which differ significantly from the containers described previously in this chapter. At the same time, they are closely related to
+std::string
+,
+std::array
+, and
+std::vector
+, which we will look at soon. I will start by describing
+std::string_view
+.
+Avoiding copies with string_view
+A
+std::string_view
+contains a
+pointer to the beginning of an immutable string buffer and a size. Since a string is a contiguous sequence of characters, the pointer and the size fully define a valid substring range. Typically, a
+std::string_view
+points to some memory that is owned by a
+std::string
+. But it could also point to a string literal with static storage duration or something like a memory-mapped file. The following diagram shows a
+std::string_view
+pointing at memory owned by a
+std::string
+:
+Figure 4.13: A std::string_view object pointing at memory owned by an instance of std::string
+The character sequence defined by a
+std::string_view
+is not required to be terminated by a null character, but it is perfectly valid to have a sequence of characters that contains null characters. The
+std::string
+, on the other hand, needs to be able to return a null-terminated string from
+c_str()
+, which means that it always stores an extra null character at the
+end of the sequence.
+The fact that
+string_view
+does not need a null terminator means that it can handle substrings much more efficiently than a C-style string or a
+std::string
+because it does not have to create new strings just to add the null terminator. The complexity of
+substr()
+using a
+std::string_view
+is constant, which should be compared to the
+substr()
+version of
+std::string
+, which runs in linear time.
+There is also a performance win when passing strings to functions. Consider the following code:
+auto
+some_func
+(
+const
+std
+::
+string
+& s)
+{
+// process s ...
+}
+some_func(
+"A string literal"
+);
+// Creates a std::string
+When passing a string literal to
+some_func()
+, the compiler needs to construct a new
+std::string
+object to match the type of the argument. However, if we let
+some_func()
+accept a
+std::string_view
+, there is no longer any need to construct a
+std::string
+:
+auto
+some_func
+(
+std
+::string_view s
+)
+{
+// Pass by value
+// process s ...
+}
+some_func(
+"A string literal"
+);
+A
+std::string_view
+instance can be constructed efficiently both from a
+std::string
+and a string literal and is, therefore, a well-suited type for function parameters.
+Eliminating array decay with std::span
+When discussing
+std::vector
+and
+std::array
+earlier in this chapter, I mentioned that array decay (losing the size
+information of an array) happens with built-in arrays when they are passed to a function:
+// buffer looks like an array, but is in fact a pointer
+auto
+f1
+(
+float
+buffer[])
+{
+const
+auto
+n =
+std
+::size(buffer);
+// Does not compile!
+for
+(
+auto
+i =
+0u
+; i < n; ++i) {
+// Size is lost!
+// ...
+}
+}
+We could get around this problem by adding a size parameter:
+auto
+f2
+(
+float
+buffer[],
+size_t
+n)
+{
+for
+(
+auto
+i =
+0u
+; i < n; ++i) {
+// ...
+}
+}
+Although this technically works, passing
+the correct data to this function is both error-prone and tedious, and if
+f2()
+passes the buffer to other functions, it needs to remember to pass the correctly sized variable
+n
+. This is what the call site of
+f2()
+might look like:
+float
+a[
+256
+]; 
+f2(a,
+256
+);     
+f2(a,
+sizeof
+(a)/
+sizeof
+(a[
+0
+]));
+// A common tedious pattern
+f2(a,
+std
+::size(a));
+Array decay is the source of many bound-related bugs, and in situations where built-in arrays are used (for one reason or another),
+std::span
+offers a safer way to pass arrays to functions. Since the span holds both the pointer to the memory and the size together in one object, we can use it as the single type when passing sequences of elements to functions:
+auto
+f3
+(
+std
+::span<
+float
+> buffer)
+{
+// Pass by value
+for
+(
+auto
+&& b : buffer) {
+// Range-based for-loop
+// ...
+}
+}
+float
+a[
+256
+]; 
+f3(a);
+// OK! Array is passed as a span with size
+auto
+v =
+std
+::
+vector
+{
+1.f
+,
+2.f
+,
+3.f
+,
+4.f
+};
+f3(v);
+// OK!
+A span is also more convenient to use over a built-in array since it acts more like a regular container with support for iterators.
+There are many similarities between
+std::string_view
+and
+std::span
+when it comes to the data members (pointer and size) and the member functions. But there are also some notable differences: the memory pointed to by
+std::span
+is mutable, whereas the
+std::string_view
+always points to constant memory.
+std::string_view
+also contains string-specific functions such as
+hash()
+and
+substr()
+, which are naturally not part of
+std::span
+. Lastly, there is no
+compare()
+function in
+std::span
+, so it's not possible to directly use the comparison operators on
+std::span
+objects.
+It's now time to highlight a few
+general points related to performance when using data structures from the standard library.
+Some performance considerations
+We have now covered the three major container categories: sequence containers, associative containers, and
+container adaptors. This section will provide you with some general performance advice to consider when working with containers.
+Balancing between complexity guarantees and overhead
+Knowing the time and memory
+complexity of data structures is important when choosing between containers. But it's equally important to remember that each container is afflicted with an overhead cost, which has a bigger impact on the performance for smaller datasets. The complexity guarantees only become interesting for sufficiently large datasets. It's up to you, though, to decide what sufficiently large means in your use cases. Here, again, you need to measure your program while executing it to gain insights.
+In addition, the fact that computers are equipped with memory caches makes the use of data structures that are friendly to the cache more likely to perform better. This usually speaks in favor of the
+std::vector
+, which has a low memory overhead and stores its elements contiguously in memory, making access and traversal faster.
+The following diagram shows the actual running time of two algorithms. One runs in linear time,
+O(n)
+, and the other runs in logarithmic time,
+O(log n)
+, but with a larger overhead. The logarithmic algorithm is slower than the linear time algorithm when the input size is below the marked threshold:
+Figure 4.14: For small sizes of n, the linear algorithm, O(n), is faster than the algorithm running in O(log n)
+Our next point to keep in mind is more
+concrete and highlights the importance of using the most suitable API functions.
+Knowing and using the appropriate API functions
+In C++, there is usually more than
+one way to do something. The language and the library continue to evolve, but very few features are being deprecated. When new functions are added to the standard library, we should learn when to use them and reflect on what patterns we might have used to compensate for a previously missing function.
+Here, we will focus on two small, but important, functions that can be found in the standard library:
+contains()
+and
+empty()
+. Use
+contains()
+when checking whether an element exists in an associated container. Use
+empty()
+if you want to know whether a container has any elements or is empty. Apart from expressing the intent more clearly, it also has performance benefits. Checking the size of a linked list is an
+O(n)
+operation, whereas calling
+empty()
+on a list runs in constant time,
+O(1)
+.
+Before C++20 and the introduction of the
+contains()
+function, we had to take a detour every time we wanted to check for the existence of some value in an associative container. You have most likely stumbled upon code that uses various ways to look for the existence of an element. Suppose we have a bag-of-words implemented using a
+std::multiset
+:
+auto
+bag =
+std
+::
+multiset
+<
+std
+::
+string
+>{};
+// Our bag-of-words
+// Fill bag with words ...
+If we want to know whether some specific word is in our bag-of-words, there are numerous ways to go forward. One alternative would be to use
+count()
+, like this:
+auto
+word =
+std
+::
+string
+{
+"bayes"
+};
+// Our word we want to find
+if
+(bag.count(word) >
+0
+) {
+// ...
+}
+It seems reasonable, but it may have a slight overhead since it counts
+all
+elements that match our word. Another alternative is
+to use
+find()
+, but it has the same overhead since it returns all the matching words, not just the first occurrence:
+if
+(bag.find(word) != bag.end()) {
+// ...
+}
+Before C++20, the recommended way was to use
+lower_bound()
+, since it only returns the first matching element, like this:
+if
+(bag.lower_bound(word) != bag.end()) {
+// ...
+}
+Now, with C++20 and the introduction of
+contains()
+, we can express our intent more clearly and also be sure that the library will provide us with the most efficient implementation when we only want to check for existence of an element:
+if
+(bag.contains(word)) {
+// Efficient and with clear intent
+// ...
+}
+The general rule is that if there is a specific member function or a free function designed for a specific container, then use it if it matches your needs. It will be efficient, and it will express the intent more clearly. Don't use detours like the ones shown earlier just because you haven't learned the full API or because you have old habits of doing things in a certain way.
+It should also be said that the zero-overhead principle applies particularly well to functions like these, so don't spend time trying to outsmart the library implementors by handcrafting your own functions.
+We will now go ahead and look at a lengthier example of how we can reorder data in different ways to optimize runtime
+performance for a specific use case.
+Parallel arrays
+We will finish this chapter
+by talking about iterating over elements and exploring ways to improve performance when iterating over array-like data structures. I have already mentioned two important factors for performance when accessing data: spatial locality and temporal locality. When iterating over elements stored contiguously in memory, we will increase the probability that the data we need is already cached if we manage to keep our objects small, thanks to spatial locality. Obviously, this will have a great impact on performance.
+Recall the cache-thrashing example, shown at the beginning of this chapter, where we iterated over a matrix. It demonstrated that we sometimes need to think about the way we access data, even if we have a fairly compact representation of the data.
+Next, we will compare how long it takes to iterate over objects of different sizes. We will start by defining two structs,
+SmallObject
+and
+BigObject
+:
+struct
+SmallObject
+{
+std
+::
+array
+<
+char
+, 4> data_{};
+int
+score_{
+std
+::rand()}; 
+};
+struct
+BigObject
+{
+std
+::
+array
+<
+char
+, 256> data_{};
+int
+score_{
+std
+::rand()}; 
+};
+SmallObject
+and
+BigObject
+are identical, except for the size of the initial data array. Both structs contain an
+int
+named
+score_
+, which we initialize to a random value just for testing purposes. We can let the compiler tell us the size of the objects by using the
+sizeof
+operator:
+std
+::
+cout
+<<
+sizeof
+(SmallObject);
+// Possible output is 8
+std
+::
+cout
+<<
+sizeof
+(BigObject);
+// Possible output is 260
+We need plenty of objects in order to evaluate the performance. Create one million objects of each kind:
+auto
+small_objects =
+std
+::
+vector
+<SmallObject>(
+1'000'000
+);
+auto
+big_objects =
+std
+::
+vector
+<BigObject>(
+1'000'000
+);
+Now for the iteration. Let's say that we want to sum the scores of all the objects. Our preference would be to use
+std::accumulate()
+, which we will cover later in the book, but, for now, a simple
+for
+-loop will do. We write this function as a template so that we don't have to manually write one version for each type of object. The function iterates over the objects and sums all the scores:
+template
+<
+class
+T
+>
+auto
+sum_scores
+(
+const
+std
+:
+:
+vector
+<T>& objects) {  
+  ScopedTimer t{
+"sum_scores"
+};
+// See chapter 3
+auto
+sum =
+0
+;
+for
+(
+const
+auto
+& obj : objects) { 
+    sum += obj.score_; 
+  }
+return
+sum; 
+}
+Now, we are ready to see how
+long it takes to sum the scores in the small objects compared to the big objects:
+auto
+sum =
+0
+; 
+sum += sum_scores(small_objects); 
+sum += sum_scores(big_objects);
+To achieve reliable results, we need to repeat the test a couple of times. On my computer, it takes about 1 ms to compute the sum of the small objects and 10 ms to compute the sum of the big objects. This example is similar to the cache thrashing example at the beginning of the chapter, and one reason for the big difference is, again, because of the way the computer uses the cache hierarchy to fetch data from the main memory.
+How can we utilize the fact that it's faster to iterate over collections of smaller objects than bigger objects when working with more realistic scenarios than the preceding example?
+Obviously, we can do our best to keep the size of our classes small, but it's often easier said than done. Also, if we are working with an old code base that has been growing for some time, the chances are high that we will stumble across some really large classes with too many data members and too many responsibilities.
+We will now look at a class that represents a user in an online game system and see how we can split it into smaller parts. The class has the following data members:
+struct
+User
+{
+std
+::
+string
+name_;
+std
+::
+string
+username_;
+std
+::
+string
+password_;
+std
+::
+string
+security_question_;
+std
+::
+string
+security_answer_;
+short
+level_{};
+bool
+is_playing_{}; 
+};
+A user has a name that is frequently used and some information for authentication that are rarely used. The class also keeps track of which level the player is currently playing at. Finally, the
+User
+struct also knows whether the user is currently playing by storing the
+is_playing_
+boolean.
+The
+sizeof
+operator reports
+that the
+User
+class is 128 bytes when compiling for a 64-bit architecture. An approximate layout of the data members can be seen in the following figure:
+Figure 4.15: Memory layout of the User class
+All users are kept in a
+std::vector
+, and there are two global functions that are called very often and need to run quickly:
+num_users_at_level()
+and
+num_playing_users()
+. Both functions iterate over all users, and therefore we need to make iterations over the user vector quick.
+The first function returns the number of users who have reached a certain level:
+auto
+num_users_at_level
+(
+const
+std
+::
+vector
+<User>& users,
+short
+level)
+{ 
+  ScopedTimer t{
+"num_users_at_level (using 128 bytes User)"
+};
+auto
+num_users =
+0
+;
+for
+(
+const
+auto
+& user : users)
+if
+(user.level_ == level)
+      ++num_users;
+return
+num_users; 
+}
+The second function computes how many users are currently playing:
+auto
+num_playing_users
+(
+const
+std
+::
+vector
+<User>& users)
+{ 
+  ScopedTimer t{
+"num_playing_users (using 128 bytes User)"
+};
+return
+std
+::count_if(users.begin(), users.end(), 
+    [](
+const
+auto
+& user) {
+return
+user.is_playing_; 
+    }); 
+}
+Here, we use the algorithm
+std::count_if()
+instead of a handwritten loop, as we did in
+num_users_at_level()
+.
+std::count_if()
+will call the predicate we provide for each user in the user vector and return
+the number of times the predicate returns
+true
+. This is basically what we are doing in the first function as well, so we could also have used
+std::count_if()
+in the first case. Both functions run in linear time.
+Calling the two functions with a vector of one million users results in the following output:
+11 ms num_users_at_level (using 128 bytes User)
+10 ms num_playing_users (using 128 bytes User)
+We hypothesize that by making the
+User
+class smaller, it would be faster to iterate over the vector. As mentioned, the password and security data fields are rarely used and could be grouped in a separate struct. That would give us the following classes:
+struct
+AuthInfo
+{
+std
+::
+string
+username_;
+std
+::
+string
+password_;
+std
+::
+string
+security_question_;
+std
+::
+string
+security_answer_; 
+};
+struct
+User
+{
+std
+::
+string
+name_;
+std
+::
+unique_ptr
+<AuthInfo> auth_info_;
+short
+level_{};
+bool
+is_playing_{}; 
+};
+This change decreases the size of the
+User
+class from 128 bytes to 40 bytes. Instead of storing four strings in the
+User
+class, we use a pointer to refer to the new
+AuthInfo
+object. The following figure shows you how we have split up the
+User
+class into two smaller classes:
+Figure 4.16: Memory layout when authentication information is kept in a separate class
+This change makes sense from a design perspective too. Keeping the authentication data in a separate class increases the cohesion of the
+User
+class. The
+User
+class contains a pointer to the authentication information. The total amount of memory that the user data occupies has not decreased, of course, but the important thing right now is to shrink the
+User
+class in order to speed up the functions that iterate over all users.
+From an optimization point of view, we have to measure this again to verify that our hypothesis regarding smaller data is valid. It turns out that both functions run more than twice as fast with the smaller
+User
+class. The output when running the modified version is:
+4 ms num_users_at_level with User
+3 ms num_playing_users with User
+Next, we are going to try a more
+aggressive way of shrinking the amount of data we need to iterate through by using
+parallel arrays
+. First, a warning: this is an optimization that, in many cases, has too many drawbacks to be a viable alternative. Don't take this as a general technique and apply it without thinking twice. We will come back to the pros and cons of parallel arrays after looking at a few examples.
+By using parallel arrays, we simply split the large structures into smaller types, similar to what we did with the authentication information for our
+User
+class. But instead of using pointers to relate objects, we store the smaller structures in separate arrays of equal size. The smaller objects in the different arrays that share the same index form the complete original object.
+An example will clarify
+this technique. The
+User
+class we have worked with consists of 40 bytes. It now only contains a username string, a pointer to the authentication information, an integer for the current level, and the
+is_playing_
+boolean. By making the user objects smaller, we saw that the performance improved when iterating over the objects. The memory layout of an array of user objects would look something like the one shown in the following figure. We will ignore memory alignment and padding for now, but will get back to these topics in
+Chapter 7
+,
+Memory Management
+:
+Figure 4.17: User objects stored contiguously in a vector
+Instead of having one vector with user objects, we can store all the
+short
+levels and
+is_playing_
+flags in separate vectors. The current level for the user at index 0 in the user array is also stored at index 0 in the level array. In that way, we can avoid having pointers to the levels, and instead just use the index for connecting the data fields. We could do the same thing with the boolean
+is_playing_
+field and end up with three parallel arrays instead of just one. The memory layout of the three vectors would look something like this:
+Figure 4.18: Memory layout when using three parallel arrays
+We are using three parallel arrays to make iterations over one particular field quickly. The
+num_users_at_level()
+function can now compute the number of users at a specific level by only using the level array. The implementation is now simply a wrapper around
+std::count()
+:
+auto
+num_users_at_level
+(
+const
+std
+::
+vector
+<
+int
+>& users,
+short
+level)
+{ 
+  ScopedTimer t{
+"num_users_at_level using int vector"
+};
+return
+std
+::count(users.begin(), users.end(), level); 
+}
+Likewise, the
+num_playing_users()
+function only needs to iterate over the vector of booleans to determine the number of playing users. Again, we use
+std::count()
+:
+auto
+num_playing_users
+(
+const
+std
+::
+vector
+<
+bool
+>& users)
+{ 
+  ScopedTimer t{
+"num_playing_users using vector<bool>"
+};
+return
+std
+::count(users.begin(), users.end(),
+true
+); 
+}
+With parallel arrays, we don't have to use
+the user array at all. The amount of memory occupied by the extracted arrays is substantially smaller than the user array, so let's check whether we have improved on performance when running the functions on one million users again:
+auto
+users =
+std
+::
+vector
+<User>(
+1'000'000
+);
+auto
+levels =
+std
+::
+vector
+<
+short
+>(
+1'000'000
+);
+auto
+playing_users =
+std
+::
+vector
+<
+bool
+>(
+1'000'000
+);
+// Initialize data
+// ...
+auto
+num_at_level_5 = num_users_at_level(levels,
+5
+);
+auto
+num_playing = num_playing_users(playing_users);
+Counting the number of users at a certain level only takes about 0.7 ms when using the array of integers. To recap, the initial version using the
+User
+class with a size of 128 bytes took around 11 ms. The smaller
+User
+class executed in 4 ms, and now, by only using the
+levels
+array, we are down to 0.7 ms. This is quite a dramatic change.
+For the second function,
+num_playing_users()
+, the change is even bigger—it only takes around 0.03 ms to count how many users are currently playing. The reason why it can be so fast is thanks to a data structure called
+bit arrays
+. It turns out that
+std::vector<bool>
+is not at all a standard vector of C++
+bool
+objects. Instead, internally, it's a bit array. Operations such as
+count()
+and
+find()
+can be optimized very efficiently in a bit array since it can process 64 bits at a time (on a 64-bit machine), or possibly even more by using SIMD registers. The future of
+std::vector<bool>
+is unclear, and it might be deprecated soon in favor of the fixed-size
+std::bitset
+and a new dynamically sized bitset. There is already a version in Boost named
+boost::dynamic_bitset
+.
+This is all fantastic, but I warned you about some drawbacks. First of all, extracting the fields from the classes where they actually belong will have a big impact on the structure of the code. In some cases, it makes perfect sense to split large classes into smaller parts, but in other cases, it totally breaks encapsulation and exposes data that could have been hidden behind interfaces with higher abstraction.
+It's also cumbersome to ensure that the
+arrays are in sync, such that we always need to ensure that fields that comprise one object are stored at the same index in all arrays. Implicit relationships like this can be hard to maintain and are error-prone.
+The last drawback is actually related to performance. In the preceding example, you saw that for algorithms that iterate over one field at a time, there was a big performance gain. However, if we have an algorithm that would need to access multiple fields that have been extracted into different arrays, it would be substantially slower than iterating over one array with bigger objects.
+So, as is always the case when working with performance, there is nothing that comes without a cost, and the cost for exposing data and splitting one simple array into multiple arrays may or may not be too high. It all depends on the scenario you are facing and what performance gain you encounter after measuring. Don't consider parallel arrays before you actually face a real performance issue. Always opt for sound design principles first, and favor explicit ways of expressing relationships between objects rather than implicit ones.
+Summary
+In this chapter, the container types from the standard library were introduced. You learned that the way we structure data has a big impact on how efficiently we can perform certain operations on a collection of objects. The asymptotic complexity specifications of the standard library containers are key factors to consider when choosing among the different data structures.
+In addition, you learned how the cache hierarchy in modern processors impacts the way we need to organize data for efficient access to memory. The importance of utilizing the cache levels efficiently cannot be stressed enough. This is one of the reasons why containers that keep their elements contiguously in memory have become the most used, such as
+std::vector
+and
+std::string
+.
+In the next chapter, we will look at how we can use iterators and algorithms to operate on containers efficiently.
+
+5
+Algorithms
+The use of containers from the standard library is widely employed among C++ programmers. It's rare to find C++ code bases without references to
+std::vector
+or
+std::string
+, for example. However, in my experience, standard library algorithms are much less frequently used, even though they offer the same kind of benefits as containers:
+They can be used as building blocks when solving complex problems
+They are well documented (including references, books, and videos)
+Many C++ programmers are already familiar with them
+Their space and runtime costs are known (complexity guarantees)
+Their implementations are well crafted and efficient
+If this wasn't enough, C++ features such as lambdas, execution policies, concepts, and ranges have all made the standard algorithms more powerful and, at the same time, friendlier to use.
+In this chapter, we will take a look at how we can write efficient algorithms in C++ using the
+Algorithm library
+. You will learn the benefits of using the standard library algorithms as building blocks in your application, both performance-wise and readability-wise.
+In this chapter, you will learn about:
+The algorithms in the C++ standard library
+Iterators and ranges – the glue between the containers and the algorithms
+How to implement a generic algorithm that can operate on standard containers
+Best practices when using C++ standard algorithms
+Let's begin by taking a look at the standard library algorithms and how they came to be what they are today.
+Introducing the standard library algorithms
+Integrating the standard
+library algorithms into your C++ vocabulary is important. In this introduction, I will present a set of common problems that can be solved effectively by using the standard library algorithms.
+C++20 comes with a dramatic change to the Algorithm library by the introduction of the
+Ranges library
+and the
+language feature of
+C++ concepts
+. So, before we start, we need a brief background of the history of the C++ standard library.
+Evolution of the standard library algorithms
+You have probably heard
+about STL algorithms or STL containers. And hopefully, you have heard about the new
+Ranges library
+introduced with C++20. There have been a lot of additions to the standard library in C++20. And before going further, I need to clear up some terminology. We'll start with the STL.
+The
+STL
+, or the
+Standard Template Library
+, was initially the name of a library added to the C++ standard library in the 1990s. It contained algorithms, containers, iterators, and function objects. The name has been sticky, and we have become accustomed to hearing and talking about the STL algorithms and containers. The C++ standard does not mention the STL however; instead, it talks about the
+standard library
+and their individual components
+such as the
+Iterator library
+and the
+Algorithm library
+. I will try to avoid using the name STL in this book and instead talk about the standard library or individual libraries when needed.
+Now on to the Ranges library and what
+I will call the
+constrained algorithms
+. The Ranges library is a library added to the standard library in C++20 that introduced a completely new header called
+<ranges>
+, which we will talk more about in the next chapter. But the addition of the Ranges library also had a big impact on the
+<algorithm>
+header by introducing overloaded versions of all previously existing algorithms. I will refer to these algorithms as the
+constrained algorithms
+because they are constrained using C++ concepts. So, the
+<algorithm>
+header now includes the old iterator-based algorithms and the new algorithms constrained with C++ concepts that can operate on ranges. This means that the algorithms we will discuss in this chapter come in two flavors, as demonstrated in the following example:
+#
+include
+<algorithm>
+#
+include
+<vector>
+auto
+values =
+std
+::
+vector
+{
+9
+,
+2
+,
+5
+,
+3
+,
+4
+};
+// Sort using the std algorithms
+std
+::sort(values.begin(), values.end());
+// Sort using the constrained algorithms under std::ranges
+std
+::ranges
+::sort(values);
+std
+::ranges
+::sort(values.begin(), values.end());
+Note that both versions of
+sort()
+live in the
+<algorithm>
+header but they are distinguished by
+different namespaces and signatures. This chapter will use both flavors, but in general, I recommend using the new constrained algorithms whenever possible. The benefits will hopefully become apparent after reading this chapter.
+Now you are ready to start learning about how you can use ready-made algorithms to solve common problems.
+Solving everyday problems
+I will list here some
+common scenarios and useful algorithms just to give you a taste of the algorithms that are available in the standard library. The are many algorithms in the library, and I will only present a few in this section. For a quick but complete overview of the standard library algorithms, I recommend the talk from
+CppCon 2018, 105 STL Algorithms in Less Than an Hour
+, by Jonathan Boccara, available at
+https://sched.co/FnJh
+.
+Iterating over a sequence
+It's useful to have a
+short helper function that can print the elements of a sequence. The following generic function works with any container that holds elements that can be printed to an output stream using
+operator<<()
+:
+void
+print
+(
+auto
+&& r)
+{
+std
+::ranges::for_each(r, [](
+auto
+&& i) {
+std
+::
+cout
+<< i <<
+' '
+; });
+}
+The
+print()
+function is using
+for_each()
+, which is an algorithm imported from the
+<algorithm>
+header.
+for_each()
+calls the function that we provide once for each element in the range. The return value of the function we provide is ignored and has no effect on the sequence we pass to
+for_each()
+. We can use
+for_each()
+for side effects such as printing to
+stdout
+(which we do in this example).
+A similar, very general
+algorithm is
+transform()
+. It also calls a function for each element in a sequence, but instead of ignoring the return value, it stores the return value of the function in an output sequence, like this:
+auto
+in =
+std
+::
+vector
+{
+1
+,
+2
+,
+3
+,
+4
+};
+auto
+out =
+std
+::
+vector
+<
+int
+>(in.size());
+auto
+lambda = [](
+auto
+&& i) {
+return
+i * i; };
+std
+::ranges::transform(in, out.begin(), lambda);
+print(out);
+// Prints: "1 4 9 16"
+This code snippet also demonstrates how we can use our
+print()
+function defined earlier. The
+transform()
+algorithm will call our lambda once for each element in the input range. To specify where the output will be stored, we provide
+transform()
+with an output iterator,
+out.begin()
+. We will talk a lot more about iterators later on in this chapter.
+With our
+print()
+function in place and a demonstration of some of the most general algorithms, we will move on to look at some algorithms for generating elements.
+Generating elements
+Sometimes we
+need to assign a sequence of elements with some initial values or reset an entire sequence. The following example fills a vector with the value -1:
+auto
+v
+=
+std
+::
+vector
+<
+int
+>(
+4
+);
+std
+::ranges::fill(v,
+-1
+);
+print(v);
+// Prints "-1 -1 -1 -1 "
+The next algorithm,
+generate()
+, calls a function for each element and stores the return value at the current element:
+auto
+v =
+std
+::
+vector
+<
+int
+>(
+4
+);
+std
+::ranges::generate(v,
+std
+::rand);
+print(v);
+// Possible output: "1804289383 846930886 1681692777 1714636915 "
+In the preceding example, the
+std::rand()
+function is called once for each element.
+The last generating algorithm I will mention is
+std::iota()
+from the
+<numeric>
+header. It generates values in increasing order. The start value must be specified as a second argument. Here is a short example that generates values between 0 and 5:
+auto
+v =
+std
+::
+vector
+<
+int
+>(
+6
+);
+std
+::iota(v.begin(), v.end(), 0);
+  print(v);
+// Prints: "0 1 2 3 4 5 "
+This sequence is already sorted, but it
+more commonly happens that you have an unordered collection of elements that needs sorting, which we will look at next.
+Sorting elements
+Sorting elements is a very
+common operation. There are sorting-algorithm alternatives that are good to know about, but in this introduction, I will only show the most conventional version, simply named
+sort()
+:
+auto
+v =
+std
+::
+vector
+{
+4
+,
+3
+,
+2
+,
+3
+,
+6
+};
+std
+::ranges::sort(v);
+print(v);
+// Prints: "2 3 3 4 6 "
+As mentioned, this is not the only way to sort, and sometimes we can use a partial sorting algorithm to gain performance. We will talk more abort sorting later in this chapter.
+Finding elements
+Another very common task is to find
+out whether a specific value is in a collection or not. Maybe we want to know how many instances of some specific value there are in a collection. These algorithms that search for values can be implemented more efficiently if we know that the collection is already sorted. You saw this in
+Chapter 3
+,
+Analyzing and Measuring Performance
+, where we compared linear search with binary search.
+Here we begin with the
+find()
+algorithm, which doesn't require a sorted collection:
+auto
+col =
+std
+::
+list
+{
+2
+,
+4
+,
+3
+,
+2
+,
+3
+,
+1
+};
+auto
+it =
+std
+::ranges::find(col,
+2
+);
+if
+(it != col.end()) {
+std
+::
+cout
+<< *it <<
+'\n'
+;
+}
+If the element we are looking for could not be found,
+find()
+returns the
+end()
+iterator of the collection. In the
+worst case,
+find()
+needs to inspect all elements in the sequence, therefore it runs in
+O(n)
+time.
+Finding using binary search
+If we know that the
+collection is already sorted, we can use one of the binary search algorithms:
+binary_search()
+,
+equal_range()
+,
+upper_bound()
+, or
+lower_bound()
+. If we are using these functions with containers that provide random access to their elements, they are all guaranteed to run in
+O(log n)
+time. You will gain a better understanding of how algorithms can provide complexity guarantees, even though they are operating on different containers, when we talk about iterators and ranges later in this chapter (there's a section coming up named, funnily enough,
+Iterators and Ranges
+).
+In the following examples, we will use a sorted
+std::vector
+with the following elements:
+Figure 5.1: An sorted std::vector with seven elements
+The
+binary_search()
+function returns
+true
+or
+false
+depending on whether the value we searched for could be found:
+auto
+v =
+std
+::
+vector
+{
+2
+,
+2
+,
+3
+,
+3
+,
+3
+,
+4
+,
+5
+};
+// Sorted!
+bool
+found =
+std
+::ranges::binary_search(v,
+3
+);
+std
+::
+cout
+<<
+std::boolalpha
+<< found <<
+'\n'
+;
+//   Output: true
+Before calling
+binary_search()
+, you should be absolutely sure that the collection is sorted. We can easily assert this in our code with the use of
+is_sorted()
+as follows:
+assert(
+std
+::ranges::is_sorted(v));
+This check will run in
+O(n)
+, but will only be called when asserts are activated and hence will not affect the performance of your final program.
+The sorted collection we are working with contains multiple 3s. What if we want to know the position of the first 3 or last 3 in the collection? In that case, we can use
+lower_bound()
+for finding the first 3, or
+upper_bound()
+for finding the element past the last 3:
+auto
+v =
+std
+::
+vector
+{
+2
+,
+2
+,
+3
+,
+3
+,
+3
+,
+4
+,
+5
+};
+auto
+it =
+std
+::ranges::lower_bound(v,
+3
+);
+if
+(it != v.end()) {
+auto
+index =
+std
+::distance(v.begin(), it);
+std
+::
+cout
+<< index <<
+'\n'
+;
+// Output: 2
+}
+This code will output
+2
+since that is the index of the first 3. To get the index of an element
+from an iterator, we use
+std::distance()
+from the
+<iterator>
+header.
+In the same manner, we can use
+upper_bound()
+to get an iterator to the element
+past
+the last 3:
+const auto
+v =
+std
+::
+vector
+{
+2
+,
+2
+,
+3
+,
+3
+,
+3
+,
+4
+,
+5
+};
+auto
+it =
+std
+::ranges::upper_bound(v,
+3
+);
+if
+(it != v.end()) {
+auto
+index =
+std
+::distance(v.begin(), it);
+std
+::
+cout
+<< index <<
+'\n'
+;
+// Output: 5
+}
+If you want both the upper bound and lower bound, you can instead use
+equal_range()
+, which returns the subrange of the collection containing the 3s:
+const auto
+v =
+std
+::
+vector
+{
+2
+,
+2
+,
+3
+,
+3
+,
+3
+,
+4
+,
+5
+};
+auto
+subrange =
+std
+::ranges::equal_range(v,
+3
+);
+if
+(subrange.begin() != subrange.end()) {
+auto
+pos1 =
+std
+::distance(v.begin(), subrange.begin());
+auto
+pos2 =
+std
+::distance(v.begin(), subrange.end());
+std
+::
+cout
+<< pos1 <<
+" "
+<< pos2 <<
+'\n'
+;
+}
+// Output: "2 5"
+Now let's explore some other useful algorithms for inspecting a collection.
+Testing for certain conditions
+There are three very handy algorithms called
+all_of()
+,
+any_of()
+, and
+none_of()
+. They all take a range, a
+unary predicate (a function that takes one argument and returns
+true
+or
+false
+), and an optional projection function.
+Let's say we have a list of numbers and a small lambda that determines whether a number is negative or not:
+const auto
+v =
+std
+::vector{
+3
+,
+2
+,
+2
+,
+1
+,
+0
+,
+2
+,
+1
+};
+const auto
+is_negative = [](
+int
+i) {
+return
+i <
+0
+; };
+We can check if none of the numbers are negative by using
+none_of()
+:
+if
+(
+std
+::ranges::none_of(v, is_negative)) {
+std
+::
+cout
+<<
+"Contains only natural numbers\n"
+;
+}
+Further, we can ask if all elements in the list are negative by using
+all_of()
+:
+if
+(
+std
+::ranges::all_of(v, is_negative)) {
+std
+::
+cout
+<<
+"Contains only negative numbers\n"
+;
+}
+Lastly, we can see whether the list contains at least one negative number using
+any_of()
+:
+if
+(
+std
+::ranges::any_of(v, is_negative)) {
+std
+::
+cout
+<<
+"Contains at least one negative number\n"
+;
+}
+It's easy to forget about these small, handy building blocks that reside in the standard library. But once you get into the habit of using them, you will never look back and start writing these by hand again.
+Counting elements
+The most obvious way to
+count the number of elements that equals some value is to call
+count()
+:
+const auto
+numbers =
+std
+::
+list
+{
+3
+,
+3
+,
+2
+,
+1
+,
+3
+,
+1
+,
+3
+};
+int
+n =
+std
+::ranges::count(numbers,
+3
+);
+std
+::
+cout
+<< n;
+// Prints: 4
+The
+count()
+algorithm runs in linear time. However, if we know that the sequence is sorted and we are using a vector or some other random-access data structure, we could instead use
+equal_range()
+, which will run in
+O(log n)
+time. The following is an example:
+const auto
+v =
+std
+::
+vector
+{
+0
+,
+2
+,
+2
+,
+3
+,
+3
+,
+4
+,
+5
+};
+assert(
+std
+::ranges::is_sorted(v));
+// O(n), but not called in release
+auto
+r =
+std
+::ranges::equal_range(v,
+3
+);
+int
+n =
+std
+::ranges::size(r);
+std
+::
+cout
+<< n;
+// Prints: 2
+The
+equal_range()
+function finds
+the subrange that contains all elements with the value we want to count. Once the subrange is found, we can retrieve the length of the subrange using
+size()
+from the
+<ranges>
+header.
+Minimum, maximum, and clamping
+I want to
+mention a set of small but extremely useful algorithms that are essential knowledge for a seasoned C++ programmer. The
+functions
+std::min()
+,
+std::max()
+, and
+std::clamp()
+are sometimes forgotten and instead
+we too often find ourselves writing code like this:
+const
+auto
+y_max =
+100
+;
+auto
+y = some_func();
+if
+(y > y_max) {
+  y = y_max;
+}
+The code ensures that the value of
+y
+is within a certain limit. This code works, but we can avoid the mutable variable and the
+if
+statement by using
+std::min()
+as follows:
+const
+auto
+y =
+std
+::min(some_func(), y_max);
+Both the mutable variable and the
+if
+statement that clutter our code have been eliminated by instead using
+std::min()
+. We can use
+std::max()
+for similar scenarios. If we want to limit a value to within both a minimum and a maximum value, we might do it like this:
+const
+auto
+y =
+std
+::max(
+std
+::min(some_func(), y_max), y_min);
+But, since C++17, we now have
+std::clamp()
+that does this for us in one function. So instead, we could just use
+clamp()
+as follows:
+const
+auto
+y =
+std
+::clamp(some_func(), y_min, y_max);
+Sometimes we need to find the extreme values in an unsorted collection of elements. For this purpose, we can use
+minmax()
+, which (unsurprisingly) returns the minimum and maximum values of a sequence. Combined with structured binding, we can print the extreme values as follows:
+const auto
+v =
+std
+::
+vector
+{
+4
+,
+2
+,
+1
+,
+7
+,
+3
+,
+1
+,
+5
+};
+const auto
+[min, max] =
+std
+::ranges::minmax(v);
+std
+::
+cout
+<< min <<
+" "
+<< max;
+// Prints: "1 7"
+We can also find the
+position of the minimum or maximum element by using
+min_element()
+or
+max_element()
+. Instead of returning
+the value, it returns an iterator pointing at the element we are looking for. In the following
+example, we are finding the minimum element:
+const auto
+v =
+std
+::
+vector
+{
+4
+,
+2
+,
+7
+,
+1
+,
+1
+,
+3
+};
+const auto
+it =
+std
+::ranges::min_element(v);
+std
+::
+cout
+<<
+std
+::distance(v.begin(), it);
+// Output: 3
+This snippet of code prints
+3
+, which is the index of the first minimum value that was found.
+This was a brief introduction to some of the most common algorithms from the standard library. The runtime cost of algorithms is specified in the C++ standard and all library implementations need to adhere to these, even though the exact implementation can vary between different platforms. To understand how the complexity guarantees can be withheld for generic algorithms working with many different types of containers, we need to take a closer look at iterators and ranges.
+Iterators and ranges
+As seen in the previous examples, the standard library algorithms operate on iterators and ranges rather than
+container types. This section will focus on iterators and the new
+concept of ranges introduced in C++20. Using containers and algorithms correctly becomes easy once you have grasped iterators and ranges.
+Introducing iterators
+Iterators form the basis of the
+standard library algorithms and ranges. Iterators are the glue between data structures and algorithms. As you have already seen, C++ containers store their elements in very different ways. Iterators provide a generic way to navigate through the elements in a sequence. By having algorithms operate on iterators rather than container types, the algorithms become more generic and flexible since they do not depend on the type of container and the way the containers arrange their elements in memory.
+At its core, an iterator is an object
+that represents a position in a sequence. It has two main responsibilities:
+Navigating in the sequence
+Reading and writing the
+value at its current position
+The iterator abstraction is not at all a C++ exclusive concept, rather it exists in most programming languages. What differentiates the C++ implementation of the iterator concept from other programming languages is that C++ mimics the syntax of raw memory pointers.
+Basically, an iterator could be considered an object with the same properties as a raw pointer; it can be stepped to the next element and dereferenced (if pointing to a valid address). The algorithms only use a few of the operations that a pointer allows, although the iterator may internally be a heavy object traversing a tree-like
+std::map
+.
+Most of the algorithms found directly under the
+std
+namespace operate only on iterators, not containers (that is,
+std::vector
+,
+std::map
+, and so on). Many algorithms return iterators rather than values.
+To be able to navigate in a sequence without going out of bounds, we need a generic way to tell when the iterator has reached the end of a sequence. That is what we have sentinel values for.
+Sentinel values and past-the-end iterators
+A
+sentinel value
+(or simply a sentinel) is a special
+value that indicates the end of a sequence. Sentinel values make it possible to iterate a sequence of values
+without knowing the size of the sequence in advance. An example usage of sentinel values are C-style strings that are null-terminated (in this case, the sentinel is the
+'\0'
+character). Instead of keeping track of the length of null-terminated strings, the pointer to the beginning of the string and the sentinel at the end is enough to define a sequence of characters.
+The constrained algorithms use an iterator to define the first element in a sequence and a sentinel to indicate the end of the sequence. The only requirement of the sentinel is that it can be compared against the iterator, which in practice means that
+operator==()
+and
+operator!=()
+should be defined to accept combinations of a sentinel and an iterator:
+bool
+operator
+=!(sentinel s, iterator i) {
+// ...
+}
+Now that you
+know what a
+sentinel is, how would we create a sentinel to indicate the end of a sequence? The trick here is to use
+something called a
+past-the-end
+iterator
+as a sentinel. It is simply an iterator that points to an element
+after
+(or past) the last element in the sequence we define. Take a look at the following code snippet and diagram:
+auto
+vec =
+std
+::
+vector
+{
+'a'
+,
+'b'
+,
+'c'
+,
+'d'
+};
+auto
+first = vec.begin();
+auto
+last = vec.end();
+As seen in the preceding diagram, the
+last
+iterator now points to an imagined element after
+'d'
+. This makes it possible to iterate over all the elements in the sequence by using a loop:
+for
+(; first != last; ++first) {
+char
+value = *first;
+// Dereference iterator
+// ...
+We can use the past-the-end sentinel to compare it against our iterator,
+it
+, but we cannot dereference the sentinel since it doesn't point to an element of the range. This concept of past-the-end iterators has a long history and even works for built-in C arrays:
+char
+arr[] = {
+'a'
+,
+'b'
+,
+'c'
+,
+'d'
+};
+char
+* end = arr +
+sizeof
+(arr);
+for
+(
+char
+* it = arr; it != end; ++it) {
+// Stop at end
+std
+::
+cout
+<< *it <<
+' '
+;}
+// Output: a b c d
+Again, note that
+end
+actually points out of bounds, so we are not allowed to dereference it, but we are
+allowed to read the pointer value and
+compare it with our
+it
+variable.
+Ranges
+A range is a replacement for the
+iterator-sentinel pairs that we have used when referring to a sequence of elements. The
+<range>
+header contains multiple concepts that define requirements for different kinds of ranges, for example,
+input_range
+,
+random_access_range
+, and so forth. These are all refinements of the most basic concept called
+range
+, which is defined like this:
+template
+<
+class
+T
+>
+concept
+range
+=
+requires
+(
+T
+&
+t
+) {
+ranges::begin(t);
+  ranges::end(t);
+};
+This means that any type that exposes
+begin()
+and
+end()
+functions is considered a range (given that these functions return iterators).
+For C++ standard containers, the
+begin()
+and
+end()
+functions will return iterators of the same type, whereas for C++20 ranges, this is not true in general. A range with identical iterator and sentinel types fulfills the concept of
+std::ranges::common_range
+. The new C++20 views (covered in the next chapter) return iterator-sentinel pairs that can be of different types. However, they can be transformed to a view that has the same type for the iterator and sentinel using
+std::views::common
+.
+The constrained algorithms found in the
+std::ranges
+namespace can operate on ranges instead of iterator pairs. And since all standard containers (
+vector
+,
+map
+,
+list
+, and so on) fulfill the range concept, we can pass ranges directly to the constrained algorithms as follows:
+auto
+vec =
+std
+::
+vector
+{
+1
+,
+1
+,
+0
+,
+1
+,
+1
+,
+0
+,
+0
+,
+1
+};
+std
+::
+cout
+<<
+std
+::ranges::count(
+vec
+,
+0
+);
+// Prints 3
+Ranges are an abstraction of something iterable (something that can be looped over), and to some extent, they hide the immediate use of C++ iterators. However, iterators are still a major part of the C++ standard library and are also used extensively in the Ranges library.
+The next thing you need to understand is the different kinds of iterators that exist.
+Iterator categories
+Now that you have a better
+understanding of how a range is defined and how we can know when we have reached the end of a sequence, it's time to look more closely at the operations that iterators can support in order to navigate, read, and write values.
+Iterator navigation in a sequence can be done with the following operations:
+Step forward:
+std::next(it)
+or
+++it
+Step backward:
+std::prev(it)
+or
+--it
+Jump to an arbitrary position:
+std::advance(it, n)
+or
+it += n
+Reading and writing a value at the position that the iterator represents is done by
+dereferencing
+the iterator. Here is how it looks:
+Read:
+auto value = *it
+Write:
+*it = value
+These are the most common operations for iterators that are exposed by containers. But in addition, iterators might operate on data sources where a write or read implies a step forward. Examples of such data sources could be user input, a network connection, or a file. These data sources require the following operations:
+Read only
+and
+step forward:
+auto value = *it; ++it;
+Write only
+and
+step forward:
+*it = value; ++it;
+These operations are only possible to express with two succeeding expressions. The post-condition of the first expression is that the second expression must be valid. This also means that we can only read or write a value to a position once. If we want to read or write a new value, we must first advance the iterator to the next position.
+Not all iterators support all of the operations in the preceding list. For example, some iterators can only
+read
+values and
+step forward
+, whereas others can both
+read
+,
+write
+, and
+jump
+to arbitrary positions.
+Now if we think about a few basic algorithms, it becomes obvious that the requirements on the iterators vary between different algorithms:
+If an algorithm counts the number of occurrences of a value, it requires the
+read
+and
+step forward
+operations
+If an algorithm fills a container with a value, it requires the
+write
+and
+step forward
+operations
+A binary search algorithm on a sorted collection requires the
+read
+and
+jump
+operations
+Some algorithms can be implemented more efficiently depending on what operations the iterators support. Just like containers, all algorithms in the standard library have complexity guarantees (using big O notation). For an algorithm to fulfill a certain complexity guarantee, it puts
+requirements
+on the iterators it operates on. These requirements are
+categorized into six basic iterator categories that relate to each other as shown in the following diagram:
+Figure 5.2: The six iterator categories and their relation to each other
+The arrows indicate that an iterator category also has all the capabilities of the category it points at. For example, if an algorithm requires a forward iterator, we can just as well pass it a bidirectional iterator, since a bidirectional iterator has all the capabilities of a forward iterator.
+The six requirements are formally specified by the following concepts:
+std::input_iterator
+: Supports
+read only and step forward
+(once). One-pass algorithms such as
+std::count()
+can use input iterators.
+std::istream_iterator
+is an example of an input iterator.
+std::output_iterator
+: Supports
+write only and step forward
+(once). Note that an output iterator can only write, not read.
+std::ostream_iterator
+is an example of an output iterator.
+std::forward_iterator
+: Supports
+read
+and
+write
+and
+step forward
+. The value at the current position can be read or written multiple times. Singly linked lists such as
+std::forward_list
+expose forward iterators.
+std::bidirectional_iterator
+: Supports
+read, write, step forward
+, and
+step backward
+. The doubly linked
+std::list
+exposes bidirectional iterators.
+std::random_access_iterator
+: Supports
+read
+,
+write
+,
+step forward
+,
+step backward
+, and
+jump
+to an arbitrary position in constant time. The elements inside
+std::deque
+can be accessed with random access iterators.
+std::contiguous_iterator
+: The same as random access iterators, but also guarantees that the
+underlying data is a contiguous block of memory, such as
+std::string
+,
+std::vector
+,
+std::array
+,
+std::span
+, and the (rarely used)
+std::valarray
+.
+The iterator categories are very important for understanding the time-complexity requirements of the algorithms. Having a good understanding of the underlying data structures makes it fairly easy to know what iterators typically belong to which containers.
+We are now ready to dig a little deeper into the common patterns used by most of the standard library algorithms.
+Features of the standard algorithms
+To get a better understanding of the standard algorithms, it's good to know a bit about the features and common patterns used by all algorithms in the
+<algorithm>
+header. As already stated, the
+algorithms under the
+std
+and
+std::ranges
+namespaces have a lot in common. We will start here with the general principles that are true for both the
+std
+algorithms and the constrained algorithms under
+std::range
+. Then, in the
+next section, we will move on to discuss the features that are specific to the constrained algorithms found under
+std::ranges
+.
+Algorithms do not change the size of the container
+Functions from
+<algorithm>
+can only modify the elements in a specified range; elements are never added or deleted from the underlying container. Therefore, these functions never alter the size of the container that they operate on.
+For example,
+std::remove()
+or
+std::unique()
+do not actually remove elements from a container (despite their names). Rather, it moves the elements that should be kept to the front of the container and then returns a sentinel that defines the new end of the valid range of
+elements:
+Code example
+Resulting vector
+// Example with std::remove()
+auto
+v =
+std
+::
+vector
+{
+1
+,
+1
+,
+2
+,
+2
+,
+3
+,
+3
+};
+auto
+new_end =
+std
+::remove(
+  v.begin(), v.end(),
+2
+);
+v.erase(new_end, v.end());
+// Example with std::unique()
+auto
+v =
+std
+::
+vector
+{
+1
+,
+1
+,
+2
+,
+2
+,
+3
+,
+3
+};
+auto
+new_end =
+std
+::unique(
+  v.begin(), v.end());
+v.erase(new_end, v.end());
+C++20 added new versions of the
+std::erase()
+and
+std::erase_if()
+functions to the
+<vector>
+header, which erases values immediately from the vector without the need to first call
+remove()
+followed by
+erase()
+.
+The fact that standard library algorithms never change the size of a container means that we need to allocate data ourselves when calling algorithms that produce output.
+Algorithms with output require allocated data
+Algorithms that write data
+to an output iterator, such as
+std::copy()
+or
+std::transform()
+, require already allocated data reserved for the output. As the algorithms only use iterators as arguments, they cannot allocate data by themselves. To enlarge the container the algorithms operate on, they rely on the iterator being capable of enlarging the container it iterates.
+If an iterator to an empty container is passed to the algorithms for output, the program will likely crash. The following example, where
+squared
+is empty, illustrates the problem:
+const auto
+square_func = [](
+int
+x) {
+return
+x * x; };
+const
+auto
+v =
+std
+::
+vector
+{
+1
+,
+2
+,
+3
+,
+4
+};
+auto
+squared =
+std
+::
+vector
+<
+int
+>{};
+std
+::ranges::transform(v, squared.begin(), square_func);
+Instead, you have to do either of the following:
+Preallocate the required size for the resulting container, or
+Use an insert iterator, which inserts elements into a container while iterating
+The following snippet shows how to use preallocated space:
+const auto
+square_func = [](
+int
+x) {
+return
+x * x; };
+const
+auto
+v =
+std
+::
+vector
+{
+1
+,
+2
+,
+3
+,
+4
+};
+auto
+squared =
+std
+::
+vector
+<
+int
+>{};
+squared.resize(v.size());
+std
+::ranges::transform(v, squared.begin(), square_func);
+The following snippet shows how to use
+std::back_inserter()
+and
+std::inserter()
+to insert values into a container that is not preallocated:
+const auto
+square_func = [](
+int
+x) {
+return
+x * x; };
+const
+auto
+v =
+std
+::
+vector
+{
+1
+,
+2
+,
+3
+,
+4
+};
+// Insert into back of vector using std::back_inserter
+auto
+squared_vec =
+std
+::
+vector
+<
+int
+>{};
+auto
+dst_vec =
+std
+::back_inserter(squared_vec);
+std
+::ranges::transform(v, dst_vec, square_func);
+// Insert into a std::set using std::inserter
+auto
+squared_set =
+std
+::
+set
+<
+int
+>{};
+auto
+dst_set =
+std
+::inserter(squared_set, squared_set.end());
+std
+::ranges::transform(v, dst_set, square_func);
+If you are operating on
+std::vector
+and know the expected size of the resulting container, you can use the
+reserve()
+member function before executing the algorithm in order to
+avoid unnecessary allocations. Otherwise, the vector may reallocate new chunks of memory several times during the algorithm.
+Algorithms use operator==() and operator<() by default
+For comparison, an algorithm relies on the fundamental
+==
+and
+<
+operators, as in the case of an integer. To be able to use your
+own classes with algorithms,
+operator==()
+and
+operator<()
+must either be provided by the class or as an argument to the
+algorithm.
+By using the three-way comparison operator,
+operator<=>()
+, we can have the necessary operators generated by the compiler. The following example shows a simple
+Flower
+class, where
+operator==()
+is utilized by
+std::find()
+, and
+operator<()
+is utilized by
+std::max_element()
+:
+struct
+Flower
+{
+auto
+operator
+<=>(
+const
+Flower& f)
+const
+=
+default
+;
+bool
+operator
+==(
+const
+Flower&)
+const
+=
+default
+;
+int
+height_{};
+};
+auto
+garden =
+std
+::
+vector
+<Flower>{{
+67
+}, {
+28
+}, {
+14
+}};
+// std::max_element() uses operator<()
+auto
+tallest =
+std
+::max_element(garden.begin(), garden.end());
+// std::find() uses operator==()
+auto
+perfect = *
+std
+::find(garden.begin(), garden.end(), Flower{
+28
+});
+Apart from using the
+default comparison functions for the current type, it's also possible to
+use a custom comparator function, which we will explore next.
+Custom comparator functions
+Sometimes we need to compare
+objects without using the default comparison operators, for example, when sorting or finding a string by length. In those cases, a custom
+function can be provided as an additional argument. While the original algorithm uses a value (for example,
+std::find()
+), the version with a specific operator has the same name with
+_if
+attached at the end (
+std::find_if()
+,
+std::count_if()
+, and so on):
+auto
+names =
+std
+::
+vector
+<
+std
+::
+string
+> {
+"Ralph"
+,
+"Lisa"
+,
+"Homer"
+,
+"Maggie"
+,
+"Apu"
+,
+"Bart"
+};
+std
+::sort(names.begin(), names.end(), 
+          [](
+const
+std
+::
+string
+& a,
+const
+std
+::
+string
+& b) {
+return
+a.size() < b.size(); });
+// names is now "Apu", "Lisa", "Bart", "Ralph", "Homer", "Maggie"
+// Find names with length 3
+auto
+x =
+std
+::find_if(names.begin(), names.end(), 
+  [](
+const
+auto
+& v) {
+return
+v.size() ==
+3
+; });
+// x points to "Apu"
+Constrained algorithms use projections
+The constrained
+algorithms under
+std::ranges
+provide us with a handy feature called
+projections
+, which
+decreases the need for writing custom comparison functions. The preceding example in the previous section could be rewritten using the standard predicate
+std::less
+combined with a custom projection:
+auto
+names =
+std
+::
+vector
+<
+std
+::
+string
+>{
+"Ralph"
+,
+"Lisa"
+,
+"Homer"
+,
+"Maggie"
+,
+"Apu"
+,
+"Bart"
+};
+std
+::ranges::sort(names,
+std
+::less<>{}, &
+std
+::
+string
+::size);
+// names is now "Apu", "Lisa", "Bart", "Ralph", "Homer", "Maggie"
+// Find names with length 3
+auto
+x =
+std
+::ranges::find(names, 3, &
+std
+::
+string
+::size);
+// x points to "Apu"
+It's also possible to pass a lambda as a projection parameter, which can be handy when you want to combine multiple properties in a projection:
+struct
+Player
+{
+std
+::
+string
+name_{};
+int
+level_{};
+float
+health_{};
+// ...
+};
+auto
+players =
+std
+::
+vector
+<Player>{
+  {
+"Aki"
+,
+1
+,
+9
+.
+f
+}, 
+  {
+"Nao"
+,
+2
+,
+7
+.
+f
+}, 
+  {
+"Rei"
+,
+2
+,
+3
+.
+f
+}};
+auto
+level_and_health = [](
+const
+Player& p) {
+return
+std
+::tie(p.level_, p.health_);
+};
+// Order players by level, then health
+std
+::ranges::sort(players,
+std
+::greater<>{}, level_and_health);
+The possibility to pass a
+projection object to the standard algorithms is a very welcome feature and really simplifies the use of custom comparisons.
+Algorithms require move operators not to throw
+All algorithms use
+std::swap()
+and
+std::move()
+when
+moving elements around, but only if the move constructor and move assignment are marked
+noexcept
+. Therefore, it is important to have these implemented for heavy objects when using algorithms. If they are not available and exception free, the elements will be copied instead.
+Note that if you implement a move constructor and a move assignment operator in your class,
+std::swap()
+will utilize them and, therefore, a specified
+std::swap()
+overload is not needed.
+Algorithms have complexity guarantees
+The complexity of
+each algorithm in the standard library is specified using big O notation. Algorithms are created with performance in mind. Therefore, they do not allocate memory nor do they have a time complexity higher than
+O(n log n)
+. Algorithms that do not fit these criteria are not included even if they are fairly common operations.
+Note the exceptions of
+stable_sort()
+,
+inplace_merge()
+, and
+stable_partition()
+. Many implementations tend to temporarily allocate memory during these operations.
+For example, let's
+consider an algorithm that tests whether a non-sorted range contains duplicates. One option is to implement it by iterating through the range and search the rest of the range for a duplicate. This will result in an algorithm with
+O(n
+2
+)
+complexity:
+template
+<
+typename
+Iterator>
+auto
+contains_duplicates
+(Iterator first, Iterator last)
+{
+for
+(
+auto
+it = first; it != last; ++it)
+if
+(
+std
+::find(
+std
+::next(it), last, *it) != last)
+return
+true
+;
+return
+false
+;
+}
+Another option is to make a copy of the full range, sort it, and look for adjacent equal elements. This will result in a time complexity of
+O(n log n)
+, the complexity of
+std::sort()
+. However, since it needs to make a copy of the full range, it still doesn't qualify as a building block algorithm. Allocating means that we cannot trust it not to throw:
+template
+<
+typename
+Iterator>
+auto
+contains_duplicates
+(Iterator first, Iterator last)
+{
+// As (*first) returns a reference, we have to get
+// the base type using std::decay_t
+using
+ValueType =
+std
+::
+decay_t
+<
+decltype
+(*first)>;
+auto
+c =
+std
+::
+vector
+<ValueType>(first, last);
+std
+::sort(c.begin(), c.end());
+return
+std
+::adjacent_find(c.begin(),c.end()) != c.end();
+}
+The complexity guarantees
+have been a part of the C++ standard library from the very beginning and are one of the major reasons behind its great success. Algorithms in the C++ standard library are designed and implemented with performance in mind.
+Algorithms perform just as well as C library function equivalents
+The standard C library comes with a number of low-level algorithms, including
+memcpy()
+,
+memmove()
+,
+memcmp()
+, and
+memset()
+. In my experience, sometimes people use these functions instead of their equivalents in the standard Algorithm library. The reason is that people tend to believe that the C library functions are faster and, therefore, accept the trade-off in type safety.
+This is not true for modern
+standard library implementation; the equivalent algorithms,
+std::copy()
+,
+std::equal()
+, and
+std::fill()
+, resort to these low-level C functions where plausible; hence, they provide both performance and type safety.
+Sure, there might be exceptions where the C++ compiler is not able to detect that it is safe to resort to the low-level C-functions. For example, if a type is not trivially copyable,
+std::copy()
+cannot use
+memcpy()
+. But that's for good reason; hopefully, the author of a class that is not trivially copyable had good reasons for designing the class in such a way, and we (or the compiler) should not ignore that by not calling the appropriate constructors.
+Sometimes, functions from the C++ Algorithm library even outperform their C library equivalents. The most prominent example is
+std::sort()
+versus
+qsort()
+from the C library. A big difference between
+std::sort()
+and
+qsort()
+is that
+qsort()
+is a
+function
+and
+std::sort()
+is a
+function template
+. When
+qsort()
+calls the comparison function, which is provided as a function pointer, it is generally a lot slower than calling an ordinary comparison function that may be inlined by the compiler when using
+std::sort()
+.
+We will spend the remainder of this chapter going through some best practices when using the standard algorithms and implementing custom algorithms.
+Writing and using generic algorithms
+The Algorithm library
+contains generic algorithms. To keep
+things as concrete as possible here, I will show an example of how a generic algorithm can be implemented. This will provide you with some insights into how to use the standard algorithms and at the same time demonstrate that implementing a generic algorithm is not that hard. I will intentionally avoid explaining all the details about the example code here, because we will spend a lot of time on generic
+programming later on in this book.
+In the examples that follow, we
+will transform a simple non-generic algorithm into a full-fledged generic algorithm.
+Non-generic algorithms
+A generic algorithm is
+an algorithm that can be used with
+various ranges of elements, not only one specific type, such as
+std::vector
+. The following algorithm is an example of a non-generic algorithm that only works with
+std::vector<int>
+:
+auto
+contains
+(
+const
+std
+::
+vector
+<
+int
+>& arr,
+int
+v)
+{
+for
+(
+int
+i =
+0
+; i < arr.size(); ++i) {
+if
+(arr[i] == v) {
+return
+true
+; }
+  }
+return
+false
+;
+}
+To find the element we are looking for, we rely on the interface of
+std::vector
+that provides us with the
+size()
+function and the subscript operator (
+operator[]()
+). However, not all containers provide us with these functions, and I don't recommend you write raw loops like this anyway. Instead, we need to create a function template that operates on iterators.
+Generic algorithms
+By replacing the
+std::vector
+with two iterators, and the
+int
+with a template parameter, we can transform our
+algorithm to a generic version. The following version of
+contains()
+can be used with any container:
+template
+<
+typename
+Iterator,
+typename
+T>
+auto
+contains
+(Iterator begin, Iterator end,
+const
+T& v)
+{
+for
+(
+auto
+it = begin; it != end; ++it) {
+if
+(*it == v) {
+return
+true
+; }
+  }
+return
+false
+;
+}
+To use it with, for example,
+std::vector
+, you would have to pass the
+begin()
+and
+end()
+iterators:
+auto
+v =
+std
+::
+vector
+{
+3
+,
+4
+,
+2
+,
+4
+};
+if
+(contains(v.begin(), v.end(),
+3
+)) {
+// Found the value...
+}
+We could improve this algorithm by offering a version that accepts a range instead of two separate iterator parameters:
+auto
+contains
+(
+const
+auto
+& r,
+const
+auto
+& x)
+{
+auto
+it =
+std
+::begin(r);
+auto
+sentinel =
+std
+::end(r);
+return
+contains(it, sentinel, x);
+}
+This algorithm does not force the client to provide the
+begin()
+and
+end()
+iterators because we have moved that inside the function. We are using the
+abbreviated function template
+syntax from C++20 to avoid spelling out explicitly that this is a function template. As a last step, we could add constraints to our parameter types:
+auto
+contains
+(
+const
+std
+::ranges::range
+auto
+& r,
+const
+auto
+& x) {
+auto
+it =
+std
+::begin(r);
+auto
+sentinel =
+std
+::end(r);
+return
+contains(it, sentinel, x);
+}
+As you can see, there is really not that much code needed to create a robust generic algorithm. The only requirement on the data structure we pass to the algorithm is that it can expose
+begin()
+and
+end()
+iterators. You will learn more about constraints and concepts in
+Chapter 8
+,
+Compile-Time Programming
+.
+Data structures that can be used by generic algorithms
+This leads us to the insight that
+new custom data structures we create can be used by the standard generic algorithms as long as they expose the
+begin()
+and
+end()
+iterators or
+a range. As a simple example, we could implement a two-dimensional
+Grid
+structure where rows are exposed as a pair of iterators, like this:
+struct
+Grid
+{
+Grid(
+std
+::size_t
+w,
+std
+::size_t
+h) : w_{w}, h_{h} {    data_.resize(w * h); 
+  }
+auto
+get_row
+(
+std
+::size_t
+y);
+// Returns iterators or a range
+std
+::
+vector
+<
+int
+> data_{};
+std
+::size_t w_{};
+std
+::size_t h_{};
+};
+The following diagram illustrates the layout of the
+Grid
+structure with the iterator pairs:
+Figure 5.3: Two-dimensional grid built upon a one-dimensional vector
+A possible implementation of
+get_row()
+would return a
+std::pair
+holding iterators that represent the
+beginning and the end of the row:
+auto
+Grid::get_row
+(
+std
+::size_t
+y)
+{
+auto
+left = data_.begin() + w_ * y;
+auto
+right = left + w_;
+return
+std
+::make_pair(left, right);
+}
+The iterator pair representing a row can then be utilized by standard library algorithms. In the following example, we are using
+std::generate()
+and
+std::count()
+:
+auto
+grid = Grid{
+10
+,
+10
+};
+auto
+y =
+3
+;
+auto
+row = grid.get_row(y);
+std
+::generate(row.first, row.second,
+std
+::rand);
+auto
+num_fives =
+std
+::count(row.first, row.second,
+5
+);
+While this works, it is a
+bit clumsy to work with
+std::pair
+, and it also requires the client to know how to handle the iterator pair. There is nothing that explicitly says that the
+first
+and
+second
+members actually denote a half-open range. Wouldn't it be nice if it could expose a strongly typed range instead? Fortunately, the Ranges library that we will explore in the next chapter provides us with a view type called
+std::ranges::subrange
+. Now, the
+get_row()
+function could be implemented like this:
+auto
+Grid::get_row
+(
+std
+::size_t y)
+{
+auto
+first = data_.begin() + w_ * y;
+auto
+sentinel = first + w_;
+return
+std
+::ranges::subrange{first, sentinel};
+}
+We could be even lazier
+and use the handy view that is tailor-made for this scenario, called
+std::views::counted()
+auto
+Grid::get_row
+(
+std
+::size_t y)
+{
+auto
+first = data_.begin() + w_ * y;
+return
+std
+::views::counted(first, w_);
+}
+A row returned from the
+Grid
+class could now be used with any of the constrained algorithms that accept ranges instead of iterator pairs:
+auto
+row = grid.get_row(y);
+std
+::ranges::generate(row,
+std
+::rand);
+auto
+num_fives =
+std
+::ranges::count(row,
+5
+);
+That completes our
+example of writing and using a generic algorithm that supports both iterator pairs and a range. Hopefully, this has given you some insights about how to write data structures and algorithms in a generic way to avoid the combinatorial explosion that would occur if we had to write specialized algorithms for all types of data structures.
+Best practices
+Let's consider practices that will help you out when working with the algorithms we've been discussing. I will start by highlighting the importance of actually exploiting the standard algorithms.
+Using the constrained algorithms
+The constrained
+algorithms under
+std::ranges
+introduced with C++20 offer some benefits over the iterator-based algorithms under
+std
+. The constrained
+algorithms do the following:
+Support projections, which simplifies custom comparisons of elements.
+Support ranges instead of iterator pairs. There is no need to pass
+begin()
+and
+end()
+iterators as separate arguments.
+Are easy to use correctly and provide descriptive error messages during compilation as a result of being constrained by C++ concepts.
+It's my recommendation to
+start using the
+constrained algorithms over the iterator-based algorithms.
+You may have noticed that this book uses iterator-based algorithms in a lot of places. The reason for this is that not all standard library implementations support the constrained algorithms at the time of writing this book.
+Sorting only for the data you need to retrieve
+The Algorithm library contains three basic sorting algorithms:
+sort()
+,
+partial_sort()
+, and
+nth_element()
+. In addition, it also contains a few variants of those, including
+stable_sort()
+, but we
+will focus on these three as, in my experience, it is easy to forget that, in many cases, a complete
+sort can be avoided by using
+nth_element()
+or
+partial_sort()
+instead.
+While
+sort()
+sorts the entire range,
+partial_sort()
+and
+nth_element()
+could be thought of as algorithms for inspecting parts of that sorted range. In many cases, you are only interested in a certain part of the sorted range, for example:
+If you want to calculate the median of a range, you require the value in the middle of the sorted range.
+If you want to create a body scanner that can be used by the mean 80% by height of a population, you require two values in the sorted range: the value located 10% from the tallest person, and the value located 10% from the shortest person.
+The following diagram illustrates how
+std::nth_element
+and
+std::partial_sort
+process a range, compared to a fully sorted range:
+auto
+v =
+std
+::
+vector
+{
+6
+,
+3
+,
+2
+,
+7
+,
+4
+,
+1
+,
+5
+};
+auto
+it = v.begin() + v.size()/
+2
+;
+std
+::ranges::sort(v);
+std
+::nth_element(v.begin(), it,
+                 v.end());
+std
+::partial_sort(v.begin(), it,
+                  v.end());
+Figure 5.1: Sorted and non-sorted elements of a range using different algorithms
+The following table
+shows their algorithmic complexity; note that
+m
+denotes the sub-range which is being fully sorted:
+Algorithm
+Complexity
+std::sort()
+O(n log n)
+std::partial_sort()
+O(n log m)
+std::nth_element()
+O(n)
+Table 5.2: Algorithmic complexity
+Use cases
+Now that you
+have insights into
+std:nth_element()
+and
+std::partial_sort()
+, let's see how we can combine them to inspect parts of a range as if the entire range were sorted:
+auto
+v =
+std
+::
+vector
+{
+6
+,
+3
+,
+2
+,
+7
+,
+4
+,
+1
+,
+5
+};
+auto
+it = v.begin() + v.size()/
+2
+;
+auto
+left = it -
+1
+;
+auto
+right = it +
+2
+;
+std
+::nth_element(v.begin(),
+                 left, v.end());
+std
+::partial_sort(left, right,
+                  v.end());
+std
+::nth_element(v.begin(), it,
+                 v.end());
+std
+::sort(it, v.end());
+auto
+left = it - 1;
+auto
+right = it + 2;
+std
+::nth_element(v.begin(),
+                 right, v.end());
+std
+::partial_sort(v.begin(),
+                  left, right);
+std
+::sort(right, v.end());
+Figure 5.3: Combining algorithms and corresponding partially ordered results
+As you can see, by using combinations of
+std::sort()
+,
+std::nth_element()
+, and
+std::partial_sort()
+, there are
+many ways to avoid sorting the entire range when not absolutely needed. This is an effective way to gain performance.
+Performance evaluation
+Let's see how
+std::nth_element()
+and
+std::partial_sort()
+measure up against
+std::sort()
+. We've measured
+this with a
+std::vector
+with 10,000,000 random
+int
+elements:
+Operation
+Code, where
+r
+is the range operated on
+Time (Speedup)
+Sort
+std
+::sort(r.begin(), r.end());
+760 ms (1.0x)
+Find median
+auto
+it = r.begin() + r.size() /
+2
+;
+std
+::nth_element(r.begin(), it, r.end());
+83 ms (9.2x)
+Sort first tenth of range
+auto
+it = r.begin() + r.size() /
+10
+;
+std
+::partial_sort(r.begin(), it, r.end());
+378 ms (2.0x)
+Table 5.3: Benchmark results for partial sort algorithms
+Use standard algorithms over raw for-loops
+It's easy to forget that complex algorithms can be implemented by combining algorithms from the standard library. Maybe because of an old habit of trying to solve problems by hand and immediately starting to handcraft
+for
+-loops and working through the problem using an imperative approach. If this sounds familiar to you, my recommendation is to get to know the standard algorithms well enough so that you start considering them as the first choice.
+I promote the use of standard library algorithms over raw
+for
+-loops, for a number of reasons:
+Standard algorithms deliver performance. Even though some of the algorithms in the standard library may seem trivial, they are often optimally designed in ways that are not obvious at first glance.
+Standard algorithms provide safety. Even simpler algorithms may have corner cases, which are easy to overlook.
+Standard algorithms are future-proof; a given algorithm can be replaced by a more suitable algorithm if you want to take advantage of SIMD extensions, parallelism, or even the GPU at a later stage (see
+Chapter 14
+,
+Parallel Algorithms
+).
+Standard algorithms are thoroughly documented.
+In addition, by using algorithms instead of
+for
+-loops, the intention of each operation is clearly indicated by the name of the algorithm. The readers of your code do not need to inspect details inside raw
+for
+-loop to determine what your code does if you use standard algorithms as building blocks.
+Once you get into the habit of thinking in terms of algorithms, you'll realize that many
+for
+-loops are most often a variation of a few simple algorithms such as
+std::transform()
+,
+std::any_of()
+,
+std::copy_if()
+, and
+std::find()
+.
+Using algorithms will also make the code cleaner. You can often implement functions without nested code blocks and at the same time avoid mutable variables. This will be demonstrated in the following example.
+Example 1: Readability issues and mutable variables
+Our first example is from a real-world
+code base, although variable names have been disguised. As it is only a cut-out, you don't have to understand the logic of the code. The example here is just to show you how the complexity is lowered when using algorithms compared with nested
+for
+-loops.
+The original version looked like this:
+// Original version using a for-loop
+auto
+conflicting =
+false
+;
+for
+(
+const
+auto
+& info : infos) {
+if
+(info.params() == output.params()) {
+if
+(varies(info.flags())) {
+      conflicting =
+true
+;
+break
+;
+    }
+  }
+else
+{
+    conflicting =
+true
+;
+break
+;
+  }
+}
+In the
+for
+-loop version, it's hard to grasp when or why
+conflicting
+is set to
+true
+, whereas in the following versions
+of the algorithm, you can instinctively see that it happens if
+info
+fulfills a predicate. Further, the standard algorithm version uses no mutable variables and can be written using a combination of a short lambda and
+any_of()
+. Here is how it looks:
+// Version using standard algorithms
+const
+auto
+in_conflict = [&](
+const auto
+& info) {
+return
+info.params() != output.params() || varies(info.flags());
+};
+const
+auto
+conflicting =
+std
+::ranges::any_of(infos, in_conflict);
+Although it may overstate the point, imagine if we were to track a bug or parallelize it, the standard algorithm version using a lambda and
+any_of()
+would be far easier to understand and reason about.
+Example 2: Unfortunate exceptions and performance problems
+To further state the importance
+of using algorithms rather than
+for
+-loops, I'd like to show a few not-so-obvious problems that you may bump into when using handcrafted
+for
+-loops rather than standard algorithms.
+Let's say we need a function that moves the first
+n
+elements from the front of a container to the back, like this:
+Figure 5.4: Moving the first three elements to the back of a range
+Approach 1: Use a traditional for-loop
+A naive approach
+would be to copy the first
+n
+elements to the back while iterating over them and then erasing the first
+n
+elements:
+Figure 5.5: Allocating and deallocating in order to move elements to the back of a range
+Here's the corresponding implementation:
+template
+<
+typename
+Container>
+auto
+move_n_elements_to_back
+(Container& c,
+std
+::size_t n)
+{
+// Copy the first n elements to the end of the container
+for
+(
+auto
+it = c.begin(); it !=
+std
+::next(c.begin(), n); ++it) {
+    c.emplace_back(
+std
+::move(*it));
+  }
+// Erase the copied elements from front of container
+c.erase(c.begin(),
+std
+::next(c.begin(), n));
+}
+At first glance, it might look plausible, but inspecting it reveals a severe problem—if the container reallocates
+during the iteration due to
+emplace_back()
+, the iterator
+it
+will no longer be valid. As the algorithm tries to access an invalid iterator, the algorithm will go into undefined behavior and, in the best case, crash.
+Approach 2: Safe for-loop (safe at the expense of performance)
+As undefined behaviors are
+an obvious problem, we'll have to rewrite the algorithm. We are still using a handcrafted
+for
+-loop, but we'll utilize the index instead of the iterator:
+template
+<
+typename
+Container>
+auto
+move_n_elements_to_back
+(Container& c,
+std
+::size_t n)
+{
+for
+(
+size_t
+i =
+0
+; i < n; ++i) {
+auto
+value = *
+std
+::next(c.begin(), i);
+    c.emplace_back(
+std
+::move(value));
+  }
+  c.erase(c.begin(),
+std
+::next(c.begin(), n));
+}
+The solution works; it doesn't crash anymore. But now, it has a subtle performance problem. The algorithm is significantly slower on
+std::list
+than on
+std::vector
+. The reason is that
+std::next(it, n)
+used with
+std::list::iterator
+is
+O(n)
+, and
+O(1)
+on a
+std::vector::iterator
+. As
+std::next(it, n)
+is invoked in every step of the
+for
+-loop, this algorithm will have a time complexity of
+O(n
+2
+)
+on containers such as
+std::list
+. Apart from this performance limitation, the preceding code also has the following limitations:
+It doesn't work with containers of a static size, such as
+std::array
+, due to
+emplace_back()
+It might throw an exception, since
+emplace_back()
+may allocate memory and fail (this is probably rare though)
+Approach 3: Find and use a suitable standard library algorithm
+When we have reached
+this stage, we
+should browse through the standard library and see whether it contains a suitable algorithm to be used as a building block. Conveniently, the
+<algorithm>
+header provides an algorithm called
+std::rotate()
+, which does exactly what we are looking for while avoiding all the disadvantages mentioned before. Here is our final version using the
+std::rotate()
+algorithm:
+template
+<
+typename
+Container>
+auto
+move_n_elements_to_back
+(Container& c,
+std
+::size_t n)
+{
+auto
+new_begin =
+std
+::next(c.begin(), n);
+std
+::rotate(c.begin(), new_begin, c.end());
+}
+Let's have a look at the
+advantages of using
+std::rotate()
+:
+The algorithm does not throw exceptions, as it does not allocate memory (the contained object might throw exceptions though)
+It works with containers whose size cannot be changed, such as
+std::array
+Performance is
+O(n)
+regardless of the container it operates on
+The implementation may very well be optimized with specific hardware in mind
+Maybe you find this
+comparison between
+for
+-loops and standard algorithms unfair because
+there are other solutions to this problem that are both elegant and efficient. Still, in the real world, it's not uncommon to see implementations like the ones you just saw, when there are algorithms in the standard library just waiting to solve your problems.
+Example 3: Exploiting the standard library optimizations
+This last example highlights the fact that even algorithms that may seem very simple might contain optimizations you wouldn't consider. Let's have a look at
+std::find()
+, for example. At a glance, it seems that the
+obvious implementation couldn't be optimized further. Here is a possible implementation of the
+std::find()
+algorithm:
+template
+<
+typename
+It,
+typename
+Value>
+auto
+find_slow
+(It first, It last,
+const
+Value& value)
+{
+for
+(
+auto
+it = first; it != last; ++it)
+if
+(*it == value)
+return
+it;
+return
+last;
+}
+However, looking through the GNU libstdc++ implementation, when being used with
+random_access_iterator
+(in other words,
+std::vector
+,
+std::string
+,
+std::deque
+, and
+std::array
+), the libc++ implementers have unrolled the main loop into chunks of four loops at a time, resulting in the comparison (
+it != last
+) being executed one-fourth as many times.
+Here is the optimized version of
+std::find()
+taken from the libstdc++ library:
+template
+<
+typename
+It,
+typename
+Value>
+auto
+find_fast
+(It first, It last,
+const
+Value& value)
+{
+// Main loop unrolled into chunks of four
+auto
+num_trips = (last - first) /
+4
+;
+for
+(
+auto
+trip_count = num_trips; trip_count >
+0
+; --trip_count) {
+if
+(*first == value) {
+return
+first;} ++first;
+if
+(*first == value) {
+return
+first;} ++first;
+if
+(*first == value) {
+return
+first;} ++first;
+if
+(*first == value) {
+return
+first;} ++first;
+  }
+// Handle the remaining elements
+switch
+(last - first) {
+case
+3
+:
+if
+(*first == value) {
+return
+first;} ++first;
+case
+2
+:
+if
+(*first == value) {
+return
+first;} ++first;
+case
+1
+:
+if
+(*first == value) {
+return
+first;} ++first;
+case
+0
+:
+default
+:
+return
+last;
+  }
+}
+Note that it is actually
+std::find_if()
+, not
+std::find()
+, that utilizes this loop-unrolling optimization. But
+std::find()
+is implemented using
+std::find_if()
+.
+In addition to
+std::find()
+, a multitude of algorithms in libstdc++ are implemented using
+std::find_if()
+, for example,
+any_of()
+,
+all_of()
+,
+none_of()
+,
+find_if_not()
+,
+search()
+,
+is_partitioned()
+,
+remove_if()
+, and
+is_permutation()
+, which means that all of these are
+slightly faster than a handcrafted
+for
+-loop.
+And by slightly, I really mean slightly; the speedup is roughly 1.07x, as shown in the following table:
+Find an integer in a
+std::vector
+of 10,000,000 elements
+Algorithm
+Time
+Speedup
+find_slow()
+3.06 ms
+1.00x
+find_fast()
+3.26 ms
+1.07x
+Table 5.5: find_fast() uses optimizations found in libstdc++. The benchmark shows that find_fast() is slightly faster than find_slow().
+However, even though the benefit is almost negligible, using standard algorithms, you get it for free.
+"Compare with zero" optimization
+In addition to the loop unrolling, a very subtle optimization is that
+trip_count
+is iterated backward in order to compare with zero instead of a value. On some CPUs, comparing with zero is slightly
+faster than any other value, as it uses another assembly instruction (on the x86 platform, it uses
+test
+instead of
+cmp
+).
+The following table shows the difference in assembly output using gcc 9.2:
+Action
+C++
+Assembler x86
+Compare with zero
+auto
+cmp_zero
+(
+size_t
+val)
+{
+return
+val >
+0
+;
+}
+test
+edi
+,
+edi
+setne
+al
+ret
+Compare with the other value
+auto
+cmp_val
+(
+size_t
+val)
+{
+return
+val >
+42
+;
+}
+cmp
+edi
+,
+42
+setba
+al
+ret
+Table 5.6: The difference in assembly output
+Even though this kind of optimization is encouraged in the standard library implementation, do not rearrange your handmade loops in order to benefit from this optimization unless it's a (very) hot spot. Doing so will heavily reduce the readability of your code; let the algorithms handle these kinds of optimizations instead.
+This was the end of my recommendations about using algorithms rather than
+for
+-loops. If you are not already using the standard algorithms, I hope that I have given you some arguments to convince you to give it a try. Now we will move on to my very last suggestion on using algorithms effectively.
+Avoiding container copies
+We will finish this
+chapter by highlighting a common problem when trying to combine multiple algorithms from the Algorithm library: it's hard to avoid unnecessary copies of the underlying containers.
+An example will clarify what I mean here. Let's say we have some sort of
+Student
+class to represent a student in a particular year and with a particular exam score, like this:
+struct
+Student
+{
+int
+year_{};
+int
+score_{};
+std
+::
+string
+name_{};
+// ...
+};
+If we want to find the student in the second year with the highest score in a big collection of students, we would probably use
+max_element()
+on
+score_
+, but as we only want to take the students from the second year into account, it gets tricky. Essentially, we want to compose a new algorithm out of a combination of
+copy_if()
+and
+max_element()
+, but composing algorithms is not possible with the Algorithm library. Instead, we would have to make a copy of all the students in the second year to a new container and then iterate the new container to find the maximum score:
+auto
+get_max_score
+(
+const
+std
+::
+vector
+<Student>& students,
+int
+year) {
+auto
+by_year = [=](
+const
+auto
+& s) {
+return
+s.year_ == year; };
+// The student list needs to be copied in
+// order to filter on the year
+auto
+v =
+std
+::
+vector
+<Student>{};
+std
+::ranges::copy_if(students,
+std
+::back_inserter(v), by_year);
+auto
+it =
+std
+::ranges::max_element(v,
+std
+::less{}, &Student::score_);
+return
+it != v.end() ? it->score_ :
+0
+; 
+}
+This is one of the
+places where it is tempting to start writing a custom algorithm from scratch without taking advantage of the standard algorithms. But as you will see in the next chapter, there is no need to abandon the standard library for tasks like this. The ability to compose algorithms is one of the key motivations for using the Ranges library, which we will cover next.
+Summary
+In this chapter, you learned how to use the basic concepts in the Algorithm library, the advantages of using them as building blocks instead of handwritten
+for
+-loops, and why using the standard Algorithm library is beneficial for optimizing your code at a later stage. We also discussed the guarantees and trade-offs of the standard algorithms, meaning that you can, from now on, use them with confidence.
+By using the advantages of the algorithms instead of manual
+for
+-loops, your code base is well prepared for the parallelization techniques that will be discussed in the coming chapters of this book. One key feature that the standard algorithms are missing is the possibility to compose algorithms, something that was highlighted when we tried to avoid unnecessary container copies. In the next chapter, you will learn how to use views from the C++ Ranges library to overcome this limitation of standard algorithms.
+
+6
+Ranges and Views
+This chapter will pick up right where we left off in the previous chapter about algorithms and their limitations. Views from the Ranges library are a powerful complement to the Algorithm library, which allows us to compose multiple transformations into a lazy evaluated view over a sequence of elements. After reading this chapter, you will understand what range views are and how to use them in combination with containers, iterators, and algorithms from the standard library.
+Specifically, we'll cover the following major topics:
+The composability of algorithms
+Range adaptors
+Materializing views into containers
+Generating, transforming, and sampling elements in a range
+Before we get into the Ranges library itself, let's discuss why it's been added to C++20, and why we'd want to use it.
+The motivation for the Ranges library
+With the
+introduction of the Ranges library to C++20 came some major improvements to how we benefit from the standard library when implementing algorithms. The following list shows the new features:
+Concepts that define requirements on iterators and ranges can now be better checked by the compiler and provide more help during development
+New overloads of all functions in the
+<algorithm>
+header are constrained with the concepts just mentioned and accept ranges as arguments rather than iterator pairs
+Constrained iterators in the iterator header
+Range views, which
+make it possible to compose algorithms
+This chapter will focus on the last item: the concept of views, which allow us to compose algorithms to avoid the unnecessary copying of data to owning containers. To fully understand the importance of this, let's begin by demonstrating the lack of composability within the algorithm library.
+Limitations of the Algorithm library
+standard library algorithms are
+lacking in one fundamental aspect: composability. Let's examine what is meant by that by looking at the last example from
+Chapter 5
+,
+Algorithms
+, where we discussed this briefly. If you remember, we had a class to represent a
+Student
+in a particular year and with a particular exam score:
+struct
+Student
+{
+int
+year_{};
+int
+score_{};
+std
+::
+string
+name_{};
+// ...
+};
+If we wanted to find the highest score from a big collection of students in their second year, we would probably use
+max_element()
+on
+score_
+, but as we only want to take the students in a specific year into account, it gets tricky. By using the new algorithms that accept both ranges and projections (refer to
+Chapter 5
+,
+Algorithms
+), we might end up with something like this:
+auto
+get_max_score
+(
+const
+std
+::
+vector
+<Student>& students,
+int
+year) {
+auto
+by_year = [=](
+const
+auto
+& s) {
+return
+s.year_ == year; };
+// The student list needs to be copied in
+// order to filter on the year
+auto
+v =
+std
+::
+vector
+<Student>{};
+std
+::ranges::copy_if(students,
+std
+::back_inserter(v), by_year);
+auto
+it =
+std
+::ranges::max_element(v,
+std
+::less{}, &Student::score_);
+return
+it != v.end() ? it->score_ :
+0
+; 
+}
+Here is an example of how it can be used:
+auto
+students =
+std
+::
+vector
+<Student>{
+  {
+3
+,
+120
+,
+"Niki"
+},
+  {
+2
+,
+140
+,
+"Karo"
+},
+  {
+3
+,
+190
+,
+"Sirius"
+},
+  {
+2
+,
+110
+,
+"Rani"
+},
+// ...
+};
+auto
+score = get_max_score(students,
+2
+);
+std
+::
+cout
+<< score <<
+'\n'
+;
+// Prints 140
+This implementation of
+get_max_score()
+is easy to understand, but it creates unnecessary copies of
+Student
+objects when using
+copy_if()
+and
+std::back_inserter()
+.
+You may now be thinking that
+get_max_score()
+could be written as a simple
+for-
+loop, which relieves us of extra allocation(s) due to
+copy_if()
+:
+auto
+get_max_score
+(
+const
+std
+::
+vector
+<Student>& students,
+int
+year)
+{
+auto
+max_score =
+0
+;
+for
+(
+const
+auto
+& student : students) {
+if
+(student.year_ == year) {
+      max_score =
+std
+::max(max_score, student.score_);
+    }
+  }
+return
+max_score;
+}
+Although this is easily achievable in this small example, we would like to be able to implement this algorithm by composing small algorithmic building blocks, rather than implementing it from scratch using a single
+for
+-loop.
+What we would like is a syntax that is as readable as using algorithms, but with the ability to avoid constructing new containers for every step in the algorithm. This is where the views from the Ranges library come into play. Although the Ranges library contains a lot more than views, the major difference from the Algorithm library is the ability to compose what is essentially a different kind of iterator into a lazy evaluated range.
+This is what the previous example would look if it was written using views from the Ranges library:
+auto
+max_value
+(
+auto
+&& range)
+{
+const
+auto
+it =
+std
+::ranges::max_element(range);
+return
+it != range.end() ? *it :
+0
+;
+}
+auto
+get_max_score
+(
+const
+std
+::
+vector
+<Student>& students,
+int
+year)
+{
+const
+auto
+by_year = [=](
+auto
+&& s) {
+return
+s.year_ == year; };
+return
+max_value(students 
+    | std::views::filter(by_year)
+    | std::views::transform(&Student::score_));
+}
+Now we are back to using algorithms and can, therefore, avoid mutable variables,
+for
+-loops, and
+if
+-statements. The extra vector that held students in a specific year in our initial example has now been eliminated. Instead, we have composed a range view, which represents all of the students filtered by the
+by_year
+predicate, and then transformed
+to only expose the score. The view is then passed to a small utility function
+max_value()
+, which uses the
+max_element()
+algorithm to compare the scores of the selected students in order to find the maximum value.
+This way of composing algorithms by chaining them together and, at the same time, avoiding unnecessary copying is what motivates us to start using views from the Ranges library.
+Understanding views from the Ranges library
+Views in the
+Ranges library are lazy evaluated iterations over a range. Technically, they
+are only iterators with built-in logic, but syntactically, they provide a very pleasant syntax for many common operations.
+The following is an example of how to use a view to square each number in a vector (via iteration):
+auto
+numbers =
+std
+::
+vector
+{
+1
+,
+2
+,
+3
+,
+4
+};
+auto
+square = [](
+auto
+v) {
+return
+v * v; };
+auto
+squared_view =
+std
+::views::transform(numbers, square);
+for
+(
+auto
+s : squared_view) {
+// The square lambda is invoked here
+std
+::
+cout
+<< s <<
+" "
+;
+}
+// Output: 1 4 9 16
+The variable
+squared_view
+is not a copy of the
+numbers
+vector with the values squared; it is a proxy object for numbers with one slight difference—every time you access an element, the
+std::transform()
+function is invoked. This is why we say that a view is lazy evaluated.
+From the outside, you can still iterate over
+squared_view
+in the same way as any regular container and, therefore, you can perform regular algorithms such as
+find()
+or
+count()
+, but, internally, you haven't created another container.
+If you want to store the range, the view can be materialized to a container using
+std::ranges::copy()
+. (This will be demonstrated later on in this chapter.) Once the view has been copied back to a container, there is no longer any dependency between the original and the transformed
+container.
+With ranges, it is also
+possible to create a filtered view where only a part of the range is visible. In this case, only the elements that satisfy the condition are visible when iterating the view:
+auto
+v =
+std
+::
+vector
+{
+4
+,
+5
+,
+6
+,
+7
+,
+6
+,
+5
+,
+4
+};
+auto
+odd_view =
+std
+::views::filter(v, [](
+auto
+i){
+return
+(i %
+2
+) ==
+1
+; });
+for
+(
+auto
+odd_number : odd_view) {
+std
+::
+cout
+<< odd_number <<
+" "
+;
+}
+// Output: 5 7 5
+Another example of the versatility of the Ranges library is the possibility it offers to create a view that can iterate over several containers as if they were a single list:
+auto
+list_of_lists =
+std
+::
+vector
+<
+std
+::
+vector
+<
+int
+>> {
+  {
+1
+,
+2
+},
+  {
+3
+,
+4
+,
+5
+},
+  {
+5
+},
+  {
+4
+,
+3
+,
+2
+,
+1
+}
+};
+auto
+flattened_view =
+std
+::views::join(list_of_lists);
+for
+(
+auto
+v : flattened_view)
+std
+::
+cout
+<< v <<
+" "
+;
+// Output: 1 2 3 4 5 5 4 3 2 1
+auto
+max_value = *
+std
+::ranges::max_element(flattened_view);
+// max_value is 5
+Now that we have looked briefly at some examples using views, let's examine the requirements and properties that are common for all views
+Views are composable
+The full power of views
+comes from the ability to combine them. As they don't copy the actual data, you can express multiple operations on a dataset while, internally, only iterating over it once. To understand how views are composed, let's look at our initial example, but without using the pipe operator for composing the views; instead, let's construct the actual view classes directly. Here is how this looks:
+auto
+get_max_score
+(
+const
+std
+::
+vector
+<Student>& s,
+int
+year)
+{
+auto
+by_year = [=](
+const
+auto
+& s) {
+return
+s.year_ == year; };
+auto
+v1
+=
+std
+::ranges::ref_view{
+s
+};
+// Wrap container in a view
+auto
+v2
+=
+std
+::ranges::filter_view{
+v1
+, by_year};
+auto
+v3
+=
+std
+::ranges::transform_view{
+v2
+, &Student::score_};
+auto
+it =
+std
+::ranges::max_element(
+v3
+);
+return
+it != v3.end() ? *it :
+0
+;
+}
+We begin by creating a
+std::ranges::ref_view
+, which is a thin wrapper around a container. In our case, it turns the vector
+s
+into a view that is cheap to copy. We need this because our next view,
+std::ranges::filter_view
+, requires a view as its first parameter. As you can see, we compose our next view by referring to the previous view in the chain.
+This chain of composable views can, of course, be made arbitrarily long. The algorithm
+max_element()
+doesn't need to know anything about the complete chain; it only needs to iterate the range
+v3
+, as it was an ordinary container.
+The following diagram is a simplified view of the relationships between the
+max_element()
+algorithm, the views, and the input container:
+Figure 6.1: The top level algorithm, std::ranges::max_element(), pulls values from the views which lazyily process elements from the underlying container (std::vector)
+Now, this style of
+composing views is a bit verbose, and if we were to try to remove the intermediate variables
+v1
+and
+v2
+, we would end up with something like this:
+using namespace
+std
+::ranges;
+// _view classes live in std::ranges
+auto
+scores = 
+  transform_view{filter_view{ref_view{s}, by_year},
+    &Student::score_};
+Now, this might not look syntactically elegant. By getting rid of the intermediate variables, we have something that is hard to read even to a trained eye. We are also forced to read the code from the inside out to understand the dependencies. Fortunately, the Ranges library provides us with range adaptors, which is the preferred way of composing views.
+Range views come with range adaptors
+As you have seen
+earlier, the Ranges library also allows us to compose views using range adaptors and pipe operators for a much more elegant syntax (you will learn more about using the pipe operator in your own code in
+Chapter 10
+,
+Proxy Objects and Lazy Evaluation
+). The previous code example could be rewritten by using range adaptor objects, and we would have something like this:
+using namespace
+std
+::views;
+// range adaptors live in std::views
+auto
+scores = s | filter(by_year) | transform(&Student::score_);
+The ability to read a statement from left to right, rather than inside out, makes the code much easier to read. If you have used a Unix shell, you are probably familiar with this notation for chaining commands.
+Each view in the Ranges library has a corresponding range adaptor object that can be used together with the pipe operator. When using the range adaptors, we can also skip the extra
+std::ranges::ref_view
+since the range adaptors work directly with
+viewable_ranges
+, namely, a range that can be safely converted into a
+view
+.
+You can think of a range adaptor as a global stateless object that has two functions implemented:
+operator()()
+and
+operator|()
+. Both functions construct and return view objects. The pipe operator is what is being used in the preceding example. But it is also possible to use the call operator to form a view using a nested syntax with parentheses, like this:
+using namespace
+std
+::views;
+auto
+scores = transform(filter(s, by_year), &Student::score_);
+Again, when using
+range adaptors, there is no need to wrap the input container in a
+ref_view
+.
+To summarize, each view in the Ranges library consists of:
+A class template (the actual view type) that operates on view objects, for example,
+std::ranges::transform_view
+. These view types can be found under the namespace
+std::ranges
+.
+A range adaptor object that creates instances of the view class from ranges, for example,
+std::views::transform
+. All range adaptors implement
+operator()()
+and
+operator|()
+, which makes it possible to compose transformations using the pipe operator or by nesting. The range adaptor objects live under the namespace
+std::views
+.
+Views are non-owning ranges with complexity guarantees
+In the previous
+chapter, the concept of a range was introduced. Any type that provides the functions
+begin()
+and
+end()
+, where
+begin()
+returns an iterator and
+end()
+returns a sentinel, qualifies as a range. We concluded that all standard containers are ranges. Containers own their elements, so we can, therefore, call them owning ranges.
+A view is also a range, that is, it provides
+begin()
+and
+end()
+functions. However, unlike containers, a view does not own the elements in the range that the view spans over.
+The construction of a view is required to be a constant-time operation,
+O(1)
+. It cannot perform any work that depends on the size of the underlying container. The same goes for assigning, copying, moving, and destructing a view. This makes it easy to reason about performance when using views to combine multiple algorithms. It also makes it impossible for views to own elements, since that would require linear time complexity upon construction and destruction.
+Views don't mutate the underlying container
+At first glance, a view might look like a mutated version of the input container. However, the container is not mutated at all: all the processing is performed in the iterators. A view is simply a proxy object that, when iterated,
+looks
+like a mutated container.
+This also makes it possible for a view to expose elements of types that are different from the types of the input elements. The following snippet demonstrates how a view transforms the element type from
+int
+to
+std::string
+:
+auto
+ints =
+std
+::
+list
+{
+2
+,
+3
+,
+4
+,
+2
+,
+1
+};
+auto
+strings = ints 
+  |
+std
+::views::transform([](
+auto
+i) {
+return
+std
+::to_string(i); });
+Perhaps we have a function that operates on a container that we want to transform using range algorithms, and then we want to return and store it back in a container. For example, in the example above, we might want to actually store the strings in a separate container. You will learn how to do that in the next section.
+Views can be materialized into containers
+Sometimes, we
+want to store the view in a container, that is,
+materialize
+the view. All views can be materialized into containers, but it is not as easy as you would have hoped. A function template called
+std::ranges::to<T>()
+, which could turn a view into an arbitrary container type
+T
+, was proposed for C++20 but didn't quite make it. Hopefully we will get something similar in a future version of C++. Until then, we need to do a little more work ourselves in order to materialize views.
+In the previous example, we converted
+ints
+into
+std::strings
+, as follows:
+auto
+ints =
+std
+::
+list
+{
+2
+,
+3
+,
+4
+,
+2
+,
+1
+};
+auto
+r = ints 
+  |
+std
+::views::transform([](
+auto
+i) {
+return
+std
+::to_string(i); });
+Now, if we want to materialize the range
+r
+to a vector, we could use
+std::ranges::copy()
+like this:
+auto
+vec =
+std
+::
+vector
+<
+std
+::
+string
+>{};
+std
+::ranges::copy(r,
+std
+::back_inserter(vec));
+Materializing views is a common operation, so it would be handy if we had a generic utility for this case. Say that we want to materialize some arbitrary view into a
+std::vector
+; we could
+use some generic programming to come up with the following convenient utility function:
+auto
+to_vector
+(
+auto
+&& r)
+{
+std
+::
+vector
+<
+std
+::ranges::
+range_value_t
+<
+decltype
+(r)>> v;
+if
+constexpr
+(
+std
+::ranges::sized_range<
+decltype
+(r)>)
+{
+    v.reserve(
+std
+::ranges::size(r));
+  }
+std
+::ranges::copy(r,
+std
+::back_inserter(v));
+return
+v;
+}
+This snippet is taken from Timur Doumler's blog post,
+https://timur.audio/how-to-make-a-container-from-a-c20-range
+, which is well worth a read.
+We haven't talked much about generic programming yet in this book, but the next few chapters will explain the use of
+auto
+argument types and
+if constexpr
+.
+We are using
+reserve()
+to optimize the performance of this function. It will preallocate enough room for all of the elements in the range to avoid further allocations. However, we can only call
+reserve()
+if we know the size of the range, and therefore we have to use the
+if constexpr
+statement to check whether the range is a
+size_range
+at compile time.
+With this utility in place, we can transform a container of some type into a vector holding elements of another arbitrary type. Let's see how to convert a list of integers to a vector of
+std::strings
+using
+to_vector()
+. Here is an example:
+auto
+ints =
+std
+::
+list
+{
+2
+,
+3
+,
+4
+,
+2
+,
+1
+};
+auto
+r = ints 
+  |
+std
+::views::transform([](
+auto
+i) {
+return
+std
+::to_string(i); });
+auto
+strings = to_vector(r);
+// strings is now a std::vector<std::string>
+Remember that once the view has been copied back to a container, there is no longer any dependency between the original and the transformed container. This also means that the materialization is an eager operation, whereas all view operations are lazy.
+Views are lazy evaluated
+All of the work that
+is performed by a view happens lazily. This is the opposite of the functions found in the
+<algorithm>
+header, which perform their work immediately on all elements when they are called.
+You have seen that the
+std::views::filter
+view can replace the algorithm
+std::copy_if()
+, and that the
+std::views::transform
+view can replace the
+std::transform()
+algorithm. When we use the views as building blocks and chain them together, we benefit from lazy evaluation by avoiding unnecessary copies of the container elements required by the eager algorithms.
+But what about
+std::sort()
+? Is there a corresponding sorting view? The answer is no because it would require the view to first collect all the elements eagerly in order to find the first element to return. Instead, we have to do that ourselves by explicitly calling sort on our view. In most cases, we also need to materialize the view before sorting. We can clarify this with an example. Assume that we have a vector of numbers that we have filtered by some predicate, like this:
+auto
+vec =
+std
+::
+vector
+{
+4
+,
+2
+,
+7
+,
+1
+,
+2
+,
+6
+,
+1
+,
+5
+};
+auto
+is_odd = [](
+auto
+i) {
+return
+i %
+2
+==
+1
+; };
+auto
+odd_numbers = vec |
+std
+::views::filter(is_odd);
+If we try to sort our view
+odd_numbers
+using
+std::ranges::sort()
+or
+std::sort()
+, we will get a compilation error:
+std
+::ranges::sort(odd_numbers);
+// Doesn't compile
+The compiler complains about the types of iterators provided by the
+odd_numbers
+range. The sorting algorithm requires random access iterators, but that's not the type of iterators that our view provides, even though the underlying input container is a
+std::vector
+. What we need to do is to materialize the view before sorting:
+auto
+v = to_vector(odd_numbers);
+std
+::ranges::sort(v);
+// v is now 1, 1, 5, 7
+But why is this necessary? The answer is that this is a consequence of lazy evaluation. The filter view (and many other views) cannot preserve the iterator types of the underlying range (in this case, the
+std::vector
+) when evaluation needs to be lazy by reading one element at a time.
+So, are there any views that can be sorted? Yes, an example would be
+std::views::take
+, which returns the first
+n
+elements in a range. The following example compiles and runs fine without the need for materializing the view before sorting:
+auto
+vec =
+std
+::
+vector
+{
+4
+,
+2
+,
+7
+,
+1
+,
+2
+,
+6
+,
+1
+,
+5
+};
+auto
+first_half = vec |
+std
+::views::take(vec.size() /
+2
+);
+std
+::ranges::sort(first_half);
+// vec is now 1, 2, 4, 7, 2, 6, 1, 5
+The quality of the iterators has been preserved and it's therefore possible to sort the
+first_half
+view. The end result is that the first half of the elements in the underlying vector
+vec
+have been sorted.
+You now have a good
+understanding of what views from the Ranges library are and how they work. In the next section, we will explore how to use the views that are included in the standard library.
+Views in the standard library
+So far in this chapter, we have
+been talking about views from the Ranges library. As
+was described earlier, these view types need to be constructed in constant time and also have constant-time copy, move, and assignment operators. However, in C++, we have talked about view classes before the Ranges library was added to C++20. These view classes are non-owning types, just like
+std::ranges::view
+, but without the complexity guarantees.
+In this section, we will begin by exploring the views from the Ranges library that are associated with the
+std::ranges::view
+concept, and then move on to
+std::string_view
+and
+std::span
+, which are not associated with
+std::ranges::view
+.
+Range views
+There are
+already many views in the Ranges library, and I think we will see even more of them in future versions of C++. This section will provide a quick overview of some of the available views and also put them in different categories based on what they do.
+Generating views
+Generating views
+produce values. They can generate a finite or infinite range of
+values. The most obvious example in this category is
+std::views::iota
+, which produces values within a half-open range. The following snippet prints the values
+-2
+,
+-1
+,
+0
+, and
+1
+:
+for
+(
+auto
+i :
+std
+::views::iota(
+-2
+,
+2
+)) {
+std
+::
+cout
+<< i <<
+' '
+;
+}
+// Prints -2 -1 0 1
+By omitting the second argument,
+std::views::iota
+will produce an infinite number of values on request.
+Transforming views
+Transforming views
+are views that transform the elements of a range or the
+structure of the range itself. Some examples include:
+std::views::transform
+: Transforms the value and/or the type of each element
+std::views::reverse
+: Returns a reversed version of the input range
+std::views::split
+: Takes an element apart and splits each element into a subrange. The resulting range is a range of ranges
+std::views::join
+: The opposite of split; flattens out all subranges
+The following example uses
+split
+and
+join
+to extract all digits from a string of comma-separated values:
+auto
+csv =
+std
+::
+string
+{
+"10,11,12"
+};
+auto
+digits = csv 
+  | std::views::split(
+','
+)
+// [ [1, 0], [1, 1], [1, 2] ]
+| std::views::join;
+// [ 1, 0, 1, 1, 1, 2 ]
+for
+(
+auto
+i : digits) {
+std
+::
+cout
+<< i; }
+// Prints 101112
+Sampling views
+Sampling views
+are views
+that select a subset of elements in a range, for example:
+std::views::filter
+: Returns only the elements that fulfill a provided predicate
+std::views::take
+: Returns the
+n
+first elements of a range
+std::views::drop
+: Returns all the remaining elements in a range after dropping the first
+n
+elements
+You have seen plenty of examples using
+std::views::filter
+in this chapter; it's an extremely useful view. Both
+std::views::take
+and
+std::views::drop
+have a
+_while
+version, which accepts a predicate instead of a
+number. Here is an
+example using
+take
+and
+drop_while
+:
+auto
+vec =
+std
+::
+vector
+{
+1
+,
+2
+,
+3
+,
+4
+,
+5
+,
+4
+,
+3
+,
+2
+,
+1
+};
+auto
+v = vec
+   |
+std
+::views::drop_while([](
+auto
+i) {
+return
+i <
+5
+; })
+   |
+std
+::views::take(
+3
+);
+for
+(
+auto
+i : v) {
+std
+::
+cout
+<< i <<
+" "
+; }
+// Prints 5 4 3
+This example uses
+drop_while
+to discard values from the front that are less than 5. The remaining elements are passed to
+take
+, which returns the first three elements. Now to our last category of range views.
+Utility views
+You have already seen some of the utility views
+in action in this chapter. They come in handy when
+you have something that you want to convert or treat as a view. Some examples in this category of views are
+ref_view
+,
+all_view
+,
+subrange
+,
+counted
+, and
+istream_view
+.
+The following example shows you how to read a text file with floating-point numbers and then print them.
+Assume that we have a text file called
+numbers.txt
+full of important floating-point numbers, like this:
+1.4142 1.618 2.71828 3.14159 6.283 ...
+We could then create a view of
+floats
+by using
+std::ranges::istream_view
+:
+auto
+ifs =
+std
+::ifstream(
+"numbers.txt"
+);
+for
+(
+auto
+f : std::ranges::istream_view<
+float
+>(ifs)) {
+std
+::
+cout
+<< f <<
+'\n'
+;
+}
+ifs.close();
+By creating a
+std::ranges::istream_view
+and passing it an
+istream
+object, we have a succinct way of processing data from files or any other input stream.
+The views in the Ranges library have been carefully chosen and designed. There will most likely be more of them in upcoming versions of the standard. Being aware of the different categories of views helps us to keep them apart and make them easy to find when we need them.
+Revisiting std::string_view and std::span
+It's worth
+noting that the standard library provides us with other views outside of the
+Ranges library. Both
+std::string_view
+and
+std::span
+introduced in
+Chapter 4
+,
+Data Structures
+are non-owning ranges that are perfect to use in combination with the Ranges view.
+There is no guarantee that these views can be constructed in constant time, as is the case with the views from the Ranges library. For example, constructing a
+std::string_view
+from a null-terminated C-style string could invoke a call to
+strlen()
+, which is an
+O(n)
+operation.
+Suppose, for some reason, we have a function that resets the first
+n
+values in a range:
+auto
+reset
+(
+std
+::span<
+int
+> values,
+int
+n)
+{
+for
+(
+auto
+& i :
+std
+::ranges::take_view{values, n}) {
+    i =
+int
+{};
+  }
+}
+There is no need to use a range adaptor with
+values
+in this case because
+values
+is already a view. By using
+std::span
+, we can pass both built-in arrays or a container such as
+std::vector
+:
+int
+a[]{
+33
+,
+44
+,
+55
+,
+66
+,
+77
+};
+reset(a,
+3
+);
+// a is now [0, 0, 0, 66, 77]
+auto
+v =
+std
+::
+vector
+{
+33
+,
+44
+,
+55
+,
+66
+,
+77
+};
+reset(v,
+2
+);
+// v is now [0, 0, 55, 66, 77]
+In a similar way, we can use
+std::string_view
+together with the Ranges library. The following function splits the content of a
+std::string_view
+into a
+std::vector
+of
+std::string
+elements:
+auto
+split
+(
+std
+::string_view s,
+char
+delim) {
+const
+auto
+to_string = [](
+auto
+&& r) ->
+std
+::
+string
+{
+const
+auto
+cv =
+std
+::ranges::common_view{r};
+return
+{cv.begin(), cv.end()};
+  };
+return
+to_vector(
+std
+::ranges::split_view{s, delim} 
+    |
+std
+::views::transform(to_string));
+}
+The lambda
+to_string
+transforms a range of
+char
+s into a
+std::string
+. The
+std::string
+constructor requires identical iterator and sentinel types, therefore, the range is wrapped in a
+std::ranges::common_view
+. The utility
+to_vector()
+materializes the view and returns a
+std::vector<std::string>
+.
+to_vector()
+was defined earlier in this chapter.
+Our
+split()
+function can now be used with both
+const char*
+strings and
+std::string
+objects, like this:
+const
+char
+* c_str =
+"ABC,DEF,GHI"
+;
+// C style string
+const
+auto
+v1 = split(c_str,
+','
+);
+// std::vector<std::string>
+const
+auto
+s =
+std
+::
+string
+{
+"ABC,DEF,GHI"
+};
+const
+auto
+v2 = split(s,
+','
+);
+// std::vector<std::string>
+assert(v1 == v2);
+// true
+We will now wrap this chapter up by talking a little bit about what we expect to see in the Ranges library in future versions of C++.
+The future of the Ranges library
+The
+Ranges library that got accepted in C++20 was based on a library authored by Eric Niebler, and is available at
+https://github.com/ericniebler/range-v3
+. Only a small subset of the components of this library have made their way into the standard at present, but more things are likely to be added soon.
+In addition to many useful views that haven't been accepted yet, such as
+group_by
+,
+zip
+,
+slice
+, and
+unique
+, there is the concept of
+actions
+that can be piped in the same way that views can. However, instead of
+being lazy evaluated like views, actions perform eager mutations of ranges. Sorting is an example of a typical action.
+If you cannot wait for these features to be added to the standard library, I recommend that you take a look at the range-v3 library.
+Summary
+This chapter presented a number of motivations behind using Range views to construct algorithms. By using views, we can compose algorithms efficiently, and with a succinct syntax, using the pipe operator. You also learned what it means for a class to be a view and how to use range adaptors that turn ranges into views.
+A view does not own its elements. Constructing a range view is required to be a constant time operation and all views are evaluated lazily. You have seen examples of how we can convert a container into a view, and how to materialize a view back into an owning container.
+Finally, we covered a brief overview of the views that come with the standard library, and the likely future of ranges in C++.
+This chapter is the last in the series about containers, iterators, algorithms, and ranges. We will now move on to memory management in C++.

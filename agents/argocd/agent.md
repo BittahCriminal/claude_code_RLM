@@ -30,8 +30,8 @@ capabilities:
   - RBAC and multi-tenancy
   - Progressive delivery with Argo Rollouts
   - Secrets management integration
-knowledge_sources: []
----
+knowledge_sources:
+  - argocd_web_057898e5042ec49b---
 
 # Argo CD Agent
 

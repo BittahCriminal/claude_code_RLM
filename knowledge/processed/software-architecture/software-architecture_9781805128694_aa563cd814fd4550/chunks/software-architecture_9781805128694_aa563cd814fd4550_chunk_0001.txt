@@ -1,0 +1,6468 @@
+ndscape of cooperating microservices with single commands, either manually or, even better, automatically, when integrated with a test script such as
+test-em-all.bash
+.
+In the next chapter, we will study how we can add some documentation of the API using OpenAPI/Swagger descriptions.
+Questions
+What are the major differences between a virtual machine and a Docker container?
+What is the purpose of namespaces and cgroups in Docker?
+What happens with a Java application that doesn’t honor the max memory settings in a container and allocates more memory than it is allowed to?
+How can we make a Spring-based application run as a Docker container without requiring modifications of its source code?
+Why will the following Docker Compose code snippet not work?
+review:
+build:
+microservices/review-service
+ports:
+-
+"8080:8080"
+environment:
+-
+SPRING_PROFILES_ACTIVE=docker
+product-composite:
+build:
+microservices/product-composite-service
+ports:
+-
+"8080:8080"
+environment:
+-
+SPRING_PROFILES_ACTIVE=docker
+
+5
+Adding an API Description Using OpenAPI
+The value of an API, such as a RESTful service, depends to a large extent on how easy it is to consume. Good and easily accessible documentation is an important part of whether an API is useful. In this chapter, we will learn how we can use the
+OpenAPI Specification
+to
+document APIs that we can make externally accessible from a microservice landscape.
+As we mentioned in
+Chapter 2
+,
+Introduction to Spring Boot
+, the OpenAPI Specification, previously known as the Swagger specification, is one of the most commonly used specifications when it comes to documenting RESTful services. Many of the leading API gateways have native support for the OpenAPI Specification. We will learn how to use the open source project
+springdoc-openapi
+to
+produce such documentation. We will also learn how to embed an
+API documentation viewer,
+Swagger UI viewer
+, which can be used both to inspect the API documentation and also to make requests to the API.
+By the end of this chapter, we will have OpenAPI-based API documentation for the external API that’s exposed by the
+product-composite-service
+microservice. The microservice will also expose a Swagger UI viewer that we can use to both visualize and test the API.
+The following topics will be covered in this chapter:
+Introduction to using springdoc-openapi
+Adding springdoc-openapi to the source code
+Building and starting the microservice landscape
+Trying out the OpenAPI documentation
+Technical requirements
+For instructions on how to install the tools used in this book and how to access the source code for this book, refer to:
+Chapter 21
+installation instructions for mac OS
+Chapter 22
+installation instructions for Microsoft Windows with WSL 2 and Ubuntu
+The code examples in this chapter all come from the source code in
+$BOOK_HOME/Chapter05
+.
+If you want to view the changes that were applied to the source code in this chapter, that is, see what it took to create OpenAPI-based API documentation using springdoc-openapi, you can compare it with the source code for
+Chapter 4
+,
+Deploying Our Microservices Using Docker
+. You can use your favorite
+diff
+tool and compare the two folders, that is,
+$BOOK_HOME/Chapter04
+and
+$BOOK_HOME/Chapter05
+.
+Introduction to using springdoc-openapi
+Using
+springdoc-openapi makes it possible to keep the documentation of the API together with the source code that implements the API. With springdoc-openapi, you can create the API documentation on the fly at runtime by inspecting Java annotations in the code. To me, this is an important feature. If the API documentation is maintained in a separate life cycle from the Java source code, they will diverge from each other over time. In many cases, this will happen sooner than expected (based on my own experience).
+Before springdoc-openapi was created, another
+open source project,
+SpringFox
+(
+http://springfox.github.io/springfox/
+), provided similar features. Over recent years, the SpringFox project has not been actively maintained and, as a reaction to that, the springdoc-openapi project was created. A migration guide for SpringFox users can be found at
+https://springdoc.org/#migrating-from-springfox
+.
+As always, it is important to separate the interface of a component from its implementation. In terms of documenting a RESTful API, we should add the API documentation
+to the Java interface that describes the API, and not to the Java class that implements the API. To simplify updating the textual parts of the API documentation (for example, longer descriptions), we can place the descriptions in property files instead of in the Java code directly.
+Added to creating the API specification on the fly, springdoc-openapi also comes with an embedded API viewer called Swagger UI. We will configure the
+product-composite-service
+service to expose Swagger UI for its API.
+Even though Swagger UI is very useful during development and test phases, it is typically not exposed in public for APIs in a production environment, for security reasons. In many cases, APIs are exposed publicly using an API gateway. Today, most API gateway products support exposing API documentation based on an OpenAPI document. So instead of exposing Swagger UI, the API’s OpenAPI documentation (generated by springdoc-openapi) is exported to an API Gateway that can publish the API documentation in a secure way.
+If APIs are expected to be consumed by third-party developers, a developer portal can be set up containing documentation and tools, used for self-registration, for example. Swagger UI can be used in a developer portal to allow developers to learn about the API by reading the documentation and also trying out the APIs using a test instance.
+In
+Chapter 11
+,
+Securing Access to APIs
+, we will learn how to lock down access to APIs using OAuth 2.1. We will also learn how to configure the Swagger UI component to acquire OAuth 2.1 access tokens and use them when the user tries out the APIs through Swagger UI.
+The following screenshot is an example of
+what Swagger UI looks like:
+Figure 5.1: Swagger UI example
+Some, for now, unimportant parts of the screenshot have been replaced by “
+…
+” in the preceding figure. We will get back to these details later on in this chapter.
+To enable
+springdoc-openapi to create the API documentation, we need to add some dependencies to our build files and add some annotations to the Java interfaces that define the RESTful services. As mentioned above, we will also place the descriptive parts of the API documentation in a property file.
+If parts of the documentation have been placed in property files to simplify updating the API documentation, it is important that the property files are handled in the same life cycle and under the same version control as the source code. Otherwise, there is a risk that they will start to diverge from the implementation, that is, become out of date.
+With
+springdoc-openapi introduced, let’s see how we can start using it by making the required changes in the source code.
+Adding springdoc-openapi to the source code
+To add
+OpenAPI-based documentation regarding the external API that’s exposed by the
+product-composite-service
+microservice, we need to change the source code in two projects:
+product-composite-service
+: Here, we will set up a configuration of springdoc-openapi in the Java application class,
+ProductCompositeServiceApplication
+, and add some general information pertaining to the API.
+api
+: Here, we will add annotations to the Java interface,
+ProductCompositeService
+, describing each RESTful service and its operations. At this stage, we only have one RESTful service with one operation, accepting HTTP GET requests to
+/product-composite/{productId}
+, which is used for requesting composite information regarding a specific product.
+The actual texts that are used to describe the API operation will be placed in the default property file,
+application.yml
+, in the
+product-composite-service
+project.
+Before we can start using springdoc-openapi, we need to add it as a dependency in the Gradle build files. So, let’s start with that!
+Adding dependencies to the Gradle build files
+The
+springdoc-openapi project is divided
+into a number of modules. For the
+api
+project, we only need the module that contains the annotations we will use to document the API. We can add it to the
+api
+project’s build file,
+build.gradle
+, as follows:
+implementation
+'org.springdoc:springdoc-openapi-starter-common:2.0.2'
+The
+product-composite-service
+project requires a more fully featured module that
+contains both
+the Swagger UI viewer and support for Spring WebFlux. We can add the dependency to the build file,
+build.gradle
+, as follows:
+implementation
+'org.springdoc:springdoc-openapi-starter-webflux-ui:2.0.2'
+That is all the dependencies that need to be added; now for the configuration.
+Adding OpenAPI configuration and general API documentation to the ProductCompositeService
+To
+enable springdoc-openapi in the
+product-composite-service
+microservice, we
+have to add some configuration. To keep the
+source code compact, we will
+add it directly to the application class,
+ProductCompositeServiceApplication.java
+.
+If you prefer, you can place the configuration of springdoc-openapi in a separate Spring configuration class.
+First, we need to define a Spring bean that returns an
+OpenAPI
+bean. The source code looks like this:
+@Bean
+public
+OpenAPI
+getOpenApiDocumentation
+()
+{
+return
+new
+OpenAPI
+()
+.info(
+new
+Info
+().title(apiTitle)
+      .description(apiDescription)
+      .version(apiVersion)
+      .contact(
+new
+Contact
+()
+        .name(apiContactName)
+        .url(apiContactUrl)
+        .email(apiContactEmail))
+      .termsOfService(apiTermsOfService)
+      .license(
+new
+License
+()
+        .name(apiLicense)
+        .url(apiLicenseUrl)))
+    .externalDocs(
+new
+ExternalDocumentation
+()
+      .description(apiExternalDocDesc)
+      .url(apiExternalDocUrl));
+}
+From the
+preceding code, we can see that the configuration contains general
+descriptive information about the API, such as:
+The name, description, version, and contact information for the API
+Terms of usage and license information
+Links to external information regarding the API, if any
+The
+api
+variables
+that are
+used to configure the
+OpenAPI
+bean are initialized from the property file using Spring
+@Value
+annotations. These are as follows:
+@Value("${api.common.version}")
+String apiVersion;
+@Value("${api.common.title}")
+String apiTitle;
+@Value("${api.common.description}")
+String apiDescription;
+@Value("${api.common.termsOfService}")
+String apiTermsOfService;
+@Value("${api.common.license}")
+String apiLicense;
+@Value("${api.common.licenseUrl}")
+String apiLicenseUrl;
+@Value("${api.common.externalDocDesc}")
+String apiExternalDocDesc;
+@Value("${api.common.externalDocUrl}")
+String apiExternalDocUrl;
+@Value("${api.common.contact.name}")
+String apiContactName;
+@Value("${api.common.contact.url}")
+String apiContactUrl;
+@Value("${api.common.contact.email}")
+String apiContactEmail;
+The actual values are set in the property file,
+application.yml
+, as follows:
+api:
+common:
+version:
+1.0.0
+title:
+Sample
+API
+description:
+Description
+of
+the
+API...
+termsOfService:
+MY
+TERMS
+OF
+SERVICE
+license:
+MY
+LICENSE
+licenseUrl:
+MY
+LICENSE
+URL
+externalDocDesc:
+MY
+WIKI
+PAGE
+externalDocUrl:
+MY
+WIKI
+URL
+contact:
+name:
+NAME
+OF
+CONTACT
+url:
+URL
+TO
+CONTACT
+email:
+contact@mail.com
+The
+property file also contains some configuration for springdoc-openapi:
+springdoc:
+swagger-ui.path:
+/openapi/swagger-ui.html
+api-docs.path:
+/openapi/v3/api-docs
+packagesToScan:
+se.magnus.microservices.composite.product
+pathsToMatch:
+/**
+The
+configuration parameters have the following purposes:
+springdoc.swagger-ui.path
+and
+springdoc.api-docs.path
+are used to specify that
+the URLs
+used by the embedded Swagger UI viewer are available under the path
+/openapi
+. Later on in this book, when we add different types of edge servers in front and address security challenges, this will simplify the configuration of the edge servers used. Refer to the following chapters for more information:
+Chapter 10
+,
+Using Spring Cloud Gateway to Hide Microservices behind an Edge Server
+Chapter 11
+,
+Securing Access to APIs
+Chapter 17
+,
+Implementing Kubernetes Features to Simplify the System Landscape
+, the
+Replacing the Spring Cloud Gateway
+section
+Chapter 18
+,
+Using a Service Mesh to Improve Observability and Management
+, the
+Replacing Kubernetes Ingress controller with Istio Ingress Gateway
+section
+springdoc.packagesToScan
+and
+springdoc.pathsToMatch
+control where in the code base springdoc-openapi will search for annotations. The narrower the scope we can give springdoc-openapi, the faster the scan will be performed.
+For details, refer
+to the
+application class
+ProductCompositeServiceApplication.java
+and the
+application.yml
+property file in the
+product-composite-service
+project. We can now proceed to see how to add API-specific documentation to the Java interface
+ProductCompositeService.java
+in the
+api
+project.
+Adding API-specific documentation to the ProductCompositeService interface
+To
+document the actual API and its RESTful operations, we will add an
+@Tag
+annotation to the Java interface declaration in
+ProductCompositeService.java
+in the
+api
+project. For each RESTful operation in the API, we
+will add an
+@Operation
+annotation, along with
+@ApiResponse
+annotations on the corresponding Java method, to describe the operation and its expected responses. We will describe both successful and error responses.
+As well as reading these annotations at runtime, springdoc-openapi will also inspect Spring annotations, such as the
+@GetMapping
+annotation, to understand what input arguments the operation takes and what the response will look like if a successful response is produced. To understand the structure of potential error responses, springdoc-openapi will look for
+@RestControllerAdvice
+and
+@ExceptionHandler
+annotations. In
+Chapter 3
+,
+Creating a Set of Cooperating Microservices
+, we added a utility class,
+GlobalControllerExceptionHandler.java
+, in the
+util
+project.
+This class is annotated with
+@RestControllerAdvice
+. See the
+The global REST controller exception handler
+section for details. The exception handler takes care of
+404
+(
+NOT_FOUND
+) and
+422
+(
+UNPROCESSABLE_ENTITY
+) errors. To allow springdoc-openapi to also correctly document
+400
+(
+BAD_REQUEST
+) errors that Spring WebFlux generates when it discovers incorrect input arguments in a request, we have also added an
+@ExceptionHandler
+for
+400
+(
+BAD_REQUEST
+) errors in
+GlobalControllerExceptionHandler.java
+.
+The
+documentation of the API on the resource level, corresponding to the Java interface declaration, looks as follows:
+@Tag(name = "ProductComposite", description =
+"REST API for composite product information.")
+public
+interface
+ProductCompositeService
+{
+For the
+API operation, we have extracted the actual text used in the
+@Operation
+and
+@ApiResponse
+annotations to the property file. The annotations contain property placeholders, like
+${name-of-the-property}
+, that springdoc-openapi will use to look up the actual text from the property file at runtime. The API operation is documented as follows:
+@Operation(
+summary =
+"${api.product-composite.get-composite-product.description}",
+description =
+"${api.product-composite.get-composite-product.notes}")
+@ApiResponses(value = {
+@ApiResponse(responseCode = "200", description =
+"${api.responseCodes.ok.description}"),
+@ApiResponse(responseCode = "
+400
+", description =
+"${api.responseCodes.badRequest.description}"),
+@ApiResponse(responseCode = "
+404
+", description =
+"${api.responseCodes.notFound.description}"),
+@ApiResponse(responseCode = "
+422
+", description =
+"${api.responseCodes.unprocessableEntity.description}")
+})
+@GetMapping
+(
+value =
+"/product-composite/{productId}"
+,
+produces = "application/json")
+ProductAggregate
+getProduct
+(
+@PathVariable
+int
+productId)
+;
+From the preceding source code, springdoc-openapi will be able to extract the following information about the operation:
+The operation accepts HTTP GET requests to the URL
+/product-composite/{productid}
+, where the last part of the URL,
+{productid}
+, is used as an input parameter to the request.
+A successful response will produce a JSON structure corresponding to the Java class,
+ProductAggregate
+.
+In the event of an error, an HTTP error code of either
+400
+,
+404
+, or
+422
+will be returned together with error information in the body, as described by
+@ExceptionHandler
+in the Java class
+GlobalControllerExceptionHandler.java
+in the
+util
+project, as described above.
+For the
+values specified in the
+@Operation
+and
+@ApiResponse
+annotations, we can use property placeholders directly, without using Spring
+@Value
+annotations. The actual values
+are set in the property file,
+application.yml
+, like this:
+api:
+responseCodes:
+ok.description:
+OK
+badRequest.description:
+Bad
+Request,
+invalid
+format
+of
+the
+request.
+See
+response
+message
+for
+more
+information
+notFound.description:
+Not
+found,
+the
+specified
+id
+does
+not
+exist
+unprocessableEntity.description:
+Unprocessable
+entity,
+input
+parameters
+caused
+the
+processing
+to
+fail.
+See
+response
+message
+for
+more
+information
+product-composite:
+get-composite-product:
+description:
+Returns
+a
+composite
+view
+of
+the
+specified
+product
+id
+notes:
+|
+# Normal response
+If the requested product id is found the method will return information regarding:
+1
+.
+Base
+product
+information
+1
+.
+Reviews
+1
+.
+Recommendations
+1
+.
+Service
+Addresses\n(technical
+information
+regarding
+the
+addresses
+of
+the
+microservices
+that
+created
+the
+response)
+# Expected partial and error responses
+In
+the
+following
+cases,
+only
+a
+partial
+response
+be
+created
+(used
+to
+simplify
+testing
+of
+error
+conditions)
+## Product id 113
+200
+-
+Ok,
+but
+no
+recommendations
+will
+be
+returned
+## Product id 213
+200
+-
+Ok,
+but
+no
+reviews
+will
+be
+returned
+## Non-numerical product id
+400
+-
+A
+**Bad
+Request**
+error
+will
+be
+returned
+## Product id 13
+404
+-
+A
+**Not
+Found**
+error
+will
+be
+returned
+## Negative product ids
+422
+-
+An
+**Unprocessable
+Entity**
+error
+will
+be
+returned
+From the
+preceding configuration, we can learn the following:
+A property placeholder such as
+${api.responseCodes.ok.description}
+will be translated to
+OK
+. Note the hierarchical structure of the YAML-based property file:
+api:
+responseCodes:
+ok.description:
+OK
+A multi-line value starts with
+|
+like the one for the property
+api.get-composite-product.description.notes
+. Also note that springdoc-openapi supports the
+provision of a multi-line description using
+Markdown
+syntax.
+For
+details, see the service interface class
+ProductCompositeService.java
+in the
+api
+project and the property file,
+application.yml
+, in the
+product-composite-service
+project.
+If you want to find out more about how a YAML file is constructed, view the specification:
+https://yaml.org/spec/1.2/spec.html
+.
+Building and starting the microservice landscape
+Before we
+can try out the OpenAPI documentation, we need to build and start the microservice landscape!
+This can be done with the following commands:
+cd $BOOK_HOME/Chapter05
+./gradlew build && docker-compose build && docker-compose up -d
+You may run into an
+error message regarding port
+8080
+already being allocated. This will look as follows:
+ERROR: for product-composite Cannot start service product-composite: driver failed programming external connectivity on endpoint chapter05_product-composite_1 (0138d46f2a3055ed1b90b3b3daca92330919a1e7fec20351728633222db5e737): Bind for 0.0.0.0:8080 failed: port is already allocated
+If this is the case, you might have forgotten to bring down the microservice landscape from the previous chapter. To find out the names of the executing containers, run the following command:
+docker ps --format {{.Names}}
+A sample response when a microservice landscape from the previous chapter is still running is as follows:
+chapter05_review_1
+chapter05_product_1
+chapter05_recommendation_1
+chapter04_review_1
+chapter04_product-composite_1
+chapter04_product_1
+chapter04_recommendation_1
+If you find containers from other chapters in the output from the command, for example, from
+Chapter 4
+,
+Deploying Our Microservices Using Docker
+, as in the preceding example, you need to jump over to the source code folder for that chapter and bring down its containers:
+cd ../Chapter04
+docker-compose down
+Now, you can bring up the missing container for this chapter:
+cd ../Chapter05
+docker-compose up -d
+Note that only the missing container,
+product-composite
+, is started by the command since the other ones were already started successfully:
+Starting chapter05_product-composite_1 ... done
+To wait for
+the microservice landscape to start up and verify that it works, you can run the following command:
+./test-em-all.bash
+Note that
+the test script,
+test-em-all.bash
+, has been extended with a set of tests that verifies that the Swagger UI endpoints work as expected:
+#
+Verify access to Swagger and OpenAPI URLs
+echo "Swagger/OpenAPI tests"
+assertCurl 302 "curl -s  http://$HOST:$PORT/openapi/swagger-ui.html"
+assertCurl 200 "curl -sL http://$HOST:$PORT/openapi/swagger-ui.html"
+assertCurl 200 "curl -s  http://$HOST:$PORT/openapi/webjars/swagger-ui/index.html?configUrl=/v3/api-docs/swagger-config"
+assertCurl 200 "curl -s  http://$HOST:$PORT/openapi/v3/api-docs"
+assertEqual "3.0.1" "$(echo $RESPONSE | jq -r .openapi)"
+assertEqual "http://$HOST:$PORT" "$(echo $RESPONSE | jq -r '.servers[0].url')"
+assertCurl 200 "curl -s  http://$HOST:$PORT/openapi/v3/api-docs.yaml"
+With the successful startup of the microservices, we can move on and try out the OpenAPI documentation exposed by the
+product-composite
+microservice using its embedded Swagger UI viewer.
+Trying out the OpenAPI documentation
+To browse the
+OpenAPI documentation, we will use the embedded Swagger UI viewer. If we open the
+http://localhost:8080/openapi/swagger-ui.html
+URL in a web browser, we will see a web page that looks something like the following screenshot:
+Figure 5.2: OpenAPI documentation with the Swagger UI viewer
+Here, we can
+ascertain the following:
+The general information we specified in the springdoc-openapi
+OpenAPI
+bean and a link to the actual OpenAPI document,
+/openapi/v3/api-docs
+, pointing to
+http://localhost:8080/openapi/v3/api-docs
+.
+Note that this is the link to the OpenAPI document that can be exported to an API Gateway, as discussed in the
+Introduction to using springdoc-openapi
+section above.
+A list of API
+resources; in our case, the
+ProductComposite
+API.
+At the bottom of the page, there is a section where we can inspect the schemas used in the API.
+Proceed with the examination of the API documentation as follows.
+Click
+on the
+ProductComposite
+API resource to expand it. You will get a list of operations that are available on the resource. You will only see one operation,
+/product-composite/{productId}
+.
+Click on it to expand it. You will see the documentation of the operation that we specified in the
+ProductCompositeService
+Java interface:
+Figure 5.3: ProductComposite API documentation
+Here, we can see
+the following:
+The one-line description of the operation.
+A section with details regarding the operation, including the input parameters it supports. Note how the Markdown syntax from the
+notes
+field in the
+@ApiOperation
+annotation has been nicely rendered!
+If you scroll down the web page, you will also find documentation regarding the expected responses and their structure, both for a normal
+200
+(
+OK
+) response…
+Figure 5.4: Documentation for a 200 response
+…and the various 4xx error responses
+we defined earlier, as shown in the following screenshot:
+Figure 5.5: Documentation for 4xx responses
+For each documented potential error response, we can learn about its meaning and the structure of the response body.
+If we scroll back up
+to the parameter description, we will find the
+Try it out
+button. If we click on the button, we can fill in actual parameter values and send a request to the API by clicking on the
+Execute
+button. For example, if we enter
+123
+in the
+productId
+field, we will get the following response:
+Figure 5.6: Response after sending a request for an existing product
+We will get an
+expected
+200
+(OK) as the response code and a JSON structure in the response body that we are already familiar with!
+If we enter an incorrect input, such as
+-1
+, we will get a proper error code as the response code,
+422
+, and a corresponding JSON-based error description in the response
+body:
+Figure 5.7: Response after sending a request with invalid input
+Note that the
+message
+field in the response body clearly points out the problem:
+“Invalid productId: -1”
+.
+If you want
+to try calling the API without using the Swagger UI viewer, you can copy the corresponding
+curl
+command from the
+Responses
+section and run it in a Terminal window, as shown in the preceding screenshot:
+curl -X GET "http://localhost:8080/product-composite/123" -H "accept: application/json"
+Great, isn’t it?
+Summary
+Good documenting of an API is essential for its acceptance, and OpenAPI is one of the most commonly used specifications when it comes to documenting RESTful services. springdoc-openapi is an open source project that makes it possible to create OpenAPI-based API documentation on the fly at runtime by inspecting Spring WebFlux and Swagger annotations. Textual descriptions of an API can be extracted from the annotations in the Java source code and placed in a property file for ease of editing. springdoc-openapi can be configured to bring an embedded Swagger UI viewer into a microservice, which makes it very easy to read about APIs that have been exposed by the microservice and also try them out from the viewer.
+Now, what about bringing some life to our microservices by adding persistence, that is, the capability to save those microservices’ data in a database? To do this, we will need to add some more APIs so that we can create and delete the information that’s handled by the microservices. Head over to the next chapter to find out more!
+Questions
+How does springdoc-openapi help us create API documentation for RESTful services?
+What specification for documenting APIs does springdoc-openapi support?
+What is the purpose of the springdoc-openapi
+OpenAPI
+bean?
+Name some annotations that springdoc-openapi reads at runtime to create the API documentation on the fly.
+What does the code “
+: |
+" mean in a YAML file?
+How can you repeat a call to an API that was performed using the embedded Swagger UI viewer without using the viewer again?
+Join our community on Discord
+Join our community’s Discord space for discussion with the author and other readers:
+https://packt.link/SpringBoot3e
+
+6
+Adding Persistence
+In this chapter, we will learn how to persist data that a microservice is using. As already mentioned in
+Chapter 2
+,
+Introduction to Spring Boot
+, we will use the Spring Data project to persist data to MongoDB and MySQL databases.
+The
+product
+and
+recommendation
+microservices will use Spring Data for MongoDB and the
+review
+microservice will use Spring Data for
+the
+Java Persistence API
+(
+JPA
+) to access a MySQL database. We will add operations to the RESTful APIs to be able to create and delete data in the databases. The existing APIs for reading data will be updated to access the databases. We will run the databases as Docker containers, managed by Docker Compose, that is, in the same way as we run our microservices.
+The following topics will be covered in this chapter:
+Adding a persistence layer to the core microservices
+Writing automated tests that focus on persistence
+Using the persistence layer in the service layer
+Extending the composite service API
+Adding databases to the Docker Compose landscape
+Manual testing of the new APIs and the persistence layer
+Updating the automated tests of the microservice landscape
+Technical requirements
+For instructions on how to install the tools used in this book and how to access the source code for this book, see:
+Chapter 21
+,
+Installation Instructions for macOS
+Chapter 22
+,
+Installation Instructions for Microsoft Windows with WSL 2 and Ubuntu
+To access the databases manually, we will use the CLI tools provided in the Docker images used to run the databases. We will also expose the standard ports used for each database in Docker Compose,
+3306
+for MySQL and
+27017
+for MongoDB. This will enable us to use our favorite database tools to access the databases in the same way as if they were running locally on our computers.
+The code examples in this chapter all come from the source code in
+$BOOK_HOME/Chapter06
+.
+If you want to view the changes applied to the source code in this chapter, that is, see what it took to add persistence to the microservices using Spring Data, you can compare it with the source code for
+Chapter 5
+,
+Adding an API Description Using OpenAPI
+. You can use your favorite
+diff
+tool and compare the two folders,
+$BOOK_HOME/Chapter05
+and
+$BOOK_HOME/Chapter06
+.
+Before going into details, let’s see where we are heading.
+Chapter objectives
+By the end of this chapter, we
+will have layers inside our microservices that look like the following:
+Figure 6.1: The microservice landscape we’re aiming for
+The
+Protocol layer
+handles
+protocol-specific logic. It is very thin, only consisting of the
+RestController
+annotations in the
+api
+project and the common
+GlobalControllerExceptionHandler
+in the
+util
+project. The main functionality of each microservice resides in
+each
+Service layer
+.
+The
+product-composite
+service
+contains an
+Integration layer
+used to handle the communication with the three core microservices. The core microservices will all have a
+Persistence layer
+used
+for communicating with their databases.
+We will be able to access data stored in MongoDB with a command like the following:
+docker-compose exec mongodb mongosh product-db --quiet --eval "db.products.find()"
+The result of the command should look like the following:
+Figure 6.2: Accessing data stored in MongoDB
+Regarding data stored in MySQL, we will be able to access it with a command like this:
+docker-compose exec mysql mysql -uuser -p review-db -e "select * from reviews"
+The result of the command should look as follows:
+Figure 6.3: Accessing data stored in MySQL
+The output from the
+mongo
+and
+mysql
+commands has been shortened for improved readability.
+Let’s see how to implement this. We will start by adding persistence functionality to our core microservices!
+Adding a persistence layer to the core microservices
+Let’s start
+with adding a persistence layer to the core microservices. Besides using Spring Data, we will also use a Java bean mapping tool,
+MapStruct
+, which
+makes it easy to transform between Spring Data entity objects and the API model classes. For further
+details, see
+http://mapstruct.org/
+.
+First, we need to add dependencies to MapStruct, Spring Data, and the JDBC drivers for the databases we intend to use. After that, we can define our Spring Data entity classes and repositories. The Spring Data entity classes and repositories will be placed in their own Java package,
+persistence
+. For example, for the product microservice, they will be placed in the Java package
+se.magnus.microservices.core.product.persistence
+.
+Adding dependencies
+We will
+use MapStruct v1.5.3, so we
+will start by defining a variable holding the version information in the build file for each core microservice,
+build.gradle
+:
+ext {
+  mapstructVersion =
+"1.5.3.Final"
+}
+Next, we declare a dependency on MapStruct:
+implementation
+"org.mapstruct:mapstruct:${mapstructVersion}"
+Since MapStruct generates the implementation of the bean mappings at compile time by processing MapStruct annotations, we need to add an
+annotationProcessor
+and a
+testAnnotationProcessor
+dependency:
+annotationProcessor
+"org.mapstruct:mapstruct-processor:${mapstructVersion}"
+testAnnotationProcessor
+"org.mapstruct:mapstruct-processor:${mapstructVersion}"
+To make
+the compile-time
+generation work in popular IDEs such as IntelliJ IDEA, we also need to add the following dependency:
+compileOnly
+"org.mapstruct:mapstruct-processor:${mapstructVersion}"
+If you are using IntelliJ IDEA, you also need to ensure that support for annotation processing is enabled. Open
+Preferences
+and navigate to
+Build
+,
+Execute
+,
+Deployment | Compiler | Annotations Processors
+. Verify that the checkbox named
+Enable annotation processing
+is selected!
+For the
+product
+and
+recommendation
+microservices, we declare the following dependencies to Spring Data for MongoDB:
+implementation
+'org.springframework.boot:spring-boot-starter-data-mongodb'
+For the
+review
+microservice, we declare a dependency on Spring Data for JPA and a JDBC driver for MySQL like this:
+implementation
+'org.springframework.boot:spring-boot-starter-data-jpa'
+implementation
+'com.mysql:mysql-connector-j'
+To enable the use of MongoDB and MySQL when running automated integration tests, we will
+use
+Testcontainers
+and its support for JUnit 5, MongoDB, and MySQL. For the
+product
+and
+recommendation
+microservices, we declare the following test dependencies:
+implementation
+platform
+(
+'org.testcontainers:testcontainers-bom:1.15.2'
+)
+testImplementation
+'org.testcontainers:testcontainers'
+testImplementation
+'org.testcontainers:junit-jupiter'
+testImplementation
+'org.testcontainers:mongodb'
+For the
+review
+microservices, we declare the following test dependencies:
+implementation
+platform
+(
+'org.testcontainers:testcontainers-bom:1.15.2'
+)
+testImplementation
+'org.testcontainers:testcontainers'
+testImplementation
+'org.testcontainers:junit-jupiter'
+testImplementation
+'org.testcontainers:mysql'
+For more
+information on
+how Testcontainers is used in integration tests, see the
+Writing automated tests that focus on persistence
+section later on.
+Storing data with entity classes
+The
+entity classes are similar to the corresponding API model classes in terms of what fields they contain; see the Java package
+se.magnus.api.core
+in the
+api
+project. We will add two fields,
+id
+and
+version
+, in the entity classes compared to the API model classes.
+The
+id
+field is used to hold the database identity of each stored entity, corresponding to the primary key when using a relational database. We will delegate the responsibility of generating unique values for the
+id
+field to Spring Data. Depending on the database used, Spring Data can delegate this responsibility to the database engine or handle it on its own. In either case, the application code does not need to consider how a unique database
+id
+value is set. The
+id
+field is not exposed in the API, as a best practice from a security perspective. The fields in the model classes that identify an entity will be assigned a unique index in the corresponding entity class, to ensure consistency in the database from a business perspective.
+The
+version
+field is used to implement optimistic locking, allowing Spring Data to verify that updates of an entity in the database do not overwrite a concurrent update. If the value of the
+version
+field stored in the database is higher than the value of the
+version
+field in an update request, this indicates that the update is performed on stale data—the information to be updated has been updated by someone else since it was read from the database. Attempts to perform updates based on stale data will be prevented by Spring Data. In the section on writing persistence tests, we will see tests verifying that the optimistic locking mechanism in Spring Data prevents updates performed on stale data. Since we only implement APIs for create, read, and delete operations, we will not expose the
+version
+field in the API.
+The
+most interesting parts of the product entity class, used for storing entities in MongoDB, look like this:
+@Document(collection="products")
+public
+class
+ProductEntity
+{
+@Id
+private
+String id;
+@Version
+private
+Integer version;
+@Indexed(unique = true)
+private
+int
+productId;
+private
+String name;
+private
+int
+weight;
+Here are some observations from the preceding code:
+The
+@Document(collection = "products")
+annotation is used to mark the class as an entity class used for MongoDB, that is, mapped to a collection in MongoDB with the name
+products
+.
+The
+@Id
+and
+@Version
+annotations are used to mark the
+id
+and
+version
+fields to be used by Spring Data, as explained previously.
+The
+@Indexed(unique = true)
+annotation is used to get a unique index created for the business key,
+productId
+.
+The most interesting parts of the
+Recommendation
+entity class, also used for storing entities in MongoDB, look like this:
+@Document(collection="recommendations")
+@CompoundIndex
+(name = "prod-rec-id", unique = true, def = "{'productId': 1, 'recommendationId' : 1}")
+public
+class
+RecommendationEntity
+{
+@Id
+private
+String id;
+@Version
+private
+Integer version;
+private
+int
+productId;
+private
+int
+recommendationId;
+private
+String author;
+private
+int
+rating;
+private
+String content;
+Added
+to the explanations for the preceding product entity, we can see how a unique compound index is created using the
+@CompoundIndex
+annotation for the compound business key based on the
+productId
+and
+recommendationId
+fields.
+Finally, the most interesting parts of the
+Review
+entity class, used for storing entities in a SQL database like MySQL, look like this:
+@Entity
+@Table
+(name = "reviews", indexes = { @Index(name = "reviews_unique_idx", unique = true, columnList =
+"productId,reviewId"
+) })
+public
+class
+ReviewEntity
+{
+@Id
+@GeneratedValue
+private
+int
+id;
+@Version
+private
+int
+version;
+private
+int
+productId;
+private
+int
+reviewId;
+private
+String author;
+private
+String subject;
+private
+String content;
+Notes from the preceding code:
+The
+@Entity
+and
+@Table
+annotations are used to mark the class as an entity class used for JPA—mapped to a table in a SQL database with the name
+reviews
+.
+The
+@Table
+annotation is also used to specify that a unique compound index will be created for the compound business key based on the
+productId
+and
+reviewId
+fields.
+The
+@Id
+and
+@Version
+annotations are used to mark the
+id
+and
+version
+fields to be used by Spring Data, as explained previously. To direct Spring Data to JPA in order to automatically generate unique
+id
+values for the
+id
+field, we are using the
+@GeneratedValue
+annotation.
+For the full
+source code of the entity classes, see the
+persistence
+package in each of the core microservice projects.
+Defining repositories in Spring Data
+Spring Data
+comes with a
+set of interfaces for defining repositories. We will use the interfaces
+CrudRepository
+and
+PagingAndSortingRepository
+:
+The
+CrudRepository
+interface
+provides standard methods for performing basic create, read, update, and delete operations on the data stored in the databases.
+The
+PagingAndSortingRepository
+interface
+adds support for paging and sorting to the
+CrudRepository
+interface.
+We will use the
+CrudRepository
+interface as the base for the
+Recommendation
+and
+Review
+repositories and also the
+PagingAndSortingRepository
+interface as the base for the
+Product
+repository.
+We will also add a few extra query methods to our repositories for looking up entities using the business key,
+productId
+.
+Spring Data supports defining extra query methods based on naming conventions for the signature of the method. For example, the
+findByProductId(int productId)
+method signature can be used to direct Spring Data to automatically create a query that returns entities from the underlying collection or table. In this case, it will return entities that have the
+productId
+field set to the value specified in the
+productId
+parameter. For more details on how to declare extra queries, see
+https://docs.spring.io/spring-data/data-commons/docs/current/reference/html/#repositories.query-methods.query-creation
+.
+The
+Product
+repository class looks like this:
+public
+interface
+ProductRepository
+extends
+PagingAndSortingRepository
+<ProductEntity, String>,
+    CrudRepository<ProductEntity, String> {
+Optional
+<ProductEntity>
+findByProductId
+(
+int
+productId)
+;
+}
+Since the
+findByProductId
+method might return zero or one product entity, the return value is marked to be optional by wrapping it in an
+Optional
+object.
+The
+Recommendation
+repository class looks like this:
+public
+interface
+RecommendationRepository
+extends
+CrudRepository
+<RecommendationEntity, String> {
+List
+<RecommendationEntity>
+findByProductId
+(
+int
+productId)
+;
+}
+In this
+case, the
+findByProductId
+method
+will return zero to many recommendation entities, so the return value is defined as a list.
+Finally, the
+Review
+repository class looks like this:
+public
+interface
+ReviewRepository
+extends
+CrudRepository
+<ReviewEntity, Integer> {
+@Transactional(readOnly = true)
+List<ReviewEntity>
+findByProductId
+(
+int
+productId)
+;
+}
+Since SQL databases are transactional, we have to specify the default transaction type—read-only in our case—for the query method,
+findByProductId()
+.
+That’s it—this is all it takes to establish a persistence layer for our core microservices.
+For the full source code of the repository classes, see the
+persistence
+package in each of the core microservice projects.
+Let’s start using the persistence classes by writing some tests to verify that they work as intended.
+Writing automated tests that focus on persistence
+When
+writing persistence tests, we want to start a database when the tests begin and tear it down when the tests are complete. However, we don’t want the tests to wait for other resources to start up, for example, a web server such as Netty (which is required at runtime).
+Spring Boot
+comes with two class-level annotations tailored to this specific requirement:
+@DataMongoTest
+: This annotation starts up a MongoDB database when the test starts.
+@DataJpaTest
+: This annotation starts up a SQL database when the test starts:
+By default, Spring Boot configures the tests to roll back updates to the SQL database to minimize the risk of negative side effects on other tests. In our case, this behavior will cause some of the tests to fail. Therefore, automatic rollback is disabled with the class-level annotation
+@Transactional(propagation = NOT_SUPPORTED)
+.
+To handle the startup and tear-down of databases during the execution of the integration tests, we will use Testcontainers. Before looking into how to write persistence tests, let’s learn about how to use Testcontainers.
+Using Testcontainers
+Testcontainers
+(
+https://www.testcontainers.org
+) is a
+library that
+simplifies running
+automated integration tests by running resource managers like a database or a message broker as a Docker container. Testcontainers can be configured to automatically start up Docker containers when JUnit tests are started and tear down the containers when the tests are complete.
+To enable
+Testcontainers in an existing test class for a Spring Boot application like the microservices in this book, we can add the
+@Testcontainers
+annotation to the test class. Using the
+@Container
+annotation, we can, for example, declare that the
+Review
+microservice’s integration tests will use a Docker container running MySQL.
+The code looks like this:
+@SpringBootTest
+@Testcontainers
+class
+SampleTests
+{
+@Container
+private
+static
+MySQLContainer
+database
+=
+new
+MySQLContainer
+(
+"mysql:8.0.32"
+);
+The version specified for MySQL, 8.0.32, is copied from Docker Compose files to ensure that the same version is used.
+A disadvantage
+of this approach
+is that each test class will use its own Docker
+container. Bringing up MySQL in a Docker container takes a few seconds, typically 10 seconds on my Mac. Running multiple test classes that use the same type of test container will add this latency for each test class. To avoid this extra latency, we can use
+the
+Single Container Pattern
+(see
+https://www.testcontainers.org/test_framework_integration/manual_lifecycle_control/#singleton-containers
+). Following this pattern, a base class is used to launch a single Docker container for MySQL. The base class,
+MySqlTestBase
+, used in the
+Review
+microservice looks like this:
+public
+abstract
+class
+MySqlTestBase
+{
+private
+static
+MySQLContainer
+database
+=
+new
+MySQLContainer
+(
+"mysql:8.0.32"
+).withStartupTimeoutSeconds(
+300
+);
+static
+{
+    database.start();
+  }
+@DynamicPropertySource
+static
+void
+databaseProperties
+(DynamicPropertyRegistry registry)
+{
+    registry.add(
+"spring.datasource.url"
+, database::getJdbcUrl);
+    registry.add(
+"spring.datasource.username"
+, database::getUsername);
+    registry.add(
+"spring.datasource.password"
+, database::getPassword);
+  }
+}
+Explanations for the preceding source code:
+The
+database
+container is declared in the same way as in the preceding example, with the addition of an extended wait period of five minutes for the container to start up.
+A
+static
+block is used to start the database container before any JUnit code is invoked.
+The database container will get some properties defined when started up, such as which port to use. To register these dynamically created properties in the application context, a static method
+databaseProperties()
+is defined. The method is annotated with
+@DynamicPropertySource
+to override the database configuration in the application context, such as the configuration from an
+application.yml
+file.
+The
+test classes
+use the base class as follows:
+class
+PersistenceTests
+extends
+MySqlTestBase
+{
+class
+ReviewServiceApplicationTests
+extends
+MySqlTestBase
+{
+For the
+product
+and
+review
+microservices, which use MongoDB, a corresponding base class,
+MongoDbTestBase
+, has been added.
+By default, the log output from Testcontainers is rather extensive. A
+Logback
+configuration file
+can be placed in the
+src/test/resource
+folder to limit the amount of log output. Logback is a
+logging framework (
+http://logback.qos.ch
+), and it is included in the microservices by using the
+spring-boot-starter-webflux
+dependency. For details, see
+https://www.testcontainers.org/supported_docker_environment/logging_config/
+. The configuration file used in this chapter is named
+src/test/resources/logback-test.xml
+and looks like this:
+<?xml version=
+"1.0"
+encoding=
+"UTF-8"
+?>
+<
+configuration
+>
+<
+include
+resource
+=
+"org/springframework/boot/logging/logback/
+defaults.xml
+"
+/>
+<
+include
+resource
+=
+"org/springframework/boot/logging/logback/
+console-appender.xml
+"
+/>
+<
+root
+level
+=
+"INFO"
+>
+<
+appender-ref
+ref
+=
+"CONSOLE"
+/>
+</
+root
+>
+</
+configuration
+>
+Some notes from the above
+XML
+file:
+The config file includes two config files provided by Spring Boot to define the default values, and a log appender is configured that can write log events to the console.
+The config file limits log output to the
+INFO
+log level, discarding the
+DEBUG
+and
+TRACE
+log records emitted by the Testcontainers library.
+For details on Spring Boot’s support for logging and the use of Logback, see
+https://docs.spring.io/spring-boot/docs/current/reference/html/howto.html#howto-configure-logback-for-logging
+.
+Finally, when
+using the
+@DataMongoTest
+and
+@DataJpaTest
+annotations instead of the
+@SpringBootTest
+annotation to only
+start up the MongoDB and SQL database during the integration test, there is one more thing to consider. The
+@DataJpaTest
+annotation is designed to start an embedded database by default. Since we want to use a containerized database, we have to disable this feature.
+For the
+@DataJpaTest
+annotation, this can be done by using an
+@AutoConfigureTestDatabase
+annotation like this:
+@DataJpaTest
+@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
+class
+PersistenceTests
+extends
+MySqlTestBase
+{
+With Testcontainers introduced, we are ready to see how persistence tests can be written.
+Writing persistence tests
+The persistence tests
+for the three core microservices are similar to each other, so we will only go through the persistence tests for the
+product
+microservice.
+The test class,
+PersistenceTests
+, declares a method,
+setupDb()
+, annotated with
+@BeforeEach
+, which is executed before each test method. The setup method removes any entities from previous tests in the database and inserts an entity that the test methods can use as the base for their tests:
+@DataMongoTest
+class
+PersistenceTests
+{
+@Autowired
+private
+ProductRepository repository;
+private
+ProductEntity savedEntity;
+@BeforeEach
+void
+setupDb
+()
+{
+        repository.deleteAll();
+ProductEntity
+entity
+=
+new
+ProductEntity
+(
+1
+,
+"n"
+,
+1
+);
+        savedEntity = repository.save(entity);
+        assertEqualsProduct(entity, savedEntity);
+    }
+Next come
+the various test methods. First is a
+create
+test:
+@Test
+void
+create
+()
+{
+ProductEntity
+newEntity
+=
+new
+ProductEntity
+(
+2
+,
+"n"
+,
+2
+);
+repository.save
+(newEntity);
+ProductEntity
+foundEntity
+=
+repository.
+findById
+(newEntity.getId()).get();
+    assertEqualsProduct(newEntity, foundEntity);
+assertEquals(
+2
+, repository.count());
+}
+This test creates a new entity, verifies that it can be found using the
+findById
+method, and wraps up by asserting that there are two entities stored in the database, the one created by the
+setup
+method and the one created by the test itself.
+The
+update
+test looks like this:
+@Test
+void
+update
+()
+{
+    savedEntity.setName(
+"n2"
+);
+    repository.
+save
+(savedEntity);
+ProductEntity
+foundEntity
+=
+repository.
+findById
+(savedEntity.getId()).get();
+assertEquals(
+1
+,
+(
+long
+)foundEntity.getVersion());
+assertEquals(
+"n2"
+,
+foundEntity.getName());
+}
+This test updates the entity created by the
+setup
+method, reads it again from the database using the standard
+findById()
+method, and asserts that it contains expected values for some of its fields. Note that, when an entity is created, its
+version
+field is set to
+0
+by Spring Data, so we expect it to be
+1
+after the update.
+The
+delete
+test looks like this:
+@Test
+void
+delete
+()
+{
+    repository.
+delete
+(savedEntity);
+assertFalse(repository.existsById
+(savedEntity.getId()));
+}
+This test deletes the entity created by the
+setup
+method and verifies that it no longer exists in the database.
+The
+read
+test looks like this:
+@Test
+void
+getByProductId
+()
+{
+    Optional<ProductEntity> entity = 
+    repository.
+findByProductId
+(savedEntity.getProductId());
+    assertTrue(entity.isPresent());
+assertEqualsProduct
+(savedEntity, entity.get());
+}
+This test
+uses the
+findByProductId()
+method to get the entity created by the
+setup
+method, verifies that it was found, and then uses the local helper method,
+assertEqualsProduct()
+, to verify that the entity returned by
+findByProductId()
+looks the same as the entity stored by the
+setup
+method.
+Next are two test methods that verify alternative flows—handling error conditions. First is a test that verifies that duplicates are handled correctly:
+@Test
+void
+duplicateError
+()
+{
+  assertThrows(
+DuplicateKeyException
+.class, () -> {
+ProductEntity
+entity
+=
+new
+ProductEntity
+(savedEntity.getProductId(),
+"
+n"
+,
+1
+);
+    repository.save(entity);
+  });
+}
+The test tries to store an entity with the same business key as used by the entity created by the
+setup
+method. The test will fail if the save operation succeeds, or if the save fails with an exception other than the expected
+DuplicateKeyException
+.
+The
+other negative test is, in my opinion, the most interesting test in the test class. It is a test that verifies correct error handling in the case of updates of stale data—it verifies that the optimistic locking mechanism works. It looks like this:
+@Test
+void
+optimisticLockError
+()
+{
+// Store the saved entity in two separate entity objects
+ProductEntity
+entity1
+=
+repository.findById(savedEntity.getId()).get();
+ProductEntity
+entity2
+=
+repository.findById(savedEntity.getId()).get();
+// Update the entity using the first entity object
+entity1.setName(
+"n1"
+);
+    repository.
+save(entity1)
+;
+//  Update the entity using the second entity object.
+// This should fail since the second entity now holds an old version
+// number, that is, an Optimistic Lock Error
+assertThrows(
+OptimisticLockingFailureException.class
+, () -> {
+      entity2.setName(
+"n2"
+);
+      repository.
+save(entity2)
+;
+    });
+// Get the updated entity from the database and verify its new state
+ProductEntity
+updatedEntity
+=
+repository.findById(savedEntity.getId()).get();
+assertEquals(
+1
+,
+(
+int
+)updatedEntity.getVersion());
+assertEquals(
+"n1"
+,
+updatedEntity.getName());
+}
+The following is observed from the code:
+First, the test reads the same entity twice and stores it in two different variables,
+entity1
+and
+entity2
+.
+Next, it uses one of the variables,
+entity1
+, to update the entity. The update of the entity in the database will cause the
+version
+field of the entity to be increased automatically by Spring Data. The other variable,
+entity2
+, now contains stale data, manifested by its
+version
+field, which holds a lower value than the corresponding value in the database.
+When the test tries to update the entity using the variable
+entity2
+, which contains stale data, it is expected to fail by throwing an
+OptimisticLockingFailureException
+exception.
+The test wraps up by asserting that the entity in the database reflects the first update, that is, contains the name
+"n1"
+, and that the
+version
+field has the value
+1
+; only one update has been performed on the entity in the database.
+Finally, the
+product
+service
+contains a test that demonstrates the usage of built-in support for sorting and paging in Spring Data:
+@Test
+void
+paging
+()
+{
+    repository.deleteAll();
+    List<ProductEntity> newProducts = rangeClosed(
+1001
+,
+1010
+)
+        .mapToObj(i ->
+new
+ProductEntity
+(i,
+"name "
++ i, i))
+        .collect(Collectors.toList());
+    repository.
+saveAll
+(newProducts);
+Pageable
+nextPage
+=
+PageRequest.of(
+0
+,
+4
+, ASC,
+"productId"
+);
+nextPage =
+testNextPage
+(nextPage,
+"[1001, 1002, 1003, 1004]"
+,
+true
+);
+    nextPage = testNextPage(nextPage,
+"[1005, 1006, 1007, 1008]"
+,
+true
+);
+    nextPage = testNextPage(nextPage,
+"[1009, 1010]"
+,
+false
+);
+}
+Explanations for the preceding code:
+The test starts by removing any existing data, then inserts 10 entities with the
+productId
+field ranging from
+1001
+to
+1010
+.
+Next, it creates
+PageRequest
+, requesting a page count of
+4
+entities per page and a sort order based on
+ProductId
+in ascending order.
+Finally, it uses a helper method,
+testNextPage
+, to read the expected three pages, verifying the expected product IDs on each page and verifying that Spring Data correctly reports back whether more pages exist or not.
+The helper
+method
+testNextPage
+looks like this:
+private
+Pageable
+testNextPage
+(Pageable nextPage, String expectedProductIds,
+boolean
+expectsNextPage)
+{
+    Page<ProductEntity> productPage = repository.
+findAll(nextPage);
+assertEquals(expectedProductIds, productPage.getContent()
+    .stream().map(p -> p.getProductId()).collect(Collectors.
+    toList()).toString());
+    assertEquals(expectsNextPage, productPage.hasNext());
+return
+productPage.nextPageable();
+}
+The helper method uses the page request object,
+nextPage
+, to get the next page from the repository method,
+findAll()
+. Based on the result, it extracts the product IDs from the returned entities into a string and compares it to the expected list of product IDs. Finally, it returns the next page.
+For the full source code of the persistence tests, see the test class
+PersistenceTests
+in each of the core microservice projects.
+The persistence tests in the
+product
+microservice can be executed using Gradle with a command like this:
+cd $BOOK_HOME/Chapter06
+./gradlew microservices:product-service:test --tests PersistenceTests
+After running the tests, it should respond with the following:
+Figure 6.4: BUILD SUCCESSFUL response
+With a persistence layer in place, we can update the service layer in our core microservices to use the persistence layer.
+Using the persistence layer in the service layer
+In this
+section, we will learn how to use the persistence layer in the service layer to store and retrieve data from a database. We will go through the following steps:
+Logging the database connection URL
+Adding new APIs
+Calling the persistence layer from the service layer
+Declaring a Java bean mapper
+Updating the service tests
+Logging the database connection URL
+When
+scaling up the number of microservices where each microservice connects to its own database, it can be hard to keep track of what database each microservice actually uses. To avoid this confusion, a good practice is to add a
+LOG
+statement directly after the startup of a microservice that logs connection information that is used to connect to the database.
+For example, the startup code for the
+product
+service looks like this:
+public
+class
+ProductServiceApplication
+{
+private
+static
+final
+Logger
+LOG
+=
+LoggerFactory.getLogger(ProductServiceApplication.class);
+public
+static
+void
+main
+(String[] args)
+{
+ConfigurableApplicationContext
+ctx
+=
+SpringApplication.run(ProductServiceApplication.class, args);
+String
+mongodDbHost
+=
+ctx.getEnvironment().getProperty(
+"spring.data.mongodb.host"
+);
+String
+mongodDbPort
+=
+ctx.getEnvironment().getProperty(
+"spring.data.mongodb.port"
+);
+LOG.info(
+"Connected to MongoDb: "
++ mongodDbHost +
+":"
++
+mongodDbPort);
+}
+}
+The call to the
+LOG.info
+method will write something like the following to the log:
+Figure 6.5: Expected log output
+For the
+full source code, see the main application class in each of the core microservice projects, for example,
+ProductServiceApplication
+in the
+product-service
+project.
+Adding new APIs
+Before we
+can use the persistence layer to create and delete information in the database, we need to create the corresponding API operations in our core service APIs.
+The API operations for creating and deleting a product entity look like this:
+@PostMapping(
+value    = "/product",
+consumes = "application/json",
+produces = "application/json")
+Product
+createProduct
+(
+@RequestBody
+Product body)
+;
+@DeleteMapping(value = "/product/{productId}")
+void
+deleteProduct
+(
+@PathVariable
+int
+productId)
+;
+The implementation of the delete operation will be
+idempotent
+; that is, it will return the same result if called several times. This is a valuable characteristic in fault scenarios. For example, if a client experiences a network timeout during a call to a delete operation, it can simply call the delete operation again without worrying about varying responses, for example,
+OK
+(
+200
+) in response the first time and
+Not Found
+(
+404
+) in response to consecutive calls, or any unexpected side effects. This implies that the operation should return the status code
+OK
+(
+200
+) even though the entity no longer exists in the database.
+The API operations for the
+recommendation
+and
+review
+entities look similar; however, note that when it comes to the delete operation for the
+recommendation
+and
+review
+entities, it
+will delete all
+recommendations
+and
+reviews
+for the specified
+productId
+.
+For the full source code, see the interface declarations (
+ProductService
+,
+RecommendationService
+, and
+ReviewService
+) of the core microservices in the
+api
+project.
+Calling the persistence layer from the service layer
+The
+source code in the service layer for using the persistence layer is structured in the same way for all core microservices. Therefore, we will only go through the source code for the
+product
+microservice.
+First, we need to inject the repository class from the persistence layer and a Java bean mapper class into the constructor:
+private
+final
+ServiceUtil serviceUtil;
+private
+final
+ProductRepository repository;
+private
+final
+ProductMapper mapper;
+@Autowired
+public
+ProductServiceImpl
+(
+ProductRepository repository, ProductMapper mapper, ServiceUtil serviceUtil
+)
+{
+this
+.repository = repository;
+this
+.mapper = mapper;
+this
+.serviceUtil = serviceUtil;
+}
+In the next section, we will see how the Java mapper class is defined.
+Next, the
+createProduct
+method is implemented as follows:
+public
+Product
+createProduct
+(Product body)
+{
+try
+{
+ProductEntity
+entity
+=
+mapper.apiToEntity(body);
+ProductEntity
+newEntity
+=
+repository.
+save
+(entity);
+return
+mapper.
+entityToApi
+(newEntity);
+    }
+catch
+(
+DuplicateKeyException
+dke) {
+throw
+new
+InvalidInputException
+(
+"Duplicate key, Product Id: "
++ 
+        body.getProductId());
+    }
+}
+The
+createProduct
+method
+used the
+save
+method in the repository to store a new entity. It should be noted that the mapper class is used to convert Java beans between an API model class and an entity class using the two mapper methods,
+apiToEntity()
+and
+entityToApi()
+. The only error we handle for the
+create
+method is the
+DuplicateKeyException
+exception, which we convert into an
+InvalidInputException
+exception.
+The
+getProduct
+method looks like this:
+public
+Product
+getProduct
+(
+int
+productId)
+{
+if
+(
+productId <
+1
+)
+throw
+new
+InvalidInputException
+(
+"Invalid
+productId: "
++ productId);
+ProductEntity
+entity
+=
+repository.
+findByProductId
+(productId)
+        .
+orElseThrow
+(() ->
+new
+NotFoundException
+(
+"No product found for
+productId: "
++ productId));
+Product
+response
+=
+mapper.entityToApi(entity);
+    response.setServiceAddress(
+serviceUtil
+.getServiceAddress());
+return
+response;
+}
+After some basic input validation (that is, ensuring that
+productId
+is not negative), the
+findByProductId()
+method in the repository is used to find the product entity. Since the repository method returns an
+Optional
+product, we can use the
+orElseThrow()
+method in the
+Optional
+class to conveniently throw a
+NotFoundException
+exception if no product entity is found. Before the product information is returned, the
+serviceUtil
+object is used to fill in the currently used address of the microservice.
+Finally, let’s see the
+deleteProduct
+method:
+public
+void
+deleteProduct
+(
+int
+productId)
+{
+    repository.
+findByProductId
+(productId).
+ifPresent
+(e -> 
+    repository.delete(e));
+}
+The
+delete
+method also uses the
+findByProductId()
+method in the repository and uses the
+ifPresent()
+method in the
+Optional
+class to conveniently delete the entity only if it exists. Note that the implementation is idempotent; it will not report any failure if the entity is not found.
+For the full source code, see the service implementation class in each of the core microservice projects, for example,
+ProductServiceImpl
+in the
+product-service
+project.
+Declaring a Java bean mapper
+So, what about the magic Java bean mapper?
+As
+already mentioned, MapStruct is used to declare our mapper classes. The use of MapStruct is similar in all three core microservices, so we will only go through the source code for the mapper object in the
+product
+microservice.
+The
+mapper
+class for the
+product
+service looks like this:
+@Mapper(componentModel = "spring")
+public
+interface
+ProductMapper
+{
+@Mappings({
+@Mapping(target = "
+serviceAddress
+", ignore = true)
+})
+Product
+entityToApi
+(ProductEntity entity)
+;
+@Mappings({
+@Mapping(target = "
+id
+", ignore = true),
+@Mapping(target = "
+version
+", ignore = true)
+})
+ProductEntity
+apiToEntity
+(Product api)
+;
+}
+The following can be noted from the code:
+The
+entityToApi()
+method maps entity objects to the API model object. Since the entity class does not have a field for
+serviceAddress
+, the
+entityToApi()
+method is annotated to ignore the
+serviceAddress
+field in the API model object.
+The
+apiToEntity()
+method maps API model objects to entity objects. In the same way, the
+apiToEntity()
+method is annotated to ignore the
+id
+and
+version
+fields that are missing in the API model class.
+Not only does MapStruct support mapping fields by name but it can also be directed to map fields with different names. In the mapper class for the
+recommendation
+service, the
+rating
+entity field is mapped to the API model field,
+rate
+, using the following annotations:
+@Mapping(target = "
+rate
+", source="entity.
+rating
+")
+,
+    Recommendation
+entityToApi
+(RecommendationEntity entity)
+;
+@Mapping(target = "
+rating
+", source="api.
+rate
+")
+,
+    RecommendationEntity
+apiToEntity
+(Recommendation api)
+;
+After a
+successful Gradle build, the generated mapping implementation can be found in the
+build/classes
+folder for each project. For example,
+ProductMapperImpl.java
+in the
+product-service
+project.
+For the full source code, see the mapper class in each of the core microservice projects, for example,
+ProductMapper
+in the
+product-service
+project.
+Updating the service tests
+The
+tests of the APIs exposed by the core microservices have been updated since the previous chapter with tests covering the create and delete API operations.
+The added tests are similar in all three core microservices, so we will only go through the source code for the service tests in the
+product
+microservice.
+To ensure a known state for each test, a setup method,
+setupDb()
+, is declared and annotated with
+@BeforeEach
+, so it is executed before each test. The setup method removes any previously created entities:
+@Autowired
+private
+ProductRepository repository;
+@
+BeforeEach
+void
+setupDb
+()
+{
+   repository.deleteAll();
+}
+The test method for the create API verifies that a product entity can be retrieved after it has been created and that creating another product entity with the same
+productId
+results in an expected error,
+UNPROCESSABLE_ENTITY
+, in the response to the API request:
+@Test
+void
+duplicateError
+()
+{
+int
+productId
+=
+1
+;
+postAndVerifyProduct(productId, OK);
+assertTrue(repository.findByProductId(productId).isPresent());
+postAndVerifyProduct(productId, UNPROCESSABLE_ENTITY)
+.jsonPath(
+"$.path"
+).isEqualTo(
+"/product"
+)
+      .jsonPath(
+"$.message"
+).isEqualTo(
+"Duplicate key, Product Id: "
++ 
+       productId);
+}
+The
+test method for the delete API verifies that a product entity can be deleted and that a second delete request is idempotent—it also returns the status code OK, even though the entity no longer exists in the database:
+@Test
+void
+deleteProduct
+()
+{
+int
+productId
+=
+1
+;
+   postAndVerifyProduct(productId, OK);
+   assertTrue(repository.findByProductId(productId).isPresent());
+   deleteAndVerifyProduct(productId,
+OK
+);
+   assertFalse(repository.findByProductId(productId).isPresent());
+   deleteAndVerifyProduct(productId,
+OK
+);
+}
+To simplify sending the create, read, and delete requests to the API and verify the response status, three helper methods have been created:
+postAndVerifyProduct()
+getAndVerifyProduct()
+deleteAndVerifyProduct()
+The
+postAndVerifyProduct()
+method looks like this:
+private
+WebTestClient.BodyContentSpec
+postAndVerifyProduct
+(
+int
+productId, HttpStatus expectedStatus)
+{
+Product
+product
+=
+new
+Product
+(productId,
+"Name "
++ productId, 
+   productId,
+"
+SA"
+);
+return
+client.post()
+      .uri(
+"/product"
+)
+      .body(just(product), Product.class)
+      .accept(APPLICATION_JSON)
+      .
+exchange()
+.expectStatus().
+isEqualTo(expectedStatus)
+.expectHeader().
+contentType(APPLICATION_JSON)
+.expectBody();
+}
+The
+helper method performs the actual HTTP request and verifies the response code and content type of the response body. Added to that, the helper method also returns the body of the response for further investigations by the caller, if required. The other two helper methods for read and delete requests are similar.
+The source code for the three service test classes can be found in each of the core microservice projects, for example,
+ProductServiceApplicationTests
+in the
+product-service
+project.
+Now, let’s move on to see how we extend a composite service API.
+Extending the composite service API
+In this
+section, we will see how we can extend the composite API with operations for creating and deleting composite entities. We will go through the following steps:
+Adding new operations to the composite service API
+Adding methods to the integration layer
+Implementing the new composite API operations
+Updating the composite service tests
+Adding new operations to the composite service API
+The
+composite versions of creating and deleting entities and handling aggregated entities are similar to the create and delete operations in the core service APIs. The major difference is that they have annotations added for OpenAPI-based documentation. For an explanation of the usage of the OpenAPI annotations
+@Operation
+and
+@ApiResponse
+, refer to
+Chapter 5
+,
+Adding an API Description Using OpenAPI
+, specifically the
+Adding API-specific documentation to the ProductCompositeService interface
+section.
+The API operation for creating a composite product entity is declared as follows:
+@Operation(
+summary = "${api.product-composite.create-composite-product.description}",
+description = "${api.product-composite.create-composite-product.notes}")
+@ApiResponses(value = {
+@ApiResponse(responseCode = "400", description = "${api.responseCodes.badRequest.description}"),
+@ApiResponse(responseCode = "422", description = "${api.responseCodes.unprocessableEntity.description}")
+})
+@PostMapping(
+value    = "/product-composite",
+consumes = "application/json")
+void
+createProduct
+(
+@RequestBody
+ProductAggregate body)
+;
+The
+API operation for deleting a composite product entity is declared as follows:
+@Operation(
+summary = "${api.product-composite.delete-composite-product.description}",
+description = "${api.product-composite.delete-composite-product.notes}")
+@ApiResponses(value = {
+@ApiResponse(responseCode = "400", description = "${api.responseCodes.badRequest.description}"),
+@ApiResponse(responseCode = "422", description = "${api.responseCodes.unprocessableEntity.description}")
+})
+@DeleteMapping(value = "/product-composite/{productId}")
+void
+deleteProduct
+(
+@PathVariable
+int
+productId)
+;
+For the full source code, see the Java interface
+ProductCompositeService
+in the
+api
+project.
+We also need to, as before, add the descriptive text of the API documentation to the property file,
+application.yml
+, in the
+product-composite
+project:
+create-composite-product:
+description:
+Creates
+a
+composite
+product
+notes:
+|
+# Normal response
+The
+composite
+product
+information
+posted
+to
+the
+API
+will
+be
+split
+up
+and
+stored
+as
+separate
+product-info,
+recommendation
+and
+review
+entities.
+# Expected error responses
+1
+.
+If
+a
+product
+with
+the
+same
+productId
+as
+specified
+in
+the
+posted
+information
+already
+exists,
+an
+**422
+-
+Unprocessable
+Entity**
+error
+with
+a
+"duplicate key"
+error
+message
+will
+be
+Returned
+delete-composite-product:
+description:
+Deletes
+a
+product
+composite
+notes:
+|
+# Normal response
+Entities
+for
+product
+information,
+recommendations
+and
+reviews
+related
+to
+the
+specified
+productId
+will
+be
+deleted.
+The
+implementation
+of
+the
+delete
+method
+is
+idempotent,
+that
+is,
+it
+can
+be
+called
+several
+times
+with
+the
+same
+response.
+This
+means
+that
+a
+delete
+request
+of
+a
+non-existing
+product
+will
+return
+**200
+Ok**.
+Using the
+Swagger UI viewer, the updated OpenAPI documentation will look like this:
+Figure 6.6: Updated OpenAPI documentation
+Later on in
+this chapter, we will use the Swagger UI viewer to try out the new composite API operations.
+Adding methods to the integration layer
+Before we
+can implement the new create and delete APIs in the composite services, we need to extend the integration layer so it can call the underlying create and delete operations in the APIs of the core microservices.
+The methods in the integration layer for calling the create and delete operations in the three core microservices are straightforward and similar to each other, so we will only go through the source code for the methods that call the
+product
+microservice.
+The
+createProduct()
+method looks like this:
+@Override
+public
+Product
+createProduct
+(Product body)
+{
+try
+{
+return
+restTemplate.postForObject
+(
+                   productServiceUrl, body, Product.class);
+    }
+catch
+(HttpClientErrorException ex) {
+throw
+handleHttpClientException
+(ex);
+    }
+}
+It simply delegates the responsibility of sending the HTTP request to the
+RestTemplate
+object and delegates error handling to the helper method,
+handleHttpClientException
+.
+The
+deleteProduct()
+method looks like this:
+@Override
+public
+void
+deleteProduct
+(
+int
+productId)
+{
+try
+{
+restTemplate.delete
+(productServiceUrl +
+"/"
++ productId);
+    }
+catch
+(HttpClientErrorException ex) {
+throw
+handleHttpClientException(ex);
+    }
+}
+It is implemented in the same way as for the create method but performs an HTTP
+delete
+request instead.
+The full
+source code for the integration layer can be found in the
+ProductCompositeIntegration
+class in the
+product-composite
+project.
+Implementing the new composite API operations
+Now, we
+can implement the composite create and delete methods!
+The composite create method will split up the aggregate product object into discrete objects for
+product
+,
+recommendation
+, and
+review
+and call the corresponding create methods in the integration layer:
+@Override
+public
+void
+createProduct
+(ProductAggregate body)
+{
+try
+{
+Product
+product
+=
+new
+Product
+(body.getProductId(), 
+        body.getName(), body.getWeight(),
+null
+);
+integration.createProduct
+(product);
+if
+(body.getRecommendations() !=
+null
+) {
+            body.getRecommendations().forEach(r -> {
+Recommendation
+recommendation
+=
+new
+Recommendation
+(body.getProductId(), 
+                r.getRecommendationId(), r.getAuthor(), r.getRate(), 
+                r.getContent(),
+null
+);
+integration.createRecommendation
+(recommendation);
+            });
+        }
+if
+(body.getReviews() !=
+null
+) {
+            body.getReviews().forEach(r -> {
+Review
+review
+=
+new
+Review
+(body.getProductId(), 
+                r.getReviewId(), r.getAuthor(), r.getSubject(), 
+                r.getContent(),
+null
+);
+integration.createReview
+(review);
+            });
+        }
+    }
+catch
+(RuntimeException re) {
+        LOG.warn(
+"createCompositeProduct failed"
+, re);
+throw
+re;
+    }
+}
+The composite delete method simply calls the three delete methods in the integration layer to delete the corresponding entities in the underlying databases:
+@Override
+public
+void
+deleteProduct
+(
+int
+productId)
+{
+    integration.deleteProduct(productId);
+    integration.deleteRecommendations(productId);
+    integration.deleteReviews(productId);
+}
+The full
+source code for the service implementation can be found in the
+ProductCompositeServiceImpl
+class in the
+product-composite
+project.
+For happy-day scenarios, this implementation will work fine, but if we consider various error scenarios, we see that this implementation will cause trouble!
+What if, for example, one of the underlying core microservices is temporarily not available, for instance, due to internal, network, or database problems?
+This might result in partly created or deleted composite products. For the delete operation, this can be fixed if the requester simply calls the composite’s delete method until it succeeds. However, if the underlying problem remains for a while, the requester will probably give up, resulting in an inconsistent state of the composite product— which is not acceptable in most cases!
+In the next chapter,
+Chapter 7
+,
+Developing Reactive Microservices
+, we will see how we can address these types of shortcomings with synchronous APIs as a RESTful API.
+For now, let’s move on with this fragile design in mind.
+Updating the composite service tests
+Testing
+composite services, as already mentioned in
+Chapter 3
+,
+Creating a Set of Cooperating Microservices
+(refer to the
+Adding automated microservice tests in isolation
+section), is limited to using simple mock components instead of the actual core services. This restricts us from testing more complex scenarios, for example, error handling when trying to create duplicates in the underlying databases.
+The tests for the composite create and delete API operations are therefore relatively simple:
+@Test
+void
+createCompositeProduct1
+()
+{
+ProductAggregate
+compositeProduct
+=
+new
+ProductAggregate
+(
+1
+,
+"
+name"
+,
+1
+,
+null
+,
+null
+,
+null
+);
+   postAndVerifyProduct(compositeProduct, OK);
+}
+@Test
+void
+createCompositeProduct2
+()
+{
+ProductAggregate
+compositeProduct
+=
+new
+ProductAggregate
+(
+1
+,
+"name"
+,
+1
+, singletonList(
+new
+RecommendationSummary
+(
+1
+,
+"a"
+,
+1
+,
+"c"
+)),
+        singletonList(
+new
+ReviewSummary
+(
+1
+,
+"a"
+,
+"s"
+,
+"c"
+)),
+null
+);
+    postAndVerifyProduct(compositeProduct, OK);
+}
+@Test
+void
+deleteCompositeProduct
+()
+{
+ProductAggregate
+compositeProduct
+=
+new
+ProductAggregate
+(
+1
+,
+"name"
+,
+1
+,singletonList(
+new
+RecommendationSummary
+(
+1
+,
+"a"
+,
+1
+,
+"c"
+)),
+        singletonList(
+new
+ReviewSummary
+(
+1
+,
+"
+a"
+,
+"s"
+,
+"c"
+)),
+null
+);
+    postAndVerifyProduct(compositeProduct, OK);
+    deleteAndVerifyProduct(compositeProduct.getProductId(), OK);
+    deleteAndVerifyProduct(compositeProduct.getProductId(), OK);
+}
+The full
+source code for the service test can be found in the
+ProductCompositeServiceApplicationTests
+class in the
+product-composite
+project.
+These are all the changes required in the source code. Before we can test the microservices together, we must learn how to add databases to the system landscape managed by Docker Compose.
+Adding databases to the Docker Compose landscape
+Now, we have
+all of the source code in place. Before we can start up the microservice landscape and try out the new APIs together with the new persistence layer, we must start up some databases.
+We will bring MongoDB and MySQL into the system landscape controlled by Docker Compose and add configuration to our microservices so that they can find their
+databases when running.
+The Docker Compose configuration
+MongoDB and MySQL are
+declared as follows
+in the Docker Compose configuration file,
+docker-compose.yml
+:
+mongodb:
+image:
+mongo:6.0.4
+mem_limit:
+512m
+ports:
+-
+"27017:27017"
+command:
+mongod
+healthcheck
+:
+test:
+"mongo --eval 'db.stats().ok'"
+interval:
+5s
+timeout:
+2s
+retries:
+60
+mysql:
+image:
+mysql:8.0.32
+mem_limit:
+512m
+ports:
+-
+"
+3306:3306
+"
+environment:
+-
+MYSQL_ROOT_PASSWORD
+=rootpwd
+-
+MYSQL_DATABASE
+=review-db
+-
+MYSQL_USER
+=user
+-
+MYSQL_PASSWORD
+=pwd
+healthcheck
+:
+test:
+"/usr/bin/mysql --user=user --password=pwd --execute \"SHOW DATABASES;\""
+interval:
+5s
+timeout:
+2s
+retries:
+60
+Notes from the preceding code:
+We will use the official Docker image for MongoDB v6.0.4 and MySQL 8.0.32 and forward their default ports
+27017
+and
+3306
+to the Docker host, also made available on
+localhost
+when using Docker Desktop for Mac.
+For MySQL, we also declare some environment variables, defining the following:
+The root password
+The name of the database that will be created on container startup
+A username and password for a user that is set up for the database on container startup
+We also declare a health check that Docker will run to determine the status of the MongoDB and MySQL databases.
+To avoid
+microservices trying to connect to databases before they are up and running, the
+product
+and
+recommendation
+services are declared as dependent on the MongoDB database, as follows:
+depends_on:
+mongodb:
+condition:
+service_healthy
+For the same reason, the
+review
+service is declared as dependent on the MySQL database:
+depends_on:
+mysql:
+condition:
+service_healthy
+This means that Docker Compose will not start up the microservice containers until the database containers are launched and reported as healthy by their health checks.
+Database connection configuration
+With the
+database in place, we now need to set up the configuration for the core microservices so they know how to connect to their databases. This is set up in each core microservice’s configuration file,
+application.yml
+, in the
+product-service
+,
+recommendation-service
+, and
+review-service
+projects.
+The configuration for the
+product
+and
+recommendation
+services are similar, so we will only look into the configuration of the
+product
+service. The following part of the configuration is of interest:
+spring.data.mongodb:
+host:
+localhost
+port:
+27017
+database:
+product-db
+logging:
+level:
+org.springframework.data.mongodb.core.
+MongoTemplate
+:
+DEBUG
+---
+spring.config.activate.on-profile:
+docker
+spring.data.mongodb.host:
+mongodb
+Important parts
+of the preceding code:
+When running without Docker using the default Spring profile, the database is expected to be reachable on
+localhost:27017
+.
+Setting the log level for
+MongoTemplate
+to
+DEBUG
+will allow us to see which MongoDB statements are executed in the log.
+When running inside Docker using the Spring profile,
+docker
+, the database is expected to be reachable on
+mongodb:27017
+.
+The configuration for the
+review
+service, which affects how it connects to its SQL database, looks like the following:
+spring.jpa.hibernate.ddl-auto
+:
+update
+spring.datasource:
+url:
+jdbc:mysql://
+localhost
+/review-db
+username:
+user
+password:
+pwd
+spring.datasource.hikari.
+initializationFailTimeout
+:
+60000
+logging
+:
+level:
+org.hibernate.SQL:
+DEBUG
+org.hibernate.type.descriptor.sql.BasicBinder:
+TRACE
+---
+spring.config.activate.on-profile:
+docker
+spring.datasource:
+url:
+jdbc:mysql://
+mysql
+/review-db
+Explanations
+for the preceding code:
+By default, Hibernate will be used by Spring Data JPA as JPA’s EntityManager.
+The
+spring.jpa.hibernate.ddl-auto
+property is used to tell Spring Data JPA to create new or update existing SQL tables during startup.
+Note
+: It is strongly recommended to set the
+spring.jpa.hibernate.ddl-auto
+property to
+none
+or
+validate
+in a production environment—this prevents Spring Data JPA from manipulating the structure of the SQL tables. For more information, see
+https://docs.spring.io/spring-boot/docs/current/reference/htmlsingle/#howto-database-initialization
+.
+When running without Docker, using the default Spring profile, the database is expected to be reachable on
+localhost
+using the default port
+3306
+.
+By default, HikariCP is used by Spring Data JPA as the JDBC connection pool. To minimize startup problems on computers with limited hardware resources, the
+initializationFailTimeout
+parameter is set to 60 seconds. This means that the Spring Boot application will wait for up to 60 seconds during startup to establish a database connection.
+The log-level settings for Hibernate will cause Hibernate to print the SQL statements used and the actual values used. Please note that when used in a production environment, writing the actual values to the log should be avoided for privacy reasons.
+When running inside Docker using the Spring profile,
+docker
+, the database is expected to be reachable on the
+mysql
+hostname using the default port
+3306
+.
+With this configuration in place, we are ready to start up the system landscape. But before we do that, let’s learn how we can run database CLI tools.
+The MongoDB and MySQL CLI tools
+Once we have
+started to run some tests with the microservices, it will be interesting to see what data is actually stored in the microservices’ databases. Each database Docker container comes with CLI-based tools that can be used to query the database tables and collections. To be able to run the database CLI tools, the Docker Compose
+exec
+command can be used.
+The commands described in this section will be used when we get to the manual tests in the next section. Don’t try to run them now; they will fail since we have no databases up and running yet!
+To start the
+MongoDB CLI tool,
+mongo
+, inside the
+mongodb
+container, run the following command:
+docker-compose exec mongodb mongosh ––quiet
+>
+Enter
+exit
+to leave the
+mongo
+CLI.
+To start the
+MySQL CLI tool,
+mysql
+, inside
+the
+mysql
+container and log in to
+review-db
+using the user created at startup, run the following command:
+docker-compose exec mysql mysql -uuser -p review-db
+mysql>
+The
+mysql
+CLI tool will prompt you for a password; you can find it in the
+docker-compose.yml
+file. Look for the value of the environment variable
+MYSQL_PASSWORD
+.
+Enter
+exit
+to leave the
+mysql
+CLI.
+We will see the usage of these tools in the next section.
+If you prefer graphical database tools, you can run them locally as well, since both the MongoDB and the MySQL containers expose their standard ports on localhost.
+Manual tests of the new APIs and the persistence layer
+Now, we
+have everything in place to test the microservices together. We will build new Docker images and start up the system landscape using Docker Compose based on the Docker images. Next, we will use the Swagger UI viewer to run some manual tests. Finally, we will use the database CLI tools to see what data was inserted into the databases.
+Build and start the system landscape with the following command:
+cd $BOOK_HOME/Chapter06
+./gradlew build && docker-compose build && docker-compose up
+Open Swagger UI in a web browser,
+http://localhost:8080/openapi/swagger-ui.html
+, and perform the following steps on the web page:
+Click on the
+ProductComposite
+service and the
+POST
+method to expand them.
+Click on the
+Try it out
+button and go down to the body field.
+Replace the default value,
+0
+, of the
+productId
+field with
+123456
+.
+Scroll down to the
+Execute
+button and click on it.
+Verify that the returned response code is
+200
+.
+The following is a sample screenshot after hitting the
+Execute
+button:
+Figure 6.7: Testing the server response
+In the log
+output from the
+docker-compose up
+command, we should be able to see output like the following (abbreviated for increased readability):
+Figure 6.8: Log output from docker-compose up
+We can also use the database CLI tools to see the actual content in the different databases.
+Look up
+the content in the
+product
+service, that is, the
+products
+collection in MongoDB, with the following command:
+docker-compose exec mongodb mongosh product-db --quiet --eval "db.products.find()"
+Expect a response like this:
+Figure 6.9: Looking up products
+Look up the content in the
+recommendation
+service, that is, the
+recommendations
+collection in MongoDB, with the following command:
+docker-compose exec mongodb mongosh recommendation-db --quiet --eval "db.recommendations.find()"
+Expect a response like this:
+Figure 6.10: Looking up recommendations
+Look up
+the content in the
+review
+service, that is, the
+reviews
+table in MySQL, with the following command:
+docker-compose exec mysql mysql -uuser -p review-db -e "select * from reviews"
+The
+mysql
+CLI tool will prompt you for a password; you can find it in the
+docker-compose.yml
+file. Look for the value of the environment variable
+MYSQL_PASSWORD
+. Expect a response like the following:
+Figure 6.11: Looking up reviews
+Bring down the system landscape by interrupting the
+docker-compose up
+command with
+Ctrl
++
+C
+, followed by the command
+docker-compose down
+. After this, let us see how to update the automated tests in a microservice landscape.
+Updating the automated tests of the microservice landscape
+The
+automated tests of the microservice landscape,
+test-em-all.bash
+, need to be updated so that they ensure that the database of each microservice has a known state before it runs the tests.
+The script is
+extended with a setup function,
+setupTestdata()
+, which uses the composite create and delete APIs to set up test data used by the tests.
+The
+setupTestdata
+function looks like this:
+function
+setupTestdata
+()
+{
+    body=\
+'{"productId":1,"name":"product 1","weight":1, "recommendations":[
+{"recommendationId":1,"author":"author
+1","rate":1,"content":"content 1"},
+{"recommendationId":2,"author":"author
+2","rate":2,"content":"content 2"},
+{"recommendationId":3,"author":"author
+3","rate":3,"content":"content 3"}
+], "reviews":[
+{"reviewId":1,"author":"author 1","subject":"subject
+1","content":"content 1"},
+{"reviewId":2,"author":"author 2","subject":"subject
+2","content":"content 2"},
+{"reviewId":3,"author":"author 3","subject":"subject
+3","content":"content 3"}
+]}'
+recreateComposite
+1
+"
+$body"
+body=\
+'{"productId":113,"name":"product 113","weight":113, "reviews":[
+{"reviewId":1,"author":"author 1","subject":"subject
+1","content":"content 1"},
+{"reviewId":2,"author":"author 2","subject":"subject
+2","content":"content 2"},
+{"reviewId":3,"author":"author 3","subject":"subject
+3","content":"content 3"}
+]}'
+recreateComposite
+113
+"$body"
+body=\
+'{"productId":213,"name":"product 213","weight":213,
+"recommendations":[
+{"recommendationId":1,"author":"author
+1","rate":1,"content":"content 1"},
+{"recommendationId":2,"author":"author
+2","rate":2,"content":"content 2"},
+{"recommendationId":3,"author":"author
+3","rate":3,"content":"content 3"}
+]}'
+recreateComposite
+213
+"$body"
+}
+It uses a
+helper function,
+recreateComposite()
+, to perform the actual requests to the delete and create APIs:
+function
+recreateComposite
+()
+{
+    local productId=$
+1
+local composite=$
+2
+assertCurl
+200
+"curl -X
+DELETE
+http://$HOST:$PORT/product-
+composite/${productId} -s"
+curl -X
+POST
+http:
+//$HOST:$PORT/product-composite -H "Content-Type:
+application/json
+" --data "
+$composite
+"
+}
+The
+setupTestdata
+function
+is called directly after the
+waitForService
+function:
+waitForService curl -X DELETE http://$HOST:$PORT/product-composite/13
+setupTestdata
+The main purpose of the
+waitForService
+function is to verify that all microservices are up and running. In the previous chapter, the get API on the composite product service was used. In this chapter, the delete API is used instead. When using the get API, only the
+product
+core microservice is called if the entity is not found; the
+recommendation
+and
+review
+services will not be called to verify that they are up and running. The call to the delete API will also ensure that the
+Not Found
+test on
+productId 13
+will succeed. In the next chapter, we will see how we can define specific APIs for checking the health state of a microservice landscape.
+Execute the updated test script with the following command:
+cd $BOOK_HOME/Chapter06
+./test-em-all.bash start stop
+The execution should end by writing a log message like this:
+Figure 6.12: Log message at the end of test execution
+This
+concludes the updates on the automated tests
+of the microservice landscape.
+Summary
+In this chapter, we saw how we can use Spring Data to add a persistence layer to the core microservices. We used the core concepts of Spring Data, repositories, and entities to store data in both MongoDB and MySQL. The programming model is similar for a NoSQL database such as MongoDB and a SQL database such as MySQL, even though it’s not fully portable. We also saw how Spring Boot’s annotations,
+@DataMongoTest
+and
+@DataJpaTest
+, can be used to conveniently set up tests targeted for persistence; this is where a database is started automatically before the test runs, but no other infrastructure that the microservice will need at runtime, for example, a web server such as Netty, is started up. To handle the startup and teardown of databases, we have used Testcontainers, which runs the databases in Docker containers. This results in persistence tests that are easy to set up and that start with minimum overhead.
+We have also seen how the persistence layer can be used by the service layer and how we can add APIs for creating and deleting entities, both core and composite.
+Finally, we learned how convenient it is to start up databases such as MongoDB and MySQL at runtime using Docker Compose and how to use the new create and delete APIs to set up test data before running automated tests of the microservice-based system landscape.
+However, one major concern was identified in this chapter. Updating (creating or deleting) a composite entity—an entity whose parts are stored in a number of microservices—using synchronous APIs can lead to inconsistencies, if not all involved microservices are updated successfully. This is, in general, not acceptable. This leads us into the next chapter, where we will look into why and how to build reactive microservices, that is, microservices that are scalable and robust.
+Questions
+Spring Data, a common programming model based on entities and repositories, can be used for different types of database engines. From the source code examples in this chapter, what are the most important differences in the persistence code for MySQL and MongoDB?
+What is required to implement optimistic locking using Spring Data?
+What is MapStruct used for?
+What does it mean if an operation is idempotent and why is that useful?
+How can we access the data that is stored in the MySQL and MongoDB databases without using the API?
+
+7
+Developing Reactive Microservices
+In this chapter, we will learn how to develop reactive microservices, that is, how to develop non-blocking synchronous REST APIs and asynchronous event-driven services. We will also learn how to choose between these two alternatives. Finally, we will see how to create and run manual and automated tests of a reactive microservice landscape.
+As already described in
+Chapter 1
+,
+Introduction to Microservices
+, the foundation for reactive systems is that they are message-driven—they use asynchronous communication. This enables them to be elastic, in other words, scalable and resilient, meaning that they are tolerant of failures. Elasticity and resilience together enable a reactive system to be responsive.
+The following topics will be covered in this chapter:
+Choosing between non-blocking synchronous APIs and event-driven asynchronous services
+Developing non-blocking synchronous REST APIs
+Developing event-driven asynchronous services
+Running manual tests of the reactive microservice landscape
+Running automated tests of the reactive microservice landscape
+Technical requirements
+For instructions on how to install the tools used in this book and how to access the source code for this book, see:
+Chapter 21
+,
+Installation Instructions for macOS
+Chapter 22
+,
+Installation Instructions for Microsoft Windows with WSL 2 and Ubuntu
+The code examples in this chapter all come from the source code in
+$BOOK_HOME/Chapter07
+.
+If you want to view the changes applied to the source code in this chapter, that is, see what it takes to make the microservices reactive, you can compare it with the source code for
+Chapter 6
+,
+Adding Persistence
+. You can use your favorite
+diff
+tool and compare the two folders, that is,
+$BOOK_HOME/Chapter06
+and
+$BOOK_HOME/Chapter07
+.
+Choosing between non-blocking synchronous APIs and event-driven asynchronous services
+When developing reactive microservices, it is not always obvious when to use non-blocking synchronous APIs and when to use event-driven asynchronous services. In general, to make a microservice
+robust and scalable, it is important to make it as autonomous as possible, for example, by minimizing its runtime dependencies. This is
+also known as
+loose coupling
+. Therefore, the asynchronous message passing of events is preferable over synchronous APIs. This is because the microservice
+will only depend on access to the messaging system at runtime, instead of being dependent on synchronous access to a number of other microservices.
+There are, however, a number of cases where synchronous APIs could be favorable. For example:
+For read operations where an end user is waiting for a response
+Where the client platforms are more suitable for consuming synchronous APIs, for example, mobile apps or SPA web applications
+Where the clients will connect to the service from other organizations – where it might be hard to agree on a common messaging system to use across organizations
+For the system landscape in this book, we will use the following:
+The create, read, and delete services exposed by the product composite microservice will be based on non-blocking synchronous APIs. The composite microservice is assumed to have clients on both web and mobile platforms, as well as clients coming from other organizations rather than the ones that operate the system landscape. Therefore, synchronous APIs seem like a natural match.
+The read services provided by the core microservices will also be developed as non-blocking synchronous APIs since there is an end user waiting for their responses.
+The create and delete services provided by the core microservices will be developed as event-driven asynchronous services, meaning that they will listen for create and delete events on topics dedicated to each microservice.
+The synchronous APIs provided by the composite microservices to create and delete aggregated product information will publish create and delete events on these topics. If the publish operation succeeds, it will return with a 202 (Accepted) response; otherwise, an error response will be returned. The 202 response differs from a normal 200 (OK) response – it indicates that the request has been accepted, but not fully processed. Instead, the processing will be completed asynchronously and independently of the 202 response.
+This is illustrated by the following diagram:
+Figure 7.1: The microservice landscape
+First, let’s
+learn how we can develop non-blocking
+synchronous REST APIs, and thereafter, we will look at how to develop event-driven asynchronous services.
+Developing non-blocking synchronous REST APIs
+In this section, we will learn how to develop non-blocking versions of the read APIs. The composite
+service will make reactive, that is, non-blocking, calls in parallel to the three core services. When the composite service has received responses from all of the core services, it will create a composite response and send it back to the caller. This is illustrated in the following diagram:
+Figure 7.2: The getCompositeProduct part of the landscape
+In this section, we will cover the following:
+An introduction to Project Reactor
+Non-blocking persistence using Spring Data for MongoDB
+Non-blocking REST APIs in the core services, including how to handle blocking code for the JPA-based persistence layer
+Non-blocking REST APIs in the composite service
+An introduction to Project Reactor
+As we mentioned in the
+Spring WebFlux
+section in
+Chapter 2
+,
+Introduction to Spring Boot
+, the reactive
+support in Spring 5 is based
+on
+Project Reactor
+(
+https://projectreactor.io
+). Project Reactor
+is based on the
+Reactive Streams specification
+(
+http://www.reactive-streams.org
+), a standard for building reactive applications. Project Reactor is fundamental – it is what Spring WebFlux, Spring WebClient, and Spring Data rely on to provide their reactive and non-blocking features.
+The programming model is based on processing streams of data, and the core data types in Project Reactor are
+Flux
+and
+Mono
+. A
+Flux
+object is
+used to process a stream of
+0...n
+elements and a
+Mono
+object is
+used to process a stream that either is empty or returns at most one element. We will see numerous examples of their usage in this chapter. As a short introduction, let’s look at the following test:
+@Test
+void
+testFlux
+()
+{
+  List<Integer> list = Flux.just(
+1
+,
+2
+,
+3
+,
+4
+)
+    .filter(n -> n %
+2
+==
+0
+)
+    .map(n -> n *
+2
+)
+    .log()
+    .collectList().block();
+  assertThat(list).containsExactly(
+4
+,
+8
+);
+}
+Here is an explanation of the preceding source code:
+We initiate the stream with the integers
+1
+,
+2
+,
+3
+, and
+4
+using the static helper method
+Flux.just()
+.
+Next, we
+filter
+out the odd numbers – we only allow even numbers to proceed through the stream. In this test, these are
+2
+and
+4
+.
+Next, we transform (or
+map
+) the values in the stream by multiplying them by
+2
+, so they become
+4
+and
+8
+.
+Then, we
+log
+the data that flows through the stream after the
+map
+operation.
+We use the
+collectList
+method to collect all items from the stream into a
+List
+, emitted once the stream completes.
+So far, we have only declared the processing of a stream. To actually get the stream processed, we need someone to subscribe to it. The final call to the
+block
+method will register a subscriber that waits for the processing to complete.
+The resulting list is saved in a member variable named
+list
+.
+We can now wrap up the test by using the
+assertThat
+method to assert that
+list
+after the processing of the stream contains the expected result – the integers
+4
+and
+8
+.
+The log output will look like the following:
+Figure 7.3: Log output for the code above
+From
+the preceding log output, we can see that:
+The processing of the stream is started by a subscriber that subscribes to the stream and requests its content.
+Next, the integers
+4
+and
+8
+pass through the
+log
+operation.
+The processing concludes with a call to the
+onComplete
+method on the subscriber, notifying it that the stream has come to an end.
+For the
+full source code, see the
+ReactorTests
+test class in the
+util
+project.
+Normally, we don’t initiate the processing of the stream. Instead, we only define how it will be processed, and it will be the responsibility of an infrastructure component to initiate the processing. For example, Spring WebFlux will do this as a response to an incoming HTTP request. An exception to this rule of thumb is the case where blocking code needs a response from a reactive stream. In these cases, the blocking code can call the
+block()
+method on the
+Flux
+or
+Mono
+object to get the response in a blocking way.
+Non-blocking persistence using Spring Data for MongoDB
+Making
+the MongoDB-based repositories for the
+product
+and
+recommendation
+services reactive is very simple:
+Change
+the base class
+for the repositories to
+ReactiveCrudRepository
+Change the custom finder methods to return either a
+Mono
+or a
+Flux
+object
+ProductRepository
+and
+RecommendationRepository
+look like the following after the change:
+public
+interface
+ProductRepository
+extends
+ReactiveCrudRepository
+<ProductEntity, String> {
+    Mono<ProductEntity>
+findByProductId
+(
+int
+productId)
+;
+}
+public
+interface
+RecommendationRepository
+extends
+ReactiveCrudRepository
+<RecommendationEntity, String> {
+    Flux<RecommendationEntity>
+findByProductId
+(
+int
+productId)
+;
+}
+No
+changes are applied to the persistence code for the
+review
+service; it will remain blocking
+using the JPA repository. See the following section,
+Dealing with blocking code
+, for how to handle the blocking
+code in the persistence layer of the
+review
+service.
+For the full source code, take a look at the following classes:
+ProductRepository
+in the
+product
+project
+RecommendationRepository
+in the
+recommendation
+project
+Changes in the test code
+When it comes to testing the persistence layer, we have to make some changes. Since our persistence
+methods now return a
+Mono
+or
+Flux
+object, the test methods have to wait for the response to be available in the returned reactive objects. The test methods can either use an explicit call to the
+block()
+method on the
+Mono
+/
+Flux
+object to wait until a response is available, or they can use the
+StepVerifier
+helper class from Project Reactor to declare a verifiable sequence of asynchronous events.
+Let’s see how we can change the following test code to work for the reactive version of the repository:
+ProductEntity
+foundEntity
+=
+repository.findById(newEntity.getId()).get();
+assertEqualsProduct(newEntity, foundEntity);
+We can use the
+block()
+method on the
+Mono
+object returned by the
+repository.findById()
+method and keep the imperative programming style, as shown here:
+ProductEntity
+foundEntity
+=
+repository.findById(newEntity.getId()).
+block();
+assertEqualsProduct(newEntity, foundEntity);
+Alternatively, we can use the
+StepVerifier
+class to set up a sequence of processing steps that both executes the repository find operation and also verifies the result. The sequence is initialized by the final call to the
+verifyComplete()
+method like this:
+StepVerifier
+.create(repository.findById(newEntity.getId()))
+  .expectNextMatches(foundEntity -> areProductEqual(newEntity, foundEntity))
+  .
+verifyComplete
+();
+For examples of tests that use the
+StepVerifier
+class, see the
+PersistenceTests
+test class in the
+product
+project.
+For corresponding
+examples of tests that use the
+block()
+method, see the
+PersistenceTests
+test class in the
+recommendation
+project.
+Non-blocking REST APIs in the core services
+With a
+non-blocking persistence layer in place, it’s time
+to make the APIs in the core services non-blocking as well. We need to make the following changes:
+Change the APIs so that they only return reactive data types
+Change the service implementations so they don’t contain any blocking code
+Change our tests so that they can test the reactive services
+Deal with blocking code – isolate the code that still needs to be blocking from the non-blocking code
+Changes in the APIs
+To make
+the APIs of the core services reactive, we need to update their methods so that they return either a
+Mono
+or
+Flux
+object.
+For example,
+getProduct()
+in the
+product
+service now returns
+Mono<Product>
+instead of a
+Product
+object:
+Mono<Product>
+getProduct
+(
+@PathVariable
+int
+productId)
+;
+For the full source code, take a look at the following
+core
+interfaces in the
+api
+project:
+ProductService
+RecommendationService
+ReviewService
+Changes in the service implementations
+For the implementations of the services in the
+product
+and
+recommendation
+projects, which use a reactive
+persistence layer, we can use the fluent API in Project Reactor. For example, the implementation of the
+getProduct()
+method looks like the following code:
+public
+Mono
+<Product>
+getProduct
+(
+int
+productId)
+{
+if
+(productId <
+1
+) {
+throw
+new
+InvalidInputException
+(
+"Invalid productId: "
++ productId);
+    }
+return
+repository.
+findByProductId(productId)
+.switchIfEmpty(Mono.error(
+new
+NotFoundException
+(
+"No product found
+for productId: "
++ productId)))
+        .log(LOG.getName(), FINE)
+        .map(e ->
+mapper.entityToApi
+(e))
+        .map(e ->
+setServiceAddress
+(e));
+}
+Let’s examine what the code does:
+The method will return a
+Mono
+object; the processing is only declared here. The processing is triggered by the web framework, Spring WebFlux, subscribing to the
+Mono
+object once it receives a request to this service!
+A product will be retrieved using its
+productId
+from the underlying database using the
+findByProductId()
+method in the persistence repository.
+If no product is found for the given
+productId
+, a
+NotFoundException
+will be thrown.
+The
+log
+method will produce log output.
+The
+mapper.entityToApi()
+method will be called to transform the returned entity from the persistence layer into an API model object.
+The final
+map
+method will use a helper method,
+setServiceAddress()
+, to set the DNS name and IP address of the microservices that processed the request in the
+serviceAddress
+field of the model object.
+Some
+example log output for successful processing is as follows:
+Figure 7.4: Log output when processing is successful
+The following is an example log output of a failed processing (throwing a
+NotFoundException
+):
+Figure 7.5: Log output when processing fails
+For the full source code, see the following classes:
+ProductServiceImpl
+in the
+product
+project
+RecommendationServiceImpl
+in the
+recommendation
+project
+Changes in the test code
+The test code for service implementations has been changed in the same way as the tests for the
+persistence layer we described previously. To handle the asynchronous behavior of the reactive return types,
+Mono
+and
+Flux
+, the tests use a mix of calling the
+block()
+method and using the
+StepVerifier
+helper class.
+For the full source code, see the following test classes:
+ProductServiceApplicationTests
+in the
+product
+project
+RecommendationServiceApplicationTests
+in the
+recommendation
+project
+Dealing with blocking code
+In the case of the
+review
+service, which uses JPA to access its data in a relational database, we don’t have
+support for a non-blocking programming model. Instead, we can run the blocking code using a
+Scheduler
+, which is capable of running the blocking code on a thread from a dedicated thread pool with a limited number of threads. Using a thread pool for the blocking code avoids draining the available threads in the microservice and avoids affecting concurrent non-blocking processing in the microservice, if there is any.
+Let’s see how this can be set up in the following steps:
+First, we configure a scheduler bean and its thread pool in the main class
+ReviewServiceApplication
+, as follows:
+@Autowired
+public
+ReviewServiceApplication
+(
+@Value("${
+app.threadPoolSize:10
+}")
+Integer threadPoolSize,
+@Value("${
+app.taskQueueSize:100
+}")
+Integer taskQueueSize
+)
+{
+this
+.threadPoolSize = threadPoolSize;
+this
+.taskQueueSize = taskQueueSize;
+}
+@Bean
+public
+Scheduler
+jdbcScheduler
+()
+{
+return
+Schedulers.newBoundedElastic(threadPoolSize,
+    taskQueueSize,
+"jdbc-pool"
+);
+}
+From the preceding code, we can see that the scheduler bean is named
+jdbcScheduler
+and that we can configure its thread pool using the following properties:
+app.threadPoolSize
+, specifying the max number of threads in the pool; defaults to
+10
+app.taskQueueSize
+, specifying the max number of tasks that are allowed to be placed in a queue waiting for available threads; defaults to
+100
+Next, we inject the scheduler named
+jdbcScheduler
+into the
+review
+service implementation class, as shown here:
+@RestController
+public
+class
+ReviewServiceImpl
+implements
+ReviewService
+{
+private
+final
+Scheduler jdbcScheduler;
+@Autowired
+public
+ReviewServiceImpl
+(
+@Qualifier("jdbcScheduler")
+Scheduler jdbcScheduler
+, ...)
+{
+this
+.jdbcScheduler = jdbcScheduler;
+  }
+Finally, we use
+the scheduler’s thread pool in the reactive implementation of the
+getReviews()
+method, like so:
+@Override
+public
+Flux<Review>
+getReviews
+(
+int
+productId)
+{
+if
+(productId <
+1
+) {
+throw
+new
+InvalidInputException
+(
+"Invalid productId: "
++ 
+      productId);
+  }
+  LOG.info(
+"Will get reviews for product with id={}"
+, 
+    productId);
+return
+Mono.fromCallable(() -> internalGetReviews(productId))
+    .flatMapMany(Flux::fromIterable)
+    .log(LOG.getName(), FINE)
+    .subscribeOn(jdbcScheduler);
+}
+private
+List<Review>
+internalGetReviews
+(
+int
+productId)
+{
+  List<ReviewEntity> entityList = repository.
+    findByProductId(productId);
+  List<Review> list = mapper.entityListToApiList(entityList);
+  list.forEach(e -> e.setServiceAddress(serviceUtil.
+    getServiceAddress()));
+  LOG.debug(
+"Response size: {}"
+, list.size());
+return
+list;
+}
+Here, the blocking code is placed in the
+internalGetReviews()
+method and is wrapped in a
+Mono
+object using the
+Mono.fromCallable()
+method. The
+getReviews()
+method uses the
+subscribeOn()
+method to run the blocking code in a thread from the thread pool of
+jdbcScheduler
+.
+When we run tests later on in this chapter, we can look at the log output from the
+review
+service and see proof that SQL statements are run in threads from the scheduler’s dedicated pool. We will be able to see log output like this:
+Figure 7.6: Log output from the review service
+From the
+preceding log output, we can see the following:
+The first log output is from the
+LOG.info()
+call in the
+getReviews()
+method and it is executed on an HTTP thread, named
+ctor-http-nio-4
+, a thread used by WebFlux.
+In the second log output, we can see the SQL statement generated by Spring Data JPA, using Hibernate under the hood. The SQL statement corresponds to the method call
+repository.findByProductId()
+. It is executed on a thread named
+jdbc-pool-1
+, meaning it is executed in a thread from the dedicated thread pool for blocking code, as expected!
+For the full source code, see the
+ReviewServiceApplication
+and
+ReviewServiceImpl
+classes in the
+review
+project.
+With the logic for handling blocking code in place, we are done with implementing the non-blocking REST APIs in the core services. Let’s move on and see how to also make the REST APIs in the composite services non-blocking.
+Non-blocking REST APIs in the composite services
+To make
+our REST API in the composite service
+non-blocking, we need to do the following:
+Change the API so that its operations only return reactive data types
+Change the service implementation so it calls the coreata services’ APIs in parallel and in a non-blocking way
+Change the integration layer so it uses a non-blocking HTTP client
+Change our tests so that they can test the reactive service
+Changes in the API
+To make the API of the composite service reactive, we need to apply the same type of change that we
+applied for the APIs of the core services we described previously. This means that the return type of the
+getProduct()
+method,
+ProductAggregate
+, needs to be replaced with
+Mono<ProductAggregate>
+.
+The
+createProduct()
+and
+deleteProduct()
+methods need to be updated to return a
+Mono<Void>
+instead of a
+void
+; otherwise, we can’t propagate any error responses back to the callers of the API.
+For the full source code, see the
+ProductCompositeService
+interface in the
+api
+project.
+Changes in the service implementation
+To be able to call the three APIs in parallel, the service implementation uses the static
+zip()
+method
+on the
+Mono
+class. The
+zip
+method is capable of handling a number of parallel reactive requests and zipping them together once they all are complete. The code looks like this:
+@Override
+public
+Mono<ProductAggregate>
+getProduct
+(
+int
+productId)
+{
+return
+Mono.zip
+(
+values
+->
+createProductAggregate
+(
+      (Product) values[
+0
+], 
+      (List<Recommendation>) values[
+1
+], 
+      (List<Review>) values[
+2
+], 
+      serviceUtil.getServiceAddress()),
+      
+    integration.getProduct(productId),
+    integration.getRecommendations(productId).collectList(),
+    integration.getReviews(productId).collectList())
+      
+    .doOnError(ex -> 
+      LOG.warn(
+"getCompositeProduct failed: {}"
+, 
+      ex.toString()))
+    .log(LOG.getName(), FINE);
+}
+Let’s take a closer look:
+The first parameter of the
+zip
+method is a lambda function that will receive the responses in an array, named
+values
+. The array will contain a product, a list of recommendations, and a list of reviews. The actual aggregation of the responses from the three API calls is handled by the same helper method as before,
+createProductAggregate()
+, without any changes.
+The parameters after the lambda function are a list of the requests that the
+zip
+method will call in parallel, one
+Mono
+object per request. In our case, we send in three
+Mono
+objects that were created by the methods in the integration class, one for each request that is sent to each core microservice.
+For the full source code, see the
+ProductCompositeServiceImpl
+class in the
+product-composite
+project.
+For information on how the
+createProduct
+and
+deleteProduct
+API operations are implemented in the
+product-composite
+service, see the
+Publishing events in the composite service
+section later on.
+Changes in the integration layer
+In the
+ProductCompositeIntegration
+integration class, we have replaced the blocking HTTP client,
+RestTemplate
+, with a non-blocking HTTP client,
+WebClient
+, that comes with Spring 5.
+To create a
+WebClient
+instance, a
+builder pattern
+is used. If customization is required, for example, setting up common headers or filters, it can be done using the builder. For the available
+configuration options, see
+https://docs.spring.io/spring/docs/current/spring-framework-reference/web-reactive.html#webflux-client-builder
+.
+The
+WebClient
+is used as follows:
+In the constructor, the
+WebClient
+is auto-injected. We build the
+WebClient
+instance without any configuration:
+public
+class
+ProductCompositeIntegration
+implements
+ProductService
+, RecommendationService, ReviewService {
+private
+final
+WebClient webClient;
+@Autowired
+public
+ProductCompositeIntegration
+(
+WebClient.Builder webClient
+, ...
+)
+{
+this
+.webClient = webClient.build();
+    }
+Next, we use the
+webClient
+instance to make our non-blocking requests for calling the
+product
+service:
+@Override
+public
+Mono<Product>
+getProduct
+(
+int
+productId)
+{
+String
+url
+=
+productServiceUrl +
+"/product/"
++ productId;
+return
+webClient
+.get().uri(url).retrieve()
+    .bodyToMono(Product.class)
+    .log(LOG.getName(), FINE)
+    .
+onErrorMap
+(WebClientResponseException.class, 
+      ex -> handleException(ex)
+    );
+}
+If the API call to the
+product
+service fails with an HTTP error response, the whole API request will fail. The
+onErrorMap()
+method in
+WebClient
+will call our
+handleException(ex)
+method, which maps the HTTP exceptions thrown by the HTTP layer to our own exceptions, for example, a
+NotFoundException
+or a
+InvalidInputException
+.
+However, if calls to the
+product
+service succeed but the call to either the
+recommendation
+or
+review
+API fails, we don’t want to let the whole request fail. Instead, we want to return as much information as is available back to the caller. Therefore, instead of propagating an exception in these cases, we will instead return an empty list of recommendations or reviews. To suppress the error, we will make the call
+onErrorResume(error -> empty())
+. For this, the code looks like the following:
+@Override
+public
+Flux<Recommendation>
+getRecommendations
+(
+int
+productId)
+{
+String
+url
+=
+recommendationServiceUrl +
+"/recommendation?
+productId="
++ productId;
+// Return an empty result if something goes wrong to make it
+// possible for the composite service to return partial responses
+return
+webClient.get().uri(url).retrieve()
+    .bodyToFlux(Recommendation.class)
+    .log(LOG.getName(), FINE)
+    .
+onErrorResume(error -> empty());
+}
+The
+GlobalControllerExceptionHandler
+class, from the
+util
+project, will, as previously, catch exceptions and transform them into proper HTTP error responses that are sent back to the caller
+of the composite API. This way we can decide if a specific HTTP error response from the underlying API calls will result in an HTTP error response or just a partly empty response.
+For the full source code, see the
+ProductCompositeIntegration
+class in the
+product-composite
+project.
+Changes in the test code
+The only change that’s required in the test classes is to update the setup of Mockito and its mock of
+the integration class. The mock needs to return
+Mono
+and
+Flux
+objects. The
+setup()
+method uses the helper methods
+Mono.just()
+and
+Flux.fromIterable()
+, as shown in the following code:
+class
+ProductCompositeServiceApplicationTests
+{
+@BeforeEach
+void
+setUp
+()
+{
+        when(compositeIntegration.getProduct(PRODUCT_ID_OK)).
+            thenReturn(
+Mono.just
+(
+new
+Product
+(PRODUCT_ID_OK,
+"name"
+,
+1
+,
+"mock-address"
+)));
+        when(compositeIntegration.getRecommendations(PRODUCT_ID_OK)).
+            thenReturn(
+Flux.fromIterable
+(singletonList(
+new
+Recommendation
+(PRODUCT_ID_OK,
+1
+,
+"author"
+,
+1
+,
+"content"
+,
+"mock address"
+))));
+        when(compositeIntegration.getReviews(PRODUCT_ID_OK)).
+            thenReturn(
+Flux.fromIterable
+(singletonList(
+new
+Review
+(PRODUCT_ID_OK,
+1
+,
+"author"
+,
+"subject"
+,
+"content"
+,
+"mock address"
+))));
+For the full source code, see the
+ProductCompositeServiceApplicationTests
+test class in the
+product-composite
+project.
+This
+completes the implementation of our non-blocking synchronous REST APIs. Now it is time to develop our event-driven asynchronous services.
+Developing event-driven asynchronous services
+In this section, we will learn how to develop event-driven and asynchronous versions of the create and
+delete services. The composite service will publish create and delete events on each core service topic and then return an OK response back to the caller without waiting for processing to take place in the core services. This is illustrated in the following diagram:
+Figure 7.7: The createCompositeProduct and deleteCompositeProduct parts of the landscape
+We will cover the following topics:
+Handling challenges with messaging
+Defining topics and events
+Changes in Gradle build files
+Consuming events in the core services
+Publishing events in the composite service
+Handling challenges with messaging
+To implement the event-driven create and delete services, we will use Spring Cloud Stream. In
+Chapter 2
+,
+Introduction to Spring Boot
+, we have already seen how easy it is to publish and consume messages
+on a topic using
+Spring Cloud Stream.
+The programming model is based on a functional paradigm, where functions implementing one of the functional interfaces
+Supplier
+,
+Function
+, or
+Consumer
+in the
+java.util.function
+package can be chained together to perform decoupled event-based processing. To trigger such functional-based processing externally, from non-functional code, the helper class
+StreamBridge
+can be used.
+For example, to publish the body of an HTTP request to a topic, we only have to write the following:
+@Autowired
+private
+StreamBridge streamBridge;
+@PostMapping
+void
+sampleCreateAPI
+(
+@RequestBody
+String body)
+{
+streamBridge.send
+(
+"topic"
+, body);
+}
+The helper class
+StreamBridge
+is used to trigger the processing. It will publish a message on a topic. A function
+that consumes
+events from a topic (not creating new events) can be defined by implementing the functional interface
+java.util.function.Consumer
+as:
+@Bean
+public
+Consumer<String>
+mySubscriber
+()
+{
+return
+s -> System.out.println(
+"ML RECEIVED: "
++ s);
+}
+To tie the various functions together, we use configuration. We will see examples of such configuration below in the sections
+Adding configuration for publishing events
+and
+Adding configuration for consuming events
+.
+This programming model can be used independently of the messaging system used, for example, RabbitMQ or Apache Kafka!
+Even though sending asynchronous messages is preferred over synchronous API calls, it comes with challenges of its own. We will see how we can use Spring Cloud Stream to handle some of them. The following features in Spring Cloud Stream will be covered:
+Consumer groups
+Retries and dead-letter queues
+Guaranteed orders and partitions
+We’ll study each of these in the following sections.
+Consumer groups
+The problem
+here is, if we scale up the number of instances of a message consumer, for example, if we start two instances of the
+product
+microservice, both instances of the
+product
+microservice will consume the same messages, as illustrated by the following diagram:
+Figure 7.8: Products #1 and #2 consuming the same messages
+This could result in one message being processed two times, potentially leading to duplicates or other undesired
+inconsistencies in the database. Therefore, we only want one instance per consumer to process each message. This can be solved by introducing a
+consumer group
+, as illustrated by the following diagram:
+Figure 7.9: Consumer group
+In Spring Cloud Stream, a consumer group can be configured on the consumer side. For example, for the
+product
+microservice, it will look like this:
+spring.cloud.stream
+:
+bindings.messageProcessor-in-0
+:
+destination
+:
+products
+group
+:
+productsGroup
+From this configuration, we can learn the following:
+Spring Cloud Stream applies, by default, a naming convention for binding a configuration
+to a function. For messages sent to a function, the binding name is
+<functionName>-in-<index>
+:
+functionName
+is the name of the function,
+messageProcessor
+in the preceding example.
+index
+is set to
+0
+, unless the function requires multiple input or output arguments. We will not use multi-argument functions, so
+index
+will always be set to
+0
+in our examples.
+For outgoing messages, the binding name convention is
+<functionName>-out-<index>
+.
+The
+destination
+property specifies the name of the topic that messages will be consumed from,
+products
+in this case.
+The
+group
+property specifies what consumer group to add instances of the
+product
+microservice to,
+productsGroup
+in this example. This means that messages sent to the
+products
+topic will only be delivered by Spring Cloud Stream to one of the instances of the
+product
+microservice.
+Retries and dead-letter queues
+If a consumer fails to process a message, it may be re-queued for the failing consumer until it is successfully
+processed. If the content of the message is invalid, also
+known as a
+poisoned message
+, the message will block the consumer from processing other messages until it is manually removed. If the failure is due to a temporary problem, for example, the database can’t be reached due to a temporary network error, the processing will probably succeed after a number of retries.
+It must be possible to specify the number of retries until a message is moved to another storage for fault analysis and correction. A failing message is typically moved to a dedicated queue called a dead-letter queue. To avoid overloading the infrastructure during temporary failure, for example, a network error, it must be possible to configure how often retries are performed, preferably with an increasing length of time between each retry.
+In Spring Cloud Stream, this can be configured on the consumer side, for example, for the
+product
+microservice, as shown here:
+spring.cloud.stream.bindings.messageProcessor-in-0.consumer:
+maxAttempts:
+3
+backOffInitialInterval:
+500
+backOffMaxInterval:
+1000
+backOffMultiplier:
+2.0
+spring.cloud.stream.rabbit.bindings.messageProcessor-in-0.consumer:
+autoBindDlq:
+true
+republishToDlq:
+true
+spring.cloud.stream.kafka.bindings.messageProcessor-in-0.consumer:
+enableDlq:
+true
+In the preceding example, we specify that Spring Cloud Stream should perform
+3
+retries before placing a
+message on the dead-letter queue. The first retry will be attempted after
+500
+ms and the two other attempts after
+1000
+ms.
+Enabling the use of dead-letter queues is binding-specific; therefore, we have one configuration for RabbitMQ and one for Kafka.
+Guaranteed order and partitions
+If the business logic requires that messages are consumed and processed in the same order as they were sent, we cannot use multiple instances per consumer to increase processing performance; for example, we cannot use consumer groups. This might, in some cases, lead to an unacceptable
+latency in the processing of incoming messages.
+We can use
+partitions
+to ensure that messages are delivered in the same order as they were sent but without losing performance and scalability.
+In most cases, strict order in the processing of messages is only required for messages that affect the same business entities. For example, messages affecting the product with product ID
+1
+can, in many cases, be processed independently of messages that affect the product with product ID
+2
+. This means that the order only needs to be guaranteed for messages that have the same product ID.
+The solution to this is to make it possible to specify a
+key
+for each message, which the messaging system can use to guarantee that the order is kept between messages with the same key. This can be solved by introducing sub-topics, also
+known as
+partitions
+, in a topic. The messaging system places messages in a specific partition based on its key.
+Messages with the same key are always placed in the same partition. The messaging system only needs to guarantee the delivery order for messages in the same partition. To ensure the order of the messages, we configure one consumer instance per partition within a consumer group. By increasing the number of partitions, we can allow a consumer to increase its number of instances. This increases its message-processing performance without losing the delivery order. This is illustrated in the following diagram:
+Figure 7.10: Specifying keys for messages
+As seen in the preceding diagram, all messages with the
+Key
+set to
+123
+always go to the
+Products-1
+, partition while messages with the
+Key
+set to
+456
+go to the
+Products-2
+partition.
+In Spring Cloud Stream, this needs to be configured on both the publisher and consumer sides. On the
+publisher side, the key and number of partitions must be specified. For example, for the
+product-composite
+service, we have the following:
+spring.cloud.stream.bindings.products-out-0.producer:
+partition-key-expression:
+headers[
+'partitionKey'
+]
+partition-count:
+2
+This configuration means that the key will be taken from the message header with the name
+partitionKey
+and that two partitions will be used.
+Each consumer can specify which partition it wants to consume messages from. For example, for the
+product
+microservice, we have the following:
+spring.cloud.stream.bindings.messageProcessor-in-0:
+destination:
+products
+group:productsGroup
+consumer:
+partitioned:
+true
+instance-index:
+0
+This configuration tells Spring Cloud Stream that this consumer will only consume messages from partition number
+0
+, that is, the first partition.
+Defining topics and events
+As we
+already mentioned
+in the
+Spring Cloud Stream
+section in
+Chapter 2
+,
+Introduction to Spring Boot
+, Spring Cloud Stream is based on the publish and subscribe pattern, where a publisher publishes messages to topics and subscribers subscribe to topics they are interested in receiving messages from.
+We will use one
+topic
+per type of entity:
+products
+,
+recommendations
+, and
+reviews
+.
+Messaging systems handle
+messages
+that typically consist of headers and a body. An
+event
+is a message that describes something that has happened. For events, the message body can be used to
+describe the type of event, the
+event data, and a timestamp for when the event occurred.
+An event is, for the scope of this book, defined by the following:
+The
+type
+of event, for example, a create or delete event
+A
+key
+that identifies the data, for example, a product ID
+A
+data
+element, that is, the actual data in the event
+A
+timestamp
+, which describes when the event occurred
+The event class we will use looks as follows:
+public
+class
+Event
+<K, T>
+{
+public
+enum
+Type
+{
+CREATE, DELETE
+}
+private
+Event.Type eventType;
+private
+K key;
+private
+T data;
+private
+ZonedDateTime eventCreatedAt;
+public
+Event
+()
+{
+this
+.eventType =
+null
+;
+this
+.key =
+null
+;
+this
+.data =
+null
+;
+this
+.eventCreatedAt =
+null
+;
+    }
+public
+Event
+(Type eventType, K key, T data)
+{
+this
+.eventType = eventType;
+this
+.key = key;
+this
+.data = data;
+this
+.eventCreatedAt = now();
+    }
+public
+Type
+getEventType
+()
+{
+return
+eventType;
+    }
+public
+K
+getKey
+()
+{
+return
+key;
+    }
+public
+T
+getData
+()
+{
+return
+data;
+    }
+public
+ZonedDateTime
+getEventCreatedAt
+()
+{
+return
+eventCreatedAt;
+    }
+}
+Let’s explain
+the preceding
+source code in detail:
+The
+Event
+class is a generic class parameterized over the types of its
+key
+and
+data
+fields,
+K
+and
+T
+The event type is declared as an enumerator with the allowed values, that is,
+CREATE
+and
+DELETE
+The class defines two constructors, one empty and one that can be used to initialize the type, key, and value members
+Finally, the class defines getter methods for its member variables
+For the full source code, see the
+Event
+class in the
+api
+project.
+Changes in the Gradle build files
+To bring in Spring Cloud Stream and its binders for RabbitMQ and Kafka, we need to add the two
+starter dependencies known as
+spring-cloud-starter-stream-rabbit
+and
+spring-cloud-starter-stream-kafka
+. We also
+need a test dependency in the
+product-composite
+project,
+spring-cloud-stream::test-binder
+, to bring in test support. The following code shows this:
+dependencies
+{
+implementation
+'org.springframework.cloud:spring-cloud-starter-stream-rabbit'
+implementation
+'org.springframework.cloud:spring-cloud-starter-stream-kafka'
+testImplementation
+'org.springframework.cloud:spring-cloud-stream::test-binder'
+}
+To specify what version of Spring Cloud we want to use, we first declare a variable for the version:
+ext
+{
+springCloudVersion
+=
+"2022.0.1"
+}
+Next, we use the variable to set up dependency management for the specified Spring Cloud version, as seen here:
+dependencyManagement
+{
+imports
+{
+mavenBom
+"org.springframework.cloud:spring-cloud-
+dependencies:${springCloudVersion}"
+}
+}
+For the full source code, see the
+build.gradle
+build file in each of the microservices projects.
+With the required dependencies added to the Gradle build files, we can start to learn how to consume events in the core services.
+Consuming events in the core services
+To be able
+to consume
+events in the core services, we need to do the following:
+Declare message processors that consume events published on the core service’s topic
+Change our service implementations to use the reactive persistence layer
+Add configuration required for consuming events
+Change our tests so that they can test the asynchronous processing of the events
+The source code for consuming events is structured in the same way in all three core services, so we will only go through the source code for the
+product
+service.
+Declaring message processors
+The REST APIs for creating and deleting entities have been replaced with a
+message processor
+in each
+core microservice that consumes create and delete events on each entity’s topic. To be able to consume messages that have been published to a topic, we need to declare a Spring Bean that implements the functional interface
+java.util.function.Consumer
+.
+The message processor for the
+product
+service is declared as:
+@Configuration
+public
+class
+MessageProcessorConfig
+{
+private
+final
+ProductService productService;
+@Autowired
+public
+MessageProcessorConfig
+(
+ProductService productService
+)
+{
+this
+.productService = productService;
+  }
+@Bean
+public
+Consumer<Event<Integer,Product>>
+messageProcessor
+()
+{
+    ...
+From the preceding code, we can see that:
+The class is annotated with
+@Configuration
+, telling Spring to look for Spring beans in the class.
+We inject an implementation of the
+ProductService
+interface in the constructor. The
+productService
+bean contains the business logic to perform the actual creation and deletions of the product entities.
+We declare the message processor as a Spring bean that implements the functional interface
+Consumer
+, accepting an event as an input parameter of type
+Event<Integer,Product>
+.
+The
+implementation of the
+Consumer
+function looks like this:
+return
+event
+-> {
+switch
+(event.getEventType()) {
+case
+CREATE:
+Product
+product
+=
+event.getData();
+productService.createProduct
+(product).block();
+break
+;
+case
+DELETE:
+int
+productId
+=
+event.getKey();
+productService.deleteProduct
+(productId).block();
+break
+;
+default
+:
+String
+errorMessage
+=
+"Incorrect event type: "
++ 
+        event.getEventType() +
+", expected a CREATE or DELETE event"
+;
+throw
+new
+EventProcessingException
+(errorMessage);
+  }
+};
+The preceding implementation does the following:
+It takes an event of type
+Event<Integer,Product>
+as an input parameter
+Using a
+switch
+statement, based on the event type, it will either create or delete a product entity
+It uses the injected
+productService
+bean to perform the actual create and delete operation
+If the event type is neither create nor delete, an exception will be thrown
+To ensure that we can propagate exceptions thrown by the
+productService
+bean back to the messaging system, we call the
+block()
+method on the responses we get back from the
+productService
+bean. This ensures that the message processor waits for the
+productService
+bean to complete its creation or deletion in the underlying database. Without calling the
+block()
+method, we would not be able to propagate exceptions and the messaging system would not be able to re-queue a failed attempt or possibly move the message to a dead-letter queue; instead, the message would silently be dropped.
+Calling a
+block()
+method is, in general, considered a bad practice from a performance and scalability perspective. But in this case, we will only handle a few incoming messages in parallel, one per partition, as described above. This means that we will only have a few threads blocked concurrently, which will not negatively impact the performance or the scalability.
+For the full source code, see the
+MessageProcessorConfig
+classes in the
+product
+,
+recommendation
+, and
+review
+projects.
+Changes in the service implementations
+The service
+implementations of the create and delete methods for the
+product
+and
+recommendation
+service have been rewritten to use the non-blocking reactive persistence layer for MongoDB. For example, creating product entities is done as follows:
+@Override
+public
+Mono<Product>
+createProduct
+(Product body)
+{
+if
+(body.getProductId() <
+1
+) {
+throw
+new
+InvalidInputException
+(
+"
+Invalid productId: "
++ 
+      body.getProductId());
+  }
+ProductEntity
+entity
+=
+mapper.apiToEntity(body);
+  Mono<Product> newEntity = repository.save(entity)
+    .log(LOG.getName(), FINE)
+    .
+onErrorMap
+(
+      DuplicateKeyException.class,
+      ex ->
+new
+InvalidInputException
+(
+"Duplicate key, Product Id: "
++ body.getProductId()))
+    .map(e -> mapper.entityToApi(e));
+return
+newEntity;
+}
+Note from the preceding code that the
+onErrorMap()
+method is used to map the
+DuplicateKeyException
+persistence exception to our own
+InvalidInputException
+exception.
+For the
+review
+service, which uses the blocking persistence layer for JPA, the create and delete methods have been updated in the same way as described in the
+Dealing with blocking code section
+.
+For the full source code, see the following classes:
+ProductServiceImpl
+in the
+product
+project
+RecommendationServiceImpl
+in the
+recommendation
+project
+ReviewServiceImpl
+in the
+review
+project
+Adding configuration for consuming events
+We also
+need to set up a configuration for the messaging system to be able to consume events. To do this, we need to complete the following steps:
+We declare that RabbitMQ is the default messaging system and that the default content type is JSON:
+spring.cloud.stream:
+defaultBinder:
+rabbit
+default.contentType:
+application/json
+Next, we bind the input to the message processors to specific topic names, as follows:
+spring.cloud.stream:
+bindings.messageProcessor-in-0:
+destination:
+products
+Finally, we declare connectivity information for both Kafka and RabbitMQ:
+spring.cloud.stream.kafka.binder:
+brokers:
+127.0.0.1
+defaultBrokerPort:
+9092
+spring.rabbitmq:
+host:
+127.0.0.1
+port:
+5672
+username:
+guest
+password:
+guest
+---
+spring.config.activate.on-profile:
+docker
+spring.rabbitmq.host:
+rabbitmq
+spring.cloud.stream.kafka.binder.brokers:
+kafka
+In the
+default Spring profile, we specify hostnames to be used when we run our system landscape without Docker on
+localhost
+with the IP address
+127.0.0.1
+. In the
+docker
+Spring profile, we specify the hostnames we will use when running in Docker and using Docker Compose, that is,
+rabbitmq
+and
+kafka
+.
+Added to this configuration, the consumer configuration also specifies consumer groups, retry handling, dead-letter queues, and partitions as they were described earlier in the
+Handling challenges with messaging
+section.
+For the full source code, see the
+application.yml
+configuration files in the
+product
+,
+recommendation
+, and
+review
+projects.
+Changes in the test code
+Since the core services now receive events for creating and deleting their entities, the tests need to be
+updated so that they send events instead of calling REST APIs, as they did in the previous chapters. To be able to call the message processor from the test class, we inject the message processor bean into a member variable:
+@SpringBootTest
+class
+ProductServiceApplicationTests
+{
+@Autowired
+@Qualifier("messageProcessor")
+private
+Consumer<Event<Integer, Product>> messageProcessor;
+From the preceding code, we can see that we not only inject any
+Consumer
+function but also use the
+@Qualifier
+annotation to specify that we want to inject the
+Consumer
+function that has the name
+messageProcessor
+.
+To send create and delete events to the message processor, we add two helper methods,
+sendCreateProductEvent
+and
+sendDeleteProductEvent
+, in the test class:
+private
+void
+sendCreateProductEvent
+(
+int
+productId)
+{
+Product
+product
+=
+new
+Product
+(productId,
+"Name "
++ productId, productId,
+"SA"
+);
+    Event<Integer, Product> event =
+new
+Event
+(CREATE, productId, product);
+    messageProcessor.
+accept
+(event);
+  }
+private
+void
+sendDeleteProductEvent
+(
+int
+productId)
+{
+    Event<Integer, Product> event =
+new
+Event
+(DELETE, productId,
+null
+);
+    messageProcessor.
+accept
+(event);
+  }
+Note that
+we use the
+accept()
+method in the
+Consumer
+function interface declaration to invoke the message processor. This means that we skip the messaging system in the tests and call the message processor directly.
+The tests for creating and deleting entities are updated to use these helper methods.
+For the full source code, see the following test classes:
+ProductServiceApplicationTests
+in the
+product
+project
+RecommendationServiceApplicationTests
+in the
+recommendation
+project
+ReviewServiceApplicationTests
+in the
+review
+project
+We have seen what is required to consume events in the core microservices. Now let’s see how we can publish events in the composite microservice.
+Publishing events in the composite service
+When
+the composite service receives HTTP requests for the creation and deletion of composite products, it will
+publish the corresponding events to the core services on their topics. To be able to publish events in the composite service, we need to perform the following steps:
+Publish events in the integration layer
+Add configuration for publishing events
+Change tests so that they can test the publishing of events
+Note that no changes are required in the composite service implementation class – it is taken care of by the integration layer!
+Publishing events in the integration layer
+To publish
+an event in the integration layer, we need to:
+Create an
+Event
+object based on the body in the HTTP request
+Create a
+Message
+object where the
+Event
+object is used as the payload and the key field in the
+Event
+object is used as the partition key in the header
+Use the helper class
+StreamBridge
+to publish the event on the desired topic
+The code for sending create product events looks like this:
+@Override
+public
+Mono<Product>
+createProduct
+(Product body)
+{
+return
+Mono.fromCallable(() -> {
+      sendMessage(
+"products-out-0"
+,
+new
+Event
+(CREATE, body.getProductId(), body));
+return
+body;
+    }).subscribeOn(publishEventScheduler);
+  }
+private
+void
+sendMessage
+(String bindingName, Event event)
+{
+Message
+message
+=
+MessageBuilder.withPayload(event)
+      .setHeader(
+"partitionKey"
+, event.getKey())
+      .build();
+streamBridge
+.send(bindingName, message);
+  }
+In the preceding code, we can see:
+The integration layer implements the
+createProduct()
+method in the
+ProductService
+interface by using a helper method,
+sendMessage()
+. The helper method takes the name of an output binding and an event object. The binding name
+products-out-0
+will be bound to the topic of the
+product
+service in the configuration below.
+Since the
+sendMessage()
+uses blocking code, when calling
+streamBridge
+, it is executed on a thread provided by a dedicated scheduler,
+publishEventScheduler
+. This is the same approach as for handling blocking JPA code in the
+review
+microservice. See the section on
+Dealing with blocking code
+for details.
+The helper method,
+sendMessage()
+, creates a
+Message
+object and sets the
+payload
+and the
+partitionKey
+header as described above. Finally, it uses the
+streamBridge
+object to send the event to the messaging system, which will publish it on the topic defined in the configuration.
+For the full source code, see the
+ProductCompositeIntegration
+class in the
+product-composite
+project.
+Adding configuration for publishing events
+We also
+need to set up the configuration for the messaging system, to be able to publish events; this is similar to what we did for the consumers. Declaring RabbitMQ as the default messaging system, JSON as the default content type, and Kafka and RabbitMQ for connectivity information is the same as for the consumers.
+To declare what topics should be used for the output binding names, we have the following configuration:
+spring.cloud.stream:
+bindings:
+products-out-0:
+destination:
+products
+recommendations-out-0:
+destination:
+recommendations
+reviews-out-0:
+destination:
+reviews
+When
+using partitions, we also need to specify the partition key and the number of partitions that will be used:
+spring.cloud.stream.bindings.
+products-out-
+0.producer:
+partition-key-expression:
+headers[
+'partitionKey'
+]
+partition-count:
+2
+In the preceding configuration, we can see that:
+The configuration applies for the binding name
+products-out-0
+The partition key used will be taken from the message header
+partitionKey
+Two partitions will be used
+For the full source code, see the
+application.yml
+configuration file in the
+product-composite
+project.
+Changes in the test code
+Testing asynchronous event-driven microservices is, by its nature, difficult. Tests typically need to synchronize
+on the asynchronous background processing in some way to be able to verify the result. Spring Cloud Stream comes with support, in the form of a test binder, that can be used to verify what messages have been sent without using any messaging system during the tests!
+See the
+Changes in the Gradle build files
+section earlier for how the test support is included in the
+product-composite
+project.
+The test support includes an
+OutputDestination
+helper class, which can be used to get the messages that were sent during a test. A new test class,
+MessagingTests
+, has been added to run tests that verify that the expected messages are sent. Let’s go through the most important parts of the test class:
+To be able to inject an
+OutputDestination
+bean in the test class, we also need to bring in its configuration from the class
+TestChannelBinderConfiguration
+. This is done with the following code:
+@SpringBootTest
+@Import({TestChannelBinderConfiguration.class})
+class
+MessagingTests
+{
+@Autowired
+private
+OutputDestination target
+;
+Next, we declare
+a couple of helper methods for reading messages and also to be able to purge a topic. The code looks like this:
+private
+void
+purgeMessages
+(String bindingName)
+{
+  getMessages(bindingName);
+}
+private
+List<String>
+getMessages
+(String bindingName)
+{
+  List<String> messages =
+new
+ArrayList
+<>();
+boolean
+anyMoreMessages
+=
+true
+;
+while
+(anyMoreMessages) {
+    Message<
+byte
+[]> message = 
+      getMessage(bindingName);
+if
+(message ==
+null
+) {
+      anyMoreMessages =
+false
+;
+    }
+else
+{
+      messages.add(
+new
+String
+(message.getPayload()));
+    }
+  }
+return
+messages;
+}
+private
+Message<
+byte
+[]>
+getMessage
+(String bindingName){
+try
+{
+return
+target.receive(
+0
+, bindingName);
+  }
+catch
+(NullPointerException npe) {
+    LOG.error(
+"getMessage() received a NPE with binding = {}"
+, bindingName);
+return
+null
+;
+  }
+}
+From the preceding code, we can see that:
+The
+getMessage()
+method returns a message from a specified topic using the
+OutputDestination
+bean, named
+target
+The
+getMessages()
+method uses the
+getMessage()
+method to return all messages in a topic
+The
+purgeMessages()
+method uses the
+getMessages()
+method to purge a topic from all current messages
+Each test starts with purging all topics involved in the tests using a
+setup()
+method annotated with
+@BeforeEach
+:
+@BeforeEach
+void
+setUp
+()
+{
+    purgeMessages(
+"products"
+);
+    purgeMessages(
+"recommendations"
+);
+    purgeMessages(
+"reviews"
+);
+  }
+An actual test
+can verify the messages in a topic using the
+getMessages()
+method. For example, see the following test for the creation of a composite product:
+@Test
+void
+createCompositeProduct1
+()
+{
+ProductAggregate
+composite
+=
+new
+ProductAggregate
+(
+1
+,
+"name"
+,
+1
+,
+null
+,
+null
+,
+null
+);
+postAndVerifyProduct
+(composite, ACCEPTED);
+final
+List<String> productMessages =
+getMessages
+(
+"products"
+);
+final
+List<String> recommendationMessages =
+getMessages
+(
+"recommendations"
+);
+final
+List<String> reviewMessages =
+getMessages
+(
+"reviews"
+);
+// Assert one expected new product event queued up
+assertEquals(
+1
+, productMessages.size());
+  Event<Integer, Product> expectedEvent =
+new
+Event
+(CREATE, composite.getProductId(),
+new
+Product
+(composite.getProductId(), composite.getName(), composite.getWeight(),
+null
+));
+  assertThat(productMessages.get(
+0
+), is(
+sameEventExceptCreatedAt
+(expectedEvent)));
+// Assert no recommendation and review events
+assertEquals(
+0
+, recommendationMessages.size());
+assertEquals(
+0
+, reviewMessages.size());
+}
+From the preceding code, we can see an example where a test:
+First makes an HTTP POST request, requesting the creation of a composite product.
+Next, gets all messages from the three topics, one for each underlying core service.
+For these tests, the specific timestamp for when an event was created is irrelevant. To be able to compare an actual event with an expected event, ignoring differences in the
+eventCreatedAt
+field, a helper class called
+IsSameEvent
+can be used. The
+sameEventExceptCreatedAt()
+method is a static method in the
+IsSameEvent
+class that compares
+Event
+objects and treats them as equal if all the fields are equal, except for the
+eventCreatedAt
+field.
+Finally, it verifies that the expected events can be found, and no others.
+For the full
+source code, see the test classes
+MessagingTests
+and
+IsSameEvent
+in the
+product-composite
+project.
+Running manual tests of the reactive microservice landscape
+Now, we have fully reactive microservices, both in terms of non-blocking synchronous REST APIs and
+event-driven asynchronous services. Let’s try them out!
+We will learn how to run tests using both RabbitMQ and Kafka as the message broker. Since RabbitMQ can be used both with and without partitions, we will test both cases. Three different configurations will be used, each defined in a separate Docker Compose file:
+Using RabbitMQ without the use of partitions
+Using RabbitMQ with two partitions per topic
+Using Kafka with two partitions per topic
+However, before testing these three configurations, we need to add two features to be able to test the asynchronous processing:
+Saving events for later inspection when using RabbitMQ
+A health API that can be used to monitor the state of the microservice landscape
+Saving events
+After running some tests on event-driven asynchronous services, it might be of interest to see what events
+were actually sent. When using Spring Cloud Stream with Kafka, events are retained in the topics, even after consumers have processed them. However, when using Spring Cloud Stream with RabbitMQ, the events are removed after they have been processed successfully.
+To be able to see what events have been published on each topic, Spring Cloud Stream is configured to save published events in a separate consumer group,
+auditGroup
+, per topic. For the
+products
+topic, the configuration looks like the following:
+spring.cloud.stream:
+bindings:
+products-out-0:
+destination:
+products
+producer:
+required-groups:
+auditGroup
+When using RabbitMQ, this will result in extra queues being created where the events are stored for later inspection.
+For the full source code, see the
+application.yml
+configuration file in the
+product-composite
+project.
+Adding a health API
+Testing a system landscape of microservices that uses a combination of synchronous APIs and asynchronous
+messaging is challenging.
+For example, how do we know when a newly started landscape of microservices, together with their databases and messaging system, are ready to process requests and messages?
+To make it easier to know when all the microservices are ready, we have added health APIs to the microservices. The health APIs are based on the support for
+health endpoints
+that comes with the Spring Boot module
+Actuator
+. By default, an Actuator-based health endpoint responds with
+UP
+(and gives 200 as the HTTP return status) if the microservice itself and all the dependencies Spring Boot knows about are available. Dependencies Spring Boot knows about include databases and messaging systems. If the microservice itself or any of its dependencies are not available, the health endpoint responds with
+DOWN
+(and returns 500 as the HTTP return status).
+We can also extend health endpoints to cover dependencies that Spring Boot is not aware of. We will use this feature to extend to the product composite’s
+health
+endpoint, so it also includes the health of the three core services. This means that the product composite
+health
+endpoint will only respond with
+UP
+if itself and the three core microservices are healthy. This can be used either manually or automatically by the
+test-em-all.bash
+script to find out when all the microservices and their dependencies are up and running.
+In the
+ProductCompositeIntegration
+class, we have added helper methods for checking the health of the three core microservices, as follows:
+public
+Mono<Health>
+getProductHealth
+()
+{
+return
+getHealth(productServiceUrl);
+}
+public
+Mono<Health>
+getRecommendationHealth
+()
+{
+return
+getHealth(recommendationServiceUrl);
+}
+public
+Mono<Health>
+getReviewHealth
+()
+{
+return
+getHealth(reviewServiceUrl);
+}
+private
+Mono<Health>
+getHealth
+(String url)
+{
+    url +=
+"/actuator/health"
+;
+    LOG.debug(
+"Will call the Health API on URL: {}"
+, url);
+return
+webClient.get().uri(url).retrieve().bodyToMono(String.class)
+        .map(s ->
+new
+Health
+.Builder().up().build())
+        .onErrorResume(ex -> Mono.just(
+new
+Health
+.Builder().down(ex).build()))
+        .log(LOG.getName(), FINE);
+}
+This code is similar to the code we used previously to call the core services to read APIs. Note that the health endpoint is, by default, set to
+/actuator/health
+.
+For the full source code, see the
+ProductCompositeIntegration
+class in the
+product-composite
+project.
+In the configuration class,
+HealthCheckConfiguration
+, we use these helper methods to register a composite health
+check using the Spring Actuator class
+CompositeReactiveHealthContributor
+:
+@Configuration
+public
+class
+HealthCheckConfiguration
+{
+@Autowired
+ProductCompositeIntegration integration;
+@Bean
+ReactiveHealthContributor
+coreServices
+()
+{
+final
+Map<String, ReactiveHealthIndicator> registry =
+new
+LinkedHashMap
+<>();
+    registry.put(
+"product"
+, () -> integration.getProductHealth());
+    registry.put(
+"recommendation"
+, () -> integration.getRecommendationHealth());
+    registry.put(
+"
+review"
+, () -> integration.getReviewHealth());
+return
+CompositeReactiveHealthContributor.fromMap(registry);
+  }
+}
+For the full source code, see the
+HealthCheckConfiguration
+class in the
+product-composite
+project.
+Finally, in the
+application.yml
+configuration file of all four microservices, we configure the Spring Boot Actuator so that it does the following:
+Shows details about the state of health, which not only includes
+UP
+or
+DOWN
+, but also information about its dependencies
+Exposes all its endpoints over HTTP
+The configuration for these two settings looks as follows:
+management.endpoint.health.show-details:
+"ALWAYS"
+management.endpoints.web.exposure.include:
+"*"
+For an example of the full source code, see the
+application.yml
+configuration file in the
+product-composite
+project.
+WARNING
+: These configuration settings are helpful during development, but it can be a security issue to reveal too much information in actuator endpoints in production systems. Therefore, plan to minimize the information exposed by the actuator endpoints in production!
+This can be done by replacing
+"*"
+with, for example,
+health,info
+in the setting of the
+management.endpoints.web.exposure.include
+property above.
+For details regarding the endpoints that are exposed by Spring Boot Actuator, see
+https://docs.spring.io/spring-boot/docs/current/reference/html/production-ready-endpoints.html
+.
+The health endpoint
+can be used manually with the following command (don’t try it yet, wait until we have started up the microservice landscape below!):
+curl localhost:8080/actuator/health -s | jq .
+This will result in a response containing:
+Figure 7.11: Health endpoint response
+In the preceding output, we can see that the composite service reports that it is healthy; that is, its status is
+UP
+. At the end of the response, we can see that all three core microservices are also reported as healthy.
+With a health API in place, we are ready to test our reactive microservices.
+Using RabbitMQ without using partitions
+In this
+section, we will test the reactive microservices together with RabbitMQ but without using partitions.
+The default
+docker-compose.yml
+Docker Compose file is used for this configuration. The following changes have been added to the file:
+RabbitMQ has been added, as shown here:
+rabbitmq:
+image:
+rabbitmq:3.11.8-management
+mem_limit:
+512m
+ports:
+-
+5672
+:5672
+-
+15672
+:15672
+healthcheck
+:
+test:
+[
+"CMD"
+,
+"rabbitmqctl"
+,
+"status"
+]
+interval:
+5s
+timeout:
+2s
+retries:
+60
+From the declaration of RabbitMQ above, we can see that:
+We use a Docker image for RabbitMQ v3.11.8 including the management plugin and Admin Web UI
+We expose the standard ports for connecting to RabbitMQ and the Admin Web UI,
+5672
+and
+15672
+We add a health check so that Docker can find out when RabbitMQ is ready to accept connections
+The microservices now have a dependency declared on the RabbitMQ service. This means that Docker will not start the microservice containers until the RabbitMQ service is reported to be healthy:
+depends_on:
+rabbitmq:
+condition:
+service_healthy
+To run
+manual tests, perform the following steps:
+Build and start the system landscape with the following commands:
+cd $BOOK_HOME/Chapter07
+./gradlew build && docker-compose build && docker-compose up -d
+Now, we have to wait for the microservice landscape to be up and running. Try running the following command a few times:
+curl -s localhost:8080/actuator/health | jq -r .status
+When it returns
+UP
+, we are ready to run our tests!
+First, create a composite product with the following commands:
+body='{"productId":1,"name":"product name C","weight":300, "recommendations":[
+{"recommendationId":1,"author":"author 1","rate":1,"content":"content 1"},
+ {"recommendationId":2,"author":"author 2","rate":2,"content":"content 2"},
+ {"recommendationId":3,"author":"author 3","rate":3,"content":"content 3"}
+], "reviews":[
+ {"reviewId":1,"author":"author 1","subject":"subject 1","content":"content 1"},
+ {"reviewId":2,"author":"author 2","subject":"subject 2","content":"content 2"},
+ {"reviewId":3,"author":"author 3","subject":"subject 3","content":"content 3"}
+]}'
+curl -X POST localhost:8080/product-composite -H "Content-Type: application/json" --data "$body"
+When using Spring Cloud Stream together with RabbitMQ, it will create one RabbitMQ exchange per topic and a set of queues, depending on our configuration. Let’s see what queues Spring Cloud Stream has created for us!
+Open the
+following URL in a web browser:
+http://localhost:15672/#/queues
+. Log in with the default username/password
+guest
+/
+guest
+. You should see the following queues:
+Figure 7.12: List of queues
+For each topic, we can see one queue for the
+auditGroup
+, one queue for the consumer group that’s used by the corresponding core microservice, and one dead-letter queue. We can also see that the
+auditGroup
+queues contain messages, as expected!
+Click on
+the
+products.auditGroup
+queue and scroll down to the
+Get messages
+section, expand it, and click on the button named
+Get Message(s)
+to see the message in the queue:
+Figure 7.13: Viewing the message in the queue
+From the preceding screenshot, note the
+Payload
+but also the header
+partitionKey
+, which we will use in the next section where we try out RabbitMQ with partitions.
+Next, try to get the product composite using the following code:
+curl -s localhost:8080/product-composite/1 | jq
+Finally, delete it with the following command:
+curl -X DELETE localhost:8080/product-composite/1
+Try to get the deleted product again. It should result in a
+404 - "NotFound"
+response!
+If you look in the RabbitMQ audit queues again, you should be able to find new messages containing delete events.
+Wrap up the test by bringing down the microservice landscape with the following command:
+docker-compose down
+This
+completes the tests where we use RabbitMQ without partitions. Now, let’s move on and test RabbitMQ with partitions.
+Using RabbitMQ with partitions
+Now, let’s try out the partitioning support in Spring Cloud Stream!
+We have
+a separate Docker Compose file prepared for using RabbitMQ with two partitions per topic:
+docker-compose-partitions.yml
+. It will also start two instances per core microservice, one for each partition. For example, a second
+product
+instance is configured as follows:
+product-p1:
+build:
+microservices/product-service
+mem_limit:
+512m
+environment:
+-
+SPRING_PROFILES_ACTIVE=docker,
+streaming_partitioned
+,
+streaming_instance_1
+depends_on:
+mongodb:
+condition:
+service_healthy
+rabbitmq:
+condition:
+service_healthy
+Here is an explanation of the preceding configuration:
+We use the same source code and Dockerfile that we did for the first
+product
+instance but configure them differently.
+To make all microservice instances aware that they will use partitions, we have added the Spring profile
+streaming_partitioned
+to their environment variable
+SPRING_PROFILES_ACTIVE
+.
+We assign the two
+product
+instances to different partitions using different Spring profiles. The Spring profile
+streaming_instance_0
+is used by the first product instance and
+streaming_instance_1
+is used by the second instance,
+product-p1
+.
+The second
+product
+instance will only process asynchronous events; it will not respond to API calls. Since it has a different name,
+product-p1
+(also used as its DNS name), it will not respond to calls to a URL starting with
+http://product:8080
+.
+Start up the microservice landscape with the following command:
+export COMPOSE_FILE=docker-compose-partitions.yml
+docker-compose build && docker-compose up -d
+Create a composite product in the same way as for the tests in the previous section but also create a composite product with the product ID set to
+2
+. If you take a look at the queues set up by Spring Cloud Stream, you will see one queue per partition and that the product audit queues now contain one message each; the event for product ID
+1
+was placed in one partition and the event for
+product ID
+2
+was placed in the other partition.
+If you go back to
+http://localhost:15672/#/queues
+in your web browser, you should see something like the following:
+Figure 7.14: List of queues
+To end the test with RabbitMQ using partitions, bring down the microservice landscape with the following command:
+docker-compose down
+unset COMPOSE_FILE
+We are now done with tests using RabbitMQ, both with and without partitions. The final test configuration we shall try out is testing the microservices together with Kafka.
+Using Kafka with two partitions per topic
+Now, we shall try out a very cool feature of Spring Cloud Stream: changing the messaging system from RabbitMQ to Apache Kafka!
+This can
+be done simply by changing the value of the
+spring.cloud.stream.defaultBinder
+property from
+rabbit
+to
+kafka
+. This is handled by the
+docker-compose-kafka.yml
+Docker Compose file, which has also replaced RabbitMQ with Kafka and ZooKeeper. The configuration of Kafka and ZooKeeper looks as follows:
+kafka:
+image:
+confluentinc/cp-kafka:7.3.1
+restart:
+always
+mem_limit:
+1024m
+ports:
+-
+"9092:9092"
+environment:
+-
+KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181
+-
+KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+-
+KAFKA_BROKER_ID=1
+-
+KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+depends_on:
+-
+zookeeper
+zookeeper:
+image:
+confluentinc/cp-zookeeper:7.3.1
+restart:
+always
+mem_limit:
+512m
+ports:
+-
+"2181:2181"
+environment:
+-
+ZOOKEEPER_CLIENT_PORT=2181
+Kafka is also configured to use two partitions per topic, and like before, we start up two instances per core microservice, one for each partition. See the Docker Compose file,
+docker-compose-kafka.yml
+, for details!
+Start up the microservice landscape with the following command:
+export COMPOSE_FILE=docker-compose-kafka.yml
+docker-compose build && docker-compose up -d
+Repeat the tests from the previous section: create two products, one with the product ID set to
+1
+and one with the product ID set to
+2
+.
+Unfortunately, Kafka doesn’t come with any graphical tools that can be used to inspect topics, partitions, and the messages that are placed within them. Instead, we can run CLI commands in the Kafka Docker container.
+To see a list of topics, run the following command:
+docker-compose exec kafka kafka-topics --bootstrap-server localhost:9092 --list
+Expect an output like the one shown here:
+Figure 7.15: Viewing a list of topics
+Here is
+what we see in the preceding output:
+The topics prefixed with
+error
+are the topics corresponding to dead-letter queues.
+You will not find any
+auditGroup
+groups as in the case of RabbitMQ. Since events are retained in the topics by Kafka, even after consumers have processed them, there is no need for an extra
+auditGroup
+group.
+To see the partitions in a specific topic, for example, the
+products
+topic, run the following command:
+docker-compose exec kafka kafka-topics --bootstrap-server localhost:9092 --describe --topic products
+Expect an output like the one shown here:
+Figure 7.16: Viewing partitions in the products topic
+To see all the messages in a specific partition, for example, partition
+1
+in the
+products
+topic, run the following command:
+docker-compose exec kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic products --from-beginning --timeout-ms 1000 --partition 1
+Expect an
+output like the one shown here:
+Figure 7.17: Viewing all messages in partition 1 in the products topic
+The output will end with a timeout exception since we stop the command by specifying a timeout for the command of
+1000
+ms.
+Bring down the microservice landscape with the following command:
+docker-compose down
+unset COMPOSE_FILE
+Now, we have learned how Spring Cloud Stream can be used to switch a message broker from RabbitMQ to Kafka without requiring any changes in the source code. It just requires a few changes in the Docker Compose file.
+Let’s move on to the last section of this chapter, learning how to run these tests automatically!
+Running automated tests of the reactive microservice landscape
+To be able
+to run tests of the reactive microservice landscape automatically instead of manually, the automated
+test-em-all.bash
+test script has been enhanced. The most important changes are as follows:
+The script uses the new
+health
+endpoint to know when the microservice landscape is operational, as shown here:
+waitForService curl http://$HOST:$PORT/actuator/health
+The script has a new
+waitForMessageProcessing()
+function, which is called after the test data is set up. Its purpose is simply to wait for the creation of the test data to be completed by the asynchronous create services.
+To use the test script to automatically run the tests with RabbitMQ and Kafka, perform the following steps:
+Run the tests using the default Docker Compose file, that is, with RabbitMQ without partitions, with the following commands:
+unset COMPOSE_FILE
+./test-em-all.bash start stop
+Run the tests for RabbitMQ with two partitions per topic using the Docker Compose
+docker-compose-partitions.yml
+file with the following commands:
+export COMPOSE_FILE=docker-compose-partitions.yml 
+./test-em-all.bash start stop
+unset COMPOSE_FILE
+Finally, run the tests with Kafka and two partitions per topic using the Docker Compose
+docker-compose-kafka.yml
+file with the following commands:
+export COMPOSE_FILE=docker-compose-kafka.yml 
+./test-em-all.bash start stop
+unset COMPOSE_FILE
+In this section, we have learned how to use the
+test-em-all.bash
+test script to automatically run tests of the reactive microservice landscape, which has been configured to use either RabbitMQ or Kafka as its message broker.
+Summary
+In this chapter, we have seen how we can develop reactive microservices!
+Using Spring WebFlux and Spring WebClient, we can develop non-blocking synchronous APIs that can handle incoming HTTP requests and send outgoing HTTP requests without blocking any threads. Using Spring Data’s reactive support for MongoDB, we can also access MongoDB databases in a non-blocking way, that is, without blocking any threads while waiting for responses from the database. Spring WebFlux, Spring WebClient, and Spring Data rely on Project Reactor to provide their reactive and non-blocking features. When we must use blocking code, for example, when using Spring Data for JPA, we can encapsulate the processing of the blocking code by scheduling the processing of it in a dedicated thread pool.
+We have also seen how Spring Data Stream can be used to develop event-driven asynchronous services that work on both RabbitMQ and Kafka as messaging systems without requiring any changes in the code. By doing some configuration, we can use features in Spring Cloud Stream such as consumer groups, retries, dead-letter queues, and partitions to handle the various challenges of asynchronous messaging.
+We have also learned how to manually and automatically test a system landscape consisting of reactive microservices.
+This was the final chapter on how to use fundamental features in Spring Boot and Spring Framework.
+Next up is an introduction to Spring Cloud and how it can be used to make our services production-ready, scalable, robust, configurable, secure, and resilient!
+Questions
+Why is it important to know how to develop reactive microservices?
+How do you choose between non-blocking synchronous APIs and event-/message-driven asynchronous services?
+What makes an event different from a message?
+Name some challenges with message-driven asynchronous services. How do we handle them?
+Why is the following test not failing?
+@Test
+void
+testStepVerifier
+()
+{
+  StepVerifier.create(Flux.just(
+1
+,
+2
+,
+3
+,
+4
+)
+    .filter(n -> n %
+2
+==
+0
+)
+    .map(n -> n *
+2
+)
+    .log())
+    .expectNext(
+4
+,
+8
+,
+12
+);
+}
+First, ensure that the test fails. Next, correct the test so that it succeeds.
+What are the challenges of writing tests with reactive code using JUnit, and how can we handle them?
+
+8
+Introduction to Spring Cloud
+So far, we have seen how we can use Spring Boot to build microservices with well-documented APIs, along with Spring WebFlux and
+springdoc-openapi
+; persist data in MongoDB and SQL databases using Spring Data for MongoDB and JPA; build reactive microservices either as non-blocking APIs using Project Reactor or as event-driven asynchronous services using Spring Cloud Stream with RabbitMQ or Kafka, together with Docker; and manage and test a system landscape consisting of microservices, databases, and messaging systems.
+Now, it’s time to see how we
+can use
+Spring Cloud
+to make our services production-ready, that is, scalable, robust, configurable, secure, and resilient.
+In this chapter, we will introduce you to how Spring Cloud can be used to implement the following design patterns from
+Chapter 1
+,
+Introduction to Microservices
+, in the
+Design patterns for microservices
+section:
+Service discovery
+Edge server
+Centralized configuration
+Circuit breaker
+Distributed tracing
+Technical requirements
+This chapter does not contain any source code, and so no tools need to be installed.
+The evolution of Spring Cloud
+In
+its initial 1.0 release in March 2015, Spring Cloud was mainly a wrapper around tools from Netflix OSS, which are as follows:
+Netflix Eureka, a discovery server
+Netflix Ribbon, a client-side load balancer
+Netflix Zuul, an edge server
+Netflix Hystrix, a circuit breaker
+The initial release of Spring Cloud also contained a configuration server and integration with Spring Security that provided OAuth 2.0 protected APIs. In May 2016, the Brixton release (v1.1) of Spring Cloud was made generally available. With the Brixton release, Spring Cloud got support for distributed tracing based on Spring Cloud Sleuth and Zipkin, which originated from Twitter. These initial Spring Cloud components could
+be used to implement the preceding design patterns. For more details, see
+https://spring.io/blog/2015/03/04/spring-cloud-1-0-0-available-now
+and
+https://spring.io/blog/2016/05/11/spring-cloud-brixton-release-is-available
+.
+Since its inception, Spring Cloud has grown considerably over the years and has added support for the following, among others:
+Service discovery and centralized configuration based on HashiCorp Consul and Apache Zookeeper
+Event-driven microservices using Spring Cloud Stream
+Cloud providers such as Microsoft Azure, Amazon Web Services, and Google Cloud Platform
+See
+https://spring.io/projects/spring-cloud
+for a complete list of tools.
+Since the release of Spring Cloud Greenwich (v2.1) in January 2019, some of the Netflix tools mentioned previously have been placed in maintenance mode in Spring Cloud.
+The reason for this is a mixture of Netflix no longer adding new features to some of the tools and Spring Cloud adding better alternatives. The following replacements are recommended by the Spring Cloud project:
+Current component
+Replaced by
+Netflix Hystrix
+Resilience4j
+Netflix Hystrix Dashboard/Netflix Turbine
+Micrometer and monitoring system
+Netflix Ribbon
+Spring Cloud LoadBalancer
+Netflix Zuul
+Spring Cloud Gateway
+Table 8.1: Spring Cloud tool replacements
+For more details, see:
+https://spring.io/blog/2019/01/23/spring-cloud-greenwich-release-is-now-available
+https://github.com/Netflix/Hystrix#hystrix-status
+https://github.com/Netflix/ribbon#project-status-on-maintenance
+With
+the release of Spring Cloud Ilford (v2020.0.0) in December 2020, the only remaining Netflix component in Spring Cloud is Netflix Eureka.
+Finally, together with Spring Boot 3, Spring Cloud Kilburn (v2022.0.0) was released in December 2022. As already mentioned in
+Chapter 2
+,
+Introduction to Spring Boot
+, in the
+News in Spring Boot 3.0
+section, Spring Cloud Sleuth has been replaced by Micrometer Tracing to support distributed tracing.
+In this book, we will use the software components in the following table to implement the design patterns mentioned previously:
+Design pattern
+Software component
+Service discovery
+Netflix Eureka and Spring Cloud LoadBalancer
+Edge server
+Spring Cloud Gateway and Spring Security OAuth
+Centralized configuration
+Spring Cloud Configuration Server
+Circuit breaker
+Resilience4j
+Distributed tracing
+Micrometer Tracing and Zipkin
+Table 8.2: Software components by design pattern
+Now, let’s go through the design patterns and introduce the software components that will be used to implement them!
+Using Netflix Eureka for service discovery
+Service discovery is
+probably the most important support function required to make a landscape of cooperating microservices production ready. As we already described in
+Chapter 1
+,
+Introduction to Microservices
+, in the
+Service discovery
+section, a service discovery service (or a
+discovery service
+as an abbreviation) can be used to keep track of existing microservices and their instances.
+The first discovery service that Spring Cloud supported was
+Netflix Eureka
+.
+We will use
+this in
+Chapter 9
+,
+Adding Service Discovery Using Netflix Eureka
+, along with a
+load balancer based on Spring Cloud
+LoadBalancer.
+We will see how easy it is to register microservices with Netflix Eureka when using Spring Cloud. We will also learn how a client can send HTTP requests, such as a call to a RESTful API, to one of the instances registered in Netflix Eureka. In addition, the chapter will cover how to scale up the number of instances of a microservice, and how requests to a microservice will be load-balanced over its available instances (based on, by default, round-robin scheduling).
+The following screenshot demonstrates the web UI from Eureka, where we can see what microservices we have registered:
+Figure 8.1: Viewing microservices currently registered with Eureka
+From the
+preceding screenshot, we can see that
+the review service has three instances available, while the other three services only have one instance each.
+With Netflix Eureka introduced, let’s introduce how Spring Cloud can help to protect a microservices system landscape using an edge server.
+Using Spring Cloud Gateway as an edge server
+Another
+very important support function
+is an edge server. As we already described in
+Chapter 1
+,
+Introduction to Microservices
+, in the
+Edge server
+section, it can be used to secure a microservice landscape, which involves hiding private services from external usage and protecting public services when they’re used by external clients.
+Initially, Spring Cloud used Netflix Zuul v1 as its edge server. Since the Spring Cloud Greenwich release, it’s recommended to use
+Spring Cloud Gateway
+instead. Spring Cloud Gateway comes with similar support for critical features, such as URL
+path-based routing and the protection of endpoints via the
+use of
+OAuth 2.0
+and
+OpenID Connect
+(
+OIDC
+).
+One important difference between Netflix Zuul v1 and Spring Cloud Gateway is that Spring Cloud Gateway is based on non-blocking APIs that use Spring 6, Project Reactor, and Spring Boot 3, while Netflix Zuul v1 is based on blocking APIs. This means that Spring Cloud Gateway should be able to handle larger numbers of concurrent requests than Netflix Zuul v1, which is important for an edge server that all external traffic goes through.
+The following diagram shows how all requests from external clients go through Spring Cloud Gateway as an edge server. Based on URL paths, it routes requests to the intended microservice:
+Figure 8.2: Requests being routed through an edge server
+In the
+preceding diagram, we can see how the edge server
+will send external requests that have a URL path that starts with
+/product-composite/
+to the
+Product Composite
+microservice. The core services
+Product
+,
+Recommendation
+, and
+Review
+are not reachable from external clients.
+In
+Chapter 10
+,
+Using Spring Cloud Gateway to Hide Microservices Behind an Edge Server
+, we will look at how to set up Spring Cloud Gateway with our microservices.
+In
+Chapter 11
+,
+Securing Access to APIs
+, we will see how we can use Spring Cloud Gateway together with Spring Security OAuth2 to protect access to the edge server using OAuth 2.0 and OIDC. We will also see how Spring Cloud Gateway can propagate identity information of the caller down to our microservices, for example, the
+username or email address of the
+caller.
+With Spring Cloud Gateway introduced, let’s see how Spring Cloud can help to manage the configuration of a system landscape of microservices.
+Using Spring Cloud Config for centralized configuration
+To
+manage the configuration
+of a system landscape of microservices, Spring Cloud contains Spring Cloud Config, which provides the centralized management of configuration files according to the requirements described in
+Chapter 1
+,
+Introduction to Microservices
+, in the
+Central configuration
+section.
+Spring Cloud Config supports storing configuration files in a number of different backends, such as the following:
+A Git repository, for example, on GitHub or Bitbucket
+A local filesystem
+HashiCorp Vault
+A JDBC database
+Spring Cloud Config allows us to handle configuration in a hierarchical structure; for example, we can place common parts of the configuration in a common file and microservice-specific settings in separate configuration files.
+Spring Cloud Config also supports detecting changes in the configuration and pushing notifications to the affected microservices. It uses
+Spring Cloud Bus
+to transport the notifications. Spring Cloud Bus is an
+abstraction on top of Spring Cloud Stream that we are already familiar with; that is, it supports the use of either RabbitMQ or Kafka as the messaging system for transporting notifications out of the box.
+The following diagram illustrates the cooperation between Spring Cloud Config, its clients, a Git repository, and Spring Cloud Bus:
+Figure 8.3: How Spring Cloud Config fits into the microservice landscape
+The diagram shows the following:
+When the microservices start up, they ask the configuration server for its configuration.
+The configuration server gets the configuration from, in this case, a Git repository.
+Optionally, the Git repository can be configured to send notifications to the configuration server when Git commits are pushed to the Git repository.
+The configuration server will publish change events using Spring Cloud Bus. The
+microservices that are affected by the change will react and
+retrieve its updated configuration from the configuration server.
+Finally, Spring Cloud Config also supports the encryption of sensitive information in the configuration, such as credentials.
+We will learn about Spring Cloud Config in
+Chapter 12
+,
+Centralized Configuration
+.
+With Spring Cloud Config introduced, let’s see how Spring Cloud can help make microservices more resilient to failures that happen from time to time in a system landscape.
+Using Resilience4j for improved resilience
+In a fairly large-scale system landscape of cooperating microservices, we must assume that there is something going wrong all of the time. Failures must be seen as a normal state, and the system landscape must be designed to handle it!
+Initially, Spring Cloud came with
+Netflix Hystrix, a well-proven circuit breaker. But as already mentioned above, since the Spring Cloud Greenwich release, it is recommended to replace Netflix Hystrix
+with
+Resilience4j
+. Resilience4j is an open source-based fault tolerance library. It comes with a larger range of fault tolerance mechanisms compared to Netflix Hystrix:
+A circuit breaker
+is
+used to prevent a chain of failure reaction if a remote service stops responding.
+A rate limiter
+is
+used to limit the number of requests to a service during a specified time period.
+A bulkhead
+is
+used to limit the number of concurrent requests to a service.
+Retries
+are
+used to handle random errors that might happen from time to time.
+A time limiter
+is
+used to avoid waiting too long for a response from a slow or unresponsive service.
+You can discover more
+about Resilience4j at
+https://github.com/resilience4j/resilience4j
+.
+In
+Chapter 13
+,
+Improving Resilience Using Resilience4j
+, we will focus on the circuit breaker in Resilience4j. It follows the classic design of a circuit breaker, as illustrated in the following state diagram:
+Figure 8.4: Circuit breaker state diagram
+Let’s take a look at the
+state diagram in more detail:
+A circuit breaker starts as
+Closed
+, allowing requests to be processed.
+As long as the requests are processed successfully, it stays in the
+Closed
+state.
+If failures start to happen, a counter starts to count up.
+If a threshold of failures is reached within a specified period of time, the circuit breaker will
+trip
+, that is, go to the
+Open
+state, not allowing further requests to be processed. Both the threshold of failures and the period of time are configurable.
+Instead, a request will
+fast fail
+, meaning it will return immediately with an exception.
+After a configurable period of time, the circuit breaker will enter a
+Half Open
+state and allow one request to go through, as a probe, to see whether the failure has been resolved.
+If the probe request fails, the circuit breaker goes back to the
+Open
+state.
+If the probe
+request succeeds, the circuit breaker goes to the initial
+Closed
+state, allowing new requests to be processed.
+Sample usage of the circuit breaker in Resilience4j
+Let’s assume we
+have a REST service, called
+myService
+, that is protected by a circuit breaker using Resilience4j.
+If the service starts to produce internal errors, for example, because it can’t reach a service it depends on, we might get a response from the service such as
+500 Internal Server Error
+. After a number of configurable attempts, the circuit will open and we will get a fast failure that returns an error message such as
+CircuitBreaker 'myService' is open
+. When the error is resolved and we make a new attempt (after the configurable wait time), the circuit breaker will allow a new attempt as a probe. If the call succeeds, the circuit breaker will be closed again; that is, operate normally.
+When using Resilience4j together with Spring Boot, we will be able to monitor the state of the circuit breakers in a microservice using its Spring Boot Actuator
+health
+endpoint. We can, for example, use
+curl
+to see the state of the circuit breaker,
+myService
+:
+curl $HOST:$PORT/actuator/health -s | jq .components.circuitBreakers
+If it operates normally, that is, the circuit is
+closed
+, it will respond with something such as the following:
+Figure 8.5: Closed circuit response
+If something is wrong
+and the circuit is
+open
+, it will respond with something such as the following:
+Figure 8.6: Open circuit response
+With Resilience4j introduced, we have seen an example of how the circuit breaker can be used to handle errors for a REST client. Let’s wrap up this chapter with an introduction to how Spring Cloud can be used for distributed tracing.
+Using Micrometer Tracing and Zipkin for distributed tracing
+To
+understand what is going on in a distributed
+system such as a system landscape of cooperating
+microservices, it is crucial to be
+able to track and visualize how requests and messages flow between microservices when processing an external call to the system landscape.
+Refer to
+Chapter 1
+,
+Introduction to Microservices
+, in the
+Distributed tracing
+section, for more information on this subject.
+Starting with
+Spring Boot 3, distributed tracing is handled by
+Micrometer Tracing
+, replacing
+Spring Cloud Sleuth
+. Micrometer Tracing can mark requests and
+messages/events that are part of the same processing flow with a common
+correlation ID
+.
+Micrometer Tracing can also be used to decorate log records with correlation IDs to make it easier to track log records from different microservices that come from the same processing flow.
+Zipkin
+is a
+distributed tracing system (
+http://zipkin.io
+) that Micrometer
+Tracing can send tracing data to for storage and visualization. Later on, in
+Chapter 19
+,
+Centralized Logging with the EFK Stack
+, we will learn how to find and visualize log records from one and the same processing flow using the correlation ID.
+The infrastructure for handling distributed tracing information in Micrometer Tracing and Zipkin is originally based on Google Dapper (
+https://ai.google/research/pubs/pub36356
+). In Dapper, the tracing information from a complete workflow is called
+a
+trace tree
+, and subparts of the tree, such as the basic units of work, are
+called
+spans
+. Spans can, in turn, consist of
+sub-spans, which form the trace tree. A correlation ID is called
+TraceId
+, and a span is identified by its own
+unique
+SpanId
+, along with the
+TraceId
+of the trace tree it belongs to.
+A short history lesson regarding the evolution of standards (or at least commons efforts on establishing open de facto standards) for implementing distributed tracing:
+Google published the paper on Dapper back in 2010, after using it internally since 2005.
+In 2016, the
+OpenTracing
+project joined
+CNCF
+. OpenTracing is heavily influenced by
+Dapper and
+provides vendor-neutral APIs and language-specific libraries for instrumenting distributed tracing.
+In 2019, the OpenTracing project merged with
+the
+OpenCensus
+project, forming a new
+CNCF project,
+OpenTelemetry
+. The OpenCensus project delivers a set of libraries for collecting metrics and distributed traces.
+Suggested URLs for further reading:
+https://opentracing.io
+https://opencensus.io
+https://opentelemetry.io
+In
+Chapter 14
+,
+Understanding Distributed Tracing
+, we will see how we can use Micrometer
+Tracing and Zipkin to trace the
+processing that goes on in our microservice
+landscape. The following is a
+screenshot from the Zipkin UI, which visualizes the trace tree that was created as a result of processing the creation of an aggregated product:
+Figure 8.7: Trace tree in Zipkin
+From the preceding screenshot, we can see that an HTTP
+POST
+request is sent to the
+product-composite
+service through
+the gateway (our edge server) and it responds by publishing create events to the topics for products, recommendations, and reviews. These events are consumed by the three core microservices in parallel and asynchronously, meaning that the
+product-composite
+service does not wait for the core microservices to complete their work. The data in the create events is stored in each microservice’s database.
+With
+Micrometer Tracing and Zipkin for
+distributed tracing having been introduced, we
+have seen an example of
+distributed tracing of the processing of an external synchronous HTTP request that includes asynchronous passing of events between the involved microservices.
+Summary
+In this chapter, we saw how Spring Cloud has evolved from being rather Netflix OSS-centric to having a much larger scope as of today, used together with tools including Resilience4j and Micrometer Tracing. We also introduced how components from the latest release of Spring Cloud 2022 can be used to implement some of the design patterns we described in
+Chapter 1
+,
+Introduction to Microservices
+, in the
+Design patterns for microservices
+section. These design patterns are required to make a landscape of cooperating microservices production ready.
+Head over to the next chapter to see how we can implement service discovery using Netflix Eureka and Spring Cloud LoadBalancer!
+Questions
+What is the purpose of Netflix Eureka?
+What are the main features of Spring Cloud Gateway?
+What backends are supported by Spring Cloud Config?
+What are the capabilities that Resilience4j provides?
+What are the concepts of trace trees and spans used for in distributed tracing, and what is the paper called that originally defined them?

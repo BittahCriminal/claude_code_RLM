@@ -1,0 +1,1986 @@
+yment, rollback, and operations with hybrid application deployments.
+Summary
+The BPC pattern is simple yet powerful. It forms the foundation of many stateless and stateful event-driven microservice patterns. You can easily implement stateless streaming and simple stateful applications using the BPC pattern.
+The BPC pattern is also flexible. It pairs well with implementations where the data storage layer does most of the business work. You can use it as an interfacing layer between event streams and legacy systems, as well as leverage external stream processing systems to augment its capabilities.
+Due to its basic nature, however, it does require you to invest in libraries to access mechanisms such as simple state materialization, event scheduling, and timestamp-based decision making. These components intersect with the offerings found in Chapters
+11
+and
+12
+, and thus you will need to decide how much in-house development you would like to do versus adopting more purpose-built solutions.
+
+Chapter 11.
+Heavyweight Framework Microservices
+This chapter and the next cover the full-featured frameworks most commonly used in event-driven processing. Frequently referred to as
+streaming frameworks
+, they provide mechanisms and APIs for handling streams of data and are often used for consuming and producing events to an event broker. These frameworks can be roughly divided into heavyweight frameworks, which are covered in this chapter, and lightweight frameworks, covered in the next. These chapters aren’t meant to compare the technologies, but rather to provide a generalized overview of how these frameworks work. However, some sections examine framework-specific features, especially as they pertain to implementing applications in a microservice-like way.
+For the purposes of evaluating heavyweight frameworks, this chapter covers aspects of
+Apache Spark
+,
+Apache Flink
+,
+Apache Storm
+,
+Apache Heron
+, and the
+Apache Beam model
+as examples of the sorts of technology and operations commonly provided.
+One defining characteristic of a heavyweight streaming framework is that it requires an independent cluster of processing resources to perform its operations. This cluster typically constitutes a number of shareable worker nodes, along with some master nodes that schedule and coordinate work. Additionally, the leading Apache solutions traditionally rely on Apache Zookeeper, another clustered service, to provide high-availability support and coordinate cluster leader elections. Though Zookeeper is not absolutely essential for bringing a heavyweight cluster to production, you should carefully evaluate whether you need it should you create your own cluster.
+A second defining characteristic is that the heavyweight framework uses its own internal mechanisms for handling failures, recovery, resource allocation, task distribution, data storage, communication, and coordination between processing instances and tasks.
+This is in contrast to the lightweight framework, FaaS, and BPC
+implementations
+that rely heavily on the container management system (CMS) and the event broker for these functions.
+These two characteristics are the main reasons why these frameworks are dubbed “heavyweight.” Having to manage and maintain additional clustered frameworks independently of the event broker and the CMS is no small task.
+Tip
+Some heavyweight frameworks are moving toward lightweight-like execution modes. These lightweight modes integrate well with the CMS used to operate other microservice implementations.
+You may have noticed that the heavyweight framework does a lot of things that are already handled by the CMS and event broker. The CMS can manage resource allocation, failures, recovery, and scaling of systems, while the event broker can provide event-based communication between the instances of a single microservice. The heavyweight framework is a single solution that merges those capabilities of the CMS and event broker. We’ll explore this topic a bit further in the next chapter on lightweight frameworks.
+A Brief History of Heavyweight Frameworks
+Heavyweight stream-processing frameworks are directly descended from their heavyweight batch-processing predecessors.
+One of the most widely known, Apache Hadoop, was released in 2006, providing open source big-data technologies for anyone to use. Hadoop bundled a number of technologies together to offer massive parallel processing, failure recovery, data durability, and internode communication, allowing users to access commodity hardware cheaply and easily to solve problems requiring many thousands of nodes (or more).
+MapReduce was one of the first widely available means of processing extremely large batches of data (aka big data), but, while powerful, it executes slowly in comparison to many of today’s options. The size of big data has steadily increased over time; although workloads of hundreds (or thousands) of gigabytes were common in the early days, workloads today have scaled to sizes in the terabyte and petabyte range. As these data sets have grown so has the demand for faster processing, more powerful options, simpler execution options, and solutions that can provide near-real-time stream-processing capabilities.
+This is where Spark, Flink, Storm, Heron, and Beam come in. These solutions were developed to process streams of data and provide actionable results much sooner than those provided by batch-based MapReduce jobs. Some of these, like Storm and Heron, are streaming-only technologies and do not currently provide batch processing. Others, like Spark and Flink, merge batch and streaming processing into a single solution.
+These technologies are undoubtedly familiar to most big-data aficionados and are likely already being used to some extent in the data science and analytics branches of many organizations. In fact, this is how many organizations start dabbling in event-driven processing, as these teams convert their existing batch-based jobs into streaming-based pipelines.
+The Inner Workings of Heavyweight Frameworks
+The aforementioned heavyweight open source Apache frameworks all operate in a fairly similar manner.
+Proprietary solutions, like Google’s Dataflow, which executes applications written using Apache Beam’s API, probably operate in a similar fashion, but this is only an assumption, given that the source is closed and the backend is not described in detail. One of the challenges of describing heavyweight frameworks in detail is that each has its own operational and design nuances, and full coverage of each framework is far beyond the scope of this chapter.
+Tip
+Make sure that you thoroughly read and understand the documents detailing how your specific heavyweight framework
+operates
+.
+A heavyweight stream processing cluster is a grouping of dedicated processing and storage resources, broken down into two primary roles.
+The first role is the master node, which prioritizes, assigns, and manages executors and tasks performed by the workers.
+The second role, the executor, completes these tasks using the processing power, memory, local, and remote disk available to that worker node. In event-driven processing, these tasks will connect to the event broker and consume events from event streams.
+Figure 11-1
+shows a rough breakdown of how this works.
+Figure 11-1.
+A generic view of a heavyweight stream-processing framework
+This figure also shows Apache Zookeeper, which plays a supporting role for this streaming cluster. Zookeeper provides highly reliable distributed coordination and is used to determine which master node is in charge (as it is not uncommon for nodes to fail, be they workers, masters, or  Zookeeper nodes). Upon failure of a master node, Zookeeper helps decide which of the remaining masters is the new leader to ensure continuity of operations.
+Note
+Zookeeper has historically been a major component in providing coordination of distributed heavyweight frameworks. Newer frameworks may or may not use Zookeeper. In either case, distributed coordination is essential for reliably running distributed workloads.
+A
+job
+is a stream-processing topology that is built using the framework’s software development kit (SDK) and designed to solve problems of the particular bounded context. It runs on the cluster indefinitely, processing events as they arrive, just like any other microservice described in this book.
+Upon acceptance by the cluster, the defined stream processing topology is broken down into tasks and assigned to the worker nodes. The task manager monitors the tasks and ensures that they are completed. When a failure occurs, the task manager restarts the work in one of the available executors.
+Task managers are usually set up with high-availability, such that if the node on which the task manager is operating fails, a backup can take over, preventing all running jobs from failing.
+Figure 11-2
+shows a job being submitted to the cluster via master node 1, which in turn is translated into tasks for processing by the executors. These long-running tasks establish connections to the event broker and begin to consume events from the event stream.
+Figure 11-2.
+Submitting a stream processing job to read from an event stream
+Though this example shows a 1:1 mapping between tasks and stream partitions, you can configure the amount of parallelism that you would like your application to use. One tasks can consume from all the partitions, or many tasks could consume from the same partition, say in the case of a queue.
+Benefits and Limitations
+The heavyweight frameworks discussed in this chapter are predominantly
+analytical
+technologies. They provide significant value around analyzing large volumes of events in near–real time to enable quicker decision making. Some fairly common patterns of usage include the following:
+Extract data, transform it, and load it into a new data store (ETL)
+Perform session- and window-based analysis
+Detect abnormal patterns of behavior
+Aggregate streams and maintain state
+Perform any sort of stateless streaming operations
+These frameworks are powerful and fairly mature, with many organizations using them and contributing back to their source code. There are numerous books and blog posts, excellent documentation, and many sample applications available to you.
+There are, however, several fairly significant shortcomings that limit, but not completely preclude, microservice applications based on these frameworks.
+First, these heavyweight frameworks were not originally designed with microservice-style deployment in mind. Deploying these applications requires a dedicated resource cluster beyond that of the event broker and CMS, adding to the complexity of managing large numbers of applications at scale. There are ways to mitigate this complexity, along with new technological developments for deployment, some of which are covered in detail later in this chapter.
+Second, most of these frameworks are JVM (Java Virtual Machine)-based, which limits the implementation languages you can use to create singular microservice applications. A common workaround is to use the heavyweight framework to perform transformations as its own standalone application, while another standalone application in another language serves the business functionality from the transformed state store.
+Third, materializing an entity stream into an indefinitely retained table is not supported out of the box by all frameworks. This can preclude creating table-table joins and stream-table joins and implementing patterns such as the gating pattern shown earlier in
+Figure 10-3
+.
+Even when heavyweight frameworks do support stream materialization and joins, that is often not immediately apparent in the documentation.
+A number of these frameworks focus heavily on time-based aggregations, with examples, blog posts, and advertisements emphasizing time-series analysis and aggregations based on limited window sizes.
+Some careful digging reveals that the leading frameworks provide a
+global window
+, which allows for the materialization of event streams. From here, you can implement your own custom join features, though I find that these are still far less well documented and exhibited than they should be, considering their importance in handling event streams at scale in an organization.
+Again, these shortcomings are indicative of the types of analytical workloads that were envisioned for these frameworks when they were being designed and implemented. Technological improvements to individual implementations and investment into common APIs that are independent of implementation (
+e.g., Apache Beam
+) are driving continual changes in the heavyweight framework domain, and it is worth keeping an eye on the leaders to see what new releases bring.
+Cluster Setup Options and Execution Modes
+There are a number of options when it comes to building and managing your heavyweight stream processing cluster, each with its own benefits and drawbacks.
+Use a Hosted Service
+The first, and simplest, way to manage a cluster is to just pay someone to do it for you. Just as there are a number of compute service providers, there are also providers who will be happy to host and possibly manage most of your operational needs for you. This is usually the most expensive option in terms of dollars spent when compared to the projected costs of starting your own cluster, but it significantly reduces the operational overhead and removes the need for in-house expertise. For example, Amazon offers both managed Flink and Spark services; Google,
+Databricks
+, and Microsoft offer their own bundling of Spark; and Google offers Dataflow, its own implementation of an Apache Beam runner.
+One thing to note about these services is that they seem to be continually moving toward a full serverless-style approach, where the entire physical cluster is invisible to you as a subscriber. This may or may not be acceptable depending on your security, performance, and data isolation needs. Be sure that you understand what is and is not offered by these service providers, as they may not include all of the features of an independently operated cluster.
+Build Your Own Full Cluster
+A heavyweight framework may have its own dedicated scalable resource cluster independent of the CMS. This deployment is the historical norm for heavyweight clusters, as it closely models the original Hadoop distributions. It is common in situations where the heavyweight framework will be used by services requiring a large number (hundreds or thousands) of worker nodes.
+Create Clusters with CMS Integration
+A cluster can also be created in conjunction with the container management system. The first mode involves just deploying the cluster on CMS-provisioned resources, whereas the second mode involves leveraging the CMS itself as the means of scaling and deploying individual jobs. Some of the major benefits of deploying your cluster on the CMS is that you gain the monitoring, logging, and resource management it provides. Scaling the cluster then becomes a matter of simply adding or removing the necessary node types.
+Deploying and running the cluster using the CMS
+Deploying the heavyweight cluster using the CMS has many benefits. The master nodes, worker nodes, and Zookeeper (if applicable) are brought up within their own container or virtual machines. These containers are managed and monitored like any other container, providing visibility into failures as well as the means to automatically restart these instances.
+Tip
+You can enforce static assignment of master nodes and any other services that you require to be highly available, to prevent the CMS from shuffling them around as it scales the underlying compute resources. This prevents excessive alerts from the cluster monitor about missing master nodes.
+Specifying resources for a single job using the CMS
+Historically, the heavyweight cluster has been responsible for assigning and managing resources for each submitted application. The introduction of the CMS in recent years gives you an option that can do the same thing, but that can
+also
+manage all of other microservice implementations. When the heavyweight cluster requires more resources to scale up, it must first request and obtain the resources from the CMS. These can then be added to the cluster’s pool of resources and finally assigned as needed to the applications.
+Spark and Flink enable you to directly leverage Kubernetes for scalable application deployment beyond their original dedicated cluster configuration, where each application has its own set of dedicated worker nodes.
+For example,
+Apache Flink allows for applications to run independently within their own isolated session cluster
+using Kubernetes.
+Apache Spark offers a similar option
+, allowing Kubernetes to play the role of the master node and maintain isolated worker resources for each application. A basic overview of how this works is shown in
+Figure 11-3
+.
+Figure 11-3.
+Single job deployed on and managed by Kubernetes cluster
+Tip
+This deployment mode is nearly identical to how you would deploy non-heavyweight microservices and merges lightweight and BPC deployment strategies.
+There are several advantages to this deployment pattern:
+It leverages the CMS resource acquisition model, including scaling needs.
+There is complete isolation between jobs.
+You can use different frameworks and versions.
+Heavyweight streaming applications can be treated just like microservices and use the same deployment processes.
+And of course, there are also several disadvantages:
+Support is not available for all leading heavyweight streaming frameworks.
+Integration is not available for all leading CMSes.
+Features available in full cluster mode, such as automatic scaling, may not yet be supported.
+Application Submission Modes
+Applications can be submitted to the heavyweight cluster for processing in one of two main ways: driver mode and cluster mode.
+Driver Mode
+Driver mode is supported by Spark and Flink. The
+driver
+is simply a single, local, standalone application that helps coordinate and execute the application, though the application itself is still executed within the cluster resources. The driver coordinates with the cluster to ensure the progress of the application and can be used to report on errors, perform logging, and complete other operations. Notably, termination of the driver will result in termination of the application, which provides a simple mechanism for deploying and terminating heavyweight streaming applications. The application driver can be deployed as a microservice using the CMS, and the worker resources can be acquired from the heavyweight cluster. To terminate the driver, simply halt it as if it were any other microservice.
+Cluster Mode
+Cluster mode is supported by Spark and Flink and is the default mode of deployment for Storm and Heron jobs. In cluster mode, the entire application is submitted to the cluster for management and execution, whereupon a unique ID is returned to the calling function. This unique ID is necessary for identifying the application and issuing orders to it through the cluster’s API. With this deployment mode, commands must be directly communicated to the cluster to deploy and halt applications, which may not be suitable for your microservice deployment pipeline.
+Handling State and Using Checkpoints
+Stateful operations may be persisted using either internal or external state (
+Chapter 7
+), though most heavyweight frameworks favor internal state for its high performance and scalability. Stateful records are kept in memory for fast access, but are also spilled to disk for data durability purposes and when state grows beyond available memory. Using internal state does carry some risks, such as state loss due to disk failure, node failures, and temporary state outages due to aggressive scaling by the CMS. However, the performance gains tend to far outweigh the potential risks, which can be mitigated with careful planning.
+Checkpoints
+, snapshots of the application’s current internal state, are used to rebuild state after scaling or node failures. A checkpoint is persisted to durable storage external to the application worker nodes to guard against data loss. Checkpointing can be done using any sort of store that is compatible with the framework, such as Hadoop Distributed File System (HDFS, a common option) or a highly available external data store. Each partitioned state store can then restore itself from the checkpoint, providing both full restoration capabilities in the case of a total application failure, and partial restoration capabilities in the case of scaling and worker node failures.
+There are two main states that the checkpointing mechanism must consider when consuming and processing partitioned event streams:
+Operator state
+The pairs of <
+partitionId
+,
+offset
+>. The checkpoint must ensure that the internal key state (see next item) matches up with the consumer offsets of each partition. Each
+partitionId
+is unique among all input topics.
+Key state
+The pairs of <
+key
+,
+state
+>. This is the state pertaining to a keyed entity, such as during aggregations, reductions, windowing, joins, and other stateful operations.
+Both the operator and keyed state must be synchronously recorded such that the keyed state accurately represents the processing of all the events marked as consumed by the operator state. A failure to do so may result in events either not being processed at all or being processed multiple times. An example of this state as recorded into a checkpoint is shown in
+Figure 11-4
+.
+Figure 11-4.
+A checkpoint with operator and key state
+Tip
+Restoring from a checkpointed state is functionally equivalent to using snapshots to restore external state stores, as covered in
+“Using snapshots”
+.
+The state associated with the application task must be completely loaded from the checkpoint before you can process any new data. The heavyweight framework must also verify that the operator state and the associated keyed state match for each task, ensuring the correct assignment of partitions among tasks. Each of the major heavyweight frameworks discussed at the start of this chapter implements checkpoints in its own way, so be sure to check the corresponding documentation for the particulars.
+Scaling Applications and Handling Event Stream Partitions
+The maximum parallelism of a heavyweight application is constrained by the same factors discussed in
+Chapter 5
+. A typical stateful stream processor will be limited by the input count of the lowest partitioned stream. Because heavyweight processing frameworks are particularly well suited for computing massive amounts of user-generated data, it is quite common to see cyclical patterns with significant computational requirements during the day and very few in the middle of the night. An example of a daily cyclical pattern is shown in
+Figure 11-5
+.
+Figure 11-5.
+Sample of daily cyclical data volume
+Applications that process such data benefit greatly from the ability to scale up with increasing demand and down with decreasing demand. Proper scaling can ensure that the application has sufficient capacity to process all events in a timely manner, without wasting resources by overprovisioning. Ideally, the latency between when an event is received and when it is fully processed should be minimized, though many applications are not that sensitive to temporarily increased latency.
+Warning
+Scaling an application is separate from scaling a cluster. All scaling discussed here assumes that there are sufficient cluster resources to increase parallelism for the application. Refer to your framework’s documentation for scaling of cluster resources.
+Stateless streaming applications are very easily scaled up or down. New processing resources for an application can simply join or leave the consumer group, upon which resources are rebalanced and streaming is resumed. Stateful applications can be more difficult to handle; not only does state need to be loaded into the workers assigned to the application, but the loaded state needs to match the input event stream partition assignments.
+There are two main strategies for scaling stateful applications, and while the specifics vary depending on the technology, they share a common goal of minimizing application downtime.
+Scaling an Application While It Is Running
+The first strategy allows you to remove, add, or reassign application instances without stopping the application or affecting processing accuracy. It is available only in some heavyweight streaming frameworks, as it requires careful handling of both state and shuffled events. The addition and removal of instances requires redistributing any assigned stream partitions and reloading state from the last checkpoint.
+Figure 11-6
+shows a regular shuffle, where each downstream reduce operation sources its shuffled events from the upstream
+groupByKey
+operations. If one of the instances were abruptly terminated, the reduce nodes would no longer know where to source the shuffled events from, leading to a fatal exception.
+Figure 11-6.
+Logical representation of a regular shuffle
+Spark’s dynamic resource allocation
+implements this scaling strategy.
+However, it requires using coarse-grained mode for cluster deployment and using an
+external shuffle service
+(ESS) as an isolation layer. The ESS receives the shuffled events from the upstream tasks and stores them for consumption by the downstream tasks, as shown in
+Figure 11-7
+. The downstream consumers access the events by asking the ESS for the data that is assigned to them.
+Figure 11-7.
+Logical representation of a shuffle using an external shuffle service
+Executor/instances of tasks can now be terminated, since the downstream operations are no longer dependent on a specific upstream instance. The shuffled data remains within the ESS, and a scaled-down service, as shown in
+Figure 11-8
+, can resume processing. In this example, instance 0 is the only remaining processor and takes on both partitions, while the downstream operations seamlessly continue processing via the interface with the ESS.
+Figure 11-8.
+Downscaled application using an external shuffle service (note instance 1 is gone)
+Tip
+Shuffles in real-time event stream continue to be an area of development for heavyweight frameworks. In the next chapter, we take a look at how lightweight frameworks directly leverage the event broker to play the role of the external shuffle service.
+Google Dataflow, which executes applications written with the Beam API,
+provides built-in scaling
+of both resources and worker instances.
+Heron provides a (currently experimental) Health Manager
+that can make a topology dynamic and self-regulating.
+This feature is still under development but is meant to enable real-time, stateful scaling of topologies.
+Ongoing Improvements of Heavyweight Frameworks
+Shortly before this book went to press, Apache Spark 3.0.0 release was announced. One of the major changes of this release is the ability to dynamically scale the instance count
+without
+the use of an ESS.
+This mode works by tracking the stages that generate shuffle files, and keeping executors that generate that data alive while downstream jobs that use them are still active. In effect, the sources play the role of their own external shuffle service. They also allow themselves to be cleaned up once all downstream jobs no longer require their shuffle files.
+Having dedicated and persistent separate storage for the ESS prevents the CMS from fully scaling the job, as it must always dedicate enough resources to ensuring the ESS is available. This new dynamic scaling option in Spark illustrates the further integration of heavyweight frameworks with CMSs like Kubernetes, and in fact, is one of the main use-cases mentioned in the
+JIRA ticket describing the new feature
+.
+Scaling an Application by Restarting It
+The second strategy, scaling an application by restarting it, is supported by all heavyweight streaming frameworks. Consumption of streams is paused, the application is checkpointed, and then it is stopped.
+Next, the application is reinitialized with the new resources and parallelism, with stateful data reloaded from the checkpoints as required. For example,
+Flink provides a simple REST mechanism
+for these purposes, while
+Storm provides its own rebalance command
+.
+Autoscaling Applications
+Autoscaling is the process of automatically scaling applications in response to specific metrics. These metrics may include processing latency, consumer lag, memory usage, and CPU usage, to name a few. Some frameworks may have autoscaling options built in, such as Google’s Dataflow engine, Heron’s Health Manager, and Spark Streaming’s dynamic allocation functionality. Others may require you to collect your own performance and resource utilization metrics and wire them up to the scaling mechanism of your framework, such as the lag monitor tooling discussed in
+“Consumer Offset Lag Monitoring”
+.
+Recovering from Failures
+Heavyweight clusters are designed to be highly tolerant to the inevitable failures of long-running jobs. Failures of the master nodes, worker nodes, and Zookeeper nodes (if applicable) can all be mitigated to allow applications to continue virtually uninterrupted. These fault-tolerance features are built into the cluster framework, but can require you to configure additional steps when deploying your cluster.
+In the case of a worker node failure, the tasks that were being executed on that node are moved to another available worker. Any required internal state is reloaded from the most recent checkpoint along with the partition assignments.
+Master node failures should be transparent to applications already being executed, but depending on your cluster’s configuration you may be unable to deploy new jobs during a master node outage.
+High-availability mode backed by Zookeeper (or similar technology) can mitigate the loss of a master node.
+Tip
+Make sure you have proper monitoring and alerting for your master and worker nodes. While a single cluster node failure won’t necessarily halt processing, it can still degrade performance and prevent applications from recovering from successive failures.
+Multitenancy Considerations
+Aside from the overhead of cluster management, you must account for multitenancy issues as the number of applications on a given cluster grows. Specifically, you should consider the priority of resource acquisition, the ratio of spare to committed resources, and the rate at which applications can claim resources (i.e., scaling). For instance, a new streaming application starting from the beginning of time on its input topics may request and acquire the majority of free cluster resources, restricting any currently running applications from acquiring their own. This can cause applications to miss their service-level objectives (SLOs) and create downstream business issues.
+Here are a couple of methods to mitigate these challenges:
+Run multiple smaller clusters
+Each team or business unit can have its own cluster, and these can be kept fully separate from one another. This approach works best when you can requisition clusters programmatically to keep operational overhead low, either through in-house development work or by using a third-party service provider. This approach may incur higher financial costs due to the overhead of running a cluster, both in terms of coordinating nodes (e.g., master and Zookeeper nodes) and monitoring/managing the clusters.
+Namespacing
+A single cluster can be divided into namespaces with specific resource allocation. Each team or business group can be assigned its own resources within their own namespace. Applications executed within that namespace can acquire only those resources, preventing them from starving applications outside of the namespace through aggressive acquisition. A downside to this option is that spare resources must be allocated to each namespace even when they’re not needed, potentially leading to a larger fragmented pool of unused resources.
+Languages and Syntax
+Heavyweight stream processing frameworks are rooted in the JVM languages of their predecessors, with Java being the most common, followed by Scala.
+Python is also commonly represented, as it is a popular language among data scientists and machine learning specialists, who make up a large portion of these frameworks’ traditional users.
+MapReduce-style APIs are commonly used, where operations are chained together as immutable operations on data sets. Heavyweight frameworks are fairly restrictive in the languages their APIs support.
+SQL-like languages are also becoming more common. These allow for topologies to be expressed in terms of SQL transformations, and reduce the cognitive overhead of learning the specific API for a new framework.
+Spark
+,
+Flink
+,
+Storm
+, and
+Beam
+all provide SQL-like languages, though they differ in features and syntax and not all operations are supported.
+Choosing a Framework
+Choosing a heavyweight stream-processing framework is much like selecting a CMS and event broker. You must determine how much operational overhead your organization is willing to authorize, and if that support is sufficient for running a full production cluster at scale. This overhead includes regular operational duties such as monitoring, scaling, troubleshooting, debugging, and assigning costs, all of which are peripheral to implementing and deploying the actual applications.
+Software service providers may offer these platforms as a service, though the options tend to be more limited than selecting providers for your CMS and event broker. Evaluate the options available to you and choose accordingly.
+Lastly, the popularity of a framework will inform your decision.
+Spark is extremely popular, with Flink and Storm being less popular but still actively used.
+Applications can be written
+independently of heavyweight framework runtime execution through Apache Beam
+, though this may not be of use or concern to your organization. Heron, a revised form of Storm that offers more advanced features, appears to be the least popular of the options. Apply the same considerations you gave to the selection of your CMS and event broker to the selection of, or abstention from, a heavyweight framework.
+Warning
+Keep in mind that a heavyweight streaming framework is not reasonably capable of implementing
+all
+event-driven microservices. Verify that it is the correct solution for your problem space before committing to it.
+Example: Session Windowing of Clicks and Views
+Imagine that you are running a simple online advertising company. You purchase ad space across the internet and resell it to your own customers. These customers want to see their return on investment, which in this case is measured by the click-through rate of users who are shown an advertisement. Additionally, customers can be billed on a per-session basis, with a session defined as continuous user activity with breaks no longer than 30 minutes.
+In this example there are two event streams: user advertisement views and user advertisement clicks. The goal is to aggregate these two streams into session windows and emit them once an
+event time
+(not wall-clock time) of 30 minutes has passed without the user performing any new actions. Refer to
+Chapter 6
+for a refresher on stream time and watermarks.
+Normally when collecting these behavioral events, you could expect to see additional information in the value field, such as where the advertisement was published, the user’s web browser or device information, or other various contexts or metadata. For the sake of this example, both the view and click event streams have been simplified down into this basic schema format:
+Key
+Value
+Timestamp
+String userId
+Long advertisementId
+Long createdEventTime
+(the local time the event was created)
+You need to perform the following operations:
+Group all of the keys together, such that all events for a given user are local to a processing instance.
+Aggregate the events together using a window with a 30-minute timeout.
+Emit the window of events once the 30-minute limit has been reached.
+The output stream adheres to the following format:
+Key
+Value
+<Window windowId, String userId>
+Action[] sequentialUserActions
+The
+Window
+object indicates the time that the window started and the time that it ended. This is part of the composite key, as users will have multiple session windows over time, and session windows may be duplicated between users. This composite key ensures uniqueness. The
+Action
+object array in the value is used to store the actions in sequential order and permits the microservice to calculate which advertisement views lead its users to billable click-throughs. This
+Action
+class can be represented as:
+Action
+{
+Long
+eventTime
+;
+Long
+advertisementId
+;
+Enum
+action
+;
+//one of Click, View
+}
+This abbreviated Apache Flink source code shows the topology using its MapReduce-style API:
+DataStream
+clickStream
+=
+...
+//Create stream of click events
+DataStream
+viewStream
+=
+...
+//Create stream of view events
+clickStream
+.
+union
+(
+viewStream
+)
+.
+keyBy
+(<
+key
+selector
+>)
+.
+window
+(
+EventTimeSessionWindows
+.
+withGap
+(
+Time
+.
+minutes
+(
+30
+)))
+.
+aggregate
+(<
+aggregator
+function
+>)
+.
+addSink
+(<
+producer
+to
+output
+stream
+>)
+A visual representation of this topology is shown in
+Figure 11-9
+, with a parallelism of 2 (note the 2 separate instances).
+Figure 11-9.
+Session-generating processing topology from user views and clicks
+Stage 1
+The executors for each instance are assigned their tasks, which are in turn assigned the input event stream partitions for processing. Both the click and view streams are unioned into a single stream logical stream, and then grouped by the
+userId
+key.
+Stage 2
+The
+keyBy
+operator, in conjunction with the downstream
+window
+and
+aggregate
+operators, requires shuffling the now-merged events to the correct downstream instances. All events for a given key are consumed into the same instance, providing the necessary data locality for the remaining operations.
+Stage 3
+Session windows for each user can be generated now that each user’s events are local to a single instance. Events are added to the local state store in sequential timestamp order, with the aggregation function applied to each event, until a break of 30 minutes or more is detected. At this point the event store evicts the completed session and purges the memory of the
+<windowId,userId>
+key and value.
+Tip
+Your framework may allow for additional control over windowing and time-based aggregations. This can include retaining sessions and windows that have closed for a period of time, so that late-arriving events can be applied and an update emitted to the output stream. Check the documentation of your framework for more information.
+Next,
+Figure 11-10
+illustrates the effects of scaling down to just a single degree of parallelism. Assuming no dynamic scaling, you would need to halt the stream processor before restoring it from a checkpoint with the new parallelism setting. Upon startup, the service reads the stateful keyed data back from the last known good checkpoint and restores the operator state to the assigned partitions. Once state is restored, the service can resume normal stream processing.
+Figure 11-10.
+Session-generating processing topology with no parallelism
+Stage 1 operates as before, though in this case all of the partitions are assigned for consumption by tasks in instance 0. Grouping and shuffling are still performed, though the source and destination remain the same instance as seen in stage 2. Keep in mind that the individual tasks running on instance 0 must each consume their assigned shuffled events, though all communication here is entirely local. The last stage of the topology, stage 3, windows and aggregates the events as normal.
+Summary
+This chapter introduced heavyweight stream processing frameworks, including a brief history of their development and the problems they were created to help solve. These systems are highly scalable and allow you to process streams according to a variety of analytical patterns, but they may not be sufficient for the requirements of some stateful event-driven microservice application patterns.
+Heavyweight frameworks operate using centralized resource clusters, which may require additional operational overhead, monitoring, and coordination to integrate successfully into a microservice framework. Recent innovations in cluster and application deployment models have provided better integration with container management solutions such as Kubernetes, allowing for more granular deployment of heavyweight stream processors similar to that of fully independent microservices.
+
+Chapter 12.
+Lightweight Framework Microservices
+Lightweight frameworks provide similar functionality to heavyweight frameworks, but in a way that heavily leverages the event broker and the container management system (CMS). Unlike heavyweight frameworks, lightweight frameworks have no additional dedicated resource cluster for managing framework-specific resources. Horizonal scaling, state management, and failure recovery are provided by the event broker and the CMS. Applications are deployed as individual microservices, just as any BPC microservice would be deployed. Parallelism is controlled by consumer group membership and partition ownership.
+Partitions are redistributed as new application instances join and leave the consumer group, including copartitioned assignments.
+Benefits and Limitations
+Lightweight frameworks offer stream processing features that rival those of heavyweight frameworks, and in a number of cases, exceed them. Materialization of streams into tables, along with simple out-of-the-box join functionality, makes it easy to handle streams and the relational data that inevitably ends up in them. Note that while table materializing functionality is not unique to lightweight frameworks, its ready inclusion and ease of use are indicative of the complex stateful problems that lightweight frameworks can address.
+The lightweight model relies upon the event broker to provide the mechanisms for data locality and copartitioning through the use of internal event streams. The event broker also acts as the mechanism of durable storage for a microservice’s internal state via the use of changelogs, as discussed in
+“Recording State to a Changelog Event Stream”
+. By leveraging the CMS, you deploy lightweight microservices like any other event-driven application. You handle application parallelism simply by adding and removing instances, using the CMS to provide the scaling and failure management mechanisms.
+Figure 12-1
+illustrates the basic lightweight model, including an internal event stream used to communicate between instances.
+Figure 12-1.
+The lightweight framework model, showcasing the usage of internal event streams for repartitioning data
+The main limitations for lightweight frameworks relate mostly to the currently available options, covered later in this chapter.
+Lightweight Processing
+The lightweight framework closely mirrors the processing methodology of the heavyweight framework. Individual instances process events according to the topology, with the event broker providing an inter-instance communication layer for scalability beyond a single instance.
+Data of the same key must be local to a given processing instance for any key-based operations, such as a
+join
+, or a
+groupByKey
+operation followed by a subsequent
+reduce
+/
+aggregation
+.
+These shuffles involve sending the events through an internal event stream, with each event of a given key written into a single partition (see
+“Copartitioning Event Streams”
+), instead of using direct instance-to-instance communication.
+The lightweight framework leverages the event broker to provide this communication path and illustrates the deeper integration of the lightweight application with the event broker. Contrast this with the heavyweight framework, where shuffling requires extensive coordination directly between the nodes. When combined with application management options provided by the CMS, the lightweight framework is much more aligned than the heavyweight framework with the application deployment and management required of modern-day microservices.
+Handling State and Using Changelogs
+The default mode of operation for lightweight frameworks is to use internal state backed by changelogs stored in the event broker. Using internal state allows for each microservice to control the resources it acquires using deployment configurations.
+Tip
+Since every lightweight application is fully independent of the others, one application could request to run on instances with very high-performance local disk, while another could request to run on instances with extremely large, albeit perhaps much slower, hard-disk drives.
+Different storage engines can also be plugged in, allowing you to use external state stores with alternative models and querying engines. This reaps all the benefits of the lightweight framework functionality, while also enabling options such as graph databases and document stores.
+In contrast to the checkpoint model of the heavyweight frameworks, lightweight frameworks using internal state stores leverage the event broker to store their changelogs. These changelogs provide the durability required for both scaling and failure recovery.
+Scaling Applications and Recovering from Failures
+Scaling a microservice and recovering from failures are effectively the same process. Adding an application instance, due to intentional scaling of a long-running process or due to a failed instance recovering, requires that partitions be correctly assigned alongside any accompanying state. Similarly, removing an instance, deliberately or due to failure, requires that partition assignments and state be reassigned to another live instance so that processing can continue uninterrupted.
+One of the main benefits of the lightweight framework model is that applications can be dynamically scaled as they are under execution. There is no need to restart an application just to change parallelism, though there may be a delay in processing due to consumer group rebalancing and rematerialization of state from the changelog.
+Figure 12-2
+illustrates the process of scaling an application up. The assigned input partitions are rebalanced (including any internal streams) and the state is restored from the changelogs prior to continuation of work.
+Figure 12-2.
+Scaling up a lightweight microservice
+Let’s look at the main considerations of scaling a lightweight application.
+Event Shuffling
+Event shuffling in lightweight framework microservices is simple, as events are repartitioned into an internal event stream for downstream consumption. This internal event stream isolates the upstream instances that create the shuffled events from the downstream ones that consume them, acting as a shuffle service similar to that required by heavyweight frameworks to perform dynamic scaling. Any dynamic scaling requires only that the consumers be reassigned to the internal event stream, regardless of the producers.
+State Assignment
+Upon scaling, an instance with new internal state assignments must load the data from the changelog before processing any new events. This process is similar to how checkpoints are loaded from durable storage in heavyweight solutions. The operator state (the mappings of
+<partitionId, offset>
+) for all event stream partitions, both input and internal, is stored within the consumer group for the individual application. The keyed state (pairs of
+<key, state>
+) is stored within the changelog for each state store in the application.
+When reloading from a changelog, the application instance must prioritize consumption and loading of all internal stateful data prior to processing any new events. This is the state restoration phase, and any processing of events before state is fully restored risks creating nondeterministic results. Once state has been fully restored for each state store within the application topology, consumption of both input and internal streams may be safely resumed.
+State Replication and Hot Replicas
+A hot replica, as introduced in
+“Using hot replicas”
+, is a copy of a state store materialized off of the changelog. It provides a standby fallback for when the primary instance serving that data fails, but can also be used to gracefully scale down stateful applications. When an instance is terminated and a consumer group is rebalanced, partitions can be assigned to leverage the hot replica’s state and continue processing without interruption. Hot replicas allow you to maintain high availability during scaling and failures, but they do come at the cost of additional disk and processor usage.
+Similarly, you can use hot replicas to seamlessly scale up the instance count without having to suffer through processing pauses due to state rematerialization on the new node. One of the current issues facing lightweight frameworks is that scaling an instance up typically follows the current workflow:
+Start a new instance.
+Join the consumer group and rebalance partition ownership.
+Pause while state is materialized from the changelog (this can take some time).
+Resume processing.
+One option is to populate a replica of the state on the new instance, wait until it’s caught up to the head of the changelog, and then rebalance to assign it ownership of the input partitions. This mode reduces outages due to materializing the changelog streams and only requires extra bandwidth from the event broker to do so.
+This functionality is currently under development for Kafka Streams
+.
+Choosing a Lightweight Framework
+Currently, there are two main options that fit the lightweight framework model, both of which require the use of the Apache Kafka event broker. Both frameworks provide indefinitely retained materialized streams in their high-level APIs, unlocking options such as primary-key joins and foreign-key joins. These join patterns permit you to handle relational data without having to materialize to external state stores and therefore reduce the cognitive overhead of writing join-based applications.
+Apache Kafka Streams
+Kafka Streams is a feature-rich stream processing library that is embedded within an individual application, where the input and output events are stored in the Kafka cluster.
+It combines the simplicity of writing and deploying standard JVM-based applications with a powerful stream-processing framework leveraging deep integration with the Kafka cluster.
+Apache Samza: Embedded Mode
+Samza offers many of the same features as Kafka Streams, though it lags behind in some features related to independent deployment. Samza predates Kafka Streams, and its original deployment model is based on using a heavyweight cluster. It is only relatively recently that Samza released an embedded mode, which closely mirrors Kafka Streams’ application writing, deployment, and management lifecycle.
+Samza’s embedded mode allows you to embed this functionality within individual applications
+, just like any other Java library. This deployment mode removes the need for a dedicated heavyweight cluster, instead relying on the lightweight framework model discussed in the previous section. By default, Samza does rely on using Apache Zookeeper for coordination across individual instances, but you can modify this to use other coordination mechanisms such as Kubernetes.
+Warning
+Apache Samza’s embedded mode may not provide all of the functionality that it has in cluster mode.
+Lightweight frameworks are not as common as heavyweight frameworks or consumer/producer libraries for the basic consumer/producer pattern. Lightweight frameworks do rely extensively on integration with the event broker, which limits their portability to other event broker technologies. The lightweight framework domain is still fairly young, but is sure to grow and develop as the EDM space matures.
+Languages and Syntax
+Both Kafka Streams and Samza are based in Java, which limits their use to JVM-based languages. The high-level APIs are expressed as a form of MapReduce syntax, as is the case in the heavyweight framework languages. Those who are experienced with functional programming, or any of the heavyweight frameworks discussed in the previous chapter, will feel right at home using either of these frameworks.
+Apache Samza supports a SQL-like language out of the box
+, though its functionality is currently limited to simple stateless queries.
+Kafka Streams doesn’t have first-party SQL support, though its enterprise sponsor,
+Confluent
+, provides KSQL under its own community license. Much like the heavyweight solutions, these SQL solutions are wrappers on top of the underlying stream libraries and may not provide the entirety of functions and features that would otherwise be available from the stream libraries directly.
+Stream-Table-Table Join: Enrichment Pattern
+Say you are working for the same large-scale advertising company as in
+“Example: Session Windowing of Clicks and Views”
+, but you are a downstream consumer of the session windows. As a quick reminder, the format of the windowed session events is shown in
+Table 12-1
+.
+Table 12-1.
+Advertisement-Sessions stream key/value definitions
+Key
+Value
+WindowKey<Window windowId, String userId>
+Action[] sequentialUserActions
+Here, an action constitutes the following:
+Action {
+  Long eventTime;
+  Long advertisementId;
+  Enum action; //one of Click, View
+}
+Your team’s goal is to take the
+Advertisement-Sessions
+stream and do the following:
+For each advertisement view action, determine if there is a click that comes after it. Sum each view-click pair and output as a conversion event, as formatted by
+Table 12-2
+:
+Table 12-2.
+Advertisement-Conversions stream key/value definitions
+Key
+Value
+Long advertisementId
+Long conversionSum
+Group all of the advertisement conversion events by
+advertisementId
+, and sum their values into a grand total.
+Join all conversion events by
+advertisementId
+on the materialized advertisement entity stream so that your service can determine which customer owns the advertisement for billing purposes, as shown in
+Table 12-3
+:
+Table 12-3.
+Advertisement entity stream key/value definitions
+Key
+Value
+Long advertisementId
+Advertisement<String name, String address, …>
+Here’s an example of some Kafka Streams source code that you could expect to see for this operation. A KStream is the high-level abstraction of a stream, while a KTable is a high-level abstraction of a table, generated by materializing the advertisement entity stream.
+KStream
+<
+WindowKey
+,
+Actions
+>
+userSessions
+=
+...
+//Transform 1 userSession into 1 to N conversion events, rekey on AdvertisementId
+KTable
+<
+AdvertisementId
+,
+Long
+>
+conversions
+=
+userSessions
+.
+transform
+(...)
+//transform userSessions into conversion events
+.
+groupByKey
+()
+.
+aggregate
+(...)
+//Creates an aggregate KTable
+//Materialize the advertisement entities
+KTable
+<
+AdvertisementId
+,
+Advertisement
+>
+advertisements
+=
+...
+//The tables are automatically co-partitioned by including
+//the join operation in the topology.
+conversions
+.
+join
+(
+advertisements
+,
+joinFunc
+)
+//See stage 4 for more details.
+.
+to
+(
+"AdvertisementEngagements"
+)
+The topology represented by the code is as follows, illustrated in
+Figure 12-3
+.
+Figure 12-3.
+Processing topology for advertising engagement-sessions
+Stage 1a and 2a
+The
+Advertisement-Sessions
+stream contains too many events for a single instance to process, so the code needs to parallelize using multiple processing instances. In this example, the maximum level of parallelization is initially 3, as that is the partition count of the
+Advertisements
+entity stream. During off-peak hours it may be possible to just use one or two instances, but during periods of heavy user activity the application will fall behind.
+Fortunately, the
+Advertisements
+entity stream can be repartitioned up to a matching 12 partitions by means of an internal stream. The events are simply consumed and repartitioned into a new 12-partition internal stream. The advertisement entities are colocated based on
+advertisementId
+with the conversion events from stages 1b and 2b.
+Stage 1b and 2b
+Events are consumed from the
+Advertisement-Sessions
+event stream, with conversion events tabulated and emitted (key =
+Long advertisementId
+, value =
+Long conversionSum
+). Note that for a given session event there can be multiple conversion events created, one for each pair of view-click events per
+advertisementId
+. These events are colocated based on
+advertisementId
+with the advertisement entities from stages 1a and 2a.
+Stage 3
+The
+Advertisement-Conversions
+events must now be aggregated into the materialized table format shown in
+Table 12-4
+, since the business is interested in keeping an indefinitely retained record of the engagements with each
+Advertisement
+entity. The aggregation is a simple sum of all values for a given
+advertisementId
+.
+Table 12-4.
+Total-Advertisement-Conversions stream key/value definition
+Long advertisementId
+Long conversionSum
+AdKey1
+402
+AdKey2
+600
+AdKey3
+38
+Thus, a new
+Advertisement-Conversions
+event of key
+(AdKey1, 15)
+processed by this aggregation operator would increment the internal state store value of
+AdKey1
+from
+402
+to
+417
+.
+Stage 4
+The last step of this topology is to join the materialized
+Total-Advertisement-Conversions
+table created in stage 3 with the repartitioned
+Advertisement
+entity stream. You’ve already established the groundwork for this join by copartitioning the input streams in stages 2a and 2b, ensuring that all
+advertisementId
+data is local to its processing instance. The entities in the
+Advertisement
+stream are materialized into their own partition-local state stores and subsequently joined with the
+Total-Advertisement-Conversions
+.
+A
+join function
+is used to specify the desired results from the join, much like a
+select
+statement is used in SQL to select only the fields that the application requires. A Java join function for this scenario may look something like this:
+public
+EnrichedAd
+joinFunction
+(
+Long
+sum
+,
+Advertisement
+ad
+)
+{
+if
+(
+sum
+!=
+null
+||
+ad
+!=
+null
+)
+return
+new
+EnrichedAd
+(
+sum
+,
+ad
+.
+name
+,
+ad
+.
+type
+);
+else
+//Return a tombstone, as one of the inputs is null,
+//possibly indicating a deletion.
+return
+null
+;
+}
+The preceding
+joinFunction
+assumes that either input may be null, indicating an upstream deletion of that event. Accordingly, you need to ensure that your code outputs a corresponding tombstone downstream to its consumers. Thankfully, most frameworks (both lightweight and heavyweight) differentiate between inner, left, right, outer, and foreign-key joins, and do some behind-the-scenes operations to save you from propagating tombstones through your join functions. However, for the purposes of instruction, it’s important that you consider the effects of tombstone events in your microservice topology.
+The Kafka Streams topology and
+joinFunction
+is identical to the selection expression in SQL:
+SELECT
+adConversionSumTable
+.
+sum
+,
+adTable
+.
+name
+,
+adTable
+.
+type
+FROM
+adConversionSumTable
+FULL
+OUTER
+JOIN
+adTable
+ON
+adConversionSumTable
+.
+id
+=
+adTable
+.
+id
+In this case, the materialized view of the
+Enriched-Advertising-Engagements
+output event stream looks like
+Table 12-5
+.
+Table 12-5.
+Enriched-Advertising-Engagements stream key/value definitions
+AdvertisementId (Key)
+Enriched advertisements (value)
+AdKey1
+sum=402, name="Josh’s Gerbils", type="Pets"
+AdKey2
+sum=600, name="David’s Ducks", type="Pets"
+AdKey3
+sum=38, name="Andrew’s Anvils", type="Metalworking"
+AdKey4
+sum=10, name="Gary’s Grahams", type="Food"
+AdKey5
+sum=10, name=null, type=null
+This sample table shows the expected aggregations from stage 3, joined with the
+Advertising
+entity data.
+AdKey4
+and
+AdKey5
+each show the results of a full outer join: no conversions have yet occurred for
+AdKey4
+, while there is no advertising entity data yet available for
+AdKey5
+.
+Tip
+Check your documentation to validate which types of joins are available for your framework. Kafka Streams supports foreign-key table-table joins, which can be extremely useful for handling relational event data.
+Summary
+This chapter introduced lightweight stream processing frameworks, including their major benefits and tradeoffs. These are highly scalable processing frameworks that rely extensively on integration with the event broker to perform large-scale data processing. Heavy integration with the container management system provides the scalability requirements for each individual microservice.
+Lightweight frameworks are still relatively new compared to heavyweight frameworks. However, the features they provide tend to be well suited for building long-running, independent, stateful microservices, and are certainly worth exploring for your own business use cases.
+
+Chapter 13.
+Integrating Event-Driven and
+Request-Response Microservices
+As powerful as event-driven microservice patterns are, they cannot serve all of the business needs of an organization. Request-response endpoints provide the means to serve important data in real time, particularly when you are:
+Collecting metrics from external sources, such as an application on a user’s cell phone or Internet of Things (IoT) devices
+Integrating with existing request-response applications, particularly third-party ones outside of the organization
+Serving content in real time to web and mobile device users
+Serving dynamic requests based on real-time information, such as location, time, and weather
+Event-driven patterns still play a large role in this domain, and integrating them with request-response solutions will help you leverage the best features of both.
+Note
+For the purposes of this chapter, the term
+request-response services
+refers to services that communicate with each other directly, typically through a synchronous API. Two services communicating via HTTP is a prime example of request-response communication.
+Handling External Events
+Due to history, precedence, familiarity, convenience, and a whole host of other reasons, external events are predominantly sent from the outside via a request-response API. While it is possible to expose an event broker and its streams to an external
+client
+, it is largely unreasonable to do so, as you would need to resolve a number of issues relating to access and security. And that is fine. Request-response APIs work wonderfully for these scenarios, just as they have for many
+decades
+before. There are two main types of externally generated events to consider.
+Autonomously Generated Events
+The first type of events are those sent from client to server
+autonomously
+by your products. These requests are usually defined as a metric or measurement from the product, such as information about what a user is doing, periodic measurements of activity, or sensor readings of some sort.
+Collectively known as
+analytical events
+, these describe measurements and statements of fact about the operation of the product (
+“Example: Overloading event definitions”
+shows such an event in action). An application installed on a customer’s cell phone is a good example of an external event source. Consider a media streaming service like Netflix, where analytical events can be independently sent back to measure things such as which movies you have started and how much of them you’ve watched. Any request from an external product, based on actions originating from that product, counts as an externally generated event.
+Now, you may be wondering if, say, requests to load the next 60s of the current movie count as an externally generated event. Absolutely, they do. But the real question to ask is, “Are these events important enough to the business such that they must go into their own event stream for additional processing?” In many cases the answer is no, and you would not collect and store those events in an event stream. But for those cases where the answer is yes, you can simply parse the request into an event and route it into its own event stream.
+Reactively Generated Events
+The second type of externally generated event is a
+reactive
+event, which is generated
+in response
+to a request from one of your services. Your service composes a request, sends it to the endpoint, and awaits a response. In some cases, it’s really only important that the request is received, and the requesting client doesn’t need any other details from the response. For example, if you need to issue requests to send advertisement emails, collecting the response from the third-party service handling the requests may not be useful if turned into events. Once the request is successfully issued (HTTP 202 response), you can assume that the third-party email application will make it happen. Collecting the responses and converting them into events may not be necessary if there is no action to take from the results.
+On the other hand, your business requirements may expect significant detail from the response of the request. A prime example of this is the use of a third-party payment service, where the input event states the amount that is due to be paid by the customer. The response payload from the third-party API is
+extremely
+important, as it specifies whether the payment succeeded or not, any error messages, and any additional details such as a unique, traceable number indicating the payment information. This data is important to put into an event stream, as it allows downstream accounting services to reconcile accounts payable with received payments.
+Handling Autonomously Generated Analytical Events
+Analytical events may be bundled together and periodically sent in a batch or they may be sent as they occur. In either case, they will be sent to a request-response API, where they can then be routed on to the appropriate event streams. This is illustrated in
+Figure 13-1
+, where an external client application sends analytical events to an event receiver service that routes them to the correct output event stream.
+Figure 13-1.
+Collecting analytical events from an external source
+Tip
+Use schemas to encode events when generating them on the client side. This ensures a high-fidelity source that reduces misinterpretation by downstream consumers, while giving producers detailed requirements for creating and populating their events.
+Schematized events are essential for consuming analytical events at scale. Schemas clarify exactly what is collected so users can make sense of the event at a later date.
+They also provide a mechanism for version control and evolution, and put the onus of populating, validating, and testing the event on the producer of that data (the application developers) and not the consumers (backend recipients and analysts). Ensuring that the event adheres to a schema
+at creation time
+means that the receiver service no longer needs to interpret and parse the event, as could be the case with a format such as plain text.
+There are a number of restrictions that you must account for when ingesting analytical events from devices running multiple versions of code. For instance, this is a particularly common scenario for any application running on an end user’s moble device. Adding new fields to collect new data, or ceasing the collection of other event data is certainly reasonable. However, while you could force users to upgrade their applications by locking out older versions, it’s not realistic to make them update their application for every small change. Plan for multiple versions of analytical events, as shown in
+Figure 13-2
+.
+Figure 13-2.
+External sources generating analytical events with different versions
+Tip
+Think of external event sources as a set of microservice instances. Each instance produces schematized events into the event stream via the event receiver service.
+Finally, it’s important to sort the incoming events into their own defined event streams based on their schemas and event definitions. Separate these events
+according
+to business purposes just as you would the event streams of any other
+microservice
+.
+Integrating with Third-Party Request-Response APIs
+Event-driven microservices often need to communicate with third-party APIs via request-response protocols. The request-response pattern fits in nicely with event-driven processing; the request and response are treated simply as a remote function call. The microservice calls the API based on the event-driven logic and awaits the reply. Upon receipt of the reply, the microservice parses it, ensures it adheres to an expected schema, and continues applying business logic as though it were any other event. A generalized example of this process is shown in
+Figure 13-3
+.
+Figure 13-3.
+Integrating request-response APIs into event-driven workflows
+The following source code illustrates the logical operation of the microservice using a blocking call:
+while
+(
+true
+)
+{
+//endless processing loop
+Event
+[]
+eventsToProcess
+=
+Consumer
+.
+consume
+(
+"input-event-stream"
+);
+for
+(
+Event
+event:
+eventsToProcess
+)
+{
+// Apply business logic to current event to generate whatever
+// request is necessary
+Request
+request
+=
+generateRequest
+(
+event
+,
+...);
+// Make a request to the external endpoint. Indicate timeouts,
+// retries, etc.
+// This code uses a blocking call to wait for a response.
+Response
+response
+=
+RequestService
+.
+makeBlockingRequest
+(
+request
+,
+timeout
+,
+retries
+,
+...);
+// HTTP response. If success, parse + apply business logic.
+if
+(
+response
+.
+code
+==
+200
+)
+{
+// Parse the results into an object for use in this application
+<
+Class
+Type
+>
+parsedObj
+=
+parseResponseToObject
+(
+response
+);
+// Apply any more business logic if necessary.
+OutputEvent
+outEvent
+=
+applyBusinessLogic
+(
+parsedObj
+,
+event
+,
+...);
+// Write results to the output event stream.
+Producer
+.
+produce
+(
+"output-stream-name"
+,
+outEvent
+);
+}
+else
+{
+// Response is not 200.
+// You must decide how to handle these conditions.
+// Retry, fail, log, and skip, etc.
+}
+}
+// Commit the offsets only when you are satisfied with the processing results.
+consumer
+.
+commitOffsets
+();
+}
+There are a number of benefits to using this pattern. For one, it allows you to mix event processing with request-response APIs while applying business logic. Second, your service can call whatever external APIs it needs, however it needs to. You can also process events in parallel by making many nonblocking requests to the endpoints. Only when each of the requests has been sent does the service wait for the results; once it obtains them, it updates the offsets and proceeds to the next event batch.
+Note that parallel processing is valid only for queue-style streams, since processing order is not preserved.
+There are also a number of drawbacks to this approach. As discussed in
+Chapter 6
+, making requests to an external service introduces nondeterministic elements into the workflow.
+Reprocessing events, even just a failed batch, may give different results than the call made during original processing. Make sure to account for this when designing the application. In cases where the request-response endpoint is controlled by a third party external to your organization, making changes to the API or the response format can cause the microservice to fail.
+Finally, consider the frequency at which you make requests to an endpoint. For instance, say that you discover a bug in your microservice and need to rewind the input stream for reprocessing. Event-driven microservices typically consume and process events as fast as they can execute the code, which could lead to a massive surge in requests going to the external API. This can cause the remote service to fail or perhaps reactively block traffic coming from your IP addresses, resulting in many failed requests and tight retry loops by your microservice.
+You can somewhat address this issue by using quotas (see
+“Quotas”
+) to limit consumption and processing rates, but it will also require tight throttling by the microservice handling the requests. In the case of an external API outside of your organization’s control, the throttling responsibility may lie with you and may need to be implemented in your microservice. This is particularly common when the external API is capable of providing high-volume burst service, but charges you disproportionately for the volume exceeding the baseline, as can be the case with some logging and metric services.
+Processing and Serving Stateful Data
+You can also create event-driven microservices that provide a request-response endpoint for the random access of state by using the EDM principles discussed so far in this book. The microservice consumes events from input event streams, processes them, applies any business logic, and stores state either internally or externally according to application needs. The request-response API, which is often contained within the application (more on this later in the chapter), provides access to these underlying state stores. This approach can be broken down into two major sections: serving state from internal state stores, and serving state from external state stores.
+Serving Real-Time Requests with Internal State Stores
+Microservices can serve the results sourced from their internal state, as demonstrated in
+Figure 13-4
+.
+The client’s request is delivered to a load balancer that routes the request on to one of the underlying microservice instances. In this case, there is only one microservice instance, and since it is materializing all of the state data for this application, all of its application data is available within the instance. This state is materialized via the consumption of the two input event streams (A and B), with the changelog backed up to the event broker.
+Figure 13-4.
+Overview of an EDM with a REST API serving content to a client
+Now, it is quite common that multiple microservice instances are required to handle the load and that internal state may be split up between instances. When using multiple microservice instances, you must route requests for state to the correct instance hosting that data, as all internal state is sharded according to key, and a keyed value can only ever be assigned to one partition.
+Figure 13-5
+shows a client making a request that is then forwarded to the correct instance containing the necessary state.
+Figure 13-5.
+Using partition assignments to determine where materialized state for a given key is located
+Tip
+Hot replicas of state stores (see
+“Using hot replicas”
+) may also be used to serve direct-call requests, should your framework support their use. Keep in mind that hot-replica data may be stale in proportion to the replication lag from the primary state store.
+There are two properties of event-driven processing that you can rely on to determine which instance contains a specific key/value pair:
+A key can only be mapped to a single partition (see
+“Repartitioning Event Streams”
+)
+A partition can only be assigned to a single consumer instance (see
+“Consuming as an event stream”
+)
+A microservice instance within a consumer group knows its partition assignments and those of its peers. All events of a given key must reside inside a single partition for an event stream to be materialized. By applying the partitioner logic to the key of the request, the microservice can generate the partition ID assignment of that key. It can then cross-reference that partition ID with the partition assignments of the
+consumer
+group to determine which instance contains the materialized data associated with the key (if the data for that key exists at all).
+For example,
+Figure 13-6
+illustrates using the properties of the partitioner assignment to route a REST GET request.
+Figure 13-6.
+Workflow illustrating the routing of a request to the correct instance
+The partitioner indicates that the key is in P1, which is assigned to instance 1. If a new instance is added and the partitions are rebalanced, subsequent routing may need to go to a different instance, which is why the consumer group assignments are instrumental in determining the location of the partition assignments.
+One drawback of serving sharded internal state is that the larger the microservice instance count, the more spread out the state between individual instances. This reduces the odds of a request hitting the correct instance on the first try, without needing a redirect. If the load balancer is simply operating on a round-robin distribution pattern and assuming an even distribution of keys, then the chance of a request being a hit on the first try can be expressed as:
+success-rate
+=
+1
+/
+(
+number
+of
+instances
+)
+In fact, for a very large number of instances, almost all requests will result in a miss followed by a redirect, increasing the latency of the response and load on the application (as each request will likely require up to two network calls to process it, instead of one). Luckily, a smart load balancer can perform the routing logic
+before
+sending the initial request to the microservices, as demonstrated in
+Figure 13-7
+.
+Figure 13-7.
+Using the load balancer to correctly forward requests based on consumer group ownership and partitioner logic
+The smart load balancer applies the partitioner logic to obtain the partition ID, compares it against its internal table of consumer group assignments, and then forwards the request accordingly. Partition assignments will need to be inferred from the internal repartition streams or the changelog streams for a given state store. This approach
+does
+entangle the logic of your application with the load balancer, such that renaming state stores or changing the topology will cause the forwarding to fail. It’s best if any smart load balancers are part of the single deployable and testing process of your microservice so that you can catch these errors prior to production deployment.
+Warning
+Using a smart load balancer is just a best effort to reduce latency. Due to race conditions and dynamic rebalancing of internal state stores, each microservice instance must still be able to redirect incorrectly forwarded requests.
+Serving Real-Time Requests with External State Stores
+Serving from an external state store has two advantages over the internal state store approach. For one, all state is available to each instance, meaning that the request does not need to be forwarded to the microservice instance hosting the data as per the internal storage model. Second, consumer group rebalances also don’t require the microservice to rematerialize the internal state in the new instance, since again, all state is maintained external to the instance. This allows the microservice to provide seamless scaling and zero-downtime options that can be difficult to provide with internal state stores.
+Caution
+Ensure that state is accessed via the request-response API of the microservice and
+not
+through a direct coupling with the state store.
+Failure to do so introduces a shared data store, resulting in tight coupling between services, and makes changes difficult and risky.
+Serving requests via the materializing event-driven microservice
+Each microservice instance consumes and processes events from its input event streams and materializes the data to the external state store. Each instance also provides the request-response API for serving the materialized data back to the requesting client. This pattern, shown in
+Figure 13-8
+, mirrors that of serving state from an internal state store. Note that each microservice instance can serve the entire domain of keyed data from the state store and thus can handle any request passed to it.
+Figure 13-8.
+An all-in-one microservice serving from external state store; note that either instance could serve the request
+Both input event stream processing and request-response serving capacity scale by increasing or decreasing the instance count, as with internal state store microservices. The number of instances can be scaled beyond the count of the event stream partitions. These extra instances won’t be assigned partitions to process, but they can still process external requests from the request-response API. Furthermore, they exist as standby instances ready to be assigned a partition in the case that one of the other instances is lost.
+One of the main advantages of this pattern is that it doesn’t require much in the way of deployment coordination. This is a single all-in-one microservice that can continue to serve state from the external state store regardless of the current instance count.
+Serving requests via a separate microservice
+In this pattern, the request-response API is completely separate from the executable of the event-driven microservice that materializes the state to the external state store. The request-response API remains independent from the event processor, though both have the same bounded context and deployment patterns. This pattern is exemplified in
+Figure 13-9
+. You can see how the requests are served via a single REST API endpoint, while events are processed using two event processing instances.
+Figure 13-9.
+A microservice composed of separate executables—one for serving requests, the other for processing events
+Note
+While this pattern has two microservices operating on a single data store, there’s still just a single bounded context. These two microservices are treated as a single
+composite service
+. They reside within the same code repository and are tested, built, and deployed together.
+One of the main advantages of this model is that because the request-response API is fully independent of the event processor, you can choose the implementation languages and scaling needs independently. For instance, you could use a lightweight stream framework to populate the materialized state, but use a language and associated libraries that are already commonly used in your organization to deliver a consistent web experience to your customers. This approach can give you the best of both worlds, though it does come with the additional overhead of managing multiple components in your codebase.
+A second major advantage of this pattern is that it isolates any failures in the event processing logic from the request-response handling application. This eliminates the chance that any bugs or data-driven issues in the event processing code could bring down the request-response handling instance, thereby reducing downtime (note that the state will become stale).
+The main disadvantages of this pattern are complexity and risk. Coordinating changes between two otherwise independent applications is risky, as altering the data structures, topologies, and request patterns can necessitate dependent changes in both services. Additionally, coupling services invalidates some of the EDM principles, such as not sharing state via common data stores and using singular deployables for a bounded context.
+All that being said, this is still a useful pattern for serving data in real time, and it is often successfully used in production. Careful management of deployments and comprehensive integration testing is key for ensuring success.
+Handling Requests Within an Event-Driven Workflow
+Request-response APIs form the basis of communications between many systems, and as a result, you need to ensure that your applications can handle these data inputs in a way that integrates with event-driven microservice principles. One way to handle requests is just as you would with any non-event-driven system: perform the requested operation immediately and return the response to the client.
+Alternately, you can also
+convert
+the request into an event, inject it into its own event stream, and process it just as any other event in the system. Finally, the microservice may also perform a mix of these operations, by turning only requests that are important to the business into events (that can be shared outside the bounded context), while handling other requests synchronously.
+Figure 13-10
+illustrates this concept, which will be expanded on shortly in
+“Example: Newspaper publishing workflow (approval pattern)”
+.
+Figure 13-10.
+Handling requests directly versus turning them into events first
+The leftmost portion of the preceding figure shows a traditional object creation operation being performed, with the results written directly to the database. Alternately, the rightmost portion shows an event-first solution, where the request is parsed into an event and published to a corresponding event stream, prior to the event-driven workflow consuming it, applying business logic, and storing it in the database.
+The major benefit of first writing to the event stream is that it provides a durable record of the event, and allows any service to materialize off of that data. The biggest tradeoff, however, is the latency incurred, and that the service must wait for the result to be materialized into the data store to be used (eventually-consistent read-after-write). One way to mitigate this delay is to keep the value in memory after successfully writing it to the object stream, allowing you to use it in application-side operations. This will not, however, work for operations that require the data to be present in the database (e.g.,
+join
+s), as the event must be materialized first.
+Processing Events for User Interfaces
+A user interface (UI) is the means by which people interact with the bounded context of a service. Request-response frameworks are exceedingly common for a UI application, with many options and languages available to serve users’ needs. Integrating these frameworks into the event-driven domain is important for unlocking their intrinsic value.
+There are a number of concerns to address when processing user input as an event stream.
+Application designs that process requests as events must incorporate an
+asynchronous UI
+. You must also ensure that the application behavior manages user expectations. For example, in a synchronous system, a user that clicks a button may expect to receive a failure or success response in very short order, perhaps in 100 ms or less. In an asynchronous event processing system, it may take the processing service longer than 100 ms to process and handle the response, especially if the event stream has a large number of records to process.
+Tip
+Research and implement best practices for asynchronous UIs when handling user input as events. Proper UI design prepares the user to expect asynchronous results.
+There are certain asynchronous UI techniques you can use to help manage your users’ expectations. For example, you can update the UI to indicate that their request has been sent, while simultaneously discouraging them from performing any more actions until it has completed. Airline booking and automobile rental websites often display a “please wait” message with a spinning wheel symbol, blanking out the rest of the web page from user input. This informs users that the backend service is processing the event and that they can’t do anything else until it has completed.
+Another factor to consider is that the microservice may need to continually process incoming nonuser events while awaiting further user input. You must decide when the service’s event processing has progressed sufficiently for an update to be pushed to the UI. In fact, you must also decide when the
+initial
+processing of events from the beginning of time has caught up to the present, despite the ongoing updates that most EDM services must handle.
+There are no hard-and-fast rules dictating when you must update your interface. The business rules of the bounded context can certainly guide you, predominantly around the impact of users making decisions based on the current state. Answering the following questions may help you decide how and when to update your UI:
+What is the impact of the user making a decision based on stale state?
+What is the performance/experience impact of pushing a UI update?
+Warning
+Intermittent network failures causing request retries can introduce duplicate events. Ensure that your consumers can handle duplicates idempotently, as covered in
+“Generating duplicate events”
+.
+This next example demonstrates some of the benefits of converting requests directly to events prior to processing.
+Example: Newspaper publishing workflow (approval pattern)
+A newspaper publisher has an application that manages the layout of its publications. Each publication relies upon customizable templates to determine how and where articles and advertisements are placed.
+A graphical user interface (GUI) allows the newspaper designers to arrange and place articles according to the publisher’s business logic. The hottest news is placed on the front pages, with less important articles placed further in. Advertisements are also positioned according to their own specific rules, usually dependent on size, content, budget, and placement agreements. For example, some advertisers may not want their ads placed next to specific types of stories (e.g., a children’s toy company would want to avoid having its ad placed alongside a story about a kidnapping).
+The newspaper designer is responsible for placing the articles and advertisements according to the layout template. The newspaper editor is responsible for ensuring that the newspaper is cohesive, that the articles are ordered by category and projected importance to the reader, and that the advertisements are placed according to the contracts. The newspaper editor must approve the work performed by the designer before it can be published, or reject the work in the case that a re-organization is required.
+Figure 13-11
+illustrates this workflow.
+Figure 13-11.
+Workflow for populating a newspaper, with gating based on approval by editor and advertiser
+Both the editor and the advertiser can reject a proposed newspaper, though the advertiser will get the chance to do so only if the editor has already approved the layout. Furthermore, the newspaper is interested only in obtaining approval from the most important advertisers, those whose ad spend is a significant source of revenue.
+The design and the approval of the newspaper are two separate bounded contexts, each concerned with its own business functionality. This can be mirrored by two microservices, as shown in
+Figure 13-12
+. For simplicity’s sake, the figure omits accounts, account management, authentication, and login details.
+Figure 13-12.
+Newspaper design and approval workflow as microservices
+There is a fair bit to unpack in this example, so let’s start with the newspaper populator microservice. This service consumes layout templates, advertisements, and articles streams into a relational database. Here, the employee responsible for layout performs their tasks, and when the newspaper is ready for approval, they compile the populated newspaper into a PDF, save it to an external store, and produce it to the populated newspaper event stream. The format for the populated newspaper event is as follows:
+//Populated newspaper event
+
+Key: String pn_key        //Populated newspaper key
+Value: {
+  String pdf_uri          //Location of the stored PDF
+  int version             //Version of the populated newspaper
+  Pages[] page_metadata   //Metadata about what is on each page
+    - int page_number
+    - Enum content        //Ad, article
+    - String id           //ID of the ad or article
+}
+Tip
+Because the PDF may be too large to store in an event, it can be stored in an external file store, with access provided via a universal resource identifier, or URI (see
+“Minimize the Size of Events”
+).
+You may have noticed that this microservice does
+not
+translate the human interactions of the newspaper populator GUI into events—why is this? Despite “human interactions as events” being one of the main themes of this example, it is not necessary to convert
+all
+human interaction into events. This particular bounded context is really only concerned with producing the final populated newspaper event, but it isn’t particularly important
+how
+it came to be.
+This encapsulation of responsibility allows you to leverage a monolithic framework with synchronous GUI patterns for building this microservice, and to use patterns and software technologies that you or your developers may already be familiar with.
+Warning
+The populated newspaper stream might get out of sync with the state within the newspaper populator microservice. See
+“Data Liberation Patterns”
+for details on atomic production from a monolith, particularly using the outbox table pattern or change-data capture logs.
+Approvals are handled by a separate microservice, where the populated newspaper event is loaded by the editor to view and approve. The editor can mark up a copy of the PDF as necessary, add comments, and provide tentative approval to move it on to the next step: advertiser approval. The editor may also reject it at any point of the workflow, before, during, or after obtaining advertiser review. The event structure is as follows:
+//Editor approval event
+
+Key: String pn_key               //Populated newspaper key
+Value: {
+  String marked_up_pdf_uri       //Optional URI of the marked-up PDF
+  int version                    //Version of the populated newspaper
+  Enum status                    //awaiting_approval, approved, rejected
+  String editor_id
+  String editor_comments
+  RejectedAdvertisements[] rejectedAds //Optional, if rejected
+    - int page_number
+    - String advertisement_id
+    - String advertiser_id
+    - String advertiser_comments
+}
+Advertisers are provided with a UI for approving their advertisement size and placement. This service is responsible for determining
+which
+advertisements require approval and which do not, and for cutting up the PDF into appropriate pieces for the advertiser to view. It is important to not leak information about news stories or competitors’ advertisements. Approval events are written to an advertiser’s approval stream, similar to that of the editor:
+//Advertiser approval event
+
+Key: String pn_key          //Populated newspaper key
+Value: {
+  String advertiser_pdf_uri //The PDF piece shown to the advertiser
+  int version               //Version of the populated newspaper
+  int page_number
+  boolean approved          //Approved or not
+  String advertisement_id
+  String advertiser_id      //ID of the approver
+  String advertiser_comments
+}
+You may have noticed that the advertiser approvals are keyed on
+pn_key
+and that there will be multiple advertiser events with this same key per newspaper. In this case the advertiser approvals are being treated as
+events
+and not
+entities
+, and it is the
+aggregate
+of these events that determines the complete approval by an advertiser for the newspaper. Keep in mind that each advertiser logs into their GUI and approves their ads separately, and it’s not until they have all replied (or perhaps, failed to reply in time) that the process can move on to the final approval. If you take a look at the editor approval event definition, you can see that the aggregation of rejected events is represented as an array of
+RejectedAdvertisements
+objects.
+One benefit of having populated newspaper, editor approval, and advertiser approval as events is that together they form the canonical narrative of newspapers, rejections, comments, and approvals. You can audit this narrative at any point in time to see the history of submissions and approvals, and pinpoint where things may have gone wrong. Another benefit is that by writing directly to events, the approval microservice can use a pure stream processing library, like Apache Kafka or Samza, to materialize the state directly from the event stream whenever the application starts up. There is no need to create an external state store for managing this data.
+Separating the editor and advertiser approval services
+Business requirements demand that the editor approval service and advertiser approval service be separated. Each of these serves a related, though separate, business context. In particular, the advertiser components of the currently combined service are responsible for:
+Determining which advertisers to ask for approval
+Slicing up the PDF into viewable chunks
+Managing advertiser-facing components, controls, and branding
+Handling public-facing exposure to the wider internet, particularly around security practices and software patches
+The editor components of the combined service, on the other hand, do not need to address public-facing concerns such as image, branding, and security. It is primarily concerned with:
+Approving overall layout, design, and flow
+Assessing the
+summary
+of retailer responses (not each one individually)
+Providing suggestions to the newspaper designer on how to accommodate advertiser rejections
+A mock-up of the new microservice layout is shown in
+Figure 13-13
+.
+Figure 13-13.
+Independent advertiser and editor approval services
+There are
+two
+new event streams to consider. The first is in step 2, the editor-approved p.n. stream. The format of this stream is identical to that of the populated newspaper stream, but this event is produced only after the editor is satisfied with the overall newspaper and releases it for advertiser approval.
+Note
+The populated newspaper stream is the single source of truth for all
+candidate
+newspapers. The editor-approved p.n. stream is the single source of truth
+only for newspapers that have been approved for advertiser review
+, having been filtered by the editor system’s logic. The two event streams do not have the same business
+meaning
+.
+A major advantage of this design is that
+all
+editor gating logic stays completely within the editor approval service. Note that updates to the populated newspaper stream are
+not
+automatically forwarded on, but rely on the editor releasing them for approval. Multiple versions of the same newspaper (
+pn_key
+) are contained entirely within the editor service. This arrangement lets the editor control which versions are sent on for approval, while gating any further revisions until they are satisfied with the initial advertiser feedback.
+The second new event stream is in step 3, the ad-approvals summary stream. It contains the summaries of the results from the advertiser approval service, designed to provide both a historical record and the current status of each of the responses for a given newspaper. Keep in mind that as a separate service, the editor approval service has no way to know which advertisers have been sent instructions to approve their advertisements. That information is strictly the domain of the advertising approval system, though it can communicate a summary of the results to the editor. The format of the ad-approval summary event is as follows:
+//Ad-approval summary event
+
+Key: String pn_key
+Value: {
+  int version              //Version of the populated newspaper
+  AdApprovalStatus[] ad_app_status
+    - Enum status          //Waiting, Approved, Rejected, Timedout
+    - int page_number
+    - String advertisement_id
+    - String advertiser_id
+    - String advertiser_comments
+}
+This ad-approval summary event definition demonstrates the encapsulation of advertiser approval state into the advertiser approval service. The editor can make decisions on the approval of the newspaper based on the statuses of the ad-approval summary event, without having to manage or handle any of the work of obtaining those results.
+Micro-Frontends in Request-Response Applications
+Frontend and backend services coordinate in three primary ways to bring business value to users. Monolithic backends are common in many organizations of any size. Microservice backends have become more popular with the growing adoption of microservices, both synchronous and event-driven. In both of these first two approaches, the frontend and backend services are owned and operated by separate teams, such that the end-to-end business functionality crosses team boundaries. In contrast, a microfrontends approach aligns implementations completely on business concerns, from backend to frontend. These three approaches are illustrated in
+Figure 13-14
+.
+Figure 13-14.
+Three main approaches to organizing products and teams for customer-facing content
+The monolithic backend approach is one that most software developers are familiar with, at least to some extent. In many cases, a dedicated backend team, usually composed of many subteams for very large monoliths, performs most of the work on the monolith. Head count increases as the monolith grows.
+The frontend team is completely separate from the backend, and they communicate via a request-response API to obtain the necessary data for rendering the customer’s UI. A product implemented in this architecture has to coordinate efforts between teams and across technical implementations, making it potentially one of the most expensive ways of delivering functionality.
+The microservice backend approach is one where many teams migrating to microservices eventually end up, and for better or worse, it is where many of them stay.
+The major advantage of this approach is that the backend is now composed of independent,
+product-focused
+microservices, with each microservice (or set of product-supporting microservices) independently owned by a single team. Each microservice materializes the necessary data, performs its business logic, and exposes any necessary request-response APIs and event streams up to the aggregation layer.
+A major downside of the microservice backend approach is that it still depends heavily on an aggregation layer, where numerous problems can pop up. Business logic can creep into this layer due to attempts to resolve product boundary issues, or to achieve “quick wins” by merging features of otherwise separate products. This layer often suffers from the tragedy of the commons, whereby everyone relies on it but no one is responsible for it. While this can be resolved to some extent by a strict stewardship model, accumulations of minor, seemingly innocent changes can still let an inappropriate amount of business logic leak through.
+The third approach, the microfrontend, splits up the monolithic frontend into a series of independent components, each backed by supporting backend microservices.
+The Benefits of Microfrontends
+Microfrontend patterns match up very well with event-driven microservice backends, and inherit many of their advantages, such as modularity; separation of business concerns; autonomous teams; and deployment, language, and code-base independence.
+Let’s look at some of the other notable benefits of microfrontends.
+Composition-Based Microservices
+Microfrontends are a compositional pattern, meaning you can add services as needed to an existing UI. Notably, microfrontends pair extremely well with event-driven backends, which are also intrinsically composition-based. Event streams enable the microservice to pull in the events and entities needed to support the backend bounded context. The backend service can construct the necessary state and apply business logic specifically for the business needs of the product provided by the microfrontend. The state store implementation can be selected to specifically suit the requirements of the service. This form of composition provides tremendous flexibility in how frontend services can be built, as you’ll see in
+“Example: Experience Search and Review Application”
+.
+Easy Alignment to Business Requirements
+By aligning microfrontends strictly on business bounded contexts, just as you’d do with other microservices operating in the backend, you can trace specific business requirements directly to their implementations. This way, you can easily inject experimental products into an application without adversely affecting the codebase of
+existing
+core services. And should their performance or user uptake not be as expected, you can just as easily remove them. This alignment and isolation ensures that product requirements from various workflows do not bleed into one another.
+Drawbacks of Microfrontends
+While microfrontends enable separation of business concerns, you have to account for features that you may take for granted in a monolithic frontend, such as consistent UI elements and total control over each element’s layout. Microfrontends also inherit some of the issues common to all microservices, such as potential for duplicated code and the operational concerns of managing and deploying microservices. This section covers a few microfrontend-specific considerations.
+Potentially Inconsistent UI Elements and Styling
+It’s important that the applications’ visual style remains consistent, and this can be challenging when a frontend experience is composed of many independent microfrontends. Each microfrontend is another potential point of failure—that is, where the UI design might be inconsistent with the desired user experience. One method to remedy this is to provide a strong style guide, in conjunction with a lean library of common UI elements to be used in each microfrontend.
+The downside to this approach is that it requires closely maintaining ownership of both the style guide and the elements. Adding new elements and modifying existing ones can be a bit difficult to coordinate across multiple teams using the element library in their products. Accommodating these assets using a stewardship model, similar to that used in many popular open source projects, can help ensure that changes are done in a measured and deliberate way. This requires participation and dialogue between the asset users and, as a result, incurs an overhead cost.
+Tip
+Ensure common UI element libraries are free of any bounded-context-specific business logic. Keep all business logic encapsulated within its own proper bounded context.
+Finally, making changes to the common UI elements of the application may require that each microfrontend be recompiled and redeployed. This can be operationally expensive, as each microfrontend team will need to update its application, test to ensure that the UI adheres to the new requirements, and verify that it integrates as expected with the UI layer that stitches it together (more on this next). This expense is somewhat mitigated by the infrequency of sweeping UI changes.
+Varying Microfrontend Performance
+Microfrontends, as pieces of a composite framework, can be problematic at times. These separate frontends may load at different rates, or worse, may not load anything at all during a failure. You must ensure that the composite frontend can handle these scenarios gracefully and still provide a consistent experience for the parts of it that are still working. For example, you may want to use spinning “loading” signs for elements that are still awaiting results from slow microfrontends. Stitching these microfrontends together is an exercise in proper UI design, but the deeper details and nuances of this process are beyond the scope of this book.
+Example: Experience Search and Review Application
+“An experience is something you’ll never forget!” claim the makers of the application, which connects vacationers with local guides, attractions, entertainment, and culinary delights. Users can search for local experiences, obtain details and contact information, and leave reviews.
+The first version of this application has a single service that materializes both the experience entities and customer reviews into a single endpoint. Users can input their city name to see a list of available experiences in their area. Once they select an option, the experience information along with any associated reviews are displayed, as in the simple mockup in
+Figure 13-15
+.
+Figure 13-15.
+Experiences search and review application, GUI mockup version 1 with monolithic frontend
+In the first version of the application, data is stored in a basic key/value state store that offers only limited searching capabilities. Searching based on the user’s geolocation is not yet available, though it is something your users have been requesting. Additionally, it would be a good idea for version 2 to split off reviews into their own microservice, as they have sufficiently distinct business responsibilities to form their own bounded context.
+Finally, you should create the product microfrontend to stitch these two products together and act as the aggregation layer for each business service. Each of these three microfrontends may be owned and managed by their own team, or the same team, though the separation of concerns allows for scaling ownership just as in backend microservices. A new mockup of the GUI showing the separated frontend responsibilities is shown in
+Figure 13-16
+.
+Figure 13-16.
+Experiences search and review application, GUI mockup version 2 with microfrontends
+Now the product boundary encapsulates both the search and review microfrontends and contains all the logic necessary to stitch these two services together. It does not, however, contain any business logic pertaining to these services. This updated UI also illustrates how the microfrontend’s responsibilities have changed, as it must now support geolocation search functionality. The user’s address is transposed into lat-lon coordinates, which can be used to compute the distance to nearby experiences. Meanwhile, the review microfrontend’s responsibilities remain the same, but it is freed of its coupling to the search service.
+Figure 13-17
+shows how this migration into microfrontends could look.
+Figure 13-17.
+The flexibility of microfrontends paired with backend event-driven microservices
+There are a few notable points about this figure. First, as discussed earlier in this chapter, the reviews are being published
+first
+as events to the review event stream, and
+then
+subsequently ingested back into the data store. This is true for both versions of the service, and it illustrates the importance of keeping core business data external to the implementation. In this way you can easily break out the review service into its own microservice, without performing unnecessary and error-prone operations with data synchronization.
+If the reviews were kept internal to version 1’s data store, you would instead have to look into liberating them for version 2’s use (
+Chapter 4
+) and then come up with a migration plan for its long-term storage in an event stream.
+Tip
+The ability to materialize and consume any stream of business events, however the service needs them, is what makes
+event-driven
+microservice backends pair so effectively with
+microfrontends
+.
+Second, the review service has been broken out into its own microservice, fully separating its bounded context and implementation from those of search. Third, the search service has replaced its state store with one capable of both plain-text and
+geolocation
+search functionality. This change supports the business requirements of the search service, which can now be addressed independently of the review service business requirements. This solution illustrates how composition-based backends give development teams the flexibility to use the best tools to support the microfrontend product.
+In this new version, the search microservice consumes events from the user profile entity stream to personalize search results. While version 1 of the backend service could certainly also consume and use this data, the increased granularity of the services in version 2 clarifies which business functions are using the user data. An observer can tell which streams are consumed and used for each part of the frontend just by looking at the input streams for the bounded contexts. Conversely, in version 1, without digging into the code, an observer would have no idea whether it’s the search or the review portion using the user events.
+Finally, note that all necessary data for both the old and new versions are sourced from the exact same event streams. Because these event streams are the single source of truth you can change the application backends without having to worry about maintaining a specific state store implementation or about migrating data. This is in stark contrast to a monolithic backend, where the database also plays the role of data communication layer and cannot be easily swapped out. The combination of an event-driven backend paired with a microfrontend is limited only by the granularity and detail of the available event data.
+Summary
+This chapter has covered the integration of event-driven microservices with request-response APIs. External systems predominantly communicate via request-response APIs, be they human or machine driven, and their requests and responses may have to be converted into events. Machine input can be schematized ahead of time, to emit events that can be collected server-side via the request-response API. Third-party APIs typically require parsing and wrapping the responses into their own event definition and tend to be more brittle with change.
+Human interactions can also be converted into events, to be processed asynchronously by the consuming event-driven microservice. This requires an integrated design, where the user interface cues the user that their request is being handled asynchronously. By treating all essential user inputs as streams of events, the implementation of the bounded context is effectively decoupled from the user data. This allows for significant flexibility in the architectural evolution of the design and permits components to be altered without undue hardship.
+Finally, microfrontends provide an architecture for full-stack development of products based on event-driven microservices. Backend event-driven microservices are compositional by nature, drawing together events and entities to apply business logic. This pattern is extended to the frontend, where user experiences need not be one large monolithic application, but instead can compromise a number of purpose-built microfrontends. Each microfrontend serves its particular business logic and functionality, with an overall compositional layer to stitch the various applications together. This architectural style mirrors the autonomy and deployment patterns of the backend microservices, providing full product alignment and allowing flexible frontend options for experimentation, segmentation, and delivery of custom user experiences.
+
+Chapter 14.
+Supportive Tooling
+Supportive tooling enables you to efficiently manage event-driven microservices at scale. While many of these tools can be provided by command-line interfaces executed by administrators, it is best to have a gamut of self-serve tools.
+These provide the DevOps capabilities that are essential for ensuring a scalable and elastic business structure. The tools covered in this chapter are by no means the only ones available, but they are tools that I and others have found useful in our experience. Your organization will need to decide what to adopt for its own use cases.
+Unfortunately, there is a dearth of freely available open source tooling for managing event-driven microservices. Where applicable, I have listed specific implementations that are available, but many of them have been privately written for the businesses I have worked for. You will likely need to write your own specific tools, but I encourage you to use open source tooling when available and to contribute back to it when
+possible
+.
+Microservice-to-Team Assignment System
+When a company has a small number of systems, it’s easy to use tribal knowledge or informal methods to keep track of who owns which systems. In the microservice world, however, it is important to explicitly track ownership of microservice implementations and event streams. By following the single writer principle (see
+“Microservice Single Writer Principle”
+), you can attribute event stream ownership back to the microservice that owns the write permissions.
+You can use a simple microservice developed in-house to track and manage all of the dependencies between people, teams, and microservices. This system is the foundation for many of the other tools within this chapter, so I strongly suggest that you look into finding or developing it. Assigning microservice ownership this way helps ensure that fine-grained DevOps permissions are correctly assigned to the teams that need them.
+Event Stream Creation and Modification
+Teams will need the ability to create new event streams and modify them accordingly. Microservices should have the right to automatically create their own internal event streams and have full control over important properties such as the partition count, retention policy, and replication factor.
+For instance, a stream that contains highly important, extremely sensitive data that cannot be lost under any circumstances may have an infinite retention policy and a high replication factor. Alternately, a stream containing a high volume of individually unimportant updates may have a high partition count with a low replication factor and a short retention policy. Upon creating an event stream, it is customary to assign ownership of it to a particular microservice or even an external system. This is covered in the next section.
+Event Stream Metadata Tagging
+One useful technique for assigning ownership is to tag streams with metadata. Then, only teams that own the production rights to a stream can add, modify, or remove metadata tags. Some examples of useful metadata include, but are not limited to, the following:
+Stream owner (service)
+The service that owns a stream. This metadata is regularly used when communicating change requests or auditing which streams belong to which services. It adds clarity to ownership and the business communications structure of any microservice or event stream in your organization.
+Personally identifiable information (PII)
+Information that requires stricter security handling because it can identify users either directly or indirectly. One of the basic use cases of this metadata is to restrict access to any event stream marked as PII unless the team owning the data explicitly gives approval.
+Financial information
+Anything pertaining to money, billing, or other important revenue-generating events. Similar but not identical to PII.
+Namespace
+A descriptor aligned with the nested bounded context structures of the business. A stream with a namespace assigned could be hidden from services outside of the namespace, but available for services within the namespace. This helps reduce data discovery overload by concealing inaccessible event streams to a user browsing through available event streams.
+Deprecation
+A way of indicating that a stream is outdated or has been superseded for some reason. Tagging an event stream as deprecated allows for grandfathered systems to continue using it while new microservices are blocked from requesting a subscription. This tag is generally used when breaking changes must be made to the data format of an existing event stream. The new events can be put into the new stream, while the old stream is maintained until dependent microservices can be migrated over. Finally, the deprecated event stream owner can be notified when there are no more registered consumers of the deprecated stream, at which point it may be safely deleted.
+Custom tags
+Any other metadata that may be suitable to your business can and should be tracked with this tool. Consider which tags may be important to your organization and ensure they are available.
+Quotas
+Quotas are generally established by the event broker at a universal level. For instance, an event broker may be set to allow only 20% of its CPU processing time to go toward serving a single producer or consumer group. This quota prevents accidental denial of service due to an unexpectedly chatty producer or a highly parallelized consumer group beginning from the start of a very large event stream. In general, you want to ensure at the very least that your entire cluster won’t be saturated by one service’s I/O requests. You can simply limit how many resources a consumer or producer can use, resulting in it being throttled.
+You may need to set up quotas at a more granular level, preventing surge-prone systems from being throttled while still ensuring a minimum amount of processing power and network I/O for steady-state consumers. You may want to set up different quotas or remove them entirely for producers producing data from sources outside the event broker cluster. For instance, a producer publishing events based on third-party input streams or external synchronous requests may simply end up dropping data or crashing if its production rate is throttled below the incoming message rate.
+Schema Registry
+Explicit schemas provide a strong framework for modeling events. Precise definitions of data, including names, types, defaults, and documentation, provide clarity to both producers and consumers of the event. The
+schema registry
+is a service that allows your producers to register the schemas they have used to write the event. This provides several distinct benefits:
+The event schema does not need to be transported with the event. A simple placeholder ID can be used, significantly reducing bandwidth usage.
+The schema registry provides the single point of reference for obtaining the schemas for an event.
+Schemas enable data discovery, particularly with free-text search.
+The workflow for a schema registry is shown in
+Figure 14-1
+.
+Figure 14-1.
+Schema registry workflow for producing and consuming an event
+The producer, upon serializing the event prior to production, registers the schema with the schema registry to obtain the schema’s ID (step 1). It then appends the ID to the serialized event (step 2) and caches the information in the producer cache (step 3) to avoid querying the registry again for that schema. Remember, the producer must complete this process for each event, so eliminating the external query for known event formats is essential.
+The consumer receives the event and gets the schema (step 4) for that specific ID from either its cache or the schema registry. It then swaps the ID out for the schema (step 5) and deserializes the event into the known format. The schema is cached if new (step 6), and the deserialized event can now be used by the consumer’s business logic. At this stage the event could also have schema evolution applied.
+Confluent has provided an
+excellent implementation of a schema registry for Apache Kafka
+. It supports Apache Avro, Protobuf, and JSON formats and is freely available for production use.
+Note
+Registering the schemas to a dedicated event stream frees the schema registry implementation from having to provide durable storage. This is the design choice Confluent made with its schema registry.
+Schema Creation and Modification Notifications
+Event stream schemas are important in terms of standardizing communication. One issue that can arise, particularly with large numbers of event streams, is that it can be problematic to notify other teams that a schema they depend on has evolved (or will be evolving). This is where schema creation and modification notifications come into play.
+The goal of a notification system is simply to alert consumers when their input schemas have evolved. Access control lists (ACLs, discussed later in this chapter) are a great way to determine which microservice consumes from which event stream and, by association, which schemas it depends on.
+Schema updates can be consumed from the schema stream (if you’re using the Confluent schema registry) and cross-referenced to their associated event streams. From here, the ACLs provide information about which services are consuming which event streams and then notify the corresponding teams that own the services via the microservice-to-team assignment system.
+There are a number of benefits to a notification system. While in a perfect world, every consumer would be able to fully review every upstream change to the schema, a notification system provides a safety net for identifying detrimental or breaking changes before they become a crisis. Lastly, a consumer may want to just follow all publicly available schema changes across a company, allowing them greater insight into the data as new event streams come online.
+Offset Management
+Event-driven microservices require that you manage offsets before they proceed with data processing. In normal operation, the microservice will advance its consumer offset as it processes messages. There are, however, cases where you’ll have to manually adjust the offset.
+Application reset: Resetting the offset
+Changing the logic of the microservice may require that you reprocess events from a previous point in time. Usually reprocessing requires starting at the beginning of the stream, but your selection point may vary depending on your service’s needs.
+Application reset: Advancing the offset
+Alternately, perhaps your microservice doesn’t need old data and should consume only the newest data. You can reset the application offset to be the latest offset, instead of the earliest.
+Application recovery: Specifying the offset
+You may want to reset the offset to a specific point in time. This often comes into play with multicluster failover, where you want to ensure you haven’t missed any messages but don’t want to start at the beginning. One strategy includes resetting the offset to a time
+N
+minutes prior to the crash, ensuring that no replicated messages are missed.
+For production-grade DevOps, a team must own the microservice in order to modify its offsets, a feature provided by the microservice-to-team assignment system.
+Permissions and Access Control Lists for Event Streams
+Access control to data is important not only from a business security standpoint, but also as a means of enforcing the single writer principle.
+Permissions and access control lists ensure that bounded contexts can enforce their boundaries. Access permissions to a given event stream should be granted only by the team that owns the producing microservice, a restriction you can enforce by using the microservice-to-team assignment system. Permissions usually fall into these common categories (depending, of course, on the event broker implementation): READ, WRITE,
+CREATE
+, DELETE, MODIFY, and DESCRIBE.
+Warning
+ACLs rely on individual identification for each consumer and producer. Ensure that you enable and enforce identification for your event broker and services as soon as possible, preferably from day one. Adding identification after the fact is extremely painful, as it requires updating and reviewing every single service that connects to the event broker.
+ACLs enforce bounded contexts. For instance, a microservice should be the only owner of CREATE, WRITE, and READ permissions for its internal and changelog event streams. At no point should a microservice couple on the internal event streams of another microservice. Additionally, this microservice should be the only service assigned WRITE permissions to its output stream, according to the single writer principle. The output streams may be made publicly available such that any other system can consume the data, or it may have restricted access because it contains sensitive financial or PII data or is part of a nested bounded context.
+A typical microservice will be individually assigned a set of permissions following the format shown in
+Table 14-1
+.
+Table 14-1.
+Typical event stream permissions for a given microservice
+Component
+Permissions for microservice
+Input event streams
+READ
+Output event streams
+CREATE, WRITE (and maybe READ, if used internally)
+Internal and changelog event streams
+CREATE, WRITE, READ
+One particularly helpful feature is to provide individual teams with the means of requesting consumer access for a specific microservice, offloading the responsibilities of access control enforcement to them. Alternately, depending on business requirements and metadata tags, you could centralize this process so that teams go through a security review whenever requesting access to sensitive information. The granting and revoking of permissions can be kept as its own stream of events, providing a durable and immutable record of data access for auditing purposes.
+Discovering Orphaned Streams and Microservices
+In the normal course of business growth, new microservices and streams will be created, and deprecated ones will be removed. Cross-referencing the list of access permissions with the existing streams and microservices can help in detecting orphans. If a stream has no consumers, it may be marked for deletion. If the producing microservice of that event stream produces no other data in other event streams under active consumption, it too may be removed. In this way you can leverage the permissions list to keep the event stream and business topology healthy and up to date.
+State Management and Application Reset
+It is common to reset the internal state of the application when changing a stateful application’s implementation. Any changes to the data structures stored in the internal and changelog event streams, as well as any changes to the topology workflow, will require that the streams be deleted and re-created according to the new
+application
+.
+Some of the stateful microservice patterns discussed in
+Chapter 7
+use state stores external to the processing node. Depending on the capabilities supported by your company’s microservice platform organization, it may be possible (and is certainly advisable) to reset these external state stores when requested by the microservice owner. For example, if a microservice is using an external state store, such as Amazon’s DynamoDB or Google’s Bigtable, it would be best to purge the associated state when resetting the application. This reduces operational overhead and ensures that any stale or erroneous data is automatically removed. Any external stateful services outside the domain of “officially supported capabilities” will likely need to be manually reset.
+It’s important to note that while this tool should be self-serve, in no way should another team be able to delete the event streams and state owned by another team. Again, I recommend using the microservice-to-team assignment system discussed in this chapter to ensure that an application can be reset only by its owner or an admin.
+In summary, this tool needs to:
+Delete a microservice’s internal streams and changelog streams
+Delete any external state store materializations (if applicable)
+Reset the consumer group offsets to the beginning for each input stream
+Consumer Offset Lag Monitoring
+Consumer lag is one of the best indicators that an event-driven microservice needs to scale up. You can monitor for this by using a tool that periodically computes the lag of consumer groups in question. Though the mechanism may vary between broker implementations, the definition of lag is the same: the difference in event count between the most recent event and the last processed event for a given microservice consumer group.
+Basic measurements of lag, such as a threshold measurement, are fairly straightforward and easy to implement. For instance, if a consumer’s offset lag is greater than
+N
+events for
+M
+minutes, trigger a doubling of consumer processors and rebalance the workload. If the lag is resolved and the number of processors currently running is higher than the minimum required, scale the processor count down.
+Some monitoring systems, such as Burrow for Apache Kafka, consider the history of offset lag when computing the lag state. This approach can be useful in cases where you have a large volume of events entering a stream, such that the amount of lag is only ever at 0 for a split second before the next event arrives. Since lag measurements tend to be periodic in nature, it is possible that the system will always appear to be lagging by a conventional measurement. Therefore, using deviation from historical norms can be a useful mechanism for determining if a system is falling behind or catching up.
+Remember that while microservices should be free to scale up and down as required, generally some form of hysteresis—a tolerance threshold—is used to prevent a system from scaling up and down endlessly. This hysteresis loop needs to be part of the logic that evaluates the signal and can often be accommodated by modern cloud platforms such as AWS CloudWatch and Google Cloud Operations (formerly Stackdriver).
+Streamlined Microservice Creation Process
+Creating a code repository for a new business requirement is a typical task in a microservice environment. Automating this task into a streamlined process will ensure that everything fits together and integrates into the common tooling provided by the capabilities teams.
+Here is a typical microservice creation process:
+Create a repository.
+Create any necessary integrations with the continuous integration pipeline (discussed in
+“Continuous Integration, Delivery, and Deployment Systems”
+).
+Configure any webhooks or other dependencies.
+Assign ownership to a team using the microservice-to-team assignment system.
+Register for access permissions from input streams.
+Create any output streams and apply ownership permissions.
+Provide the option for applying a template or code generator to create the skeleton of the microservice.
+Teams will complete this process many times over, so streamlining it in this way will save significant time and effort. The newly automated workflow includes an injection point for up-to-date templates and code generators, ensuring that new projects include the latest supported code and tools instead of simply copying an older project.
+Container Management Controls
+Container management is handled by the container management service (CMS), as discussed in
+Chapter 2
+. I recommend exposing certain aspects of the CMS so teams can provide their own DevOps capabilities, such as:
+Setting environment variables for their microservices
+Indicating which cluster to run a microservice on (e.g., testing, integration,
+production
+)
+Managing CPU, memory, and disk resources, depending on the needs of their microservices
+Increasing and decreasing service count manually, or depending on service-level agreements and processing lag
+Autoscaling on CPU, memory, disk or lag metrics
+The business will need to determine how many container management options should be exposed to developers, versus how many should be managed by a dedicated operations team. This typically depends on the culture of DevOps within the
+organization
+.
+Cluster Creation and Management
+Cluster creation and management tends to come up as a company scales around event-driven microservices. Generally speaking, a small to medium-sized company can often get away with using a single event broker cluster for all of its serving needs. However, larger companies often find themselves under pressure to provide multiple clusters for various technical and legal reasons. International companies may need to keep certain data within the country of origin. Data sizes may grow so large that it cannot all be practically kept within a single cluster, despite modern event brokers’ excellent horizontal scaling qualities. Various business units in an organization may require their own clusters for isolation purposes. Perhaps most commonly, data must be replicated across multiple clusters in multiple regions to provide redundancy in case of a total cluster outage.
+Multicluster management, including dynamic cross-region communication and disaster recovery, is a complex topic that could very well fill its own book. It is also highly dependent on the services in question and the prevention and recovery strategies being used. Some businesses, like Capital One, have significant custom libraries and code built around their Apache Kafka implementations to allow for native multicluster replication. As a bank, the company cannot afford to lose any financial transaction events whatsoever. Your needs may vary. For these reasons, this book doesn’t cover multicluster service and data management strategies.
+Programmatic Bringup of Event Brokers
+The team responsible for managing the event broker clusters will often also provide tooling for creating and managing new clusters. That being said, commercial cloud providers are also moving into this domain; for instance, Apache Kafka clusters can now be created on-demand in AWS (as of November 2018), joining a number of other cloud service providers. Different event broker technologies may require varying amounts of work to support and should be examined closely by your domain experts. In either case, the goal is to have an event broker cluster management tool that the entire organization can use to easily create and scale event brokers.
+Programmatic Bringup of Compute Resources
+You’ll often need to bring up a set of compute resources that are independent of all other resources. It is not always necessary to create an entirely new container management service, as usually the existing one can serve multiple namespaces.
+As with event brokers, cloud computing providers commonly provide hosted services that can give you these capabilities on-demand, such as Google’s and Amazon’s hosted Kubernetes solutions.
+The same technical and legal requirements that apply to event brokers extend to compute resources. Avoid regional failures by distributing processing across data centers, process data locally if it cannot leave the country, and save money by dynamically shifting compute-heavy workloads to cheaper service providers.
+Generally you can use the same continuous integration and continuous delivery (CI and CD) tools to perform this task, but you will need a selection mechanism to determine where to deploy the microservices. Additionally, you will need to ensure that the required event data is available to the compute resources, generally through colocation within the same region or availability zone. Cross-region communication is always possible, but it tends to be expensive and slow.
+Cross-Cluster Event Data Replication
+Replicating event data between clusters is important for scaling up event-driven microservices beyond the confines of a single cluster—examples include for the purposes of disaster recovery, regular cross-cluster communication, and programmatically generated testing environments.
+The specifics of how data is replicated between clusters vary with event broker and replication tool implementations. When selecting a replication tool implementation, consider the following:
+Does it replicate newly added event streams automatically?
+How does it handle the replication of deleted or modified event streams?
+Is the data replicated exactly, with the same offsets, partitions, and timestamps, or approximately?
+What is the latency in replication? Is it acceptable to the business needs?
+What are the performance characteristics? Can it scale according to business needs?
+Programmatic Bringup of Tooling
+Last, but certainly not least, the same sets of tools discussed thus far should also be programmatically brought up for new clusters.
+This provides a common set of tools you can deploy to any cluster deployment without relying on any data stores besides the event broker itself. There are a number of benefits to using tooling in this manner. First, the tooling gets used far more often and helps reveal bugs or necessary features to be added. Second, it lowers the barrier to entry for using new clusters, as users will already be familiar with the tooling interfaces. Lastly, when the cluster is terminated, the tools can be terminated alongside it with no additional cleanup required.
+Dependency Tracking and Topology Visualization
+Tracking the data dependencies between microservices can be extremely useful in helping run an event-driven microservice organization. The only requirement is that the organization must know which microservices are reading and writing to which event streams. To achieve this, it could employ a self-reporting system where consumers and producers report on their own consumption and production patterns. The problem with any sort of self-reporting solution, however, is that it is effectively voluntary, and there will always be a number of teams that forget, opt out, or simply are unwilling to report. Determining dependencies without full compliance is not particularly useful, as gaps in the communication structure and incomplete topologies limit insight. This is where the permissions structure and ACLs discussed earlier in this chapter come into play.
+Leveraging the permissions structure to determine dependencies guarantees two things. First, a microservice cannot operate without registering its permissions requirements, as it would not be able to read from or write to any event streams. Second, if any changes are made to the permissions structure, the associated permissions used to determine dependencies and topology generation are also updated. No other changes are required to ensure proper dependency tracking.
+Here are some other uses of such a tool:
+Determine data lineage
+One problem that data scientists and data engineers regularly encounter is how to determine where data came from and which route it took. With a full graph of the permissions structure, they can identify each ancestor service and stream of any given event. This can help them trace bugs and defects back to the source and determine all services involved in a given data transformation. Remember that it is possible to go back in time in the permissions event stream and the microservice-to-team assignment event streams to generate a view of the topology at that point in time. This is often quite useful when you are auditing old data.
+Overlay team boundaries
+The teams owning the microservices and streams can be mapped onto the topology. When rendered with a proper visualization tool, the topology will clearly show which teams are directly responsible for which services.
+Discover data sources
+Visualizers are a useful tool for data discovery. A prospective consumer can see which streams are available and who their producers and consumers are. If more information is needed about the stream data, the prospective consumer can contact the producers.
+Measure interconnectedness and complexity
+Just as it is ideal for microservices to be highly cohesive and loosely coupled, so too it is for teams. With this tooling in place, a team can measure how many internal connections between microservices and how many cross-boundary connections it has. A general rule of thumb is that the fewer external connections, the better; but a simple count of connections is a very basic metric. However, even a consistent application of a basic metric can reveal the relative interdependence between teams.
+Map business requirements to microservices
+Aligning microservices along business requirements enables a mapping of implementation to business requirement. It is reasonable to explicitly state each microservice’s business requirements alongside its code, perhaps in the repository
+README
+or in the microservice metadata store. In turn, this can be mapped to the owning teams.
+A business owner could look at this overlay and ask themselves, “Does this implementation structure align with the goals and priorities of this team?” This is one of the most important tools a business can have at its disposal to ensure that its technical teams are aligned with the business communication structure.
+Topology Example
+Figure 14-2
+shows a topology with 25 microservices, overlaid with the ownership of four teams. For purposes of clarity, each arrow represents the production of data to an event stream as well as consumption by the consuming process. Thus, microservice 3 is consuming a stream of data from microservice 4.
+Figure 14-2.
+Topology map of service connections
+The mapping shows that team 2 is responsible for two microservices that are not part of its main bounded context (bottom right). This may be of concern if the business goals of team 2 do not align with the functions being served by microservices 2 and 7. Additionally, both microservices 2 and 7 have a number of dependencies on teams 1, 3, and 4, which increases the “surface area” that team 2 exposes to the outside world. A measure of interconnectedness is shown in
+Table 14-2
+.
+Table 14-2.
+Topology graph measure of interconnectedness
+Incoming streams
+Outgoing streams
+Incoming team connections
+Outgoing team connections
+Services owned
+Team 1
+1
+3
+1 (Team 2)
+2 (Teams 2,3)
+5
+Team 2
+8
+2
+3 (Teams 1,3,4)
+2 (Teams 1,4)
+8
+Team 3
+3
+3
+2 (Teams 1,4)
+1 (Team 2)
+6
+Team 4
+1
+5
+1 (Team 1)
+2 (Teams 2,3)
+8
+Let’s see what happens if we reduce the number of interteam connections and the number of incoming and outgoing streams at the team boundary. Microservices 2 and 7 are good candidates for being reassigned simply due to their ownership island in the topology, and can be reassigned to reduce the number of cross-team dependencies. Microservice 7 can be assigned to team 1 (or to team 3), and microservice 2 can be assigned to team 4. It is also more apparent now that microservice 1 may also be assigned to team 4 to further reduce the cross-boundary communication. This result is shown in
+Figure 14-3
+and
+Table 14-3
+.
+Figure 14-3.
+Topology map of service connections after reassignment of microservices
+Table 14-3.
+New measure of interconnectedness; differences are shown in brackets
+Incoming streams
+Outgoing streams
+Incoming team connections
+Outgoing team connections
+Services owned
+Team 1
+1
+3
+1 (Team 3)
+1 (Team 3) (–1)
+5
+Team 2
+4 (–4)
+0 (–2)
+2 (Teams 3,4) (–1)
+0 (–2)
+6 (–2)
+Team 3
+3
+3
+2 (Teams 1,4)
+2 (Teams 1,2) (+1)
+6
+Team 4
+1
+3 (–2)
+1 (Team 1)
+2 (Teams 3,4)
+8 (+2)
+Computing the cross-boundary dependencies has a positive result: cross-team incoming and outgoing stream counts are reduced, with a net decrease of three connections between teams. Minimizing the number of cross-boundary connections helps optimize the assignment of microservices to teams. This is not sufficient, however, for determining the assignment of microservices to a team. You must also take into account a variety of factors, such as the team’s head count, areas of expertise, and implementation complexities.
+Most importantly of all, though, you must account for the business functions that a microservice is performing. Consider a scenario where one team produces a whole host of event data, perhaps consumed from a number of external sources. It could be that the business responsibility of that team is limited simply to sourcing and organizing the data into events, with business logic being performed downstream by other consumers. In this case, the team would have many stream connections and team connections. This is where it is useful to be able to view the business functions associated with the microservices owned by the team.
+In the preceding example, there are a number of questions worth asking. For one, do the business function implementations of microservice 2 align closer to the goals of team 2 or team 4? What about microservice 7: is it aligned closer with team 1’s goals than team 2’s? And in general, which services align best with which team? These answers tend to be qualitative and must be carefully evaluated against the goals of the team. It is natural that team goals change as business needs evolve, and it is important to ensure that the microservices assigned to those teams align with the overarching business goals. This tooling provides insight into these allocations and helps provide clarity to business owners.
+Summary
+Having multiple autonomous services requires that you carefully consider how you’re going to manage these systems. The tools described in this chapter are designed to help your organization manage its services.
+As the number of services increases, the ability of any one person to know how everything works and how each service and stream fit into the big picture diminishes. Keeping explicit track of properties such as service and stream ownership, schemas, and metadata allows organizations to organize and track change across time. Reducing tribal knowledge and formally codifying otherwise simple stream and service properties should be priorities for your organization. After all, any ambiguity around the properties of a service or stream will be amplified for each additional instance created.
+Autonomy and control over your team’s services are important aspects of managing microservices at scale. In accordance with DevOps principles, you should be able to reset consumer group offsets and microservice state stores.
+Schemas foster a common understanding of the meaning of events. The schema registry provides a mechanism for streamlining schema management and can be used to notify interested parties about any changes to a particular schema.
+
+Chapter 15.
+Testing Event-Driven Microservices
+One of the great things about testing event-driven microservices is that they’re very modular. Input to the service is provided by event streams or by requests from a request-response API. State is materialized to its own independent state store, and output events are written to a service’s output streams. Microservices’ small and purpose-built nature make them far easier to test than larger and more complex services. There are fewer moving parts, a relatively standard methodology of handling I/O and state, and plenty of opportunity to reuse testing tooling with other microservices. This chapter covers testing principles and strategies, including unit testing, integration testing, and performance testing.
+General Testing Principles
+Event-driven microservices share the testing best practices that are common to all applications.
+Functional
+testing, such as unit, integration, system, and regression testing, ensures that the microservice does what it is supposed to and that it doesn’t do what it should not do.
+Nonfunctional
+testing, such as performance, load, stress, and recovery testing, ensures that it behaves as expected under various environmental scenarios.
+Now, before going much further, it’s important to note that this chapter is meant to be a companion to more extensive works on the principles and how-tos of testing. After all, many books, blogs, and documents have been written on testing, and I certainly can’t cover testing to the extent that they do. This chapter primarily looks at event-driven-specific testing methodologies and principles and how they integrate into the overall testing picture. Consult your own sources on language-specific testing frameworks and testing best practices to complement this chapter.
+Unit-Testing Topology Functions
+Unit tests are used to test the smallest pieces of code in an application to ensure that they work as expected. These small testing units provide a foundation for which larger, more comprehensive tests can be written to test higher functionality of the application. Event-driven topologies often apply transformation, aggregation, mapping, and reduction functions to events, making these functions ideal candidates for unit testing.
+Tip
+Make sure to test boundary conditions, such as null and maximum values, for each of your functions.
+Stateless Functions
+Stateless functions do not require any persistent state from previous function calls, and so are quite easy to test independently. The following code shows an example of an EDM topology similar to one that you would find in a map-reduce-style
+framework
+:
+myInputStream
+.
+filter
+(
+myFilterFunction
+)
+.
+map
+(
+myMapFunction
+)
+.
+to
+(
+outputStream
+)
+myMapFunction
+and
+myFilterFunction
+are independent functions, neither of which keeps state. Each function should be unit-tested to ensure that it correctly handles the range of expected input data, particularly corner cases.
+Stateful Functions
+Stateful functions are generally more complicated to test than stateless ones. State can vary with both time and input events, so you must take care to test all of the necessary stateful edge cases. Stateful unit testing also requires that persistent state, whether in the form of a mocked external data store or a temporary internal data store, is available for the duration of the test.
+Here is an example of a stateful aggregation function that might be found in a basic producer-consumer implementation:
+public
+Long
+addValueToAggregation
+(
+String
+key
+,
+Long
+eventValue
+)
+{
+//The data store needs to be made available to the unit-test environment
+Long
+storedValue
+=
+datastore
+.
+getOrElse
+(
+key
+,
+0L
+);
+//Sum the values and load them back into the state store
+Long
+sum
+=
+storedValue
++
+eventValue
+;
+datastore
+.
+upsert
+(
+key
+,
+sum
+);
+return
+sum
+;
+}
+This function is used to sum all
+eventValue
+s for each key. Mocking the endpoint is one way of providing a reliable implementation of the data store for the duration of the test. Another option is creating a locally available version of the data store, though this is more akin to integration testing, which will be covered in more detail shortly. In either case, you must carefully consider what this data store needs to do and how it relates to the actual implementation used at runtime. Mocking tends to work well, because it allows for very high-performance unit testing that isn’t burdened by the overhead of spinning up a full implementation of the data store.
+Testing the Topology
+The full-featured lightweight and heavyweight frameworks typically provide the means to locally test your entire topology. If your framework does not, the community of users and contributors may have created a third-party option that provides this functionality (this is another reason to choose a framework with a strong community).
+For example, Apache Spark has two separate third-party options for unit tests,
+StreamingSuiteBase
+and
+spark-fast-tests
+, in addition to providing a
+built-in
+MemoryStream
+class
+for fine-grained control over stream input and output.
+Apache Flink provides its own topology testing
+options, as does
+Apache Beam
+. As for lightweight stream frameworks,
+Kafka Streams provides the means to test topologies using the
+TopologyTestDriver
+, which mocks out the functionality of the framework without requiring you to set up an entire event broker.
+Topology testing is more complex than a single unit test and exercises the entire topology as specified by your business logic. You can think of your topology as a single, large, complex function with many moving parts. The topology testing frameworks allow you to fully control
+which
+events are produced to the input streams as well as
+when
+they are created. You can generate events with specific values; events that are out of order, contain invalid timestamps, or include invalid data; and events that are used to exercise corner-case logic. By doing so, you can ensure that operations such as time-based aggregations, event scheduling, and stateful functions perform as expected.
+For example, consider the following map-reduce-style topology definition:
+myInputStream
+.
+map
+(
+myMapFunction
+)
+.
+groupByKey
+()
+.
+reduce
+(
+myReduceFunction
+)
+In this topology, consumed events are represented by the variable
+myInputStream
+. A mapping function is applied, the results are grouped together by key, and then finally they are reduced into a single event per key. While unit tests can be implemented for
+myMapFunction
+and
+myReduceFunction
+, they can’t easily reproduce the framework operations of
+map
+,
+groupByKey
+, and
+reduce
+, as these operations (among others) are inherently part of the framework.
+This is where topology testing comes into play. Each stream framework has varying levels of support for testing the topology, and you must explore the options available to you. These testing frameworks
+do not
+require you to create an event broker to hold input events or to set up a heavyweight framework cluster for processing.
+Testing Schema Evolution and Compatibility
+To ensure that any output schemas are compatible with previous schemas according to any event stream schema evolutionary rules (see
+“Full-Featured Schema Evolution”
+), you can pull in the schemas from the schema registry and perform evolutionary rule checking as part of the code submission process. Some applications may use schema-generating tools to automatically generate the schemas from the classes or structs defined in the code at compile time, resulting in a programmatically generated schema that can be compared to previous versions.
+Integration Testing of Event-Driven Microservices
+Microservice integration testing comes in two main flavors:
+local
+integration testing, where testing is performed on a localized replica of the production environment, and
+remote
+integration testing, where the microservice is executed on an environment external to the local system. Each of these solutions has a number of advantages and disadvantages, which we will explore shortly.
+A third flavor is a hybrid option, where certain parts of your microservice and its test environment are hosted or executed locally and others done remotely. Since it’s technically impossible to evaluate all combinations and permutations of this hybrid pattern, I’ll just focus on the two main cases and leave it up to you to determine your own requirements should they differ.
+There are several overarching questions that you should keep in mind for the remainder of this chapter:
+What are you hoping to get out of your integration testing? Is it as simple as “does this run?” Is it a smoke test with production data? Or are there more complex workflows that need to be tested and validated?
+Does your microservice need to support restarting from the beginning of input stream time, as in the case of full data loss or reprocessing due to a bug? If so, what do you need to know to test if this functionality works as expected? You may also need to validate that your input event streams are capable of supporting this requirement.
+What data do you need to determine success or failure? Is manually crafted event data sufficient? Programmatically created? Does it need to be real production data? If so, how much?
+Do you have any performance, load, throughput, or scaling concerns that need to be tested?
+How will you go about ensuring that each microservice you build doesn’t require a full home-grown solution to integration testing?
+The next sections will help you understand some of the options available to you, so you can formulate your own answers to these questions.
+Local Integration Testing
+Local integration testing allows for a significant range of functional and nonfunctional testing. This form of testing uses a local copy of the production environment where the microservice will be deployed. At a minimum this means creating an event broker, schema registry, any microservice-specific data stores, the microservice itself, and any required processing framework, such as when you are using a heavyweight framework or FaaS. You could also introduce containerization, logging, and even the container management system, but they are not strictly related to the business logic of the microservice and so are not absolutely necessary.
+The biggest benefit of spinning up your own locally controllable environment is that you get to control each system independently. You can programmatically create scenarios that replicate actual production situations, such as intermittent failures, out-of-order events, and loss of network access. You also get to test the integration of the framework with your business logic. Local integration testing also provides the means to test the basic functionality of horizontal scaling, particularly where copartitioning and state are concerned.
+Another significant benefit of local integration testing is that you can effectively test both event-driven and request-response logic at the same time, in the same workflows. You have full control over when events are injected into the input streams, and can issue requests at any point before, during, or after the events have been processed. It may be helpful to think of the request-response API as just another source of events for the purposes of testing your microservice.
+Let’s take a look at some of the options provided by each system component.
+The event broker
+Create and delete event streams
+Apply selective event ordering for input streams to exercise time-based logic, out-of-order events, and upstream producer failures
+Modify partition counts
+Induce broker failures and recovery
+Induce event stream availability failures and recovery
+The schema registry
+Publish evolutionary-compatible schemas for a given event stream and use them to produce input events
+Induce failures and recovery
+The data stores
+Make schema changes to existing tables (if applicable)
+Make changes to stored procedures (if applicable)
+Rebuild internal state (if applicable) when the application instance count is
+modified
+Induce failures and recovery
+The processing framework (if applicable)
+The application and the processing framework are typically intertwined, and you may need to provide a full-framework implementation for testing, as in the case of FaaS and heavyweight framework solutions. The framework provides functionality such as:
+Shuffling via internal event streams (lightweight) or shuffle mechanism (heavyweight) to ensure proper copartitioning and data locality
+Checkpointing, failures, and recovery from checkpoints
+Inducing a worker instance failure to mimic losing an application instance (heavyweight frameworks)
+The application
+Application-level control predominantly involves managing the number of instances running at any given time. Integration testing should include scaling the instance count (dynamically, if supported) to ensure that:
+Rebalancing occurs as expected
+Internal state is restored from checkpoints or changelog streams, and data locality is preserved
+External state access is unaffected
+Request-response access to the stateful data is unaffected by changes in application instance count
+The point of having full control over all of these systems is to ensure that your microservice will still work as intended through various failure modes, adverse conditions, and with varying processing capacity.
+There are two main ways to perform local integration tests. The first involves embedding testing libraries that can live strictly in your code. These are not available for all microservice solutions and tend to depend heavily on both language and framework support. The second option involves creating a local environment where each of the necessary components is installed and can be controlled as required. We’ll take a look at these first, then follow up by investigating options for testing microservices that rely on hosted services.
+Create a Temporary Environment Within the Runtime
+of Your Test Code
+Embedding testing libraries into your code is by far the narrowest of the options, though it can work very well depending on how your client, broker, and framework programming language compatibilities line up. In this approach, the test code starts the necessary components within the same executable as the application.
+For example, the test code of a Kafka Streams application starts its own Kafka broker, schema registry, and microservice topology instances. The test code can then start and stop topology instances, publish events, await responses, incur broker outages, and induce other failure modes. Upon termination, all of the components are terminated, and the state is cleaned up. Consider the following pseudocode (declarations and instantiations skipped for brevity):
+broker
+.
+start
+(
+brokerUrl
+,
+brokerPort
+,
+...);
+schemaRegistry
+.
+start
+(
+schemaRegistryUrl
+,
+srPort
+,
+...);
+//The first instance of the microservice
+topologyOne
+.
+start
+(
+brokerUrl
+,
+schemaRegistryUrl
+,
+inputStreamOne
+,
+inputStreamTwo
+...);
+//A second instance of the same microservice
+topologyTwo
+.
+start
+(
+brokerUrl
+,
+schemaRegistryUrl
+,
+inputStream
+,
+inputStreamTwo
+,
+...);
+//Publish some test data to input stream 1
+producer
+.
+publish
+(
+inputStreamOne
+,
+...);
+//Publish some test data to input stream 2
+producer
+.
+publish
+(
+inputStreamTwo
+,
+...);
+//Wait a short amount of time. Not the best way to do it, but you get the idea
+Thread
+.
+sleep
+(
+5000
+);
+//Now mimic topologyOne failing
+topologyOne
+.
+stop
+();
+//Check the output of the output topic. Is it as expected?
+event
+=
+consumer
+.
+consume
+(
+outputTopic
+,
+...)
+//Shut down the remaining components if no more testing is to be done
+topologyTwo
+.
+stop
+()
+schemaRegistry
+.
+stop
+()
+broker
+.
+stop
+()
+if
+(
+event
+...)
+//validate the consumer output
+//pass the test if correct
+else
+//fail the test.
+Kafka Streams is a particularly relevant example because it illustrates the limited nature of this approach. The application code, the broker, and the Confluent schema registry are all JVM-based, so you need a JVM-based application to programmatically control everything within the same runtime.
+Other open source heavyweight frameworks may also work, though some extra overhead is required to handle creating both the master instance and the worker instance. Keep in mind that because these heavyweight frameworks are also almost universally JVM-based, this strategy is predominantly a JVM-only approach at the time of this writing. While it is certainly possible to use workarounds to test non-JVM-based applications in this manner, that process is not nearly as simple.
+Create a Temporary Environment External to Your Test Code
+One option for setting up an environment to perform these tests is simply to install and configure all required systems locally. This is a low-overhead approach particularly if you’re just starting out with microservices, but if every teammate must do the same, it becomes expensive and complex to debug if they’re each running slightly different versions. As with most things microservices, it’s often best to avoid duplicating steps and instead provide supportive tooling that eliminates the overhead.
+A more flexible option is to create a single container that has all of the necessary components installed and configured. This container can be used by any team that wants to test its application in this way. You can maintain an open source contribution model (even if internal to the organization), allowing fixes, updates, and new
+features
+to be added back for the benefit of all teams. This model is flexible enough to be used with any programming language, though it’s far easier to use with a programmatic API that allows for easy communication with the system components in the container. A lightweight processing framework example is shown in
+Figure 15-1
+, with the schema registry, event broker, and necessary topics created internally to the container. The microservice instance itself is executed externally to the container, and simply references the addresses of the broker and schema registry from its testing config file.
+Figure 15-1.
+Lightweight microservice using containerized testing dependencies for local integration testing
+Integrate Hosted Services Using Mocking and Simulator Options
+A local integration testing environment may also need to provide hosted services, such as a hosted event broker, heavyweight framework, or FaaS platform. While some hosted services may have open source options you can run instead (such as open source Kafka instead of hosted Kafka), not all hosted services have these alternatives.
+For example, Microsoft’s Event Hubs, Google’s PubSub, and Amazon’s Kinesis are all proprietary and closed, with full implementations unavailable for download. In this situation, the best you can do is use whatever emulators, libraries, or components
+are
+available from these companies or open source initiatives.
+Google’s PubSub, for example, has an
+emulator
+that can provide sufficient local testing functionality, as does
+an open source version of Kinesis (and many other Amazon services) provided by LocalStack
+.
+Unfortunately, Microsoft Azure’s Event Hubs does not currently have an emulator, nor is an implementation of it available in the open source world. Azure Event Hub clients do, however,
+allow you to use Apache Kafka in its place
+, though not all features are supported.
+Applications using FaaS platforms can leverage local testing libraries provided by the hosting service.
+Google Cloud functions
+can be tested locally, as can
+Amazon’s Lambda functions
+and
+Microsoft Azure’s functions
+. The open source solutions OpenWhisk, OpenFaaS, and Kubeless, as discussed in
+Chapter 9
+, provide similar testing mechanisms, which you can find via a quick web search.
+These options allow you to configure a complete FaaS environment locally, such that you can test on a platform configured to be as similar to production as possible.
+Establishing an integration testing environment for applications using heavyweight frameworks is similar to the process of establishing one for FaaS frameworks. Each requires that the framework be installed and configured, with the application submitting the processing job directly to the framework. With heavyweight frameworks, a typical single-container installation will just need to run the master and worker instances side-by-side along with the event broker and any other dependencies. With the heavyweight framework set up, you simply need to submit the processing job to the master and await test output on the output event streams. An example is illustrated in
+Figure 15-2
+, where the entire set of dependencies has been containerized for easy distribution among developers.
+Figure 15-2.
+Heavyweight microservice using containerized testing dependencies for local integration testing
+Integrate Remote Services That Have No Local Options
+Some services used in production may simply not have any locally available options, and this is a disadvantage for both development and integration testing.
+A current example is the absence of any emulator for Microsoft Azure’s Event Hub. The lack of a locally available implementation means that remote environments must be provisioned for each developer, in addition to integration testing environments for these applications. This is also where lines can begin to blur, as integration testing up to this point has been primarily about isolating a single application instance in a disposable, easily managed, local environment. The overhead incurred in this scenario can be a real impediment to independent development and integration testing efforts, so be sure to give it careful consideration before moving forward.
+Alleviating this issue generally requires close coordination with infrastructure teams to ensure either that independent testing environments can be independently provisioned via access controls or that a large, common environment can be created for all to use (this has its own issues, as discussed later in the chapter). Security issues may arise from developers having to connect their local staging environment to remote resources. Cleanup and management of the remote staging environment(s) can also become problematic. There are many ways to approach this challenge, but the problems that the situation may pose are too large to comprehensively tackle here.
+The good news is that most of the biggest closed source service providers are making strong efforts to provide local options for development and testing, so in time the forerunners will all have these available. In the meantime, be cautious about your selection of services and consider whether a local option for development and integration testing is available.
+Full Remote Integration Testing
+Full remote integration testing enables you to perform specific tests that are difficult to conduct in local environments. For example, performance and load testing are essential for ensuring that the microservice under test achieves its service-level objectives. Event processing throughput, request-response latency, instance scaling, and failure recovery are all enabled by full integration testing.
+Tip
+The goal of full integration testing is to create an environment as close to possible as that of production, including event streams, event data volume, event schemas, and request-response patterns (if applicable), in which to run the application.
+Full integration testing is generally done in one of three following ways. You can use a temporary integration environment and discard it once testing is complete. You can use a common testing environment, which persists between integration tests and is used by multiple teams. Finally, you can use the production environment itself for testing.
+Programmatically Create a Temporary Integration Testing Environment
+“Cluster Creation and Management”
+examined the advantages of having programmatically generated event brokers and compute resource managers.
+You can leverage these tools to generate temporary environments for your integration testing. A separate set of brokers can be created along with individually reserved compute resources to run the containerized microservices under test. One added benefit of using this approach for full integration testing is that it regularly exercises the process of creating new brokers and compute environments. This ensures that any breakages that occur in the scripts or any bugs in the configuration will be exposed at the next integration test.
+The next issue in a newly brought-up environment is that it lacks both event streams and event data. These are, of course, both essential for testing your microservice. You can obtain the names of the event streams to create either by directly asking the user or by using a configuration file within the microservice codebase to be accessed by the tooling. The partition count must mirror that of the production system to ensure that the microservice’s scaling, copartitioning, and repartitioning logic is correctly exercised.
+Once the event streams have been generated, the next step is to populate them with events. This can be done using production data, specially curated testing data sets, or ad hoc, programmatically generated data.
+Populating with events from production
+Events can be copied from the production cluster over to the newly created event streams in the testing cluster. This is where the replication tooling described in
+“Cross-Cluster Event Data Replication”
+comes into play, as this same tooling can be used to replicate specific event streams from production and load the events. You must account for any security and access restrictions that may prevent production from obtaining the data.
+Advantages
+It accurately reflects production data.
+You can copy as many or as few events as required.
+The fully isolated environment prevents other microservices under test from inadvertently affecting your testing.
+Disadvantages
+Copying data may affect production performance unless you have adequately planned and established broker quotas.
+It may require copying substantial amounts of data, especially in the case of long-lived entities.
+You must account for event streams containing sensitive information.
+It requires significant investment in streamlining the creation and copying process to reduce barriers to usage.
+It may expose sensitive production events.
+Populating with events from a curated testing source
+Curated events allow you to use events with specific properties, values, and relationships to other events in integration testing. These events need to be stored somewhere stable and secure, where they can’t be accidentally or inadvertently overwritten, corrupted, or lost. This strategy is often used in
+single shared testing environments
+(more on this later), but you can also apply it by loading the events out of a durable data store into the user-specified streams, similar to copying events from production.
+Advantages
+It involves a smaller set of data.
+It’s carefully curated to ensure specific values and relationships.
+It has no impact on production.
+Disadvantages
+There’s significant overhead to maintain.
+Data can become stale.
+New event streams must be handled.
+Schema changes must be handled.
+Lesser-used event streams may not be available.
+While many of these disadvantages can be mitigated through strict operational processes, this strategy often ends up following the same pathway that documentation tends to at many organizations. It is well intentioned but remains out-of-date, not necessarily relevant, and seemingly always a lower priority than other work.
+Creating mock events using schemas
+Programmatic creation of mock events is another possibility for populating event streams. You can obtain the schema from the schema registry and generate events that adhere to this schema definition. You can even take older versions of that schema and generate events for those too.
+The complexity of this approach comes from ensuring that there are events with the proper relationships to other events, particularly if any of the services are doing joins between streams or aggregations across different types of events. A microservice that joins multiple events together will require that events with matching primary/foreign keys have been created to properly exercise the joining logic of the service. While this is not typically a significant issue (especially since the microservice code expresses
+which
+relationships the business logic requires), it does leave it up to the creators of this data to ensure that it is properly scoped and that all data falls into the expected ranges and values.
+Advantages
+It doesn’t require the production cluster to provide any data and can’t negatively affect production performance.
+You can use fuzzing tools to create event data, testing boundary conditions, and other potential malformed and semiformed fields.
+You can create specific test cases that aren’t available in production data, ensuring corner cases are covered.
+It allows you to leverage third-party tools for programmatically creating testing data (for example,
+Confluent Avro tools
+).
+Disadvantages
+It requires much more attention to creating realistic data than other options.
+The created data is still not fully accurate when compared to the production distribution. For example, production data may have a serious disparity in data volume due to key distribution that doesn’t show up in mock data.
+The created data may inaccurately represent certain fields. For example, parsing a string field in a particular way for business operations may pass with the created test data, but fail in a subset of production data.
+Testing Using a Shared Environment
+Another option involves creating a single testing environment with a shared pool of event streams all residing within the same event broker. These streams are populated by testing data that represents a subset of production data, or carefully crafted testing data as previously discussed. This option provides a low-overhead a testing environment, but offloads the management of the event streams and the data onto the application developers.
+Advantages
+It’s easy to get started.
+You only need to maintain infrastructure for one testing environment.
+It is isolated from production workloads.
+Disadvantages
+It is subject to the “tragedy of the commons.” Fragmented and abandoned event streams can make it difficult to distinguish which streams are valid for testing input and which are simply the output of previous tests that were not cleaned up.
+Systems under test are not necessarily isolated. For example, services running simultaneous large-scale performance testing can affect each other’s results.
+Incompatible events may be produced to other services’ input event streams.
+Event stream data inevitably becomes stale and must be updated with newer events.
+It inaccurately represents the entire range of events found in production.
+Warning
+This strategy is the worst of the options in terms of usability, as the event broker eventually becomes a dumping ground of confusing event streams and broken data.
+Isolation from other application testing is difficult to achieve, particularly as the output stream of one microservice is usually the input to another service. Careful curation of data streams, strict naming conventions, and restrictions to writing to event streams can help mitigate the disadvantages, but environment maintainers and users will need to exercise diligence and discipline.
+Testing Using the Production Environment
+You can also test microservices in the production environment (note: be careful). The microservice can be spun up, consume from its input event streams, apply business logic, and produce output. The most common approach is to have the microservice use its own designated output event streams and state stores, such that it doesn’t affect the existing production systems. This is particularly important when a previous version of the same microservice is running alongside the new one under test.
+Advantages
+You have complete access to production events.
+It leverages production security models to ensure proper access protocols are
+followed
+.
+It is excellent for smoke-testing an application.
+You do not need to maintain a separate testing environment.
+Disadvantages
+There’s a risk of affecting production capacity, especially if workload is high. It’s not suitable for load and performance testing.
+You must carefully clean up any resources created during testing, such as event streams, consumer groups, access control permissions, and state stores. This is similar to the requirements for the common staging environment option.
+It requires tooling support to keep microservices and event streams under test separate from “true production” microservices, particularly when you are testing over a long period of time. This includes the resources used to manage and deploy microservices, as each observer to the production environment must be able to identify which services are the true production ones and which are those under test.
+Choosing Your Full-Remote Integration Testing Strategy
+The nice thing about the modularity of microservices is that you don’t have to choose just one way to perform your tests. You can use any option as needed switch to a different one for other projects, and update your testing methodology as requirements change. Investments in supportive tooling for multicluster event brokers and event copying capabilities will largely determine your testing options.
+If you have little to no supportive tooling, you’re most likely going to end up with a single, shared testing event broker with a hodge-podge of event streams generated by various teams and systems. You’ll likely see a mixture of “good” event streams that you can use for testing, and event streams with suffixes like “-testing-01,” “-testing-02,” “-testing-02-final,” and “-testing-02-final-v2.” Event data may or may not be reliable, up-to-date, or in the correct schema format. Tribal knowledge plays a large role in this world, and it can be difficult to ensure your testing sufficiently reflects your service’s production environment. In addition, costs are much higher for a continuously available staging cluster that must also enable performance testing, load large amounts of data, and provide event stores with indefinite duration.
+With proper investment in tooling, each microservice can bring up its own dedicated cluster, populate it with event streams, copy some production data into it, and run the test in a nearly identical production environment. The cluster can be torn down once testing is completed, eliminating testing artifacts that would otherwise stick around in a shared cluster. The overhead for getting to this stage is significant, but the investment unlocks multicluster efforts, redundancy, and disaster recovery options that are difficult to obtain otherwise (see
+Chapter 14
+for more details).
+This isn’t to say a single shared testing cluster is inherently bad. Diligence in marking clean and reliable source streams is important, as is deleting unused testing artifacts. Specific, codified responsibilities can ensure that expectations around staging event-data reliability are managed by the teams that own the production event data. Teams must also coordinate performance and load testing to ensure they do not affect each other’s results. As your team improves its multicluster and event copying tooling, teams can begin to migrate to their own dynamically created testing clusters.
+Summary
+Event-driven microservices predominantly source their input data from event streams. You can create and populate these streams in a variety of ways, including copying data from production, curating specific data sets, and automatically generating events based on the schema. Each method has its own advantages and disadvantages, but all of them rely on supportive tooling to create, populate, and manage these event streams.
+Establishing an environment in which to test your microservice should be a collaborative effort. Other developers and engineers in your organization will undoubtedly benefit from a common testing platform, so you should consider investing in tooling to streamline your testing processes. Programmatic bringup of environments, including the population of event streams, can significantly reduce the overhead of setting up environments for each microservice under test.
+A single shared testing environment is a common strategy to employ when investment in tooling is low. The tradeoff is the increased difficulty in managing the event data, ensuring validity, and clarifying ownership. Disposable environments are a preferable alternative, as they provide isolation for services under test and reduce the risks and shortcomings caused by multiple tenancy issues. These options tend to require more investment in common supportive tooling, but save significant time and effort in the long run. As an added benefit, using programmatic environment bringup and event copying tooling can better prepare your organization for disaster recovery.

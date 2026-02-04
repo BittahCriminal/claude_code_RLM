@@ -1,0 +1,6442 @@
+own in the following screenshot, but none were found. Why?
+Figure 19.19: Kiali web UI, not showing expected log records
+A user has found a log record of interest (shown below). How can the user find related log records from this and other microservices, for example, that come from processing an external API request?
+Figure 19.20: Kiali web UI; how do we find related log records?
+A user has found a log record that seems to indicate the root cause of a problem that was reported by an end user. How can the user find the stack trace that shows where in the source code the error occurred?
+Figure 19.21: Kiali web UI; how do we find the root cause?
+Why doesn’t the following Fluentd configuration element work?
+<match
+kubernetes.**hands-on**>
+@type
+rewrite_tag_filter
+<rule>
+key
+log
+pattern
+^(.*)$
+tag
+spring-boot.${tag}
+</rule>
+</match>
+How can you determine whether Elasticsearch is up and running?
+You suddenly lose connection to Kibana from your web browser. What could have caused this problem?
+
+20
+Monitoring Microservices
+In this chapter, we will learn how to use Prometheus and Grafana to collect, monitor, and alert about performance metrics. As we mentioned in
+Chapter 1
+,
+Introduction to Microservices
+, in a production environment it is crucial to be able to collect metrics for application performance and hardware resource usage. Monitoring these metrics is required to avoid long response times or outages for API requests and other processes.
+To be able to monitor a system landscape of microservices in a cost-efficient and proactive way, we must also be able to define alarms that are triggered automatically if the metrics exceed the configured limits.
+In this chapter, we will cover the following topics:
+Introduction to performance monitoring using Prometheus and Grafana
+Changes in source code to collect application metrics
+Building and deploying the microservices
+Monitoring microservices using Grafana dashboards
+Setting up alarms in Grafana
+Technical requirements
+For instructions on how to install the tools used in this book and how to access the source code for this book, see:
+Chapter 21
+,
+Installation Instructions for macOS
+Chapter 22
+,
+Installation Instructions for Microsoft Windows with WSL 2 and Ubuntu
+The code examples in this chapter all come from the source code in
+$BOOK_HOME/Chapter19
+.
+If you want to view the changes applied to the source code in this chapter so that you can use Prometheus and Grafana to monitor and alert on performance metrics, you can compare it with the source code for
+Chapter 19
+,
+Centralized Logging with the EFK Stack
+. You can use your favorite diff tool and compare the two folders,
+$BOOK_HOME/Chapter19
+and
+$BOOK_HOME/Chapter20
+.
+Introduction to performance monitoring using Prometheus and Grafana
+In this chapter, we will reuse the deployment of Prometheus and Grafana that we created in
+Chapter 18
+,
+Using a Service Mesh to Improve Observability and Management
+, in the
+Deploying Istio in a Kubernetes cluster
+section. Also in that chapter, we were briefly introduced to
+Prometheus, a popular open source
+database for collecting and storing time series data such as performance metrics. We learned about Grafana, an open source tool to visualize performance metrics. With the Grafana deployment comes a set of Istio-specific dashboards. Kiali can also render some performance-related graphs without the use of Grafana. In this chapter, we will get some hands-on experience with these tools.
+The Istio configuration we deployed in
+Chapter 18
+includes a configuration of Prometheus, which automatically collects metrics from Pods in Kubernetes. All we need to do is set up an endpoint in our microservice that produces metrics in a format Prometheus can consume. We also need to add annotations to the Kubernetes Pods so that Prometheus can find the address of these endpoints. See the
+Changes in source code to collect application metrics
+section of this chapter for details on how to set this up. To demonstrate Grafana’s capabilities to raise alerts, we will also deploy a local mail server.
+The following diagram illustrates the relationship between the runtime components we just discussed:
+Figure 20.1: Adding Prometheus and Grafana to the system landscape
+Here, we can see how Prometheus uses the annotations in the definitions of the Kubernetes Pods to be able to
+collect metrics from our microservices. It then stores these metrics in
+its database. A user can access the web UIs of Kiali and Grafana to monitor these
+metrics in a
+web browser
+. The web
+browser uses the
+minikube tunnel
+that was introduced in
+Chapter 18
+, in the
+Setting up access to Istio services
+section, to access Kiali, Grafana, and also a web page from the mail server to see alerts sent out by Grafana.
+Please remember that the configuration that was used to deploy Istio from
+Chapter 18
+is only intended for development and testing, not production. For example, performance metrics stored in the Prometheus database will not survive the Prometheus Pod being restarted!
+With the Istio version used in this book, v1.17.0, comes Grafana v9.0.1 and Prometheus v2.34.0. In Grafana v8, a new alerting system was introduced. To support readers of this book that use older versions of Grafana than v8, the older way of configuring alerts will be used. Grafana will be configured to use the older alert system in the
+Configuring Grafana
+section below.
+In the next section, we will look at what changes have been applied to the source code to make the microservices produce performance metrics that Prometheus can collect.
+Changes in source code to collect application metrics
+Spring Boot 2 introduced
+support for producing performance metrics in a Prometheus format using the
+Micrometer
+library (
+https://micrometer.io
+). There’s only
+one change we need to make to the source code of the microservices: we need to add a dependency on the Micrometer library,
+micrometer-registry-prometheus
+, in the Gradle build files,
+build.gradle
+. The dependency looks like this:
+implementation
+'io.micrometer:micrometer-registry-prometheus'
+This will make the microservices produce Prometheus metrics on port
+4004
+using the
+/actuator/prometheus
+path.
+In
+Chapter 18
+, we separated the management port, used by the actuator, from the port serving requests to APIs exposed by a microservice. See the
+Observing the service mesh
+section for a recap, if required.
+To let Prometheus know about these endpoints, each microservice’s Pod is annotated with the following code:
+annotations:
+prometheus.io/scrape:
+"true"
+prometheus.io/port:
+"4004"
+prometheus.io/scheme:
+http
+prometheus.io/path:
+"/actuator/prometheus"
+This is added to the
+values.yaml
+file of each component’s Helm chart. See
+kubernetes/helm/components
+.
+To make it easier to identify the source of the metrics once they have been collected by Prometheus, they are tagged with the name of the microservice that produced the metric. This is achieved by adding the following configuration to the common configuration file,
+config-repo/application.yml
+:
+management.metrics.tags.application:
+${spring.application.name}
+This will result in each metric that’s produced having an extra label named
+application
+. It will contain
+the value of the standard Spring property for the name of a microservice,
+spring.application.name
+.
+Finally, to ensure that we get metrics from the configured Prometheus endpoints, a test has been added to
+test-em-all.bash
+. It looks like:
+if
+[[ $USE_K8S ==
+"true"
+]]
+then
+  # Verify access to Prometheus formatted metrics
+  echo
+"Prometheus metrics tests"
+assertCurl
+200
+"curl -ks https://health.minikube.me/actuator/prometheus"
+fi
+Note that this test only runs if the test script is run against Kubernetes.
+These are all the changes that are required to prepare the microservices to produce performance metrics and make Prometheus aware of what endpoints to use to start collecting them. In the next section, we will build and deploy the microservices.
+Building and deploying the microservices
+Building, deploying, and
+verifying the deployment using the
+test-em-all.bash
+test script is
+done in the same way it was done in
+Chapter 19
+,
+Centralized Logging with the EFK Stack
+, in the
+Building and deploying the microservices
+section. Run the following commands:
+Build the Docker images from the source with the following commands:
+cd $BOOK_HOME/Chapter20
+eval $(minikube docker-env -u)
+./gradlew build
+eval $(minikube docker-env)
+docker-compose build
+The
+eval $(minikube docker-env -u)
+command ensures that the
+./gradlew build
+command uses the host’s Docker engine and not the Docker engine in the Minikube instance. The
+build
+command uses Docker to run test containers.
+Recreate the
+namespace,
+hands-on
+, and set it as the default namespace:
+kubectl delete namespace hands-on
+kubectl apply -f kubernetes/hands-on-namespace.yml
+kubectl config set-context $(kubectl config current-context) --namespace=hands-on
+Resolve the Helm chart
+dependencies with the following commands.
+First, we update the dependencies in the
+components
+folder:
+for f in kubernetes/helm/components/*; do helm dep up $f; done
+Next, we update the dependencies in the
+environments
+folder:
+for f in kubernetes/helm/environments/*; do helm dep up $f; done
+Deploy the system landscape using Helm and wait for all deployments to complete:
+helm install hands-on-dev-env \
+  kubernetes/helm/environments/dev-env \
+  -n hands-on --wait
+Start the Minikube tunnel, if it’s not already running, as follows (see the
+Setting up access to Istio services
+section, in
+Chapter 18
+, for a recap if you need one):
+minikube tunnel
+Remember that this command requires that your user has
+sudo
+privileges and that you enter your password during startup. It takes a couple of seconds before the command asks for the password, so it is easy to miss!
+Run the normal tests to verify the deployment with the following command:
+./test-em-all.bash
+Expect the
+output to be similar to what we’ve seen in the
+previous chapters:
+Figure 20.2: All tests OK
+With the microservices deployed, we can move on and start monitoring our microservices using Grafana!
+Monitoring microservices using Grafana dashboards
+As we already mentioned
+in the introduction, Kiali provides some very useful dashboards out of the box. In general, they are focused on application-level performance metrics such as requests per
+second, response times, and fault percentages to process requests. As we will see shortly, they are
+very useful on an application level. But if we want to understand the usage of the underlying hardware resources, we need more detailed metrics, for example, Java VM-related metrics.
+Grafana has an active community that, among other things, shares reusable dashboards. We will try out a dashboard from the community that’s tailored to get a lot of valuable Java VM-related metrics from a Spring Boot application such as our microservices. Finally, we will see how we can build our own dashboards in Grafana. But let’s
+start by exploring the dashboards that come out of the box in Kiali and Grafana.
+Before we do that, we need to make two
+preparations:
+Install a local mail server for tests and configure Grafana to be able to send alert emails to it. We will use the mail server in the
+Setting up alarms in Grafana
+section.
+To be able to
+monitor some metrics, we will start the load test tool we used in previous chapters.
+Installing a local mail server for tests
+In this section, we
+will set up a local test mail server and configure Grafana to send alert emails to the mail server.
+Grafana can send emails to any SMTP mail server, but to keep the tests local, we will deploy a test mail server named
+maildev
+. Go through the following steps:
+Install the test mail server in Istio’s namespace with the following commands:
+kubectl -n istio-system create deployment mail-server --image maildev/maildev:2.0.5
+kubectl -n istio-system expose deployment mail-server --port=1080,1025 --type=ClusterIP
+kubectl -n istio-system wait --timeout=60s --for=condition=ready pod -l app=mail-server
+To make the mail server’s web UI available from the outside of Minikube, a set of
+Gateway
+,
+VirtualService
+, and
+DestinationRule
+manifest files has been added for the mail server in Istio’s Helm chart. See the template
+kubernetes/helm/environments/istio-system/templates/expose-mail.yml
+. Run a
+helm upgrade
+command to apply the new manifest files:
+helm upgrade istio-hands-on-addons kubernetes/helm/environments/istio-system -n istio-system
+Verify that the test mail server is up and running by visiting its web page at
+https://mail.minikube.me
+. Expect a
+web page such as the following to be rendered:
+Figure 20.3: Mail server web page
+For more information on the mail server, see
+https://hub.docker.com/r/maildev/maildev
+.
+With the mail server installed, we can configure Grafana in the next section to send emails to the server for alerts.
+Configuring Grafana
+Configuring
+Grafana can be done by setting up environment variables in its Kubernetes Deployment
+object. To enable the old alert system and configure Grafana to send emails to the test mail server, run the following commands:
+kubectl -n istio-system set env deployment/grafana \
+    GF_ALERTING_ENABLED=true \
+    GF_UNIFIED_ALERTING_ENABLED=false \
+    GF_SMTP_ENABLED=true \
+    GF_SMTP_SKIP_VERIFY=true \
+    GF_SMTP_HOST=mail-server:1025 \
+    GF_SMTP_FROM_ADDRESS=grafana@minikube.me
+kubectl -n istio-system wait --timeout=60s --for=condition=ready pod -l app=Grafana
+The variables
+GF_ALERTING_ENABLED
+and
+GF_UNIFIED_ALERTING_ENABLED
+are used to enable the use of the older alerting system mentioned in the
+Introduction to performance monitoring using Prometheus and Grafana
+section above. The
+GF_SMTP_ENABLED
+variable is used to allow Grafana to send emails. The
+GF_SMTP_SKIP_VERIFY
+variable is used to tell Grafana to skip SSL checks with the test mail server.
+The
+GF_SMTP_HOST
+variable points to our mail server and, finally, the
+GF_SMTP_FROM_ADDRESS
+variable specifies what “from” address to use in the mail.
+Now that Grafana has been configured, in the next section we will start the load test tool.
+Starting up the load test
+To have something to
+monitor, let’s start up the load test using Siege, which we used in previous chapters. Run the following commands to get an access token and then start up the load test, using the access token for authorization:
+ACCESS_TOKEN=$(curl https://writer:secret-writer@minikube.me/oauth2/token -d grant_type=client_credentials -d scope="product:read product:write" -ks | jq .access_token -r)
+echo ACCESS_TOKEN=$ACCESS_TOKEN
+siege https://minikube.me/product-composite/1 -H "Authorization: Bearer $ACCESS_TOKEN" -c1 -d1 -v
+Remember that an access token is only valid for 1 hour – after that, you need to get a new one.
+Now, we are ready to learn about the dashboards in Kiali and Grafana and explore the Grafana
+dashboards that come with Istio.
+Using Kiali’s built-in dashboards
+In
+Chapter 18
+, we learned about Kiali, but we skipped the part where Kiali shows performance metrics. Now, it’s
+time to get back to that subject!
+Execute the following steps to learn about Kiali’s built-in dashboards:
+Open the Kiali web UI in a web browser using the
+https://kiali.minikube.me
+URL. Log in with
+admin
+/
+admin
+if required.
+To see our deployments, go to the workloads page by clicking on the
+Workloads
+tab from the menu on the left-hand side.
+Select the
+product-composite
+deployment by clicking on it.
+On the
+product-composite
+page, select the
+Outbound Metrics
+tab. You will see a page like the following screenshot:
+Figure 20.4: Kiali outbound metrics
+Kiali will visualize some overall performance graphs that are of great value, and there are more graphs to explore. Feel free to try them out on your own!
+However, far more detailed performance metrics are available in Grafana. Open the Grafana web UI in a web browser using the
+https://grafana.minikube.me
+URL.
+You will be
+presented with a welcome page with the text
+Welcome to Grafana
+. Over the welcome text is a
+Home
+link; click on it and you will be presented with an overview of available dashboards. You will see a folder named
+Istio
+that contains the dashboards that were installed when Grafana was deployed together with Istio in
+Chapter 18
+. Click on the folder to expand it and select the dashboard named
+Istio Mesh Dashboard
+.
+Expect a web page like the following:
+Figure 20.5: Grafana showing Istio Mesh Dashboard
+This
+dashboard gives a very good overview of metrics for the microservices involved in the service mesh, like request rates, response times, and success rates.
+There are a lot of detailed performance metrics available. Go back to the
+Istio
+folder (click on
+Istio
+in the top menu) and select the dashboard named
+Istio Workload Dashboard
+.
+Select the
+hands-on
+namespace and the
+product-composite
+workload. Finally, expand the
+Outbound Services
+tab. The web page should look like the following screenshot:
+Figure 20.6: Grafana with a lot of metrics for a microservice
+The page displays metrics like response codes, duration, and bytes sent per destination. Feel free to look around among the remaining dashboards provided by Istio!
+As we’ve already
+mentioned, the Istio dashboards give a very good overview at an application level. But there is also a need to monitor the metrics for hardware usage per microservice. In the next section, we will learn about how existing dashboards can be imported – specifically, a dashboard showing Java VM metrics for a Spring Boot-based application.
+Importing existing Grafana dashboards
+As we’ve already
+mentioned, Grafana has an active community that shares reusable dashboards. They can be explored at
+https://grafana.com/grafana/dashboards
+. We will try out a dashboard called
+JVM (Micrometer) - Kubernetes - Prometheus by Istio
+that’s tailored
+to get a lot of valuable JVM-related metrics from Spring Boot applications in a Kubernetes environment. The link to the dashboard is
+https://grafana.com/grafana/dashboards/11955
+. Perform the following steps to import this dashboard:
+Import the dashboard named
+JVM (Micrometer)
+by following these steps:
+On the Grafana web page, hover the mouse over the
+Dashboard
+icon (four squares) in the menu to the left. Select
++ Import
+from the menu that pops up.
+On the
+Import
+page, enter the dashboard ID
+11955
+into the
+Import via grafana.com
+field and click on the
+Load
+button next to it.
+On the
+Import
+page that will be displayed, click on the
+Prometheus
+drop-down menu and select the
+Prometheus
+data source.
+Now, by clicking on the
+Import
+button, the
+JVM (Micrometer)
+dashboard will be imported and rendered.
+Inspect the
+JVM (Micrometer)
+dashboard by following these steps:
+To get a good view of the metrics, use the time picker (in the top-right corner) to select
+Last 5 minutes
+, and select a refresh rate of
+5s
+in the dropdown to the right.
+In the
+Application
+drop-down menu, which can be found at the top-left of the page, select the
+product-composite
+microservice.
+Since we are running a load test using Siege in the background, we will see a lot of metrics. The following is a sample screenshot:
+Figure 20.7: Grafana showing Java VM metrics
+In this dashboard, we can find all types of Java VM relevant metrics for, among
+other things, CPU, memory, heap, and I/O usage, as well as HTTP-related metrics such as requests/second, average duration, and error rates. Feel free to explore these metrics on your own!
+Being able to import existing dashboards is of great value when we want to get started quickly. However, what’s even more important is to know how to create our own dashboard. We
+will learn about this in the next section.
+Developing your own Grafana dashboards
+Getting started with
+developing Grafana dashboards is straightforward. The important thing for us to understand is what metrics Prometheus makes available for us.
+In this section, we will learn how to examine the available metrics. Based on these, we will create a dashboard that can be used to monitor some of the more interesting metrics.
+Examining Prometheus metrics
+Earlier, in the
+Changes in source code to collect application metrics
+section, we configured
+Prometheus to collect metrics from our microservices. We can make a call to the same endpoint and see what metrics Prometheus collects. Run the following command:
+curl https://health.minikube.me/actuator/prometheus -ks
+Expect a lot of output from the command, as in the following example:
+Figure 20.8: Prometheus metrics
+Among all of the metrics that are reported, there are two very interesting ones:
+resilience4j_retry_calls
+: Resilience4j reports on how the retry mechanism operates. It reports four different values for successful and failed requests, combined with and without retries.
+resilience4j_circuitbreaker_state
+: Resilience4j reports on the state of the circuit breaker.
+Note that the metrics have a label named
+application
+, which contains the name of the microservice. This field comes from the configuration of the
+management.metrics.tags.application
+property, which we did in the
+Changes in source code to collect application metrics
+section.
+These metrics are
+interesting to monitor. None of the dashboards we have used so far use metrics from Resilience4j. In the next section, we will create a dashboard for these metrics.
+Creating the dashboard
+In this section, we
+will learn how to create a dashboard that visualizes the Resilience4j metrics we described in the previous section.
+We will set up the dashboard in the following stages:
+Creating an empty dashboard
+Creating a new panel for the circuit breaker metric
+Creating a new panel for the retry metric
+Arranging the panels
+Creating an empty dashboard
+Perform the following steps to
+create an empty dashboard:
+On the Grafana web page, hover the mouse over the
+Dashboard
+icon (four squares) in the menu to the left. Select
++ New Dashboard
+from the menu that pops up. A web page named
+New dashboard
+will be displayed:
+Figure 20.9: Creating a new dashboard in Grafana
+Click on the Dashboard settings button (it has a gear as its icon), in the menu shown in
+the preceding screenshot. Then, follow these steps:
+Specify the name of the dashboard in the
+Name
+field and set the value to
+Hands-on Dashboard
+.
+Click on the top-left back button on the web page (not to be mixed up with the web browser’s back button).
+Click on the time picker and select
+Last 5 minutes
+as the range.
+Click on the refresh rate icon to the right and specify
+5s
+as the refresh rate.
+Creating a new panel for the circuit breaker metric
+Perform the following
+steps to create a new panel for the circuit breaker metric:
+In the
+Add panel
+section, click on the
+Add a new panel
+button.
+A page will be displayed where the new panel can be configured.
+In the tab to the right, set the
+Panel title
+to
+Circuit Breaker
+.
+Also in the tab to the right, set the
+Tooltip mode
+to
+All
+.
+In the bottom-left
+Query
+panel, under the letter
+A
+, specify the query as the name of the circuit breaker metric for the
+closed
+state, as follows:
+Set
+Metric
+to
+resilience4j_circuitbreaker_state
+.
+Set
+Label
+to
+state
+and specify that it shall be equal to
+closed
+.
+Verify that the
+Raw query
+is set to
+resilience4j_circuitbreaker_state{state="closed"}
+.
+Expand the
+Options
+tab, and in the
+Legend
+drop-down box, select
+Custom
+. In the
+Legend
+field, specify the value
+{{state}}
+. This will create a legend in the panel where the names of the different states are displayed.
+The filled-in
+values should look as follows:
+Figure 20.10: Specifying circuit breaker metrics in Grafana
+Click on the
++ Query
+button at the bottom of the page to enter a new query under
+B
+for the
+open
+state. Repeat the steps for query
+A
+, but set the state’s value to
+open
+. Verify that the
+Raw query
+field is set to
+resilience4j_circuitbreaker_state{state="open"}
+and set the
+Legend
+field to
+{{state}}
+.
+Click on the
++ Query
+button a final time to enter a new query under
+C
+for the
+half_open
+state. Set the state’s value to
+half_open
+, and verify that the
+Raw query
+field is set to
+resilience4j_circuitbreaker_state{state="half_open"}
+and set the
+Legend
+field to
+{{state}}
+.
+Click on the back button at the top left of the page to get back to the dashboard.
+Creating a new panel for the retry metric
+Here, we will repeat the same procedure that we went through to add a panel for the preceding
+circuit breaker metric, but instead, we will specify the values for the retry metrics:
+Create a new panel by clicking on the
+Add panel
+icon (a chart with a plus sign) in the top-level menu, and click on
+Add a new panel
+in the new panel.
+Specify
+Retry
+as the
+Panel title
+, and the
+Tooltip mode
+as
+All
+in the same way as for the previous panel.
+Set
+Metric
+to
+resilience4j_retry_calls_total
+.
+Since the retry metric is a counter, its value will only go up. An ever-increasing metric is rather uninteresting to monitor. Therefore, a
+rate
+function is used to convert the retry metric into a rate-per-second metric. The time window specified, that is,
+30s
+, is used by the rate function to calculate the average values of the rate. To apply the rate function:
+Click on the
++ Operations
+button.
+Click on
+Range functions
+and select the
+Rate
+function.
+Set the
+Range
+to
+30s
+.
+In the
+Raw query
+field, verify that it is set to
+rate(resilience4j_retry_calls_total[30s])
+.
+Expand the
+Options
+tab, and in the
+Legend
+drop-down box, select
+Custom
+. In the
+Legend
+field, specify the value
+{{kind}}
+. This will create a legend in the panel where the names of the different kinds of retries are displayed.
+Note that Grafana immediately starts to render a graph in the panel editor based on the specified values.
+Click on the back button to get back to the dashboard.
+Arranging the panels
+Perform the following
+steps to arrange the panels on the dashboard:
+You can resize a panel by dragging its lower right-hand corner to the preferred size.
+You can also move a panel by dragging its header to the desired position.
+The following is an example layout of the two panels:
+Figure 20.11: Moving and resizing a panel in Grafana
+Since this screenshot was taken with Siege running in the background, the
+Retry
+panel reports
+successful_without_retry
+metrics, while the
+Circuit Breaker
+reports that
+closed
+equals
+1
+and
+open
+and
+half_open
+equal
+0
+, meaning that it is closed and operating normally (something that is about to
+change in the next section).
+Finally, click on the
+Save
+button at the top of the page. A
+Save dashboard as...
+dialog will show up; ensure that the name is
+Hands-on Dashboard
+and hit the
+Save
+button.
+If you get stuck when configuring the dashboard, take a look at the end of the
+Trying out the circuit breaker alarm
+section. There is an easy solution described.
+With the dashboard created, we are ready to try it out. In the next section, we will try out both
+metrics.
+Trying out the new dashboard
+Before we start testing
+the new dashboard, we must stop the load test tool, Siege. To do this, go to the command window where Siege is running and press
+Ctrl + C
+to stop it.
+Let’s start by testing how to monitor the circuit breaker. Afterward, we will try out the retry metrics.
+Testing the circuit breaker metrics
+If we force the
+circuit breaker to open up, its state will change from
+closed
+to
+open
+, and then eventually to the
+half-open
+state. This should be reported in the circuit breaker panel.
+Open the circuit, just like we did in
+Chapter 13
+,
+Improving Resilience Using Resilience4j
+, in the
+Trying out the circuit breaker and retry mechanism
+section – that is, make some requests to the API in a row, all of which will fail. Run the following commands:
+ACCESS_TOKEN=$(curl https://writer:secret-writer@minikube.me/oauth2/token -d grant_type=client_credentials -d scope="product:read product:write" -ks | jq .access_token -r)
+echo ACCESS_TOKEN=$ACCESS_TOKEN
+for ((n=0; n<4; n++)); do curl -o /dev/null -skL -w "%{http_code}\n" https://minikube.me/product-composite/1?delay=3 -H "Authorization: Bearer $ACCESS_TOKEN" -s; done
+We can expect three
+500
+responses and a final
+200
+, indicating three errors in a row, which is what it takes to open the circuit breaker. The last
+200
+indicates a
+fail-fast
+response from the
+product-composite
+microservice when it detects that the circuit is open.
+On some rare occasions, I have noticed that the circuit breaker metrics are not reported in Grafana directly after the dashboard is created. If they don’t show up after a minute, simply rerun the preceding command to reopen the circuit breaker again.
+Expect the value for the
+closed
+state to drop to
+0
+and the
+open
+state to take the value
+1
+, meaning that the circuit is now open. After 10s, the circuit will turn to the half-open state, indicated by the
+half-open
+metrics having the value
+1
+and
+open
+being set to
+0
+. This means that the circuit breaker is ready to test some requests to see if the
+problem that opened the circuit is gone.
+Close the circuit breaker again by issuing three successful requests to the API with the following command:
+for ((n=0; n<4; n++)); do curl -o /dev/null -skL -w "%{http_code}\n" https://minikube.me/product-composite/1?delay=0 -H "Authorization: Bearer $ACCESS_TOKEN" -s; done
+We will get only
+200
+responses. Note that the circuit breaker metric goes back to normal again, meaning that the
+closed
+metric goes back to
+1
+.
+After this test, the Grafana dashboard should look as follows:
+Figure 20.12: Retries and Circuit Breaker in action as viewed in Grafana
+From the preceding screenshot, we can see that the retry mechanism also reports metrics that succeeded and failed. When the circuit was opened, all requests failed without
+retries. When the circuit was closed, all requests were successful without any retries. This is as expected.
+Now that we have seen the circuit breaker metrics in action, let’s see the retry metrics in action!
+If you want to check the state of the circuit breaker, you can do it with the following command:
+curl -ks https://health.minikube.me/actuator/health | jq -r .components.circuitBreakers.details.product.details.state
+It should report
+CLOSED
+,
+OPEN
+, or
+HALF_OPEN
+, depending on its state.
+Testing the retry metrics
+To trigger the retry
+mechanism, we will use the
+faultPercentage
+parameter we used in previous chapters. To avoid triggering the circuit breaker, we need to use relatively low values for the parameter. Run the following command:
+while true; do curl -o /dev/null -s -L -w "%{http_code}\n" -H "Authorization: Bearer $ACCESS_TOKEN" -k https://minikube.me/product-composite/1?faultPercent=10; sleep 3; done
+This command will call the API once every third second. It specifies that 10% of the requests should fail so that the retry mechanism will kick in and retry the failed requests.
+After a few minutes, the dashboard should report metrics such as the following:
+Figure 20.13: Result of retry tests viewed in Grafana
+In the preceding screenshot, we can see that most of the requests have been executed successfully, without any retries. Approximately 10% of the requests have been retried by the
+retry mechanism and successfully executed after the retry.
+Before we leave the section on creating dashboards, we will learn how we can export and import dashboards.
+Exporting and importing Grafana dashboards
+Once a dashboard has
+been created, we typically want to take two actions:
+Save the definition of the dashboard as source code in a Git repo
+Move the dashboard to other Grafana instances, for example, those used in QA and production environments
+To perform these actions, we can use Grafana’s API for exporting and importing dashboards. Since
+we only have one Grafana instance, we
+will perform the following steps:
+Export the dashboard to a JSON file.
+Delete the dashboard.
+Import the dashboard from the JSON file.
+Before we perform these steps, we need to understand the two different types of IDs that a dashboard has:
+id
+, an auto-incremented identifier that is unique only within a Grafana instance.
+uid
+, a unique identifier that can be used in multiple Grafana instances. It is part of the URL when accessing dashboards, meaning that links to a dashboard will stay the same as long as the
+uid
+of a dashboard remains the same. When a dashboard is created, a random
+uid
+is created by Grafana.
+When we import a dashboard, Grafana will try to update it if the
+id
+field is set. To be able to test importing a dashboard in a Grafana instance that doesn’t have the dashboard already installed, we need to set the
+id
+field to
+null
+.
+Perform the following actions to export and then import your dashboard:
+Identify the
+uid
+of your dashboard.
+The
+uid
+value can be found in the URL in the web browser where the dashboard is shown. It will look like this:
+https://grafana.minikube.me/d/YMcDoBg7k/hands-on-dashboard
+The
+uid
+in the URL above is
+YMcDoBg7k
+. In a terminal window, create a variable with its value. In my case, it will be:
+ID=YMcDoBg7k
+Export the dashboard to a JSON file with the following command:
+curl -sk https://grafana.minikube.me/api/dashboards/uid/$ID | jq '.dashboard.id=null' > "Hands-on-Dashboard.json"
+The
+curl
+command exports the dashboard to the JSON format. The
+jq
+statement sets the
+id
+field to
+null
+, and the output from the
+jq
+command is written to a file named
+Hands-on-Dashboard.json
+.
+Delete the dashboard.
+In the web browser, select
+Dashboards
+and
+Browse
+in the menu to the left. Identify the
+Hands-on Dashboard
+in the list of dashboards and select it by clicking on the checkbox
+in front of it. A red
+Delete
+button will
+be shown; click on it, and then click on the new
+Delete
+button that is shown in the confirm dialog box that pops up.
+Recreate the dashboard by importing it from the JSON file with the following command:
+curl -i -XPOST -H 'Accept: application/json' -H 'Content-Type: application/json' -k \
+    'https://grafana.minikube.me/api/dashboards/db' \
+    -d @Hands-on-Dashboard.json
+Note that the URL used to access the dashboard is still valid, in my case,
+https://grafana.minikube.me/d/YMcDoBg7k/hands-on-dashboard
+.
+Verify that the imported dashboard reports metrics in the same way as before it was deleted and re-imported. Since the request loop started in the
+Testing the retry metrics
+section is still running, the same metrics from that section should be reported.
+For more information regarding Grafana’s APIs, see
+https://grafana.com/docs/grafana/v9.0/developers/http_api/dashboard/#get-dashboard-by-uid
+.
+Before proceeding to the next section, remember to stop the request loop that we started for the retry test by pressing
+Ctrl
++
+C
+in the terminal window where the request loop executes!
+In the next section, we will learn how to set up alarms in Grafana, based on these metrics.
+Setting up alarms in Grafana
+Being able to monitor the circuit breaker and retry metrics is of great value, but even more important is the
+capability to define automated alarms on these metrics. Automated alarms relieve us from monitoring the
+metrics manually.
+Grafana comes with built-in support to define alarms and send notifications to a number of channels. In this section, we will define alerts on the circuit breaker and configure Grafana to send emails to the test mail server when alerts are raised. The local test mail server was installed earlier in the
+Installing a local mail server for tests
+section.
+For other types of channels supported by the version of Grafana used in this chapter, see
+https://grafana.com/docs/grafana/v7.2/alerting/notifications/#list-of-supported-notifiers
+.
+In the next section, we will define a mail-based notification channel that will be used by the alert in the section after this.
+Setting up a mail-based notification channel
+To configure a
+mail-based notification channel in Grafana, perform the following steps:
+On the Grafana web page, on the menu to the left, click on the Alerting
+menu choice (with an alarm bell as its icon) and select
+Notification channels
+.
+Click on the
+Add channel
+button.
+Set the name to
+mail
+.
+Select the type as
+Email
+.
+Enter an email address of your choice. Emails will only be sent to the local test mail server, independent of the email address that’s specified.
+Expand
+Notification settings
+and select
+Default (Use this notification for all alerts)
+.
+The configuration of the notification channel should look as follows:
+Figure 20.14: Setting up an email-based notification channel
+Click on the
+Test
+button
+to send a test mail.
+Click on the
+Save
+button.
+Click on the
+Dashboard
+button in the left-hand side menu and then on the
+Browse
+menu entry.
+Select
+Hands-on Dashboard
+from the list to get back to the dashboard.
+Check the test mail server’s web page to ensure that we have received a test email. You should receive the following:
+Figure 20.15: Verifying the test mail on the mail server’s web page
+With a notification
+channel in place, we are ready to define an alert on the circuit breaker.
+Setting up an alarm on the circuit breaker
+To create an alarm on
+the circuit breaker, we need to create the alert and then add an alert list to the dashboard, where we can see what alert events have occurred over time.
+Perform the following steps to create an alert for the circuit breaker:
+In the
+Hands-on Dashboard
+, click on the header of the
+Circuit Breaker
+panel. A drop-down menu will appear.
+Select the
+Edit
+menu option.
+Select the
+Alert
+tab in the tab list (shown as an alarm bell icon).
+Click on the
+Create Alert
+button.
+In the
+Evaluate every
+field, set the value to
+10s
+.
+In the
+For
+field, set the value to
+0m
+.
+In the
+Conditions
+section, specify the following values:
+For the
+WHEN
+field, select
+max()
+Set the
+OF
+field to
+query(A, 10s, now)
+Change
+IS ABOVE
+to
+IS BELOW
+, and set its value to
+0.5
+These settings will result in an alert being raised if the
+closed
+state (related to the
+A
+variable) goes below 0.5 during the last 10 seconds. When the circuit breaker is closed, this variable has the value 1, and 0 otherwise. So, this means that an alert is raised when the circuit breaker is no longer closed.
+Scroll down to the
+Notifications
+section to confirm that the notification will be sent to the default notification channel, that is, the mail channel we defined
+previously. The alarm definition should look as follows:
+Figure 20.16: Setting up an alarm in Grafana, part 1
+Click on the
+Save
+button (top-right), enter a note like
+Added an alarm
+, and then click on the
+Save
+button.
+Click on the back button (left arrow) to get back to the dashboard.
+Then, we need to perform the following steps to create an alarm list:
+Click on the
+Add panel
+button in the top-level menu.
+Click on the
+Add new panel
+button in the new panel.
+In the top-right corner, click on the
+Time series
+drop-down button and select the
+Alert list
+option.
+In the tab to the right, do the following:
+Enter
+Circuit Breaker Alerts
+as the
+Panel title
+.
+In the
+Option
+section, set the
+Show
+field to the value
+Recent state changes
+.
+Finally, enable the toggle switch named
+Alerts from this dashboard
+.
+Expand the
+Visualization
+row below the
+Settings
+row and select
+Alert list
+.
+In the
+Panel
+options
+row below, set
+the
+Show
+field to
+Recent state changes
+, set
+Max items
+to
+10
+, and enable the option
+Alerts from this dashboard
+.
+The settings should look as follows:
+Figure 20.17: Setting up an alarm in Grafana, part 2
+Click on the back button to get back to the dashboard.
+Rearrange the panel to suit your needs.
+Save the
+changes to the dashboard with a note like
+Added an alert list
+.
+Here is a sample layout with the alarm list added:
+Figure 20.18: Setting up a layout in Grafana with Retry, Circuit Breaker, and alert panels
+We can see that the circuit breaker reports the metrics as healthy (with a green heart icon) and
+that the alert list is currently empty.
+Now, it’s time to try out the alarm!
+Trying out the circuit breaker alarm
+Here, we will repeat the tests from the
+Testing the circuit breaker metrics
+section, but this
+time, we expect alarms to be raised and emails to be sent as well! Let’s get started:
+Acquire a new access token, if required (valid for 1 hour):
+ACCESS_TOKEN=$(curl https://writer:secret-writer@minikube.me/oauth2/token -d grant_type=client_credentials -d scope="product:read product:write" -ks | jq .access_token -r)
+echo ACCESS_TOKEN=$ACCESS_TOKEN
+Open the circuit breaker as we did before:
+for ((n=0; n<4; n++)); do curl -o /dev/null -skL -w "%{http_code}\n" https://minikube.me/product-composite/1?delay=3 -H "Authorization: Bearer $ACCESS_TOKEN" -s; done
+The dashboard should report the circuit as open as it did previously. After a few seconds, an alarm should be raised, and an email is also sent. Expect the dashboard to look like the following screenshot (you might need to refresh the web page to make the alert show up):
+Figure 20.19: Alarm raised in Grafana
+Take note of the alarm icon in the header of the circuit breaker panel (a red broken
+heart). The red line marks the time of the alert event and that an alert has been added to the alert list.
+In the test mail server, you should see an email, as shown in the following screenshot:
+Figure 20.20: Alarm email
+Great! We got alarms, just like we expected! Now, close the circuit with the following
+command, simulating that the problem is gone:
+for ((n=0; n<4; n++)); do curl -o /dev/null -skL -w "%{http_code}\n" https://minikube.me/product-composite/1?delay=0 -H "Authorization: Bearer $ACCESS_TOKEN" -s; done
+The
+closed
+metric should go back to normal, that is,
+1
+, and the alert should turn green again.
+Expect the dashboard to look like the following screenshot:
+Figure 20.21: Error resolved as reported in Grafana
+Note that the
+alarm icon in the header of the circuit breaker panel is green again; the green line marks the time of the
+OK
+event and that it has been added to the alert list.
+In the test mail server, you should see an email, as shown in the following screenshot:
+Figure 20.22: Error resolved as reported in an email
+That completes how
+to monitor microservices using Prometheus and Grafana.
+If you want to export the configuration of the mail notification, you can do that with the following command:
+curl https://grafana.minikube.me/api/alert-notifications/1 -ks | jq '.id=null' > mail-notification.jso
+To import it, the following command can be used:
+curl -ik -XPOST -H 'Accept: application/json' \
+  -H 'Content-Type: application/json' \
+  'https://grafana.minikube.me/api/alert-notifications' \
+  -d @mail-notification.json
+For your convenience, the folder
+$BOOK_HOME/Chapter20/kubernetes/grafana/api-export-import
+contains export files for both the mail notifier and the dashboard that we learned how to export and import in the
+Exporting and importing Grafana dashboards
+section.
+Summary
+In this chapter, we learned how to use Prometheus and Grafana to collect and monitor alerts on performance metrics.
+We saw that, to collect performance metrics, we can use Prometheus in a Kubernetes environment. We then learned how Prometheus can automatically collect metrics from a Pod when a few Prometheus annotations are added to the Pod’s definition. To produce metrics in our microservices, we used Micrometer.
+Then, we saw how we can monitor the collected metrics using dashboards in both Kiali and Grafana, which comes with the installation of Istio. We also experienced how to consume dashboards shared by the Grafana community, and learned how to develop our own dashboards, where we used metrics from Resilience4j to monitor the usage of its circuit breaker and retry mechanisms. Using the Grafana API, we can export created dashboards and import them into other Grafana instances.
+Finally, we learned how to define alerts on metrics in Grafana and how to use Grafana to send out alert notifications. We used a local test mail server to receive alert notifications from Grafana as emails.
+The next two chapters should already be familiar to you, covering the installation of tools on a Mac or Windows PC. Instead, head over to the last chapter in this book, which will introduce how we can compile our Java-based microservices into binary executable files using the brand-new
+Spring Native
+project, still in beta at the time of writing. This will enable the microservices to start up in a fraction of a second, but increased complexity and time are involved when it comes to building them.
+Questions
+What changes did we need to make to the source code in the microservices to make them produce metrics that are consumed by Prometheus?
+What is the
+management.metrics.tags.application
+config parameter used for?
+If you want to analyze a support case regarding high CPU consumption, which of the dashboards in this chapter would you start with?
+If you want to analyze a support case regarding slow API responses, which of the dashboards in this chapter would you start with?
+What is the problem with counter-based metrics such as Resilience4j’s retry metrics, and what can be done so that we can monitor them in a useful way?
+What is going on here?
+Figure 20.23: What is going on here?
+If you are reading this with screenshots rendered in grayscale, it might be hard to figure out what the metrics say. So, here’s some help:
+The state transitions reported by the circuit breaker are, in order:
+half_open
+→
+open
+open
+→
+half_open
+half_open
+→
+closed
+The retry mechanism reports:
+An initial burst of requests, where most of them are reported as
+failed_without_retry
+and a few are reported as
+successful_without_retry
+.
+A second burst of requests, all reported as
+successful_without_retry
+.
+Join our community on Discord
+Join our community’s Discord space for discussion with the author and other readers:
+https://packt.link/SpringBoot3e
+
+21
+Installation Instructions for macOS
+In this chapter, we will learn how to set up the tools required to run the commands described in this book on macOS. We will also learn how to get access to the source code of the book.
+The following topics will be covered in this chapter:
+Technical requirements
+Installing tools
+Accessing the source code
+If you are using a Windows PC, you should follow the instructions in
+Chapter 22
+,
+Installation Instructions for Microsoft Windows with WSL 2 and Ubuntu
+.
+Technical requirements
+All of the commands described in this book are run on a MacBook Pro with macOS Ventura and use
+bash
+, a command shell. All commands have been verified on both an Intel and Apple silicon-based MacBook Pro.
+If you are using another shell, such as
+zsh
+, I recommend that you switch to bash before running commands from this book using this command:
+/bin/bash
+Installing tools
+In this section, we will learn
+how to install and configure the tools. Here is a list of the tools we will install, with a link to more information on downloading and installation, if required:
+Git
+:
+https://git-scm.com/downloads
+Docker Desktop for Mac
+:
+https://hub.docker.com/editions/community/docker-ce-desktop-mac/
+Java
+:
+https://adoptium.net/installation
+curl
+:
+https://curl.haxx.se/download.html
+jq
+:
+https://stedolan.github.io/jq/download/
+The Spring Boot CLI
+:
+https://docs.spring.io/spring-boot/docs/3.0.4/reference/html/getting-started.html#getting-started.installing.cli
+Siege
+:
+https://github.com/JoeDog/siege#where-is-it
+Helm
+:
+https://helm.sh/docs/intro/install/
+kubectl
+:
+https://kubernetes.io/docs/tasks/tools/install-kubectl-macos/
+Minikube
+:
+https://minikube.sigs.k8s.io/docs/start/
+Istioctl
+:
+https://istio.io/latest/docs/setup/getting-started/#download
+The following versions have been used when writing this book:
+Git
+: v2.37.1
+Docker Desktop for Mac
+: v4.12.0
+Java
+: v17.0.6
+curl
+: v7.86.0
+jq
+: v1.6
+Spring Boot CLI
+: v3.0.4
+Siege
+: v4.1.6
+Helm
+: v3.11.1
+kubectl
+: v1.26.1
+Minikube
+: v1.29.0
+Istioctl
+: v1.17.0
+Most of the tools
+will be installed using the
+Homebrew
+package manager (
+https://brew.sh/
+), so we
+will start by installing Homebrew. After that, we will install most of the tools using Homebrew and wrap up by installing the remaining tools.
+For tools where control is required over the version that is installed – not just installing the latest available – I find Homebrew insufficient. When it comes to
+minikube
+,
+kubectl
+, and
+istioctl
+, it is important to install versions that are compatible with each other, specifically when it comes to the versions of Kubernetes that they support. Simply installing and upgrading to the latest versions can lead to situations where incompatible versions of
+minikube
+, Kubernetes, and Istio are used.
+For supported
+Kubernetes
+versions when it comes to Istio, see
+https://istio.io/latest/about/supported-releases/#support-status-of-istio-releases
+. For
+minikube
+, see
+https://minikube.sigs.k8s.io/docs/handbook/config/#selecting-a-kubernetes-version
+.
+Installing Homebrew
+If you don’t have
+Homebrew installed already, you can install it with the following command:
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+Installing Homebrew also installs the command-line tools for
+Xcode
+, if they are not already installed, so it might take a while.
+Verify the
+installation of Homebrew with the following command:
+brew --version
+Expect a response such as the following:
+Homebrew 4.0.1
+Using Homebrew to install tools
+On macOS,
+curl
+is already pre-installed and
+git
+was installed as part of the installation of the command-line
+tools for Xcode, required by Homebrew. Homebrew can be used to install Docker, Java, jq, the Spring Boot CLI, Helm, and Siege with the following commands:
+brew tap spring-io/tap && \
+brew tap homebrew/cask-versions && \brew install --cask temurin17 && \
+brew install jq && \
+brew install spring-boot && \
+brew install helm && \
+brew install siege && \
+brew install --cask docker
+Brew installs the tools in different folders on Intel and Apple silicon-based Macs, in
+/usr/local
+and
+/opt/homebrew
+respectively.
+Java is installed
+using the distribution called
+Eclipse Temurin
+; for more information, see
+https://adoptium.net/temurin/
+.
+Install tools without Homebrew
+When it
+comes to installing
+minikube
+,
+kubectl
+, and
+istioctl
+, we will avoid using
+brew
+for improved control over what versions we install. The commands look slightly different on Intel and Apple silicon-based Macs, so will go through them separately.
+Install tools on an Intel-based Mac
+To install
+the
+kubectl
+version used in this book, run the
+following commands:
+curl -LO "https://dl.k8s.io/release/v1.26.1/bin/darwin/amd64/kubectl"
+sudo install kubectl /usr/local/bin/kubectl
+rm kubectl
+To install the
+minikube
+version used in this book, run the following commands:
+curl -LO https://storage.googleapis.com/minikube/releases/v1.29.0/minikube-darwin-amd64
+sudo install minikube-darwin-amd64 /usr/local/bin/minikube
+rm minikube-darwin-amd64
+To install the
+istioctl
+version used in this book, run the following commands:
+curl -L https://istio.io/downloadIstio | ISTIO_VERSION=1.17.0 TARGET_ARCH=x86_64 sh -
+sudo install istio-1.17.0/bin/istioctl /usr/local/bin/istioctl
+rm -r istio-1.17.0
+Install tools on an Apple silicon-based Mac
+To install
+the
+kubectl
+version used in this book, run the
+following commands:
+curl -LO "https://dl.k8s.io/release/v1.26.1/bin/darwin/arm64/kubectl"
+sudo install kubectl /usr/local/bin/kubectl
+rm kubectl
+To install the
+minikube
+version used in this book, run the following commands:
+curl -LO https://storage.googleapis.com/minikube/releases/v1.29.0/minikube-darwin-arm64
+sudo install minikube-darwin-arm64 /usr/local/bin/minikube
+rm minikube-darwin-arm64
+To install the
+istioctl
+version used in this book, run the following commands:
+curl -L https://istio.io/downloadIstio | ISTIO_VERSION=1.17.0 TARGET_ARCH=arm64 sh -
+sudo install istio-1.17.0/bin/istioctl /usr/local/bin/istioctl
+rm -r istio-1.17.0
+If you want to use the latest versions, with the risk of incompatible versions as described above, you should be able to install
+minikube
+,
+kubectl
+, and
+istioctl
+with Homebrew using the following commands:
+brew install kubernetes-cli && \<
+brew install istioctl && \<
+brew install minikube
+With the tools installed, we need to take some post-installation actions before we can verify the installations.
+Post-installation actions
+We need
+to take some actions after installing Java and Docker to make them work properly:
+Java
+Add a command to your login script to set up the
+JAVA_HOME
+environment variable:
+echo 'export JAVA_HOME=$(/usr/libexec/java_home -v17)' >> ~/.bash_profile
+If you are not using
+~/.bash_profile
+as your login script, you need to replace it with the login script you use, for example,
+~/.zshrc
+.
+Apply the settings in your current terminal session:
+source ~/.bash_profile
+Docker
+To be able to run the examples in this book, it is recommended that you configure Docker so that it can use most of the CPUs except a few (allocating all CPUs to Docker can make the computer unresponsive when tests are running) and 10 GB of memory, if available. The initial chapters will work fine with less memory allocated, for example, 6 GB. But the more features we add later in the book, the more memory will be required by the Docker host to be able to run all the microservices smoothly.
+Before we can configure Docker, we must ensure that the Docker daemon is running. You can start Docker as you start any application on a Mac, for example, by using
+Spotlight
+or opening the
+Application
+folder in
+Finder
+and starting it from there.
+To configure Docker, click on the Docker icon in the status bar and select
+Preferences…
+. Go to the
+Resources
+tab in the
+Preferences
+settings for Docker and set
+CPUs
+and
+Memory
+, as illustrated by the following screenshot:
+Figure 21.1: Docker Desktop resource configuration
+If you don’t
+want to start Docker manually after a system startup, you can go to the
+General
+tab and select the
+Start Docker Desktop when you log in
+option, as shown in the screenshot below:
+Figure 21.2: Docker Desktop general configuration
+Finalize the configuration by clicking on the
+Apply & Restart
+button.
+With the post-installation actions performed, we can verify that the tools are installed as expected.
+Verifying the installations
+To verify
+the tool installations, run the following commands to print each tool’s version:
+git version && \
+docker version -f json | jq -r .Client.Version && \
+java -version 2>&1 | grep "openjdk version" && \
+curl --version | grep "curl" | sed 's/(.*//' && \
+jq --version && \
+spring --version && \
+siege --version 2>&1 | grep SIEGE && \
+helm version --short && \
+kubectl version --client -o json | jq -r .clientVersion.gitVersion && \
+minikube version | grep "minikube" && \
+istioctl version --remote=false
+These commands will return output like the following:
+Figure 21.3: Versions used
+With the tools
+installed and verified, let’s see how we can access the source code for this book.
+Accessing the source code
+The source code for this book can be found in the GitHub repository:
+https://github.com/PacktPublishing/Microservices-with-Spring-Boot-and-Spring-Cloud-Third-Edition
+.
+To be able to
+run the commands that are described in this book, download the source code to a folder and set up an environment variable,
+$BOOK_HOME
+, that points to that folder.
+Sample commands are as follows:
+export BOOK_HOME=~/Documents/Microservices-with-Spring-Boot-and-Spring-Cloud-Third-Edition 
+git clone https://github.com/PacktPublishing/Microservices-with-Spring-Boot-and-Spring-Cloud-Third-Edition.git $BOOK_HOME
+The Java source code is written for Java SE 8 and uses a Java SE 17 JRE when executed in Docker containers. The following versions of Spring are used:
+Spring Framework
+: 6.0.6
+Spring Boot
+: 3.0.4
+Spring Cloud
+: 2022.0.1
+The code examples in each chapter all come from the source code in
+$BOOK_HOME/ChapterNN
+, where
+NN
+is the number of the chapter. The code examples in the book are in many cases edited to remove irrelevant parts of the source code, such as comments, imports, and log statements.
+Using an IDE
+I recommend
+that you work with your Java code using an IDE that supports the development of Spring Boot applications, such as Visual Studio Code, Spring Tool Suite, or IntelliJ IDEA Ultimate Edition. However, you don’t need an IDE to be able to follow the instructions in this book.
+The structure of the code
+Each chapter
+consists of a number of Java projects, one for each microservice and Spring Cloud service, plus a couple of library projects used by the other projects.
+Chapter 14
+contains the largest number of projects; its project structure looks like this:
+├── api
+├── microservices
+│   ├── product-composite-service
+│   ├── product-service
+│   ├── recommendation-service
+│   └── review-service
+├── spring-cloud
+│   ├── authorization-server
+│   ├── config-server
+│   ├── eureka-server
+│   └── gateway
+└── util
+All projects are
+built using Gradle and have a file structure that follows Gradle’s standard conventions:
+├── build.gradle
+├── settings.gradle
+└── src
+    ├── main
+    │   ├── java
+    │   └── resources
+    └── test
+        ├── java
+        └── resources
+For more
+information on how to organize a Gradle project, see
+https://docs.gradle.org/current/userguide/organizing_gradle_projects.html
+.
+With this, we have the required tools installed for macOS and the source code for the book downloaded. In the next chapter, we will learn how to set up the tools in a Windows environment.
+Summary
+In this chapter, we learned how to install, configure, and verify the tools required to run the commands described in this book on macOS. For development, we will use
+git
+,
+docker
+,
+java
+, and
+spring
+. To create a Kubernetes environment to deploy our microservice at runtime, we will use
+minikube
+,
+helm
+,
+kubectl
+, and
+istioctl
+. Finally, to run tests to verify that the microservices work as expected at runtime, we will use
+curl
+,
+jq
+, and
+siege
+.
+We also learned how to access the source code from GitHub and how the source code is structured.
+In the next chapter, we will learn how to set up the same tools in an environment based on Microsoft Windows with
+Windows Subsystem for Linux v2
+(
+WSL 2
+), where we will use a Linux server based on Ubuntu.
+
+22
+Installation Instructions for Microsoft Windows with WSL 2 and Ubuntu
+In this chapter, we will learn how to set up the tools required to run the commands described in this book on Microsoft Windows. We will also learn how to get access to the source code of the book.
+The following topics will be covered in this chapter:
+Technical requirements
+Installing tools
+Accessing the source code
+If you are using a Mac, you should follow the instructions in
+Chapter 21
+,
+Installation Instructions for macOS.
+Technical requirements
+All of the commands described in this book are run on a MacBook Pro using
+bash
+as the command shell. In this chapter, we will learn how to set up a development environment in Microsoft Windows in which the commands in this book can be run without requiring any changes. In a few cases, the commands have to be modified to run in the Windows environment. This is clearly pointed out in each chapter and the alternative command to be used in the Windows environment is also specified.
+The development environment is based on
+Windows Subsystem for Linux v2
+, or
+WSL 2
+for short, which requires
+Windows 10, version 2004
+(build 19041) or later. We will use WSL 2 to run a Linux server based on
+Ubuntu 22.04
+, where we will run all the commands using
+bash
+as the command shell.
+Microsoft provides integration between Windows and Linux servers that run in WSL 2. Linux files can be accessed from Windows, and vice versa. We will learn how to access files in the Linux server from Visual Studio Code running in Windows. Ports accessible from
+localhost
+in a Linux server are also available on localhost in Windows. We will use this integration to access web pages exposed by web applications running in the Linux server from a web browser running in Windows.
+For more information on WSL 2, see
+https://docs.microsoft.com/en-us/windows/wsl/
+.
+Installing tools
+In this section, we will learn
+how to install and configure the tools. Here is a list of the tools we will install, with a link to more information on downloading and installation, if required.
+On Windows, we
+will install the following tools:
+Windows Subsystem for Linux v2 (WSL 2)
+:
+https://docs.microsoft.com/en-us/windows/wsl/install-win10
+Ubuntu 22.04 in WSL 2
+:
+https://apps.microsoft.com/store/detail/ubuntu-22042-lts/9PN20MSR04DW
+Windows Terminal
+:
+https://www.microsoft.com/en-us/p/windows-terminal/9n0dx20hk701
+Docker Desktop for Windows
+:
+https://hub.docker.com/editions/community/docker-ce-desktop-windows/
+Visual Studio Code
+and its extension for
+Remote WSL
+:
+https://code.visualstudio.com
+and
+https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-wsl
+On the Linux server, we will install
+the following tools:
+Git
+:
+https://git-scm.com/downloads
+Java
+:
+https://adoptium.net/installation
+curl
+:
+https://curl.haxx.se/download.html
+jq
+:
+https://stedolan.github.io/jq/download/
+Spring Boot CLI
+:
+https://docs.spring.io/spring-boot/docs/3.0.4/reference/html/getting-started.html#getting-started.installing.cli
+Siege
+:
+https://github.com/JoeDog/siege#where-is-it
+Helm
+:
+https://helm.sh/docs/intro/install/#from-apt-debianubuntu
+kubectl
+:
+https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/
+minikube
+:
+https://minikube.sigs.k8s.io/docs/start/
+istioctl
+:
+https://istio.io/latest/docs/setup/getting-started/#download
+The following versions have been used when writing this book:
+Windows Terminal
+: v1.16.10261.0
+Visual Studio Code
+: v1.75.1
+Docker Desktop for Windows
+: v4.14.0
+Git
+: v2.34.1
+Java
+: v17.0.6
+curl
+: v7.81.0
+jq
+: v1.6
+Spring Boot CLI
+: v3.0.4
+Siege
+: v4.0.7
+Helm
+: v3.11.2
+kubectl
+: v1.26.1
+minikube
+: v 1.29.1
+istioctl
+: v1.17.0
+We will start by installing
+the tools required on Windows and, after that, we will install the required tools on the Linux server running in WSL 2.
+Installing tools on Windows
+In the Windows environment, we will install WSL 2 together
+with a Linux
+server, the Windows Terminal, Docker Desktop, and finally, Visual Studio Code with an extension for remote access to files in WSL.
+Installing WSL 2 together with a default Ubuntu server
+Run the following commands
+to install
+WSL 2 with an Ubuntu server:
+Open PowerShell as an administrator and run the following command:
+wsl –install
+Restart the PC to complete the installation.
+After the restart of the PC, the Ubuntu server will automatically be installed in a new Terminal window. After a while, you will be asked to enter a username and password.
+When the installation is complete, you can verify the installed version of Ubuntu with this command:
+lsb_release -d
+It should respond with an output similar to:
+Description:    Ubuntu 22.04.1 LTS
+Installing a new Ubuntu 22.04 server on WSL 2
+If you already have WSL 2 installed
+but not an Ubuntu 22.04 server, you
+can install it with the following steps:
+Download an installation file from Microsoft Store:
+To select
+from available Linux distributions for WSL 2, go to
+https://aka.ms/wslstore
+.
+To go directly
+to Ubuntu 22.04, visit
+https://apps.microsoft.com/store/detail/ubuntu-22042-lts/9PN20MSR04DW
+.
+After downloading the installation file, execute it to get Ubuntu 20.04 installed.
+A console window will be opened, and after a minute or two, you will be asked for a username and password
+to be used in the Linux
+server.
+Installing Windows Terminal
+To simplify access
+to the Linux server, I strongly recommend installing Windows Terminal. It supports:
+Using multiple tabs
+Using multiple panes within a tab
+Using multiple types of shells: for example, Windows Command Prompt, PowerShell, bash for WSL 2, and Azure CLI
+…and much
+more; for more information, see
+https://docs.microsoft.com/en-us/windows/terminal/
+Windows Terminal can be installed from Microsoft Store; see
+https://aka.ms/terminal
+.
+When you start Windows Terminal and click on the
+down arrow
+in the menu, you will find that it is already configured for starting a Terminal in the Linux server:
+Figure 22.1: Windows Terminal configured for the Linux server in WSL 2
+Select
+Ubuntu-22.04
+, and a
+bash
+shell will be started. Depending on your settings, your working directory might be set to your home folder in Windows, for example,
+/mnt/c/Users/magnus
+. To get to your home folder in the Linux server, simply use the
+cd
+and
+pwd
+commands to verify that you are inside your Linux
+server’s filesystem:
+Figure 22.2: Windows Terminal using bash to access files in the Linux server
+Installing Docker Desktop for Windows
+To install and configure
+Docker Desktop
+for Windows, perform the following steps:
+Download and install
+Docker Desktop for Windows from
+https://hub.docker.com/editions/community/docker-ce-desktop-windows/
+.
+If you are asked to enable WSL 2 during installation, answer
+YES
+.
+After the installation is complete, launch
+Docker Desktop
+from the
+Start
+menu.
+From the
+Docke
+r menu, select
+Settings
+, and in the
+Settings
+window, select the
+General
+tab:
+Ensure that the
+Use the WSL 2 based engine
+check box is selected.
+To avoid starting up Docker Desktop manually each time the PC is restarted, I recommend also selecting the
+Start Docker Desktop when you log in
+check box.
+The
+General
+settings should look like the following:
+Figure 22.3: Docker Desktop configuration
+Finalize the configuration
+by clicking
+on the
+Apply & Restart
+button.
+Installing Visual Studio Code and its extension for Remote WSL
+To simplify editing source code
+inside the Linux server, I recommend
+using Visual Studio Code. With its extension for WSL 2, named
+Remote WSL
+, you can easily work with source code inside the Linux server
+using Visual Studio Code
+running in Windows.
+To install and configure Visual Studio Code and its extension for Remote WSL, perform the following steps:
+Visual Studio Code
+can be downloaded and installed from
+https://code.visualstudio.com
+:
+When asked to
+Select Additional Tasks
+, select the
+Add to PATH
+option. This will make it possible to open a folder in Visual Studio Code from within the Linux server with the
+code
+command.
+After the installation is complete, launch
+Visual Studio Code
+from the
+Start
+menu.
+Install the extension for Remote WSL using this link:
+https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-wsl
+.
+If you want to learn
+more about how Visual Studio Code integrates with WSL 2, see this article:
+https://code.visualstudio.com/docs/remote/wsl
+.
+Installing tools on the Linux server in WSL 2
+Now, it is time to install
+the tools required in the Linux server
+in WSL 2.
+Launch
+Windows Terminal
+from the
+Start
+menu and open a Terminal in the Linux server, as described in the
+Installing Windows Terminal
+section.
+The
+git
+and
+curl
+tools are already installed in Ubuntu. The remaining tools will be installed using either
+apt install
+,
+sdk install
+, or a combination of
+curl
+and
+install
+.
+Installing tools using apt install
+In this section, we will install
+jq
+,
+siege
+, Helm, and a couple of dependencies
+required
+by the other tools.
+Install
+jq
+,
+zip
+,
+unzip
+, and
+siege
+with the following commands:
+sudo apt update
+sudo apt install -y jq
+sudo apt install -y zip
+sudo apt install -y unzip
+sudo apt install -y siege
+To install Helm, run the following commands:
+curl -s https://baltocdn.com/helm/signing.asc | \
+  gpg --dearmor | sudo tee /usr/share/keyrings/helm.gpg > /dev/null sudo apt-get install apt-transport-https --yes echo "deb [arch=$(dpkg --print-architecture) \
+  signed-by=/usr/share/keyrings/helm.gpg] \
+  https://baltocdn.com/helm/stable/debian/ all main" | \
+  sudo tee /etc/apt/sources.list.d/helm-stable-debian.list
+sudo apt-get update
+sudo apt install -y helm
+Installing the Java and Spring Boot CLI using SDKman
+To install the Java
+and Spring
+Boot CLI, we will use
+SDKman
+(
+https://sdkman.io
+). Install SDKman
+with the following
+commands:
+curl -s "https://get.sdkman.io" | bash
+source "$HOME/.sdkman/bin/sdkman-init.sh"
+Verify that SDKman was installed correctly with the following command:
+sdk version
+Expect it to return something like this:
+SDKMAN5.9.2+613
+To install Java, we will use
+a distribution named
+Eclipse Temurin
+(
+https://adoptium.net/temurin/
+).
+Install Java
+with this
+command:
+sdk install java 17.0.6-tem
+Finally, install
+the Spring
+Boot CLI:
+sdk install springboot 3.0.4
+Installing the remaining tools using curl and install
+Finally, we will install
+kubectl
+,
+minikube
+, and
+istioctl
+using
+curl
+to download
+the executable
+files. Once downloaded, we will use
+the
+install
+command
+to copy the files to the proper places in the filesystem, and also ensure that the
+owner
+and
+access rights
+are configured properly. When it comes to these tools, it is important to install versions that are compatible with each other, specifically when it comes to what versions of Kubernetes they support. Simply installing and upgrading to the latest versions can lead to situations where incompatible versions of
+minikube
+, Kubernetes, and Istio are used.
+For supported
+Kubernetes
+versions when it comes to Istio, see
+https://istio.io/latest/about/supported-releases/#support-status-of-istio-releases
+. For
+minikube
+, see
+https://minikube.sigs.k8s.io/docs/handbook/config/#selecting-a-kubernetes-version
+.
+To install the
+kubectl
+version used in this book, run the following commands:
+curl -LO "https://dl.k8s.io/release/v1.26.1/bin/linux/amd64/kubectl"
+sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+rm kubectl
+To install the
+minikube
+version used in this book, run the following commands:
+curl -LO https://storage.googleapis.com/minikube/releases/v1.29.0/minikube-linux-amd64
+sudo install -o root -g root -m 0755 minikube-linux-amd64 \
+  /usr/local/bin/minikube
+rm minikube-linux-amd64
+To install the
+istioctl
+version used in this book, run the following commands:
+curl -L https://istio.io/downloadIstio | ISTIO_VERSION=1.17.0 TARGET_ARCH=x86_64 sh -
+sudo install -o root -g root -m 0755 istio-1.17.0/bin/istioctl /usr/local/bin/istioctl
+rm -r istio-1.17.0
+With the tools
+now installed, we can
+verify that they
+have been installed
+as expected.
+Verifying the installations
+To verify
+the tool installations, run the following commands to print each tool’s version:
+git version && \
+docker version -f json | jq -r .Client.Version && \
+java -version 2>&1 | grep "openjdk version" && \
+curl --version | grep "curl" | sed 's/(.*//' && \
+jq --version && \
+spring --version && \
+siege --version 2>&1 | grep SIEGE && \
+helm version --short && \
+kubectl version --client -o json | \
+  jq -r .clientVersion.gitVersion && \
+minikube version | grep "minikube" && \
+istioctl version --remote=false
+Expect version info like the following:
+Figure 22.4: Versions used on the Linux server in WSL 2
+With the tools installed
+and verified, let’s see how we can access the source code for this book.
+Accessing the source code
+The source code
+for this book can be found in the GitHub repository at
+https://github.com/PacktPublishing/Microservices-with-Spring-Boot-and-Spring-Cloud-Third-Edition
+.
+To be able to run the commands in the Linux server in WSL 2 that are described in this book, download the source code to a folder and set up an environment variable,
+$BOOK_HOME
+, that points to that folder. Sample commands are as follows:
+export BOOK_HOME=~/Microservices-with-Spring-Boot-and-Spring-Cloud-Third-Edition
+git clone https://github.com/PacktPublishing/Microservices-with-Spring-Boot-and-Spring-Cloud-Third-Edition.git $BOOK_HOME
+To verify access to source code downloaded to the Linux server in WSL 2 from Visual Studio Code, run the following commands:
+cd $BOOK_HOME
+code .
+Visual Studio Code will open a window from where you can start to inspect the source code. You can also start a Terminal window for running bash commands in the Linux server from the menu selection
+Terminal
+→
+New Terminal
+. The Visual Studio Code window should look something like the following:
+Figure 22.5: Accessing a file in the Linux server from Visual Studio Code
+The Java source code is written for Java SE 8 and uses a Java SE 17 JRE when executed in Docker containers. The following versions of Spring are used:
+Spring Framework: 6.0.6
+Spring Boot: 3.0.4
+Spring Cloud: 2022.0.1
+The code examples in each chapter all come from the source code in
+$BOOK_HOME/ChapterNN
+, where
+NN
+is the number of the chapter. The code examples in the book are, in many cases, edited to remove irrelevant parts
+of the source code, such as comments, imports, and log statements.
+The structure of the code
+Each chapter consists of a number of Java projects, one for each microservice and Spring Cloud service, plus a couple of library projects used by the other projects.
+Chapter 14
+contains the largest number of projects; its project structure looks like this:
+├── api
+├── microservices
+│   ├── product-composite-service
+│   ├── product-service
+│   ├── recommendation-service
+│   └── review-service
+├── spring-cloud
+│   ├── authorization-server
+│   ├── config-server
+│   ├── eureka-server
+│   └── gateway
+└── util
+All projects are built using Gradle and have a file structure according to Gradle standard conventions:
+├── build.gradle
+├── settings.gradle
+└── src
+    ├── main
+    │   ├── java
+    │   └── resources
+    └── test
+        ├── java
+        └── resources
+For more information
+on how to organize a Gradle
+project, see
+https://docs.gradle.org/current/userguide/organizing_gradle_projects.html
+.
+Summary
+In this chapter, we have learned how to install, configure, and verify the tools required to run the commands described in this book on WSL 2 and Windows. For development, we will use
+git
+,
+docker
+,
+java
+, and
+spring
+. To create a Kubernetes environment to deploy our microservice in runtime, we will use
+minikube
+, Helm,
+kubectl
+, and
+istioctl
+. Finally, to run tests to verify that the microservices work as expected in runtime, we will use
+curl
+,
+jq,
+and
+siege
+.
+We have also learned how to access the source code from GitHub and how the source code is structured.
+In the next and final chapter, we will learn how to natively compile microservices, reducing their startup time to sub-seconds.
+
+23
+Native-Complied Java Microservices
+In this chapter, we will learn how to compile the Java source code in our microservices into binary executable
+files, known as
+Native Images
+. A Native Image starts up significantly faster compared to using a Java VM and is also expected to consume less memory. We will be introduced to the
+Spring AOT
+engine
+introduced in Spring Framework 6 and the
+GraalVM
+project and its
+Native Image compiler
+, learning how to use them.
+We will cover the following topics:
+When to natively compile Java source code
+Introducing the GraalVM project and Spring’s AOT engine
+Handling problems with native compilation
+Testing and compiling Native Images
+Testing with Docker Compose
+Testing with Kubernetes
+Even though Spring Framework 6 and Spring Boot 3 come with
+General Availability
+(
+GA
+) support for building native executables of Spring Boot applications, it must be considered as being in an early stage. At the time of writing this chapter, a lot of pitfalls were discovered while natively compiling the microservices in this book. Since natively compiling the microservices is not required for the rest of the material in this book, this chapter is placed at the end of the book as an extra chapter, describing an exciting but not yet fully mature technology.
+Technical requirements
+For instructions on how to install the tools used in this book and how to access the source code for this book, see:
+Chapter 21
+,
+Installation Instructions for macOS
+Chapter 22
+,
+Installation Instructions for Microsoft Windows with WSL 2 and Ubuntu
+The code examples in this chapter all come from the source code in
+$BOOK_HOME/Chapter23
+.
+If you want to view the changes applied to the source code in this chapter so you can natively compile the microservices, you can compare it with the source code for
+Chapter 20
+,
+Monitoring Microservices
+. You can use your favorite
+diff
+tool and compare the two folders
+$BOOK_HOME/Chapter20
+and
+$BOOK_HOME/Chapter23
+.
+When to native-compile Java source code
+Java has always been known for its
+build-once-run-anywhere
+capability, providing excellent cross-platform support. The Java source code is compiled once into bytecode. At
+runtime, a Java VM transforms the bytecode into executable code for the target platform using a
+Just in Time
+compiler, also known as
+JIT
+compilation. This takes some time, slowing down the
+startup of Java programs. Before the era of microservices, Java components typically ran on an application server, like a Java EE server. After being deployed, the Java component ran for a long time, making the longer startup time less of a problem.
+With the introduction of microservices, this perspective changed. With microservices, there comes the expectation of being able to upgrade them more frequently and quickly scale instances for a microservice up and down based on its usage. Another expectation is to be able to
+scale to zero
+, meaning that when a microservice is not used, it should not run any instances at all. An unused microservice should not allocate any hardware resources and, even more importantly, should not create any runtime cost, for example, in a cloud deployment. To be able to meet these expectations, it is important that a microservice instance can be started swiftly.
+Also, with the use of containers, the importance of cross-platform support built into the application itself has faded. Instead, Docker can be used to build Docker images that contain support for multiple platforms, for example, Linux on both
+arm64
+and
+amd64
+(also known as
+x86_64
+), or Docker images that can be run on Windows and Linux. For more information, see
+https://docs.docker.com/build/building/multi-platform/
+. For an example of a Docker image that contains multi-platform support, see the OpenJDK Docker image used in this book,
+https://hub.docker.com/_/eclipse-temurin/tags
+.
+Given that the startup time for Java programs can be significantly reduced, other use cases also come to mind; for example, developing Java-based
+Function-as-a-Service
+(
+FaaS
+) solutions using
+AWS Lambda, Azure Functions, or Google Cloud Functions, to mention some of the major platforms. Also, developing CLI tools in Java becomes a feasible option.
+Together, these lead to
+a situation where faster startup becomes a more critical requirement than cross-platform support. This requirement can be achieved by compiling the Java source code into the target platform’s binary format at build time, in the same way as C or Go programs are compiled. This is known as
+Ahead of Time
+compilation or
+AOT
+compilation. The GraalVM Native
+Image compiler will be used to perform the AOT compilation.
+As we will see in the next section, the GraalVM Native Image compiler comes with a few restrictions, for example, relating to the use of reflection and dynamic proxies. It also takes quite some time to compile Java code into a binary Native Image. This technology has its strengths and weaknesses.
+With a better understanding of when it might be of interest to natively compile Java source code, let’s learn about the tooling: first, the GraalVM project, and then, the Spring AOT engine.
+Introducing the GraalVM project
+Oracle has worked for several years on a high-performance Java VM and associated tools, known together as
+the
+GraalVM
+project (
+https://www.graalvm.org
+). It was launched back in April 2018 (
+https://medium.com/graalvm/graalvm-in-2018-b5fa7ff3b917
+), but work can be traced back to, for example, a research paper from Oracle Labs in 2013 on the subject:
+Maxine: An approachable virtual machine for, and in, java
+; see
+https://dl.acm.org/doi/10.1145/2400682.2400689
+.
+Fun Fact
+: The Maxine VM is known as a
+metacircular
+Java VM implementation, meaning that it is, itself, written
+in Java.
+GraalVM’s VM is polyglot, supporting not only traditional Java VM languages such as Java, Kotlin, and Scala but also languages such as JavaScript, C, C++, Ruby, Python, and even programs compiled into a WebAssembly. The part of GraalVM that we will focus on is its
+Native Image
+compiler, which can be used to compile Java bytecode into a Native Image containing binary executable code for a specific
+operating system
+(
+OS
+) and HW platform, for example, macOS on Apple silicon (
+arm64
+) or Linux on Intel (
+amd64
+).
+The Native Image can run without a Java VM, including binary compiled application classes and other classes required from the application’s dependencies. It also includes a runtime
+system called
+Substrate VM
+, which handles garbage collection, thread scheduling, and more.
+To be able to build a Native Image, the native compiler runs static code analysis based on a closed-world assumption, meaning that all bytecode that can be called at runtime must be reachable during build time. Therefore, it is not possible to load or create classes on the fly in runtime that was not available during the AOT compilation.
+To overcome these restrictions, the GraalVM project provides configuration options for the native compiler where
+we can provide
+reachability metadata
+. With this configuration, we can describe the use of dynamic features like reflection and the generation of proxy classes at runtime. For more information, see
+https://www.graalvm.org/22.3/reference-manual/Native Image/metadata/
+. We will learn later in this chapter various ways to create the required reachability metadata.
+The GraalVM Native Image compiler can be launched using a CLI command,
+Native Image
+, or as part of a Maven or Gradle build. GraalVM provides a plugin for both Maven and
+Gradle. In this chapter, the Gradle plugin will be used.
+With GraalVM introduced, it is time to learn about Spring’s AOT engine.
+Introducing the Spring’s AOT engine
+The Spring team has also worked on supporting the native compilation of Spring applications for some time. In
+March 2021, after 18 months of work, the experimental
+Spring Native
+project launched a beta release; see
+https://spring.io/blog/2021/03/11/announcing-spring-native-beta
+. Based on the experiences from the Spring Native Project, official support for building Native Images was added in Spring Framework 6 and Spring Boot 3; see
+https://spring.io/blog/2023/02/23/from-spring-native-to-spring-boot-3
+. To perform the actual native compilation, Spring uses GraalVM’s Native Image compiler under the hood.
+The most important feature is Spring’s new
+AOT engine
+, which
+analyzes the Spring Boot application at build time and generates initialization source code and reachability metadata required by the GraalVM Native Image compiler. The generated initialization source
+code, also known as
+AOT-generated code
+, replaces the reflection-based initialization performed when using a Java VM, eliminating most of the requirements of dynamic features like reflection and the generation of proxy classes at runtime.
+When this AOT processing is performed, a closed-world assumption is made in the same way as for the GraalVM Native Image compiler. This means that only Spring beans and classes reachable at build time will be represented in the AOT-generated code and reachability metadata. Special attention must be given to Spring beans that only are created if some profiles are set or if some conditions are met, using
+@Profile
+or
+@ConditionalOnProperty
+annotations. These profiles and conditions must be set at build time; otherwise, these Spring beans will not be represented in the Native Image.
+To perform the analysis, the AOT engine creates bean definitions for all Spring beans it can find by scanning the source code of the application. But instead of instantiating the Spring beans, meaning starting the application, it generates the corresponding initialization code that will instantiate the Spring beans when executed. For all uses
+of the dynamic features, it will also generate the required reachability metadata.
+The process of creating a Native Image from the source code of a Spring Boot application is summarized by the following data flow diagram:
+Figure 23.1: Data flow diagram explaining the creation of a Native Image
+The creation of a Native Image goes through the following steps:
+The application’s source code is compiled into bytecode by the Java compiler.
+Spring’s AOT engine analyzes the code under a closed-world assumption and generates AOT source code and reachability metadata.
+The AOT-generated code is compiled into bytecode using the Java compiler.
+The application’s bytecode, together with the reachability metadata and bytecode created by the AOT engine, is sent to GraalVM’s Native Image compiler, which creates the Native Image.
+For more information on how the creation of GraalVM Native Images is supported in Spring Boot 3, see
+https://docs.spring.io/spring-boot/docs/current/reference/html/Native Image.html
+.
+Building a Native Image can be done in two ways:
+Creating a
+Native Image for the current OS:
+The first option uses Gradle’s
+nativeImage
+task. It will use the installed GraalVM’s Native Image compiler to create an executable file for the current OS and hardware architecture. The nativeImage task is available given that GraalVM’s Gradle-plugin is declared in the build file.
+Creating a Native Image as a Docker image
+The second option is to use the existing Gradle task,
+bootBuildImage
+, to create a Docker image. Given that GraalVM’s Gradle plugin is declared in the build file, the bootBuildImage task will create a Docker image that contains the Native Image instead of a Java VM with the application’s JAR file that is used otherwise. The Native Image will be built in a Docker container so that it will be built for Linux. This also means that the GraalVM’s Native Image compiler does not need to be installed when the bootBuildImage task is used. Under the hood, this task uses
+buildpacks
+, instead of a Dockerfile, to create the Docker image.
+The concept of buildpacks was introduced by Heroku back in 2011. In 2018, the
+Cloud Native Buildpacks
+project (
+https://buildpacks.io
+) was created by Pivotal and Heroku, and later
+that year, it joined CNCF.
+To be a bit more formal, a buildpack creates an
+OCI image
+, according to the OCI Image Format Specification:
+https://github.com/opencontainers/image-spec/blob/master/spec.md
+. Since the OCI specification is based on Docker’s image format, the formats are very similar and are both supported by container engines.
+To create the OCI images, Spring Boot uses buildpacks from the
+Paketo
+project; for more
+information, see
+https://docs.spring.io/spring-boot/docs/3.0.5/reference/html/container-images.html#container-images.buildpacks
+and
+https://paketo.io/docs/builders
+. Unfortunately, Paketo’s buildpacks did not support
+arm64
+, including Apple silicon, at the time of writing this chapter. The
+amd64
+(Intel)-based buildpacks technically works on a MacBook with Apple silicon but runs painfully slowly. As suggested here,
+https://www.cloudfoundry.org/blog/arm64-paketo-buildpacks/
+, unofficial Docker images for
+arm64
+can be used as a temporary workaround. They are available here:
+https://hub.docker.com/r/dashaun/builder-arm
+.
+Creating Native Images
+with the
+nativeImage
+task for the local OS is faster than creating Docker images. Therefore, the
+nativeImage
+task can be used for a quick feedback loop when initially trying to build a Native Image successfully. But once that has been worked out, creating Docker images containing the Native Image is the most useful alternative for testing natively compiled microservices, together with either Docker Compose or Kubernetes. In this chapter, we will use the unofficial Docker images mentioned above, named
+dashaun/builder:tiny
+. Docker images for both
+arm64
+and
+amd64
+are provided.
+Several tools and projects are available to help eliminate challenges with native compilation. The next section will give an overview of them, and in the
+Testing and compiling Native Images
+section, we will learn how to use them.
+Handling problems with native compilation
+Natively compiling Spring Boot applications is, as already mentioned, not yet mainstream. Therefore, you will
+probably run into problems when trying it out on your own applications. This section will go through a few projects and tools that can be used to handle these problems. Examples of how to use these tools will be provided in the sections below.
+The following project and tools can be used to handle problems with native compilation of Spring Boot applications:
+Spring AOT smoke tests:
+This project contains a suite of tests verifying that the various Spring projects work when natively compiled. Whenever you encounter issues with natively compiling a Spring feature, you should start looking into this project for a working solution. Also, if you want to report a problem with natively compiling a Spring project, you can use tests from this project as a boilerplate to demonstrate the problem in a reproducible
+way. The project is available at
+https://github.com/spring-projects/spring-aot-smoke-tests
+. Test results can be found in Spring’s CI environment. For example, the tests of the various Spring Cloud projects can be found here:
+https://ci.spring.io/teams/spring-aot-smoke-tests/pipelines/spring-aot-smoke-tests-3.0.x?group=cloud-app-tests
+.
+GraalVM reachability metadata repository:
+This project contains reachability metadata for various open-source projects that do not yet support native compilation themselves. The GraalVM community can submit reachability metadata, which is approved after a review by the project’s team. GraalVM’s Gradle plugin automatically looks up reachability metadata from this project and adds it when natively compiling. For more information, see
+https://graalvm.github.io/native-build-tools/0.9.18/gradle-plugin.html#metadata-support
+.
+Testing AOT-generated code with the Java VM:
+Since natively compiling a Spring Boot application takes a few minutes, an interesting alternative can be to try out the initialization code generated by the Spring AOT engine on the Java VM. Normally the AOT-generated code is ignored when using a Java VM, but this can be changed by setting the system property
+spring.aot.enabled
+to
+true
+. This means that the normal reflection-based initialization of the application is replaced by executing the generated initialization code. This can be used as a quick verification that the generated initialization code works as expected. Another positive effect is that the application starts slightly faster.
+Providing custom hints:
+If an application requires custom reachability metadata for the GraalVM Native Image compiler to create a Native Image, they can be provided as JSON files
+as described in the
+Introducing the GraalVM project
+section. Spring provides an alternative to the JSON files by either using an annotation named
+@RegisterReflectionForBinding
+or implementing the
+RuntimeHintsRegistrar
+interface in a class, which can be activated by using the
+@ImportRuntimeHints
+annotation. The
+RegisterReflectionForBinding
+annotation is easier to use, but implementing the
+RuntimeHintsRegistrar
+interface gives full control of the hints specified.
+One important benefit of using Spring’s custom hints over using GraalVM JSON files is that the custom hints are type-safe and checked by the compiler. If an entity referred to in a GraalVM JSON file is renamed, but the JSON file is not updated, that metadata is lost. This will result in the GraalVM Native Image compiler failing to create a Native Image.
+When using custom hints, the source code will not even compile; typically, the IDE will complain as soon as the entity is renamed that the custom hint is no longer valid.
+Running native tests:
+Even though testing AOT-generated code with the Java VM can give a quick indication of whether the native compilation will work, we still need to create the Native Image of the application to test it fully. A feedback loop based on creating a Native Image, starting the application, and finally running some tests by hand is very slow and error-prone. A compelling alternative to this process is to run
+native tests
+, where Spring’s Gradle plugin automatically will create a Native Image and then run JUnit tests defined
+in the application’s project using the Native Image. This still will take time due to the native compilation, but the process is fully automated and repeatable. After ensuring the native tests run as expected, they can be placed in a CI build pipeline for automated execution. Native tests can be started using Gradle with this command:
+gradle nativeTest
+Using GraalVM’s tracing agent:
+If it turns out to be hard to determine what reachability metadata and/or custom hints are required to create a working Native Image for an application, GraalVM’s tracing agent can help out. If the tracing agent is enabled when running the application in the Java VM, it can gather the required reachability metadata based on how the application uses reflection, resources, and proxies. This is specifically useful if run
+together with JUnit tests since gathering the required reachability metadata will be automated and repeatable.
+With the tooling introduced and explained for how to handle the main expected challenges, let’s see what changes are required in the source code to be able to natively compile the microservices.
+Changes in the source code
+Before compiling the Java source code in the microservices into native executable images, the source code needs to be updated a bit. To be able to natively compile the
+microservices, the following changes have been applied to the source code:
+The Gradle build files,
+build.gradle
+, have been updated by adding the GraalVM plugin, adjusting some dependencies, and configuring the
+bootBuildImage
+command.
+Required reachability metadata and custom hints have been added.
+Build time property files have been added to ensure that required Spring beans are reachable during the AOT processing at build time.
+Some properties used at runtime have been added to the
+config-repo
+to make the natively compiled microservices operate successfully.
+The configuration to be able to run the GraalVM Native Image tracing agent has been added.
+The verification script,
+test-em-all.bash
+, has been updated since the Docker images no longer include the
+curl
+command.
+Native tests have been disabled using the annotation
+@DisabledInNativeImage
+at the class level as described in the
+Running native tests
+section.
+Two new Docker Compose files for using the Docker images containing the Native Images have been added.
+A system property has been added to the microservices’
+Dockerfile
+to simplify toggling AOT mode. The
+ENVIRONMENT
+command has been updated to disable
+AOT mode when run with the Java VM. It looks like this:
+ENTRYPOINT
+[
+"java"
+,
+"-Dspring.aot.enabled=false"
+,
+"org.springframework.boot.loader.JarLauncher"
+]
+Note that it doesn’t work to specify
+spring.aot.enabled
+as an environment variable or in a property file; it has to be set as a system property on the
+java
+command.
+Let’s go through the changes one by one and start with changes applied to the build files.
+Updates to the Gradle build files
+The changes described in this
+section have been applied to the
+build.gradle
+files in each microservice project unless stated otherwise.
+The following updates have been applied:
+To enable Spring AOT tasks, the GraalVM plugin has been added:
+plugins
+{
+...
+id
+'org.graalvm.buildtools.native'
+version
+'
+0.9.18'
+}
+The
+bootBuildImage
+task is configured to specify the name of the Docker image that is created. The same naming conventions are used as in earlier chapters, but the name of the image is prefixed with
+native-
+to separate it from the existing Docker images. Also, a Docker image for the builder that supports
+arm64
+,
+dashaun/builder:tiny
+, is specified. For the
+product
+microservice, the configuration looks like this:
+tasks.named(
+'bootBuildImage'
+) {
+    imageName =
+"hands-on/native-product-service"
+builder =
+"dashaun/builder:tiny"
+}
+To get around some problems with native compilation, Spring Boot has been upgraded from v3.0.4, as used in the other chapters, to v3.0.5. For the same reason,
+springdoc-openapi
+has been upgraded from v2.0.2 to v2.1.0.
+Due to the issue described at
+https://github.com/spring-projects/spring-boot/issues/33238
+, the
+jar
+task is no longer disabled.
+To recap why the
+jar
+task was disabled, see the
+Implementing our API
+section in
+Chapter 3
+.
+These are all the changes required for the build files. In the next section, we will learn about how we need to help the native compiler to
+compile our source code in some cases.
+Providing reachability metadata and custom hints
+There are a few cases in the source code where the GraalVM native compiler needs help to be able to compile the
+source code correctly. The first case is the JSON-based APIs and messages that the microservices use. The JSON parser, Jackson, must be able to create Java objects based on the JSON documents that the microservices receive. Jackson uses reflection to perform this work, and we need to tell the native compiler about the classes to which Jackson will apply reflection.
+For example, a native hint for the
+Product
+class looks like this:
+@RegisterReflectionForBinding
+({
+Event
+.
+class
+,
+ZonedDateTimeSerializer
+.
+class
+,
+Product
+.
+class
+})
+public
+class
+ProductServiceApplication
+{
+All necessary custom hint annotations have been added to each microservice’s main class.
+When this chapter was written, the Resilience4J annotations did not work properly when natively compiled. In issue
+#1882
+, a solution for this problem is proposed by providing an implementation of the
+RuntimeHintsRegistrar
+interface. For details, see
+https://github.com/resilience4j/resilience4j/issues/1882
+. This solution has been applied to the
+NativeHintsConfiguration
+class in the
+product-service
+project. The most central parts of the class look like the following:
+@Configuration
+@ImportRuntimeHints(NativeHintsConfiguration.class)
+public
+class
+NativeHintsConfiguration
+implements
+RuntimeHintsRegistrar
+{
+@Override
+public
+void
+registerHints
+(RuntimeHints hints, ClassLoader classLoader)
+{
+    hints.reflection().registerType(CircuitBreakerAspect.class,
+      builder -> builder.withMembers(INVOKE_DECLARED_METHODS));
+    hints.reflection().registerType(RetryAspect.class,
+      builder -> builder.withMembers(INVOKE_DECLARED_METHODS));
+    hints.reflection().registerType(TimeLimiterAspect.class,
+      builder -> builder.withMembers(INVOKE_DECLARED_METHODS));
+  }
+}
+From the source code above, we can see that hints are registered for the three annotations used in the
+product-composite
+microservice, the circuit breaker, retry, and time limiter. The class also provides the necessary configuration by importing itself using the
+ImportRuntimeHints
+annotation.
+A final corner case is
+that we must provide reachability metadata for Resilience4J’s use of reflection in the declaration of the
+retry
+mechanism. The configuration looks like this:
+resilience4j.retry
+:
+instances
+:
+product
+:
+maxAttempts
+:
+3
+waitDuration
+:
+1000
+retryExceptions
+:
+-
+org.springframework.web.reactive.function.client.WebClientResponseException$InternalServerError
+This configuration will enable the
+retry
+mechanism to retry errors of type
+InternalServerError
+. To let the GraalVM Native Image compiler know that reflection must be enabled for this
+class, the third way of supplying reachability metadata has been used: by providing a GraalVM config file. See
+src/main/resources/META-INF/Native Image/reflect-config.json
+in the
+product-composite
+project.
+We now know how to provide metadata and custom hints for our own source code. Next, we will learn how we can ensure that Spring beans required at runtime also exist at build time so that the AOT processing can introspect them and generate proper AOT code.
+Enabling Spring beans at build time in application.yml files
+As mentioned above, due to the closed-world assumption that the static analysis uses at build time, all Spring beans required at runtime must be reachable at build time. Otherwise, they cannot be
+activated at runtime. Given that they are reachable at build time, they can be configured at runtime. To
+summarize, this means that if you are using Spring beans that are only created if some profiles are set or if some conditions are met (using the
+@Profile
+or
+@ConditionalOnProperty
+annotations), you must ensure that these profiles and conditions are met at build time.
+For example, the possibility to specify a separate management port at runtime when using a natively compiled microservice is only possible if the management port was set to a random port (different from the standard port) at build time. Therefore, each microservice has an
+application.yml
+file in its
+src/main/resources
+folder that specifies:
+# Required to make the Spring AOT engine generate the appropriate infrastructure for a separate management port at build time
+management.server.port:
+9009
+With this specified at build time, when the Native Image is created, the management port can be set to
+any value at runtime using property files in the
+config-repo
+folder.
+Below is a list of all properties set at build time in the
+application.yml
+files to avoid these types of
+problems for various Spring beans used by the four microservices:
+# Required to make Springdoc handling forward headers correctly when natively compiled
+server.forward-headers-strategy:
+framework
+# Required to make the Spring AOT engine generate the appropriate infrastructure for a separate management port, Prometheus, and K8S probes at build time
+management.server.port:
+9009
+management.endpoint.health.probes.enabled:
+true
+management.endpoints.web.exposure.include:
+health,info,circuitbreakerevents,prometheus
+# Required to make the Spring AOT engine generate a ReactiveJwtDecoder for the OIDC issuer
+spring.security.oauth2.resourceserver.jwt.issuer-uri:
+http://someissuer
+# See https://github.com/springdoc/springdoc-openapi/issues/1284#issuecomment-1279854219
+springdoc.enable-native-support:
+true
+# Native Compile: Point out that RabbitMQ is to be used when performing the native compilation
+spring.cloud.stream.defaultBinder:
+rabbit
+# Native Compile: Required to disable the health check of RabbitMQ when using Kafka
+# management.health.rabbit.enabled: false
+# Native Compile: Required to disable the health check of Kafka when using RabbitMQ
+management.health.kafka.enabled:
+false
+# Native Compile: Required to get the circuit breaker's health check to work properly
+management.health.circuitbreakers.enabled:
+true
+As reported in issue
+#2255
+, the Swagger UI does not display the
+Authorize
+button when natively compiled. See
+https://github.com/springdoc/springdoc-openapi/issues/2255
+.
+There can also exist cases where natively compiled microservices also require slightly different
+configurations at runtime; this will be covered in the next section.
+Updated runtime properties
+In one case, a runtime property also needs to be updated when using natively compiled images. That is the
+connection string for the MySQL database used by the
+review
+microservice. Since not all character sets are represented in the Native Image by default, we must specify one as available in the Native Image. We will use the UTF-8 character set. This is done for all MySQL connection properties in the review config file
+config-repo/review.yml
+. It looks like this:
+spring.datasource.url:
+jdbc:mysql://localhost/review-db?useUnicode=true&connectionCollation=utf8_general_ci&characterSetResults=utf8&characterEncoding=utf-8
+With the required changes of properties both at build time and runtime covered, let’s learn how to configure the GraalVM Native Image tracing agent.
+Configuration of the GraalVM Native Image tracing agent
+In cases where it is hard to determine what reachability metadata and/or custom hints are required, we can use the
+GraalVM Native Image tracing agent. As previously mentioned, it can, at runtime, detect the usage of reflection, resources, and proxies and create the required
+reachability metadata based on that.
+To enable the tracing agent to observe the execution of JUnit tests, the following
+jvmArgs
+can be added to the
+build.gradle
+file in the
+test
+section:
+tasks.named(
+'test'
+) {
+    useJUnitPlatform()
+    jvmArgs
+"-agentlib:Native Image-agent=access-filter-file=src/test/resources/access-filter.json,config-output-dir=src/main/resources/META-INF/Native Image"
+}
+Since the tracing agent is not required to make native compilation work for the microservices in this book, this configuration is commented out in the build files.
+The parameter
+Native Image-agent=access-filter-file
+specifies a file listing Java packages and classes that the
+tracing agent should exclude, typically test-related classes that we have no use for at runtime.
+For example, for the
+product
+microservice, the
+file
+src/test/resources/access-filter.json
+looks like this:
+{
+"rules"
+:
+[
+{
+"excludeClasses"
+:
+"org.apache.maven.surefire.**"
+},
+{
+"excludeClasses"
+:
+"net.bytebuddy.**"
+},
+{
+"excludeClasses"
+:
+"org.apiguardian.**"
+},
+{
+"excludeClasses"
+:
+"org.junit.**"
+},
+{
+"excludeClasses"
+:
+"org.gradle.**"
+},
+{
+"excludeClasses"
+:
+"org.mockito.**"
+},
+{
+"excludeClasses"
+:
+"org.springframework.test.**"
+},
+{
+"excludeClasses"
+:
+"org.springframework.boot.test.**"
+},
+{
+"excludeClasses"
+:
+"
+org.testcontainers.**"
+},
+{
+"excludeClasses"
+:
+"se.magnus.microservices.core.product.MapperTests"
+},
+{
+"excludeClasses"
+:
+"se.magnus.microservices.core.product.MongoDbTestBase"
+},
+{
+"excludeClasses"
+:
+"se.magnus.microservices.core.product.PersistenceTests"
+},
+{
+"excludeClasses"
+:
+"se.magnus.microservices.core.product.ProductServiceApplicationTests"
+}
+]
+}
+The folder specified by the
+config-output-dir
+parameter will contain the generated configuration files. The specified folder,
+src/main/resources/META-INF/Native Image
+, is where the GraalVM native compiler looks for reachability metadata.
+Finally, let’s learn how the verification script has been adopted to be able to test the Native Images.
+Updates to the test-em-all.bash verification script
+In the previous chapters,
+eclipse-temurin
+was used as the base image for the Docker images. The verification script,
+test-em-all.bash
+, uses the
+curl
+command that comes with that base image for
+running circuit breaker tests inside the
+product-composite
+container.
+The verification script runs the
+curl
+command inside the
+product-composite
+container since the endpoints used to verify the functionality of the circuit breaker are not exposed outside of the internal network in Docker.
+With natively compiled microservices, the Docker image will no longer contain utility tools like the
+curl
+command. To overcome this problem, the
+curl
+commands are executed from the
+auth-server
+'s container, whose Docker image still is based on
+eclipse-temurin
+and therefore contains the required
+curl
+command.
+Since the tests of the circuit breaker are executed from the
+auth-server
+, the hostname,
+localhost
+, is replaced with
+product-composite
+.
+For details, see the verification script
+test-em-all.bash
+.
+With the required changes in the source code explained, let’s learn how to use the various tools mentioned in the previous sections to test and create Native Images for the microservices.
+Testing and compiling Native Images
+Now, it is time to try out the tools for
+testing and building Native Images!
+The following tools will be covered in this section:
+Running the
+tracing agent
+Executing native tests
+Creating a Native Image for the current OS
+Creating a Native Image as a Docker image
+Since the first three tools require that the GraalVM and its
+Native Image
+compiler are installed locally, we must install them first. Next, we will go through the tools one by one.
+Installing GraalVM and its Native Image compiler
+If you want to try out native tests, the tracing agent, or the native compiler without using Docker, you must
+first install the GraalVM JDK together with the Native Image compiler.
+It can be done by the following steps:
+To install GraalVM,
+SDKman
+(
+https://sdkman.io
+) will be used. If not already installed, it can be
+installed with the following commands:
+curl -s "https://get.sdkman.io" | bash
+source "$HOME/.sdkman/bin/sdkman-init.sh"
+Verify that SDKman was installed correctly with the following command:
+sdk version
+Expect it to return something like this:
+SDKMAN 5.18.1
+On Linux, GraalVM’s Native Image compiler requires GCC to be installed. If you are running an Ubuntu instance under WSL 2 on Windows, you can install GCC with the required dependencies with the following command:
+sudo apt install -y build-essential libz-dev zlib1g-dev
+Now GraalVM can be installed. Version 22.3.1 for Java 17 is used in this book. It can be installed and set to the default Java version with the following commands:
+sdk install java 22.3.1.r17-grl 
+sdk default java 22.3.1.r17-grl
+Finally, the Native Image compiler can be installed with the following command:
+gu install Native Image
+To verify the installation, run the following commands:
+java -version
+gu list
+Expect a response from the
+java -version
+command like:
+openjdk version "17.0.6" 2023-01-17
+OpenJDK Runtime Environment GraalVM CE 22.3.1 (build 17.0.6+10-jvmci-22.3-b13)
+OpenJDK 64-Bit Server VM GraalVM CE 22.3.1 (build 17.0.6+10-jvmci-22.3-b13, mixed mode, sharing)
+For the
+gu list
+command, expect:
+ComponentId              Version             Component name
+-----------------------------------------------------------
+graalvm                  22.3.1              GraalVM Core  
+Native Image             22.3.1              Native Image
+Now we are ready to try out
+the tools; let’s start with the tracing agent!
+Running the tracing agent
+For the microservices in this book, the tracing agent is not required. But it can be of interest to see how to
+use it for other cases: if, for example, one of your own microservices will require help from the tracing agent to generate the required reachability metadata.
+If you want to try out the tracing agent, you can do so with the following steps:
+Activate the
+jvmArgs
+parameter in the section of the
+build.gradle
+file for the selected microservice by removing the preceding comment characters
+//
+.
+Run a
+gradle test
+command, in this case for the
+product
+service:
+cd $BOOK_HOME/Chapter23
+./gradlew :microservices:product-service:test --no-daemon
+This is a normal
+gradle test
+command, but to avoid running out of memory, we disable the use of the Gradle daemon. By default, the daemon is limited to using 512 MB for its heap, which is insufficient for the tracing agent in most cases.
+After the tests are complete, you should find the following files in the
+microservices/product-service/src/main/resources/META-INF/Native Image
+folder:
+jni-config.json
+predefined-classes-
+config
+.
+json
+proxy-
+config
+.
+json
+reflect-
+config
+.
+json
+resource-
+config
+.
+json
+serialization-
+config
+.
+json
+After browsing through the generated files, wrap up by adding back the comment before the
+jvmArgs
+parameter in the build file to disable the tracing agent and remove
+the created files.
+Next, we move on to how to use native tests!
+Running native tests
+Running native tests can, as
+described earlier, be very useful for automating the process of finding issues with creating Native Images. Unfortunately, a couple of problems currently prevent us from using native tests with the microservices in this book:
+Tests that use Testcontainers can’t be used with native tests.
+For details, see
+https://github.com/spring-projects/spring-boot/issues/35663
+.
+Tests that use Mockito cannot be used with native tests either.
+For details, see
+https://github.com/spring-projects/spring-boot/issues/32195
+and
+https://github.com/mockito/mockito/issues/2435
+.
+Therefore, all tests have been disabled using native tests using the annotation
+@DisabledInNativeImage
+at the class level. This means that we still can run the native test command; all Native Images will be created but no tests will currently be executed in the Native Images. As these problems are resolved, the
+@DisabledInNativeImage
+annotation can be removed step by step and more and more tests will be run by the native test command.
+To run the native tests on all four microservices, run the following command:
+./gradlew nativeTest
+To test a specific microservice, run a command like:
+./gradlew :microservices:product-service:nativeTest
+After each test of a microservice, the
+native testing tool creates a test report that looks like:
+JUnit Platform on Native Image - report
+...
+[        13 tests found           ]
+[        13 tests skipped         ]
+[         0 tests started         ]
+[         0 tests aborted         ]
+[         0 tests successful      ]
+[         0 tests failed          ]
+As can be seen in the report above, currently all tests are skipped.
+After covering the test agent and native tests, let’s see how we can create Native Images.
+Creating a Native Image for the current OS
+The first option for creating a
+Native Image is to use Gradle’s
+nativeImage
+command. It will use the installed GraalVM
+Native Image
+compiler to create an executable file for the current OS and hardware architecture.
+Since we will only test our microservices using Docker and Kubernetes, we will not use Native Images created by this command. But to try it out on the
+product-composite
+microservice, run the following commands:
+Create the Native Image with the following command:
+./gradlew microservices:product-composite-service:nativeCompile
+The executable file will be created in the
+build/native/nativeCompile
+folder with the name
+product-composite-service
+.
+The executable file can be inspected using the
+file
+command:
+file microservices/product-composite-service/build/native/nativeCompile/product-composite-service
+It will respond with something like:
+…product-composite-service: Mach-O 64-bit executable arm64
+Here,
+Mach-O
+indicates that the file is compiled for macOS, and
+arm64
+indicates it is compiled for Apple silicon.
+To try it out, we need to start up the resources it needs manually. In this case, it is only RabbitMQ that is required to make it start up successfully. Start it up with the following command:
+docker-compose up -d rabbitmq
+The Native Image
+can now be started in the terminal by specifying the same environment variables that are supplied in the
+docker-compose
+files:
+SPRING_RABBITMQ_USERNAME=rabbit-user-prod \
+SPRING_RABBITMQ_PASSWORD=rabbit-pwd-prod \
+SPRING_CONFIG_LOCATION=file:config-repo/application.yml,file:config-repo/product-composite.yml \
+microservices/product-composite-service/build/native/nativeCompile/product-composite-service
+It should start up quickly and print something like the following in the log output:
+Started ProductCompositeServiceApplication in 0.543 seconds
+Try it out by calling its liveness probe:
+curl localhost:4004/actuator/health/liveness
+Expect it to answer with:
+{"status":"UP"}
+Stop the execution by pressing
+Ctrl
++
+C
+and stop the RabbitMQ container with the following command:
+docker-compose down
+Even though this is the fastest way to create a Native Image, it is not very useful for the scope of this book. Instead, it needs
+to be built for Linux and placed in a Docker container. Let’s jump into the next section and learn how to do that.
+Creating a Native Image as a Docker image
+Now, it is time to build Docker images
+containing Native Images of our microservices. Go through the following steps:
+This is a very resource-demanding process. Therefore, first, ensure that Docker Desktop is allowed to consume at least 10 GB of memory to avoid out-of-memory faults.
+If a build fails with an error message that looks like
+<container-name> exited with code 137
+, you have run out of memory in Docker.
+If your computer has less than 32 GB of memory, it could be a good idea to stop the
+minikube
+instance at this time to avoid running out of memory in the computer. Use the following command:
+minikube stop
+Ensure that the Docker client talks to Docker Desktop and not to the
+minikube
+instance:
+eval $(minikube docker-env -u)
+Run the following command to compile the
+product
+service:
+./gradlew :microservices:product-service:bootBuildImage --no-daemon
+Expect it to take some time. The command will start a Docker container to perform the native compilation. The first time it runs, it will also download the GraalVM native compiler to be used in Docker, making the compilation time even longer. On my MacBook, the first compilation takes a few minutes, mainly depending on my network’s capacity; after that, it takes just around a minute or two.
+Expect a lot of output during the compilation, including all sorts of warning and error
+messages. A successful compilation ends with a log output like this:
+Successfully built image 'docker.io/hands-on/native-product-service:latest'
+Natively compile the three remaining microservices with the following commands:
+./gradlew :microservices:product-composite-service:bootBuildImage --no-daemon
+./gradlew :microservices:recommendation-service:bootBuildImage --no-daemon
+./gradlew :microservices:review-service:bootBuildImage --no-daemon
+To verify that the Docker images were successfully built, run the following command:
+docker images | grep "hands-on/native"
+Expect output like this:
+Figure 23.2: Docker images containing the natively compiled executables
+Now that we’ve created the Docker images containing the natively compiled executables, we are ready to try them out! We will start with Docker Compose and, after that, try them out with Kubernetes.
+Testing with Docker Compose
+We are ready to try out the natively compiled
+microservices. To use the Docker images that contain the natively compiled microservices, two new Docker Compose files have been created,
+docker-compose-native.yml
+and
+docker-compose-partitions-native.yml
+. They are copies of
+docker-compose.yml
+, and
+docker-compose-partitions.yml
+, where the
+build
+option has been removed from the definitions of the microservices. Also, the names of the Docker images to use have been changed, so the ones we created in the previous section are used, with names that start with
+native-
+.
+In this chapter, we will only use
+docker-compose-native.yml
+.; feel free to try out
+docker-compose-partitions-native.yml
+on your own.
+We’ll first get a benchmark using the Java VM-based microservices to compare the startup times and initial memory consumption. We will run the following tests:
+Use the Java VM-based microservices with AOT mode disabled.
+Use the Java VM-based microservices with AOT mode enabled.
+Use the Docker images that contain the natively compiled microservices.
+To avoid port collisions, we first must stop the
+minikube
+instance with the following command:
+minikube stop
+Testing Java VM-based microservices with AOT mode disabled
+We will start the tests by ignoring the AOT-generated code, starting the Java VM-based microservices as we did in the
+previous chapters. Run through the following commands to test the Java VM-based microservices:
+Start by compiling the source code and building the Java VM-based Docker images in Docker Desktop:
+cd $BOOK_HOME/Chapter23
+eval $(minikube docker-env -u)
+./gradlew build
+docker-compose build
+Use the default Docker Compose file for the Java VM-based microservices:
+unset COMPOSE_FILE
+Start all containers, except the microservices’ containers:
+docker-compose up -d mysql mongodb rabbitmq auth-server gateway
+Wait for the containers to start up until the CPU load goes down.
+Start up the microservices using the Java VM:
+docker-compose up -d
+Wait for the microservices to start up, again monitoring the CPU load.
+To find out how
+long time it took to start the microservices, we can look for a log output containing
+: Started
+. Run the following command:
+docker-compose logs product-composite product review recommendation | grep ": Started"
+Expect an output like this:
+Figure 23.3: Startup times for Java VM-based microservices
+In the output, we can see startup times varying from 5.5 to 7 seconds. Remember that all four microservice instances were started simultaneously, resulting in longer startup times compared to if they were started up one by one.
+Run through the tests to verify that the system landscape works as expected:
+USE_K8S=false HOST=localhost PORT=8443 HEALTH_URL=https://localhost:8443 ./test-em-all.bash
+Expect the output we have seen in previous chapters from the tests:
+Figure 23.4: Output from the test script
+Finally, to find
+out how much memory is used after starting up and running the tests, run the following command:
+docker stats --no-stream
+Expect a response like this:
+Figure 23.5: Memory usage for Java VM-based microservices
+From the preceding output, we can see that the microservices consume around 240-310 MB.
+Bring down the system landscape:
+docker compose down
+Now we know how long the
+microservices take to start up without using the AOT-generated code; let’s test them in AOT mode.
+Testing Java VM-based microservices with AOT mode enabled
+Now we will enable AOT mode, using
+the AOT-generated code to start the Java VM-based microservices. We expect them to start a bit faster in AOT mode. Run through the following commands:
+Start all containers, except the microservices’ containers:
+docker-compose up -d mysql mongodb rabbitmq auth-server gateway
+Enable AOT mode by editing each microservice’s Dockerfile and set “
+-Dspring.aot.enabled=true
+" in the
+ENVIRONMENT
+command so it looks like this:
+ENTRYPOINT ["java", "-Dspring.aot.enabled=true", "org.springframework.boot.loader.JarLauncher"]
+Rebuild the microservices:
+docker-compose build
+Start the microservices:
+docker-compose up -d
+Check AOT mode:
+docker-compose logs product-composite product review recommendation | grep "Starting AOT-processed"
+Expect four lines containing “
+Starting AOT-processed
+".
+Check the startup
+times:
+docker-compose logs product-composite product review recommendation | grep ": Started"
+Expect the same type of output as when running without AOT mode in the section above but with slightly shorter startup times. In my case, the startup times vary from 4.5 to 5.5 seconds. Compared to the normal Java VM startup times, this is 1 to 1.5 seconds faster.
+Run
+test-em-all.bash
+:
+USE_K8S=false HOST=localhost PORT=8443 HEALTH_URL=https://localhost:8443 ./test-em-all.bash
+Expect an output like when running without AOT mode in the section above.
+Revert the changes in the Dockerfiles and perform a rebuild of the Docker images to disable AOT mode.
+Bring down the system landscape:
+docker compose down
+In this test, we verified that Java VM-based microservices start up a bit faster using the AOT-generated
+code. Now it’s time to try out the natively compiled microservices.
+Testing natively compiled microservices
+Now, we are ready to repeat the same procedure, but this time using the Docker images with the natively
+compiled microservices:
+Change to the new Docker Compose file:
+export COMPOSE_FILE=docker-compose-native.yml
+Start all containers, except for the microservices’ containers:
+docker-compose up -d mysql mongodb rabbitmq auth-server gateway
+Wait for the containers to start up until the CPU load goes down.
+Start up the microservices using the Java VM:
+docker-compose up -d
+Wait for the microservices to start up, again monitoring the CPU load.
+To find out how long time it took to start the natively compiled microservices, run the same command we ran previously:
+docker-compose logs product-composite product review recommendation | grep ": Started"
+Expect output like this:
+Figure 23.6: Startup times for natively compiled microservices
+In the above output, we can see startup times varying from 0.2-0.5 seconds. Considering that all microservices instances were started up at the same time, these are rather impressive figures compared to the 5.5 to 7 seconds it took for the Java VM-based tests!
+Run through the tests
+to verify that the system landscape works as expected:
+USE_K8S=false HOST=localhost PORT=8443 HEALTH_URL=https://localhost:8443 ./test-em-all.bash
+Expect the same output as from the test above using the Java VM-based Docker images.
+Finally, to find out how much memory is used after starting up and running the tests, run the following command:
+docker stats --no-stream
+Expect a response like this:
+Figure 23.7: Memory usage for natively compiled microservices
+From the preceding output, we can see that the microservices consume around 80-130 MB. Again, this is a noticeable reduction compared to the 240-310 MB that the Java VM containers used!
+Bring down the system landscape:
+docker compose down
+To get a better understanding of both the memory and CPU consumption of the natively compiled microservices, a more realistic load test needs to be performed, but that is beyond the scope of this book.
+After seeing how much
+faster and less memory-consuming the natively compiled microservices are when starting up compared to Java VM-based alternatives, let’s see how we can run them using Kubernetes.
+Testing with Kubernetes
+To be able to deploy the natively compiled microservices in Kubernetes, a new environment Helm chart has
+been added, which has been configured to use the Docker images that contain the natively compiled microservices. The Helm charts can be found in the following folders:
+kubernetes/helm/
+└── environments
+    └── dev-env-native
+Another thing we need to consider before deploying the natively compiled microservices to Kubernetes is how to provision the Docker images. We don’t want to run the lengthy native compilation commands again to get new Docker images created in the
+minikube
+instance. If we used a Docker registry in this book, we could have pushed the images to the registry, but we haven’t. Instead, we will extract the Docker images from Docker Desktop and import them into the
+minikube
+instance, as a workaround for not using a Docker registry.
+Move the Docker
+images from Docker Desktop to the
+minikube
+instance with the following commands:
+Export the Docker images from Docker Desktop:
+eval $(minikube docker-env -u)
+docker save hands-on/native-product-composite-service:latest -o native-product-composite.tar
+docker save hands-on/native-product-service:latest -o native-product.tar
+docker save hands-on/native-recommendation-service:latest -o native-recommendation.tar
+docker save hands-on/native-review-service:latest -o native-review.tar
+Start up the
+minikube
+instance again:
+minikube start
+In a separate terminal, start the
+minikube tunnel
+command:
+minikube tunnel
+Note that this command requires that your user has
+sudo
+privileges and that you enter your password during startup. It can take a couple of seconds before the command asks for the password, so it is easy to miss!
+Import the Docker images into the
+minikube
+instance:
+eval $(minikube docker-env)
+docker load -i native-product-composite.tar
+docker load -i native-product.tar
+docker load -i native-recommendation.tar
+docker load -i native-review.tar
+Finally, delete the exported
+.tar
+files:
+rm native-product-composite.tar native-product.tar native-recommendation.tar native-review.tar
+Building, deploying, and verifying the deployment on Kubernetes is done in the same way as in the previous chapters. Run the following commands:
+Build the Docker image for the
+auth-server
+with the following command:
+docker-compose build auth-server
+Recreate the
+namespace,
+hands-on
+, and set it as the default Namespace:
+kubectl delete namespace hands-on
+kubectl apply -f kubernetes/hands-on-namespace.yml
+kubectl config set-context $(kubectl config current-context) --namespace=hands-on
+Resolve the Helm chart dependencies with the following commands.
+First, we update the dependencies in the
+components
+folder:
+for f in kubernetes/helm/components/*; do helm dep up $f; done
+Next, we update the dependencies in the
+environments
+folder:
+for f in kubernetes/helm/environments/*; do helm dep up $f; done
+We are now ready to deploy the system landscape using Helm. Run the following command and wait for all the deployments to complete:
+helm upgrade -install hands-on-dev-env-native \
+  kubernetes/helm/environments/dev-env-native \
+  -n hands-on --wait
+In the previous chapters, we used the
+helm install
+command. The
+helm upgrade -install
+command used here is a better alternative for scripting since it performs an
+insert
+if the chart is not installed, but an
+upgrade
+if the chart is already installed. It’s a bit like an
+upsert
+command in the relational database world.
+Run the normal tests to verify the deployment with the following command:
+./test-em-all.bash
+Expect the output to be like what we’ve already seen in the previous tests.
+Check the startup
+time for one of the Pods. To measure the actual startup time for a specific microservice, let’s delete it and then measure the time it takes to start up once Kubernetes recreates it:
+Kubectl delete pod -l app=product-composite
+kubectl logs -l app=product-composite --tail=-1 | grep ": Started"
+Expect a response like this:
+Figure 23.8: Startup time when running as a Pod in Kubernetes
+Expect a startup time around what we noticed when using Docker Compose, 0.4 seconds in the example above. Since we also start an Istio proxy as a sidecar, there might be some extra delay.
+Check the Docker images used with the following command:
+kubectl get pods -o jsonpath="{.items[*].spec.containers[*].image}" | xargs -n1 | grep hands-on
+Expect the following response:
+Figure 23.9: Docker images with natively compiled code
+From the
+output, we can see that all containers, except the
+auth-server
+, use Docker images with the same prefix
+native
+, meaning we are running natively compiled executables inside the Docker containers.
+This completes this chapter on using Spring’s AOT engine and the GraalVM project to create natively compiled executables for our microservices.
+Summary
+In this chapter, we were introduced to the new
+Spring AOT engine
+and underlying
+GraalVM
+project, along with its Native Image compiler. After declaring GraalVM’s plugin in the build file and providing the Native Image compiler with some reachability metadata and custom hints, it can be used to create Native Images. Spring Boot’s Gradle task
+buildBootImage
+packages these standalone executable files into ready-to-use Docker images.
+The main benefit of compiling Java-based source code into Native Images is significantly faster startup time and less memory usage. In a test where we started up the microservice instances at the same time, we observed 0.2-0.5 seconds startup times for the natively compiled microservices, compared with the 5.5 to 7 seconds required for the Java VM-based microservices for the same test. Also, the natively compiled microservices required less than half of the memory compared to the Java VM-based microservices after running through the verifications in the script,
+test-em-all.bash
+.
+Most libraries and frameworks in this book already support GraalVM’s
+Native Image
+compiler. For those that don’t,
+GraalVM Reachability Metadata Repository
+can help out by providing reachability metadata from the community. GraalVM’s build plugin can automatically detect and download reachability metadata from this repository. As a last resort, the GraalVM Native Image
+tracing agent
+can be used to create reachability metadata to help the native compiler. The tracing agent is configured to run together with the existing JUnit tests, creating reachability metadata based on the execution of the tests.
+If we find it problematic to get the Native Image creation to work properly for a specific Spring feature, we can reach out to the
+Spring AOT Smoke Tests
+project for working examples per Spring feature. To verify that the microservices will work once natively compiled, we can run the unit tests in a Native Image using Spring Boot’s Gradle task
+nativeTest
+.
+For the time being, the
+nativeTest
+task is not very useful with the source code in this book due to the described problems that existed when this chapter was written.
+We have also seen how easy it is to replace the Docker images running a Java VM with Docker images containing the natively compiled images. By running the Java VM Docker images in
+AOT mode
+, the startup times can be reduced a bit and, at the same time, we ensure that the generated AOT code works as expected. Finally, we tested the natively compiled images, both using Docker Compose and Kubernetes.
+With this, we have reached the end of the book. I hope it has helped you learn how to develop microservices using all the amazing features of Spring Boot, Spring Cloud, Kubernetes, and Istio and that you feel encouraged to try them out!
+Questions
+How are the Spring’s AOT engine and the GraalVM projects related to each other?
+How is the tracing agent used?
+What is the difference between JIT and AOT compilation?
+What is AOT mode, and how can it be beneficial to use?
+What is a native custom hint?
+What is a native test, and why is it useful?
+How are initial memory usage and startup times affected by natively compiling Java code?
+Join our community on Discord
+Join our community’s Discord space for discussion with the author and other readers:
+https://packt.link/SpringBoot3e
+
+packt.com
+Subscribe to our online digital library for full access to over 7,000 books and videos, as well as industry leading tools to help you plan your personal development and advance your career. For more information, please visit our website.
+Why subscribe?
+Spend less time learning and more time coding with practical eBooks and Videos from over 4,000 industry professionals
+Improve your learning with Skill Plans built especially for you
+Get a free eBook or video every month
+Fully searchable for easy access to vital information
+Copy and paste, print, and bookmark content
+At
+www.packt.com
+, you can also read a collection of free technical articles, sign up for a range of free newsletters, and receive exclusive discounts and offers on Packt books and eBooks.
+Other Books You May Enjoy
+If you enjoyed this book, you may be interested in these other books by Packt:
+Learning Spring Boot 3.0
+Greg L. Turnquist
+ISBN: 9781803233307
+Create powerful, production-grade web applications with minimal fuss
+Support multiple environments with one artifact, and add production-grade support with features
+Find out how to tweak your Java apps through different properties
+Enhance the security model of your apps
+Make use of enhancing features such as native deployment and reactive programming in Spring Boot
+Build anything from lightweight unit tests to fully running embedded web container integration tests
+Get a glimpse of reactive programming and decide if it’s the right approach for you
+Full Stack Development with Spring Boot 3 and React
+Juha Hinkula
+ISBN: 9781805122463
+Make fast and RESTful web services powered by Spring Data REST
+Create and manage databases using ORM, JPA, Hibernate, and more
+Explore the use of unit tests and JWTs with Spring Security
+Employ React Hooks, props, states, and more to create your frontend
+Harness MUI to customize your frontend
+Discover an array of advanced React and third-party components
+Add CRUD functionality to your apps
+Deploy your apps using AWS and Docker
+Packt is searching for authors like you
+If you’re interested in becoming an author for Packt, please visit
+authors.packtpub.com
+and apply today. We have worked with thousands of developers and tech professionals, just like you, to help them share their insight with the global tech community. You can make a general application, apply for a specific hot topic that we are recruiting an author for, or submit your own idea.
+Share your thoughts
+Now you’ve finished
+Microservices with Spring Boot 3 and Spring Cloud, Third Edition
+,  we’d love to hear your thoughts! Please
+click here to go straight to the Amazon review page
+for this book and share your feedback.
+Your review is important to us and the tech community and will help us make sure we’re delivering excellent quality content.
+
+Index
+Symbols
+12-factor app
+26
+URL
+26
+A
+access tokens
+acquiring
+284
+acquiring, with authorization code grant flow
+285
+-
+289
+acquiring, with client credentials grant flow
+284
+,
+285
+used, for calling protected APIs
+289
+-
+291
+affinity rules
+377
+Ahead of Time (AOT) compilation
+623
+alarm setup, Grafana
+585
+circuit breaker alarm
+592
+-
+595
+mail-based notification channel, setting up
+586
+-
+588
+on circuit breaker
+588
+-
+591
+Amazon ECS
+7
+AOT engine
+624
+AOT-generated code
+624
+Apache Mesos
+7
+API design
+significance
+25
+APIs
+manual testing
+70
+-
+72
+API server
+377
+APIs, protecting with OpenID Connect and OAuth 2.0
+access, allowing to protected APIs from Swagger UI
+279
+-
+281
+changes, making in edge server and product-composite service
+277
+,
+278
+changes, making in product-composite service
+278
+,
+279
+making changes, to test script
+281
+,
+282
+Apple silicon-based Mac
+tools, installing
+602
+application metrics
+collecting, with source code
+565
+,
+566
+apt install
+used, for installing tools
+614
+asymmetric keys
+reference link
+312
+Auth0
+user information, requesting
+306
+,
+307
+Auth0 access tokens
+used, for calling protected APIs
+306
+Auth0, using as OpenID provider
+required changes, applying
+298
+authentication
+264
+authorization
+264
+authorization code grant flow
+used, for acquiring access tokens
+285
+-
+306
+authorization delegation
+264
+AuthorizationPolicy
+471
+automated microservice tests, in isolation
+adding
+73
+-
+75
+automated tests
+adding
+337
+-
+340
+building and running
+341
+autonomous software components
+1
+benefits
+3
+-
+5
+challenges
+5
+,
+6
+B
+backward-compatible
+505
+blue-green deployment
+505
+kubectl patch command
+515
+performing
+516
+-
+520
+running
+515
+bounded context
+25
+,
+56
+C
+canary deployments
+504
+central configuration pattern
+15
+problem
+15
+solution
+16
+solution requirements
+16
+centralized configuration
+Spring Cloud Config, using for
+215
+-
+217
+centralized log analysis
+problem
+16
+solution
+17
+solution requirements
+17
+centralized monitoring and alarms
+21
+problem and solution
+21
+solution requirements
+22
+Certificate Authorities (CA)
+271
+certificate provisioning
+automating
+451
+,
+452
+certificates
+rotating
+456
+,
+457
+cert-manager tool
+reference link
+451
+testing with
+452
+-
+456
+chain of failures
+6
+,
+19
+chart
+400
+circuit
+verifying
+341
+,
+342
+circuit breaker
+324
+-
+326
+adding
+332
+annotations, adding in source code
+333
+closing
+343
+,
+344
+configuration, adding
+335
+dependencies, adding to build file
+332
+,
+333
+fail-fast fallback logic, adding
+334
+features
+326
+forcing, to open
+342
+trying out
+340
+,
+341
+circuit breaker pattern
+problem and solution
+19
+solution requirements
+20
+client credentials grant flow
+used, for acquiring access tokens
+284
+,
+285
+,
+302
+Cloud Native Buildpacks
+URL
+626
+Cloud Native Computing Foundation (CNCF)
+URL
+221
+,
+524
+code
+structure
+619
+code examples, for setting up REST services
+34
+property files
+35
+sample RestController
+36
+starter dependencies
+34
+,
+35
+code examples, for Spring Boot application setup
+29
+@SpringBootApplication annotation
+29
+,
+30
+component scanning
+30
+Java-based configuration
+31
+,
+32
+common library chart, Helm
+ConfigMap template
+404
+Deployment template
+412
+Secrets template
+406
+Service template
+409
+components charts
+417
+,
+418
+composite microservices, adding
+66
+,
+67
+API classes
+62
+,
+63
+integration component
+63
+-
+66
+properties
+63
+composite service API
+composite service tests, updating
+149
+,
+150
+extending
+145
+methods, adding to integration layer
+147
+,
+148
+operations, adding
+145
+-
+147
+operations, implementing
+148
+,
+149
+composite service events
+configuration, adding for publishing events
+191
+publishing
+190
+publishing, in integration layer
+190
+test code, changing
+192
+-
+194
+ConfigMap
+376
+ConfigMap template
+404
+,
+405
+using, example
+406
+config server
+310
+config server API
+312
+used, for obtaining configuration
+317
+-
+319
+configuration
+adding, for Micrometer Tracing
+352
+,
+353
+adding, for Zipkin
+352
+,
+353
+securing
+311
+securing, at rest
+311
+securing, in transit
+311
+configuration repository
+structuring
+316
+Consumer
+41
+containerd
+378
+URL
+378
+Container Network Interface (CNI)
+374
+container orchestrators
+7
+Container Runtime Interface (CRI)
+378
+control groups (cgroups)
+43
+controller manager
+377
+control loop pattern
+20
+actual state
+21
+desired state
+21
+implementation notes
+21
+problem
+21
+solution
+21
+solution requirements
+21
+control plane
+377
+,
+466
+convention over configuration
+29
+Conway's law
+24
+cooperating microservices
+test run, troubleshooting
+100
+,
+101
+tests, automating
+97
+-
+99
+core service events
+configuration for consuming events, adding
+188
+consuming
+185
+message processor, declaring
+185
+,
+186
+service implementation, changing
+187
+test code, changing
+189
+CrudRepository interface
+130
+curl
+used, for installing tools
+615
+,
+616
+Custom Resource Definitions (CRDs)
+470
+custom spans
+adding, to existing spans
+355
+-
+359
+custom tags
+adding, to existing spans
+355
+-
+361
+D
+DaemonSet
+376
+database
+542
+adding, to Docker Compose landscape
+150
+connection configuration
+152
+,
+153
+Docker Compose configuration
+151
+,
+152
+MongoDB CLI tool
+154
+MySQL CLI tool
+155
+data plane
+377
+,
+466
+Data Transfer Object (DTO)
+58
+declarative command
+380
+dependencies
+adding, to build files
+352
+dependency injection
+28
+Deployment
+375
+Deployment template
+412
+-
+416
+using, example
+416
+,
+417
+design patterns, microservices
+11
+central configuration
+15
+centralized log analysis
+16
+centralized monitoring and alarms
+21
+challenges, handling
+23
+,
+24
+circuit breaker
+19
+control loop
+20
+distributed tracing
+18
+edge server
+13
+reactive microservices
+14
+service discovery
+12
+desired state
+374
+DestinationRule
+471
+discovery server
+access, securing to
+272
+disruptive tests, with Netflix Eureka server
+240
+extra instance, starting up of product service
+240
+stopping
+240
+distributed tracing
+361
+adding, to source code
+351
+,
+352
+API request, sending that triggers asynchronous processing
+366
+-
+370
+problem
+18
+solution
+19
+solution requirements
+19
+successful API request, sending
+362
+-
+365
+system landscape, starting up
+361
+unsuccessful API request, sending
+365
+,
+366
+with Micrometer Tracing
+220
+-
+223
+,
+350
+,
+351
+with Zipkin
+220
+-
+223
+,
+350
+,
+351
+DNS-based service discovery
+problem
+226
+-
+228
+Docker
+7
+,
+43
+,
+44
+,
+45
+,
+80
+commands, running
+81
+config server, configuring for use with
+314
+Java, running in
+82
+,
+83
+Swarm mode
+7
+using, with one microservice
+85
+Docker Compose
+44
+changes, making in source code
+93
+,
+94
+microservice landscape, managing with
+93
+testing
+460
+-
+462
+testing with
+640
+tests, running with
+520
+Docker Compose configuration
+151
+Docker Compose files
+changes, applying
+459
+,
+460
+Zipkin, adding to
+353
+Docker Desktop
+installing, for Windows
+613
+Dockerfile
+44
+Docker Hub
+reference link
+81
+Docker images
+building
+421
+,
+422
+Docker, using with one microservice
+85
+changes, making in source code
+86
+-
+88
+container, running in detached mode
+91
+,
+92
+Docker image, building
+88
+,
+89
+product microservice, starting up
+89
+-
+91
+domain-driven design
+25
+,
+56
+dot
+403
+drivers, in Minikube
+reference link
+380
+E
+Eclipse Temurin
+reference link
+87
+,
+601
+,
+615
+Eclipse Temurin project
+82
+edge server
+adding, to system landscape
+246
+Eureka, calling through
+258
+,
+259
+exposes outside of system landscape, examining
+255
+product composite API, calling through
+256
+,
+257
+Spring Cloud Gateway, using as
+214
+,
+215
+Swagger UI, calling through
+257
+,
+258
+trying out
+254
+edge server pattern
+13
+implementation notes
+14
+problem
+13
+solution requirements
+14
+EFK stack
+deploying, on Kubernetes
+533
+Kibana, initializing
+542
+log records, analyzing
+543
+-
+548
+log records, discovering from microservices
+548
+-
+553
+root cause analyses, performing
+553
+-
+558
+trying out
+542
+EFK stack deployment, on Kubernetes
+533
+microservice, building
+533
+-
+535
+egress gateway
+466
+Elasticsearch
+523
+deploy commands, running
+537
+deploying
+535
+entity
+38
+,
+39
+entity objects
+58
+environment charts
+419
+,
+420
+Envoy proxy
+reference link
+468
+error handling
+adding
+68
+global REST controller exception handler
+68
+in API client
+69
+,
+70
+in API implementations
+69
+etcd
+377
+event-driven asynchronous services
+composite service events, publishing
+190
+core service events, consuming
+185
+developing
+177
+Gradle build files, changing
+184
+selecting
+164
+,
+165
+Spring Cloud Stream, using
+177
+,
+178
+topics and events, defining
+182
+,
+184
+existing spans
+custom span, adding to
+356
+-
+359
+custom tags, adding to
+359
+,
+361
+external OpenID Connect provider
+account, setting up and configuring in Auth0
+294
+-
+298
+testing with
+293
+F
+fail-fast fallback logic
+adding
+334
+fallback method
+326
+fat JAR file
+29
+files
+dependencies, adding to build
+352
+Finagle project
+reference link
+466
+Fluentd
+523
+,
+524
+configuring
+525
+-
+533
+deploy commands, running
+541
+,
+542
+deploying
+538
+manifest files
+538
+-
+541
+overview
+524
+,
+525
+URL
+524
+Flux object
+166
+Function-as-a-Service (FaaS)
+622
+G
+gateway
+471
+glob pattern
+403
+GraalVM
+installing, with Native Image compiler
+635
+,
+636
+GraalVM Native Image tracing agent
+configuring
+633
+GraalVM project
+623
+,
+624
+Gradle
+multi-project builds, setting up
+54
+,
+55
+Gradle build files
+changing
+184
+dependencies, adding
+106
+,
+107
+Gradle project, organizing
+reference link
+619
+Grafana
+alarms, setting up
+585
+configuring
+569
+performance, monitoring with
+564
+reference link
+468
+Grafana dashboards
+circuit breaker metrics, testing
+580
+-
+582
+creating
+576
+developing
+576
+empty dashboard, creating
+577
+exporting
+584
+,
+585
+implementing
+580
+importing
+584
+,
+585
+microservices, monitoring with
+568
+new panel, creating for circuit breaker metric
+577
+,
+578
+panel, creating for retry music
+578
+panels, arranging
+579
+,
+580
+Prometheus metrics, examining
+576
+retry metrics, testing
+582
+,
+583
+H
+half-open circuit
+20
+HashiCorp Nomad
+7
+HashiCorp Vault PKI Secrets Engine
+reference link
+451
+health group
+399
+Helm
+399
+,
+400
+built-in objects
+403
+commands, running
+401
+common library chart
+404
+reference link
+400
+templates and values
+402
+,
+403
+Helm chart
+dependencies, resolving
+422
+files
+402
+Homebrew
+installing
+601
+horizontal scaling
+6
+host-based routing
+253
+HTTPS
+certificate, creating
+269
+edge server, configuring
+270
+external communication, protecting with
+269
+,
+270
+self-signed certificate, replacing at runtime
+271
+,
+272
+I
+imperative statements
+381
+index
+542
+information, handling by microservices
+infrastructure-related information
+49
+product composite service
+49
+product service
+48
+recommendation service
+49
+review service
+48
+Ingress
+375
+testing with
+452
+-
+456
+ingress gateway
+466
+Ingress object
+374
+install command
+used, for installing tools
+615
+,
+616
+Intel-based Mac
+tools, installing
+602
+Istio
+467
+,
+468
+API objects
+471
+,
+472
+deploying, in Kubernetes cluster
+473
+-
+476
+proxies, injecting into microservices
+468
+-
+470
+reference link
+600
+using, with service meshes
+466
+istioctl
+467
+Istio ingress gateway
+Kubernetes Ingress controller, replacing with
+472
+Istio services
+access, setting up
+476
+-
+479
+J
+Jaeger component, Istio
+Zipkin server, replacing with
+473
+Jakarta Persistence API (JPA)
+reference link
+38
+Java
+installing, with SDKman
+615
+running, in Docker
+82
+,
+83
+Java 2 Platform, Enterprise Edition (J2EE)
+28
+Java Development Kit (JDK)
+82
+Java Persistence API (JPA)
+123
+Java Platform, Enterprise Edition (Java EE)
+28
+Java running, in Docker
+available CPUs, limiting
+83
+,
+84
+available memory, limiting
+84
+,
+85
+Java Runtime Environment (JRE)
+82
+Java source code
+changes, applying to
+628
+,
+629
+GraalVM Native Image tracing agent, configuring
+633
+,
+634
+Gradle build files, updating
+629
+,
+630
+reachability metadata and custom hints, providing
+630
+,
+631
+Spring beans, enabling at build time
+631
+-
+633
+test-em-all.bash verification script, updating
+634
+updated runtime properties
+633
+Java VM-based microservices
+testing, with AOT mode disabled
+641
+-
+643
+testing, with AOT mode enabled
+643
+,
+644
+JSON Web Key Set (jwk-set)
+268
+JSON Web Tokens (JWTs)
+471
+Just in Time (JIT) compilation
+622
+JVM (Micrometer)
+574
+K
+Kiali
+reference link
+467
+Kibana
+523
+deploying
+535
+manifest files
+536
+,
+537
+kubectl
+377
+working with
+381
+kubectl contexts
+working with
+381
+,
+382
+kubectl Kubernetes CLI tool
+working with
+380
+-
+391
+Kubernetes
+7
+,
+373
+,
+374
+deploying, for development and test
+420
+deploying to
+423
+-
+425
+,
+434
+,
+435
+deploying, to staging and production environment
+432
+,
+457
+,
+458
+Deployment, testing
+425
+,
+426
+EFK stack, deploying
+533
+resources, cleaning up
+435
+,
+436
+source code changes, making
+433
+testing with
+646
+,
+647
+,
+648
+,
+649
+test script, changing
+425
+using
+398
+Kubernetes API objects
+375
+-
+377
+ConfigMap
+376
+DaemonSet
+376
+Deployment
+375
+Ingress
+375
+namespace
+375
+node
+375
+Pod
+375
+reference link
+376
+ReplicaSet
+375
+Secrets
+376
+Service
+375
+Kubernetes cluster
+creating, with Minikube
+379
+-
+384
+hibernating
+391
+Istio, deploying
+473
+-
+476
+managing
+391
+resuming
+391
+terminating
+392
+Kubernetes ConfigMaps
+testing with
+452
+-
+456
+Kubernetes ConfigMaps and Secrets
+using, to replace Spring Cloud Config Server
+441
+-
+445
+Kubernetes Ingress controller
+replacing, with Istio ingress gateway
+472
+Kubernetes Ingress object
+using, to replace Spring Cloud Gateway
+446
+-
+449
+Kubernetes runtime components
+377
+-
+379
+API server
+377
+container runtime
+378
+controller manager
+377
+etcd
+377
+kubelet
+377
+kube-proxy
+378
+Kubernetes DNS
+378
+scheduler
+377
+Kubernetes Service objects
+374
+Kubernetes Services
+Netflix Eureka, replacing with
+396
+,
+397
+,
+398
+Kubernetes version, selecting
+reference link
+616
+Kustomize
+400
+L
+library chart
+400
+Linkerd
+reference link
+466
+Linux, installing on Windows with WSL
+reference link
+611
+Linux namespaces
+80
+Linux server in WSL 2
+tools, installing
+614
+liveness probe
+374
+local authorization server
+access tokens, acquiring
+284
+adding
+274
+-
+276
+automated tests, building and running
+282
+protected discovery server, testing
+283
+,
+284
+testing with
+282
+Logback
+133
+long-term support (LTS)
+27
+loose coupling
+164
+M
+MapStruct
+125
+dependencies, adding
+126
+,
+127
+URL
+125
+Markdown syntax
+112
+master nodes
+377
+metacircular
+623
+Micrometer library
+reference link
+565
+Micrometer Observability
+351
+reference link
+351
+,
+361
+Micrometer Tracing
+220
+configuration, adding
+352
+,
+353
+distributed tracing, using with
+220
+-
+223
+,
+350
+,
+351
+Microservice E
+20
+microservice landscape
+48
+,
+124
+automated tests, updating
+158
+,
+160
+building
+112
+,
+113
+Integration layer
+125
+managing, with Docker Compose
+92
+Persistence layer
+125
+Protocol layer
+124
+semi-automated tests, adding
+76
+service discovery, replacing temporarily
+49
+,
+50
+Service layer
+124
+simplifying
+472
+starting
+112
+,
+113
+starting up
+95
+-
+97
+microservices
+1
+architectures
+6
+,
+7
+building
+566
+,
+567
+challenges
+10
+,
+11
+connecting, to Netflix Eureka server
+231
+-
+233
+considerations
+24
+-
+26
+defining
+8
+,
+9
+deploying
+533
+-
+535
+,
+566
+,
+567
+design patterns
+11
+Docker Compose files changes, applying
+459
+,
+460
+Docker Compose, testing
+460
+-
+462
+information, handling
+48
+Istio proxies, injecting into
+468
+-
+470
+monitoring, with Grafana dashboards
+568
+sample microservice landscape
+7
+,
+8
+usage, verifying without Kubernetes
+458
+,
+459
+microservices, monitoring with Grafana dashboards
+568
+existing dashboards, importing
+574
+,
+575
+Grafana, configuring
+569
+Kiali's built-in dashboards, using
+570
+-
+573
+load test, starting up
+570
+local mail server, installing for tests
+568
+Minikube
+reference link
+600
+used, for creating Kubernetes cluster
+379
+-
+384
+Minikube profiles
+working with
+380
+minikube tunnel
+564
+MongoDB CLI tool
+154
+monitor service
+21
+Mono object
+166
+multi-stage build
+88
+mutual authentication (mTLS)
+used, for protecting internal communication
+497
+,
+499
+mutual TLS (mTLS)
+471
+MySQL CLI tool
+155
+N
+named templates
+404
+namespace
+374
+,
+375
+native compilation
+used, for handling problems
+626
+-
+628
+native compile Java source code
+usage
+622
+,
+623
+Native Images
+621
+compiling
+635
+creating, as Docker image
+639
+,
+640
+creating, for current OS
+638
+,
+639
+native tests, running
+637
+testing
+635
+tracing agent, running
+636
+,
+637
+natively compiled microservices
+testing
+644
+-
+646
+native tests
+628
+Netflix Eureka
+calling, through edge server
+258
+,
+259
+disruptive tests with
+240
+problem, with DNS-based service discovery
+226
+-
+228
+replacing, with Kubernetes Services
+396
+-
+398
+service discovery, challenges
+228
+using, for service discovery
+213
+,
+214
+,
+226
+Netflix Eureka clients
+changes, making
+274
+Netflix Eureka server
+changes, making
+272
+,
+273
+clients, configuring to
+235
+configuration parameters
+234
+,
+235
+configuration, setting up for development usage
+233
+,
+234
+configuring
+235
+discovery service, exploring
+236
+discovery service, exploring
+236
+executing again
+241
+,
+242
+microservices, connecting to
+231
+-
+233
+setting up
+230
+,
+231
+Netflix Eureka server, discovery service
+scaling down
+239
+,
+240
+scaling up
+236
+-
+239
+Netflix Hystrix
+217
+Netflix OSS
+7
+Netty
+URL
+34
+news items , Spring Boot 3.0
+Native Compile
+32
+observability
+32
+Virtual Threads
+32
+NGINX Deployment
+384
+-
+391
+node
+375
+non-blocking persistence, with Spring Data for MongoDB
+167
+,
+168
+test code, changing
+168
+non-blocking REST APIs, in composite services
+173
+API, changing
+173
+integration layer, changing
+175
+,
+176
+service implementation, changing
+174
+test code, changing
+176
+,
+177
+non-blocking REST APIs, in core services
+169
+APIs, changing
+169
+blocking code, dealing with
+171
+-
+173
+service implementation, changing
+169
+,
+170
+test code, changing
+170
+non-blocking synchronous REST APIs
+developing
+165
+non-blocking persistence, with Spring Data for MongoDB
+167
+,
+168
+non-blocking REST APIs, in composite services
+173
+non-blocking REST APIs, in core services
+169
+Project Reactor
+166
+,
+167
+selecting
+164
+,
+165
+O
+OAuth 2.0
+214
+,
+264
+-
+266
+APIs, protecting with
+276
+used, for testing Swagger UI
+291
+-
+293
+OAuth 2.0/OIDC access tokens
+external requests, authenticating with
+495
+-
+497
+OAuth resource servers
+configuration, changing
+299
+OpenAPI documentation
+114
+-
+120
+OpenAPI Specification
+103
+OpenCensus project
+221
+OpenID Connect (OIDC)
+214
+,
+264
+-
+268
+,
+471
+APIs, protecting with
+276
+OpenID Connect, certified implementations
+reference link
+294
+OpenJDK project
+reference link
+82
+OpenTelemetry
+221
+URL
+350
+OpenTracing
+221
+OpenZipkin Brave
+350
+outlier detection
+499
+OWASP Top Ten Project
+reference link
+269
+P
+PagingAndSortingRepository interface
+130
+Paketo project
+626
+parent chart
+400
+partitions
+181
+PeerAuthentication
+471
+persistence automated tests
+Testcontainers, using
+131
+-
+133
+updating
+158
+-
+160
+writing
+131
+-
+138
+persistence layer
+adding, to core microservices
+125
+APIs, testing manually
+155
+-
+158
+data, storing with entity classes
+127
+-
+129
+dependencies, adding to MapStruct
+126
+,
+127
+repositories, defining in Spring Data
+130
+persistence layer, using in service layer
+138
+APIs, adding
+139
+,
+140
+database connection URL, logging
+139
+Java bean mapper, declaring
+142
+,
+143
+persistence layer, calling
+140
+,
+141
+service tests, updating
+143
+,
+144
+Pods
+374
+,
+375
+poisoned message
+180
+product composite API
+calling, through edge server
+256
+,
+257
+ProductCompositeService
+223
+API-specific documentation, adding
+109
+-
+112
+general API documentation, adding
+107
+-
+109
+OpenAPI configuration, adding
+107
+-
+109
+Project Reactor
+34
+,
+167
+reference link
+166
+Prometheus
+performance, monitoring with
+564
+reference link
+467
+protected APIs
+calling, access tokens used
+289
+-
+291
+proxy component
+466
+Q
+quality assurance (QA)
+432
+quotas
+374
+R
+reachability metadata
+624
+reactive clients
+workarounds, adding
+354
+,
+355
+Reactive Manifesto
+URL
+15
+reactive microservice landscape
+automated tests, running
+207
+events, saving
+195
+health API, adding
+195
+-
+198
+Kafka, using with partitions per topic
+205
+-
+207
+manual tests, running
+195
+RabbitMQ, using without partitions
+199
+-
+202
+RabbitMQ, using with partitions
+203
+reactive microservices pattern
+problem
+14
+solution
+15
+solution requirements
+15
+Reactive Streams specification
+reference link
+166
+readiness probe
+374
+Remote WSL
+Visual Studio Code extension, installing
+614
+ReplicaSet
+375
+reporter
+350
+repositories
+39
+,
+40
+RequestAuthentication
+471
+Resilience4j
+217
+bulkhead
+217
+circuit breaker
+217
+-
+219
+rate limiter
+217
+retries
+217
+time limiter
+217
+URL
+217
+resilience mechanisms
+324
+adding, to source code
+329
+API definitions, changes
+330
+product-composite microservice, changes
+330
+product microservice, changes
+331
+,
+332
+programmable delays, adding
+329
+,
+330
+random errors, adding
+329
+,
+330
+RESTful APIs
+adding
+55
+,
+56
+api project, adding
+56
+-
+58
+implementing
+59
+-
+61
+util project
+58
+retries
+trying out, caused by random errors
+344
+,
+345
+retry annotation
+adding
+336
+retry mechanism
+324
+,
+328
+adding
+336
+configuration, adding
+336
+reference link
+325
+trying out
+340
+,
+341
+RFC8555
+reference link
+451
+Role-Based Access Control (RBAC)
+374
+reference link
+374
+root cause analysis
+542
+route
+250
+destination URI
+250
+filters
+250
+ID
+250
+predicates
+250
+route configuration
+testing, based on host header
+260
+routing requests
+to Eureka server's API and web page
+251
+,
+252
+to product-composite API
+250
+with predicates and filters
+253
+,
+254
+routing rule
+250
+implementing
+256
+setting up, in edge server
+313
+,
+314
+S
+sample microservice landscape
+7
+,
+8
+scheduler
+377
+SDKman
+reference link
+635
+used, for installing Java
+615
+used, for installing Spring Boot CLI
+615
+Secrets
+376
+testing with
+452
+-
+456
+Secrets template
+406
+,
+407
+using, example
+408
+semi-automated tests, microservice landscape
+adding
+76
+test script, implementing
+77
+,
+78
+server extensions and choices
+reference link
+351
+server-side service concept
+230
+Service
+375
+service discovery
+213
+,
+226
+challenges with
+228
+Netflix Eureka, using for
+213
+,
+214
+service discovery pattern
+12
+client-side routing
+13
+implementation notes
+13
+problem
+12
+server-side routing
+13
+solution
+13
+solution requirements
+13
+service discovery, with Netflix Eureka
+in Spring Cloud
+228
+,
+230
+service mesh
+commands, running to create
+484
+-
+486
+creating
+480
+external endpoints, protecting with HTTPS and certificates
+492
+,
+494
+logging propagation of trace
+486
+,
+487
+mutual authentication (mTLS), used for protecting internal communication
+497
+-
+499
+OAuth 2.0/OIDC access tokens, used for authenticating external requests
+495
+-
+497
+observing
+487
+-
+492
+resilience, testing by delay injection
+502
+-
+504
+resilience, testing by fault injection
+500
+-
+502
+resiliency, ensuring
+499
+,
+500
+securing
+492
+source code changes
+480
+span IDs
+486
+,
+487
+using, with Istio
+466
+Service template
+409
+,
+410
+using, example
+411
+sidecar
+469
+Single Container Pattern
+using
+132
+skeleton microservices
+generating
+50
+multi-project builds, setting up in Gradle
+54
+,
+55
+Spring Initializr, using to generate skeleton code
+50
+-
+54
+soft link
+418
+software enablers
+23
+source code
+accessing
+606
+,
+617
+,
+618
+distributed tracing, adding to
+351
+,
+352
+IDE, using
+607
+structure
+607
+source code changes
+505
+deployments and services
+507
+,
+508
+prod-env Helm chart, using
+508
+,
+509
+virtual services and destination rules
+506
+,
+507
+source code changes, service mesh
+_istio_base.yaml template content
+480
+-
+482
+_istio_dr_mutual_tls.yaml template content
+483
+,
+484
+SpanId
+221
+spans
+221
+,
+350
+Spring Authorization Server
+274
+Spring beans
+enabling, at build time in application.yml files
+631
+,
+632
+Spring Boot
+28
+at JAR files
+29
+convention over configuration
+29
+support, testing
+426
+-
+431
+support, using for graceful shutdown
+398
+support, using for liveness and readiness probes
+398
+Spring Boot 2 application
+migrating
+32
+-
+34
+Spring Boot 3.0
+news items
+32
+Spring Boot Actuator
+50
+Spring Boot application
+setting up, code examples
+29
+Spring Boot CLI
+installing, with SDKman
+615
+Spring Cloud
+7
+,
+211
+evolution
+211
+,
+213
+references
+212
+service discovery, with Netflix Eureka in
+228
+,
+230
+Spring Cloud Bus
+216
+Spring Cloud Circuit Breaker project
+325
+reference link
+325
+Spring Cloud Config
+using, for centralized configuration
+215
+,
+217
+Spring Cloud Config Server
+310
+automated tests, building and running
+317
+clients, configuring
+315
+configuration, obtaining with config server API
+317
+-
+319
+configuration, securing
+311
+configuring, for use with Docker
+314
+connection information, configuring
+315
+,
+316
+initial client connection, deciding
+311
+reference link
+311
+replacing
+440
+,
+441
+replacing, with Kubernetes ConfigMaps and Secrets
+441
+-
+445
+routing rule, setting up in edge server
+313
+,
+314
+sensitive information, decrypting
+319
+,
+320
+sensitive information, encrypting
+319
+,
+320
+setting up
+312
+,
+313
+storage type of configuration repository, selecting
+310
+Spring Cloud Gateway
+composite health check, adding
+248
+,
+249
+configuring
+249
+replacing
+445
+,
+446
+replacing, with Kubernetes Ingress object
+446
+-
+449
+setting up
+247
+using, as edge server
+214
+,
+215
+Spring Cloud Sleuth
+220
+Spring Cloud Stream
+41
+binder
+41
+code examples, for sending and receiving messages
+42
+,
+43
+consumer group
+178
+,
+179
+consumer groups
+180
+destination
+41
+guaranteed order and partitions
+181
+,
+182
+message
+41
+publisher
+41
+retries and dead-letter queues
+180
+,
+181
+subscriber
+41
+using
+177
+,
+178
+Spring Data
+38
+entity
+38
+,
+39
+repositories
+39
+-
+41
+repositories, defining
+130
+Spring Data for MongoDB
+non-blocking persistence, using
+167
+,
+168
+springdoc-openapi
+36
+,
+103
+adding, to source code
+106
+API-specific documentation, adding to ProductCompositeService
+109
+-
+112
+dependencies, adding to Gradle build files
+106
+,
+107
+general API documentation, adding to ProductCompositeService
+107
+,
+108
+OpenAPI configuration, adding to ProductCompositeService
+107
+,
+109
+using
+104
+,
+106
+SpringFox
+URL
+104
+Spring Initializr
+URL
+50
+using, to generate skeleton code
+50
+-
+54
+Spring's AOT engine
+624
+-
+626
+Spring WebFlux
+27
+,
+34
+REST service, setting up with code examples
+34
+standard Spring Boot configuration files, for configuring Resilence4j
+parameters
+326
+,
+327
+starter dependencies
+34
+subchart
+400
+Substrate VM
+623
+Supplier
+41
+support status of Istio releases
+reference link
+616
+Swagger UI
+calling, through edge server
+257
+,
+258
+testing, with OAuth 2.0
+291
+-
+293
+Swagger UI viewer
+103
+,
+105
+symbolic link
+418
+system landscape
+edge server, adding to
+246
+securing
+268
+,
+269
+T
+tags
+350
+Testcontainers
+127
+,
+131
+disadvantage
+132
+URL
+131
+using
+131
+-
+133
+test script
+changing, to acquire access tokens from Auth0
+299
+-
+301
+running, with Auth0 as OpenID Connect provider
+301
+,
+302
+time limiter
+324
+,
+328
+adding
+332
+tools, installing
+599
+-
+611
+on Apple silicon-based Mac
+602
+on Intel-based Mac
+602
+on Linux server in WSL 2
+614
+on Windows
+611
+with apt install
+614
+with curl
+615
+,
+616
+with install command
+615
+,
+616
+without Homebrew
+601
+post-installation actions
+603
+,
+605
+verifying
+606
+,
+616
+,
+617
+tools, for installation on Linux server
+reference link
+610
+tools, for installation on Windows
+reference link
+610
+topics and events
+defining
+182
+,
+184
+trace
+350
+trace ID
+542
+tracer
+350
+trace tree
+221
+,
+350
+tracing
+reference link
+467
+U
+Ubuntu 22.04.2 LTS
+reference link
+611
+Ubuntu 22.04 server
+installing, on WSL 2
+611
+,
+612
+Ubuntu server
+WSL 2, installing with
+611
+user acceptance tests (UATs)
+432
+V
+vertical scaling
+6
+VirtualService
+471
+Virtual Threads
+32
+Visual Studio Code
+extension, installing for Remote WSL
+614
+installing, for Remote WSL
+614
+URL
+614
+Visual Studio Code, integrating with WSL 2
+reference link
+614
+W
+W3C trace context
+350
+URL
+350
+web browser
+564
+Windows
+Docker Desktop, installing
+613
+tools, installing on
+611
+Windows Terminal
+installing
+612
+reference link
+612
+worker nodes
+377
+WSL 2
+installing, with Ubuntu server
+611
+Ubuntu 22.04 server, installing on
+611
+,
+612
+Z
+zero-downtime updates
+canary tests, running
+513
+-
+515
+performing
+504
+,
+505
+source code changes
+505
+traffic routing, to v1 version of microservice
+512
+,
+513
+v1 and v2 microservices versions , deploying with routing to v1 version
+509
+-
+512
+Zipkin
+220
+adding, to Docker Compose files
+353
+configuration, adding
+352
+,
+353
+distributed tracing with
+350
+,
+351
+for distributed tracing
+220
+-
+223
+reference link
+353
+URL
+220
+Zipkin server
+replacing, with Istio's Jaeger component
+473
+Download a free PDF copy of this book
+Thanks for purchasing this book!
+Do you like to read on the go but are unable to carry your print books everywhere?Is your eBook purchase not compatible with the device of your choice?
+Don’t worry, now with every Packt book you get a DRM-free PDF version of that book at no cost.
+Read anywhere, any place, on any device. Search, copy, and paste code from your favorite technical books directly into your application.
+The perks don’t stop there, you can get exclusive access to discounts, newsletters, and great free content in your inbox daily
+Follow these simple steps to get the benefits:
+Scan the QR code or visit the link below
+https://packt.link/free-ebook/9781805128694
+Submit your proof of purchase
+That’s it! We’ll send your free PDF and other benefits to your email directly
+
+Contents
+Preface
+Who this book is for
+What this book covers
+Get in touch
+Share your thoughts
+Introduction to Microservices
+Technical requirements
+My way into microservices
+Benefits of autonomous software components
+Challenges with autonomous software components
+Enter microservices
+A sample microservice landscape
+Defining a microservice
+Challenges with microservices
+Design patterns for microservices
+Service discovery
+Problem
+Solution
+Solution requirements
+Edge server
+Problem
+Solution
+Solution requirements
+Reactive microservices
+Problem
+Solution
+Solution requirements
+Central configuration
+Problem
+Solution
+Solution requirements
+Centralized log analysis
+Problem
+Solution
+Solution requirements
+Distributed tracing
+Problem
+Solution
+Solution requirements
+Circuit breaker
+Problem
+Solution
+Solution requirements
+Control loop
+Problem
+Solution
+Solution requirements
+Centralized monitoring and alarms
+Problem
+Solution
+Solution requirements
+Software enablers
+Other important considerations
+Summary
+Introduction to Spring Boot
+Technical requirements
+Spring Boot
+Convention over configuration and fat JAR files
+Code examples for setting up a Spring Boot application
+The magic @SpringBootApplication annotation
+Component scanning
+Java-based configuration
+What’s new in Spring Boot 3.0
+Migrating a Spring Boot 2 application
+Spring WebFlux
+Code examples of setting up a REST service
+Starter dependencies
+Property files
+Sample RestController
+springdoc-openapi
+Spring Data
+Entity
+Repositories
+Spring Cloud Stream
+Code examples for sending and receiving messages
+Docker
+Summary
+Questions
+Creating a Set of Cooperating Microservices
+Technical requirements
+Introducing the microservice landscape
+Information handled by the microservices
+The product service
+The review service
+The recommendation service
+The product composite service
+Infrastructure-related information
+Temporarily replacing service discovery
+Generating skeleton microservices
+Using Spring Initializr to generate skeleton code
+Setting up multi-project builds in Gradle
+Adding RESTful APIs
+Adding an API and a util project
+The api project
+The util project
+Implementing our API
+Adding a composite microservice
+API classes
+Properties
+The integration component
+Composite API implementation
+Adding error handling
+The global REST controller exception handler
+Error handling in API implementations
+Error handling in the API client
+Testing APIs manually
+Adding automated microservice tests in isolation
+Adding semi-automated tests of a microservice landscape
+Trying out the test script
+Summary
+Questions
+Deploying Our Microservices Using Docker
+Technical requirements
+Introduction to Docker
+Running our first Docker commands
+Running Java in Docker
+Limiting available CPUs
+Limiting available memory
+Using Docker with one microservice
+Changes in source code
+Building a Docker image
+Starting up the service
+Running the container in detached mode
+Managing a landscape of microservices using Docker Compose
+Changes in the source code
+Starting up the microservice landscape
+Automating tests of cooperating microservices
+Troubleshooting a test run
+Summary
+Questions
+Adding an API Description Using OpenAPI
+Technical requirements
+Introduction to using springdoc-openapi
+Adding springdoc-openapi to the source code
+Adding dependencies to the Gradle build files
+Adding OpenAPI configuration and general API documentation to the ProductCompositeService
+Adding API-specific documentation to the ProductCompositeService interface
+Building and starting the microservice landscape
+Trying out the OpenAPI documentation
+Summary
+Questions
+Adding Persistence
+Technical requirements
+Chapter objectives
+Adding a persistence layer to the core microservices
+Adding dependencies
+Storing data with entity classes
+Defining repositories in Spring Data
+Writing automated tests that focus on persistence
+Using Testcontainers
+Writing persistence tests
+Using the persistence layer in the service layer
+Logging the database connection URL
+Adding new APIs
+Calling the persistence layer from the service layer
+Declaring a Java bean mapper
+Updating the service tests
+Extending the composite service API
+Adding new operations to the composite service API
+Adding methods to the integration layer
+Implementing the new composite API operations
+Updating the composite service tests
+Adding databases to the Docker Compose landscape
+The Docker Compose configuration
+Database connection configuration
+The MongoDB and MySQL CLI tools
+Manual tests of the new APIs and the persistence layer
+Updating the automated tests of the microservice landscape
+Summary
+Questions
+Developing Reactive Microservices
+Technical requirements
+Choosing between non-blocking synchronous APIs and event-driven asynchronous services
+Developing non-blocking synchronous REST APIs
+An introduction to Project Reactor
+Non-blocking persistence using Spring Data for MongoDB
+Changes in the test code
+Non-blocking REST APIs in the core services
+Changes in the APIs
+Changes in the service implementations
+Changes in the test code
+Dealing with blocking code
+Non-blocking REST APIs in the composite services
+Changes in the API
+Changes in the service implementation
+Changes in the integration layer
+Changes in the test code
+Developing event-driven asynchronous services
+Handling challenges with messaging
+Consumer groups
+Retries and dead-letter queues
+Guaranteed order and partitions
+Defining topics and events
+Changes in the Gradle build files
+Consuming events in the core services
+Declaring message processors
+Changes in the service implementations
+Adding configuration for consuming events
+Changes in the test code
+Publishing events in the composite service
+Publishing events in the integration layer
+Adding configuration for publishing events
+Changes in the test code
+Running manual tests of the reactive microservice landscape
+Saving events
+Adding a health API
+Using RabbitMQ without using partitions
+Using RabbitMQ with partitions
+Using Kafka with two partitions per topic
+Running automated tests of the reactive microservice landscape
+Summary
+Questions
+Introduction to Spring Cloud
+Technical requirements
+The evolution of Spring Cloud
+Using Netflix Eureka for service discovery
+Using Spring Cloud Gateway as an edge server
+Using Spring Cloud Config for centralized configuration
+Using Resilience4j for improved resilience
+Sample usage of the circuit breaker in Resilience4j
+Using Micrometer Tracing and Zipkin for distributed tracing
+Summary
+Questions
+Adding Service Discovery Using Netflix Eureka
+Technical requirements
+Introducing service discovery
+The problem with DNS-based service discovery
+Challenges with service discovery
+Service discovery with Netflix Eureka in Spring Cloud
+Setting up a Netflix Eureka server
+Connecting microservices to a Netflix Eureka server
+Setting up the configuration for development use
+Eureka configuration parameters
+Configuring the Eureka server
+Configuring clients to the Eureka server
+Trying out the discovery service
+Scaling up
+Scaling down
+Disruptive tests with the Eureka server
+Stopping the Eureka server
+Starting up an extra instance of the product service
+Starting up the Eureka server again
+Summary
+Questions
+Using Spring Cloud Gateway to Hide Microservices behind an Edge Server
+Technical requirements
+Adding an edge server to our system landscape
+Setting up Spring Cloud Gateway
+Adding a composite health check
+Configuring Spring Cloud Gateway
+Routing rules
+Trying out the edge server
+Examining what is exposed outside the Docker engine
+Trying out the routing rules
+Calling the product composite API through the edge server
+Calling the Swagger UI through the edge server
+Calling Eureka through the edge server
+Routing based on the host header
+Summary
+Questions
+Securing Access to APIs
+Technical requirements
+Introduction to OAuth 2.0 and OpenID Connect
+Introducing OAuth 2.0
+Introducing OpenID Connect
+Securing the system landscape
+Protecting external communication with HTTPS
+Replacing a self-signed certificate at runtime
+Securing access to the discovery server
+Changes in the Eureka server
+Changes in Eureka clients
+Adding a local authorization server
+Protecting APIs using OAuth 2.0 and OpenID Connect
+Changes in both the edge server and the product-composite service
+Changes in the product-composite service only
+Changes to allow Swagger UI to acquire access tokens
+Changes in the test script
+Testing with the local authorization server
+Building and running the automated tests
+Testing the protected discovery server
+Acquiring access tokens
+Acquiring access tokens using the client credentials grant flow
+Acquiring access tokens using the authorization code grant flow
+Calling protected APIs using access tokens
+Testing Swagger UI with OAuth 2.0
+Testing with an external OpenID Connect provider
+Setting up and configuring an account in Auth0
+Applying the required changes to use Auth0 as an OpenID provider
+Changing the configuration in the OAuth resource servers
+Changing the test script so it acquires access tokens from Auth0
+Running the test script with Auth0 as the OpenID Connect provider
+Acquiring access tokens using the client credentials grant flow
+Acquiring access tokens using the authorization code grant flow
+Calling protected APIs using the Auth0 access tokens
+Getting extra information about the user
+Summary
+Questions
+Centralized Configuration
+Technical requirements
+Introduction to the Spring Cloud Config Server
+Selecting the storage type of the configuration repository
+Deciding on the initial client connection
+Securing the configuration
+Securing the configuration in transit
+Securing the configuration at rest
+Introducing the config server API
+Setting up a config server
+Setting up a routing rule in the edge server
+Configuring the config server for use with Docker
+Configuring clients of a config server
+Configuring connection information
+Structuring the configuration repository
+Trying out the Spring Cloud Config Server
+Building and running automated tests
+Getting the configuration using the config server API
+Encrypting and decrypting sensitive information
+Summary
+Questions
+Improving Resilience Using Resilience4j
+Technical requirements
+Introducing the Resilience4j resilience mechanisms
+Introducing the circuit breaker
+Introducing the time limiter
+Introducing the retry mechanism
+Adding the resilience mechanisms to the source code
+Adding programmable delays and random errors
+Changes in the API definitions
+Changes in the product-composite microservice
+Changes in the product microservice
+Adding a circuit breaker and a time limiter
+Adding dependencies to the build file
+Adding annotations in the source code
+Adding fail-fast fallback logic
+Adding configuration
+Adding a retry mechanism
+Adding the retry annotation
+Adding configuration
+Adding automated tests
+Trying out the circuit breaker and retry mechanism
+Building and running the automated tests
+Verifying that the circuit is closed under normal operations
+Forcing the circuit breaker to open when things go wrong
+Closing the circuit breaker again
+Trying out retries caused by random errors
+Summary
+Questions
+Understanding Distributed Tracing
+Technical requirements
+Introducing distributed tracing with Micrometer Tracing and Zipkin
+Adding distributed tracing to the source code
+Adding dependencies to build files
+Adding configuration for Micrometer Tracing and Zipkin
+Adding Zipkin to the Docker Compose files
+Adding workarounds for lacking support of reactive clients
+Adding custom spans and custom tags to existing spans
+Adding a custom span
+Adding custom tags to existing spans
+Trying out distributed tracing
+Starting up the system landscape
+Sending a successful API request
+Sending an unsuccessful API request
+Sending an API request that triggers asynchronous processing
+Summary
+Questions
+Introduction to Kubernetes
+Technical requirements
+Introducing Kubernetes concepts
+Introducing Kubernetes API objects
+Introducing Kubernetes runtime components
+Creating a Kubernetes cluster using Minikube
+Working with Minikube profiles
+Working with the Kubernetes CLI, kubectl
+Working with kubectl contexts
+Creating a Kubernetes cluster
+Trying out a sample Deployment
+Managing a local Kubernetes cluster
+Hibernating and resuming a Kubernetes cluster
+Terminating a Kubernetes cluster
+Summary
+Questions
+Deploying Our Microservices to Kubernetes
+Technical requirements
+Replacing Netflix Eureka with Kubernetes Services
+Introducing how Kubernetes will be used
+Using Spring Boot’s support for graceful shutdown and probes for liveness and readiness
+Introducing Helm
+Running Helm commands
+Looking into a Helm chart
+Helm templates and values
+The common library chart
+The ConfigMap template
+The Secrets template
+The Service template
+The Deployment template
+The component charts
+The environment charts
+Deploying to Kubernetes for development and test
+Building Docker images
+Resolving Helm chart dependencies
+Deploying to Kubernetes
+Changes in the test script for use with Kubernetes
+Testing the Deployment
+Testing Spring Boot’s support for graceful shutdown and probes for liveness and readiness
+Deploying to Kubernetes for staging and production
+Changes in the source code
+Deploying to Kubernetes
+Cleaning up
+Summary
+Questions
+Implementing Kubernetes Features to Simplify the System Landscape
+Technical requirements
+Replacing the Spring Cloud Config Server
+Changes required to replace the Spring Cloud Config Server
+Replacing the Spring Cloud Gateway
+Changes required to replace the Spring Cloud Gateway
+Automating certificate provisioning
+Testing with Kubernetes ConfigMaps, Secrets, Ingress, and cert-manager
+Rotating certificates
+Deploying to Kubernetes for staging and production
+Verifying that the microservices work without Kubernetes
+Changes in the Docker Compose files
+Testing with Docker Compose
+Summary
+Questions
+Using a Service Mesh to Improve Observability and Management
+Technical requirements
+Introducing service meshes using Istio
+Introducing Istio
+Injecting Istio proxies into microservices
+Introducing Istio API objects
+Simplifying the microservice landscape
+Replacing the Kubernetes Ingress controller with an Istio ingress gateway
+Replacing the Zipkin server with Istio’s Jaeger component
+Deploying Istio in a Kubernetes cluster
+Setting up access to Istio services
+Creating the service mesh
+Source code changes
+Content in the _istio_base.yaml template
+Content in the _istio_dr_mutual_tls.yaml template
+Running commands to create the service mesh
+Logging propagation of trace and span IDs
+Observing the service mesh
+Securing a service mesh
+Protecting external endpoints with HTTPS and certificates
+Authenticating external requests using OAuth 2.0/OIDC access tokens
+Protecting internal communication using mutual authentication (mTLS)
+Ensuring that a service mesh is resilient
+Testing resilience by injecting faults
+Testing resilience by injecting delays
+Performing zero-downtime updates
+Source code changes
+Virtual services and destination rules
+Deployments and services
+Tying things together in the prod-env Helm chart
+Deploying v1 and v2 versions of the microservices with routing to the v1 version
+Verifying that all traffic initially goes to the v1 version of the microservices
+Running canary tests
+Running a blue-green deployment
+A short introduction to the kubectl patch command
+Performing the blue-green deployment
+Running tests with Docker Compose
+Summary
+Questions
+Centralized Logging with the EFK Stack
+Technical requirements
+Introducing Fluentd
+Overview of Fluentd
+Configuring Fluentd
+Deploying the EFK stack on Kubernetes
+Building and deploying our microservices
+Deploying Elasticsearch and Kibana
+A walkthrough of the manifest files
+Running the deploy commands
+Deploying Fluentd
+A walkthrough of the manifest files
+Running the deploy commands
+Trying out the EFK stack
+Initializing Kibana
+Analyzing the log records
+Discovering the log records from microservices
+Performing root cause analyses
+Summary
+Questions
+Monitoring Microservices
+Technical requirements
+Introduction to performance monitoring using Prometheus and Grafana
+Changes in source code to collect application metrics
+Building and deploying the microservices
+Monitoring microservices using Grafana dashboards
+Installing a local mail server for tests
+Configuring Grafana
+Starting up the load test
+Using Kiali’s built-in dashboards
+Importing existing Grafana dashboards
+Developing your own Grafana dashboards
+Examining Prometheus metrics
+Creating the dashboard
+Trying out the new dashboard
+Exporting and importing Grafana dashboards
+Setting up alarms in Grafana
+Setting up a mail-based notification channel
+Setting up an alarm on the circuit breaker
+Trying out the circuit breaker alarm
+Summary
+Questions
+Installation Instructions for macOS
+Technical requirements
+Installing tools
+Installing Homebrew
+Using Homebrew to install tools
+Install tools without Homebrew
+Install tools on an Intel-based Mac
+Install tools on an Apple silicon-based Mac
+Post-installation actions
+Verifying the installations
+Accessing the source code
+Using an IDE
+The structure of the code
+Summary
+Installation Instructions for Microsoft Windows with WSL 2 and Ubuntu
+Technical requirements
+Installing tools
+Installing tools on Windows
+Installing WSL 2 together with a default Ubuntu server
+Installing a new Ubuntu 22.04 server on WSL 2
+Installing Windows Terminal
+Installing Docker Desktop for Windows
+Installing Visual Studio Code and its extension for Remote WSL
+Installing tools on the Linux server in WSL 2
+Installing tools using apt install
+Installing the Java and Spring Boot CLI using SDKman
+Installing the remaining tools using curl and install
+Verifying the installations
+Accessing the source code
+The structure of the code
+Summary
+Native-Complied Java Microservices
+Technical requirements
+When to native-compile Java source code
+Introducing the GraalVM project
+Introducing the Spring’s AOT engine
+Handling problems with native compilation
+Changes in the source code
+Updates to the Gradle build files
+Providing reachability metadata and custom hints
+Enabling Spring beans at build time in application.yml files
+Updated runtime properties
+Configuration of the GraalVM Native Image tracing agent
+Updates to the test-em-all.bash verification script
+Testing and compiling Native Images
+Installing GraalVM and its Native Image compiler
+Running the tracing agent
+Running native tests
+Creating a Native Image for the current OS
+Creating a Native Image as a Docker image
+Testing with Docker Compose
+Testing Java VM-based microservices with AOT mode disabled
+Testing Java VM-based microservices with AOT mode enabled
+Testing natively compiled microservices
+Testing with Kubernetes
+Summary
+Questions
+Other Books You May Enjoy
+Index
+Landmarks
+Cover
+Index

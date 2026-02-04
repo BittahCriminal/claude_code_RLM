@@ -1,0 +1,2217 @@
+t parallel search techniques are explained by Mark Jenmougin here:
+www.sans.org/cyber-security-summit/archives/file/summit-archive-1524582079.pdf
+Conclusion
+Network security monitoring remains a vital component for incident response, threat hunting, and network security in general. Although encryption is
+increasingly used for network communications, many of the activities that occur daily within our networks still do so in the clear. It is imperative that we have visibility over data in motion across the network as part of an active defense strategy. Using tools such as Elastic Stack provides an analysis platform that can ingest not only NSM data but also host‐based data to provide a more complete picture of what is occurring within the environment. As you continue through this book, think about the high‐value data sources that would benefit you if they were incorporated into a security‐focused implementation of Elastic Stack to provide visibility across both the network and endpoints.
+
+CHAPTER 8
+Event Log Analysis
+Microsoft Windows provides detailed auditing capabilities that have improved with each new operating system version. The event logging service can generate a vast amount of information about account logons, file and system access, changes to system configurations, process tracking, and much more. These logs can be stored locally, or they can leverage Window's Event Forwarding (WEF) store event logs on a remote Windows system. Microsoft provides access to event log data through the built‐in Event Viewer application and through PowerShell cmdlets that allow for queries leveraging PowerShell Remoting across the network. Event logs can also be centralized to a third‐party security information and event management (SIEM) solution for aggregation and analysis. With proper tuning and log retention, event logs can be an extremely powerful tool for incident responders.
+Understanding Event Logs
+An event is an observable activity that occurs on the system. The Windows event logging service can record five different types of event record: Error, Warning, Information, Success Audit, and Failure Audit. All of these have a defined set of data that is recorded for each event, as well as additional, event‐specific details that may be recorded depending on the type of event. Each event can be recorded in an event log record. Event log records are written to event log files
+by event log sources (programs capable of writing to the event logs). Modern Windows systems have a variety of event logs to which event log sources may write event log records. All Windows systems have the primary Windows logs: Application, Security, and System. Additional Applications and Services Logs are used for specific purposes on each Windows system as well. The built‐in Event Viewer utility provides an easy way to look at event logs on your local system.
+Figure 8.1
+shows the Windows Logs and the Applications and Services Logs on a Windows Server 2019 domain controller.
+Figure 8.1
+:
+Event Viewer showing default logs on Windows Server 2019
+Under Windows Logs shown in the left pane of
+Figure 8.1
+, you can see the default Windows event logs. From an incident response perspective, the Security log is one of the most useful sources of log information. The System log records events related to the operating system and device drivers and is helpful for system administration and troubleshooting, but some System event log records may also be of use during incident response. The Application log can be written to by various applications on the system, so its contents will vary depending on the applications installed and the associated audit settings that are configured. The Setup log is populated during initial operating system installation.
+Forwarded Events is the default location to receive events forwarded from other systems using log subscriptions. For remote logging, a remote system running the Windows Event Collector service subscribes to receive event logs produced by other systems. The types of logs to be collected can be specified at a granular level, and transport occurs over HTTPS on port 5986 using WinRM. Group Policy Objects (GPOs) can be used to configure the remote logging facilities on each computer.
+In addition to the Application log that is located under the Windows Logs category, Windows provides an Applications and Services Logs category. As shown in
+Figure 8.1
+, several additional default logs appear under this category on the example domain controller. The logs located here are geared toward specific event types and may therefore retain events for a longer period of time before reaching their maximum size. This is because fewer events are recorded in each log compared to the more general‐purpose Security event log (by default, once an event log reaches its maximum size, the oldest events are deleted as new events are recorded). For this reason, these Applications and Services Logs can be useful to incident responders when trying to determine information about events that happened in the past, particularly if the more active Windows Logs have already rolled over due to size restrictions. Remember, however, that backup copies and volume shadow copies (discussed in
+Chapter 11
+, “Disk Forensics”) of log files may exist even when their maximum size is reached and events begin to be deleted. Deleted event log record entries may also be able to be recovered forensically from unallocated disk space. You should plan your log retention strategy to ensure that critical security events are available for a sufficient period of time. Your strategy should include defining the retention for both locally stored logs as well as the retention period of logs once they are aggregated to a SIEM solution or similar central log storage. The optimal retention time for each will be specific to your environment, but consider that the average dwell time of an attacker before being detected is currently months, not days, when making that decision. Regulatory requirements may also exist that require retention of certain logs for even longer periods of time.
+The right pane shown on
+Figure 8.1
+provides access to several actions you can take to interact with the event logs. Filter Current Log allows you to search on criteria such as time, event level (Critical, Warning, etc.), event sources, event IDs, keywords, and others, as shown in
+Figure 8.2
+. Note that the User field may not behave as you would hope. Often it contains N/A for events, depending on the event source generating the event. You'll learn specific techniques to locate logon, account logon, object access, and other events based on the associated user account as we proceed through this chapter.
+Figure 8.2
+:
+The filter options in Event Viewer
+Once you have filtered on the types of events of interest to your particular query, you can then specify a search term and use the Find feature in the Actions menu to look for specific events, such as a user account name. If you find yourself using a filter setting repeatedly, you can save it as a custom view for quick access in the future by choosing Create Custom View from the Action menu. This will save your settings under the Custom Views section of the Event Viewer, as seen in
+Figure 8.1
+, so that you can simply click that custom view to apply the same filter in the future. Once filtered, you can export the matching events to a separate file by right‐clicking the applicable custom view and choosing the option entitled Save All Events in Custom View As.
+Each of the five types of events mentioned at the beginning of this chapter follow the same format and use the same fields to store their data. The standard fields can be seen at the bottom of
+Figure 8.3
+. In addition, there is an event‐specific data area (sometimes called the event description) that contains information for each event type. In many cases, this event‐specific data area will be where the most useful information for your investigation is stored.
+Figure 8.3
+shows an interactive logon event.
+Figure 8.3
+:
+A successful interactive logon event
+The fields shared by all event types are shown at the bottom of the figure. They include the items listed in
+Table 8.1
+.
+Table 8.1
+:
+Default event log fields
+FIELD
+DESCRIPTION
+Log Name
+The name of the event log where the event is stored. Useful when processing numerous logs pulled from the same system.
+Source
+The service, Microsoft component, or application that generated the event.
+Event ID
+A code assigned to each type of audited activity.
+Level
+The severity assigned to the event in question.
+User
+The user account involved in triggering the activity or the user context that the source process was using when it logged the event. As you see later in this chapter, this field often indicates System, N/A, or a user that is not the cause of the event being recorded. In most cases, user information contained in the event‐specific data area is a better indicator of the user account involved.
+OpCode
+Assigned by the source generating the log. Its meaning is left to the source.
+Logged
+The local system date and time when the event was logged.
+Task Category
+Assigned by the source generating the log. Its meaning is left to the source.
+Keywords
+Assigned by the source and used to group or sort events.
+Computer
+The computer on which the event was logged. This is useful when examining logs collected from multiple systems but should not be considered the device that caused an event (for example, when a remote logon is initiated, the Computer field will still show the name of the system logging the event, not the source of the connection).
+As shown in
+Figure 8.3
+, the event‐specific data area is displayed at the top of the record entry. As will be the case with many event records, the information of most value for this entry is contained within this event‐specific data area. Note that the User field at the bottom of
+Figure 8.3
+is listed as N/A, and the actual information regarding the account name used to log on to the system is found in the event‐specific data area, under the New Logon section. In this case, we used the user account jlemburg, which is a domain account in the COMPANY domain. Event log entries are categorized by a series of different event identifiers (IDs). Each event ID records a specific type of entry for a specific event source. Learning the event IDs associated with important events, and the idiosyncrasies of the different event‐specific data area for each of those event IDs, is an important skill for incident handlers.
+EDITING EVENT LOGS
+Event log files are not easy to manipulate, but it can be done. The Shadow Brokers released a tool called EventLogEdit that can unlink selected event log records so that they do not appear when queried through normal means, but the logs may still be recoverable forensically. Each event record entry is assigned a sequential EventRecordID when it is recorded (shown in
+Figure 8.4
+in a moment), and malicious manipulation of event log files may result in gaps that can be detected in these record entries. Additional details can be found here:
+https://blog.fox-it.com/2017/12/08/detection-and-recovery-of-nsas-covered-up-tracks
+Retention of logs in secure, centralized locations, such as a SIEM solution, can help mitigate any risk of log tampering.
+The data for each event log record is stored as binary XML within an event log file. Event log files end in the
+.evtx
+extension (the older
+.evt
+extension was used for a previous, binary data format in older Windows systems). These EVTX files are mostly located in the
+%SystemRoot%\System32\winevt\Logs
+directory. You can view the XML associated with an event log record by clicking the Details tab near the top of the event log record (shown in
+Figure 8.3
+and
+Figure 8.4
+) and choosing XML View. The information for the default fields is stored within the System element, followed by the event‐specific data area information in the
+EventData
+element, as shown in
+Figure 8.4
+.
+Figure 8.4
+:
+The XML representation of an event log record
+Since the event‐specific data area, which is found in the
+EventData
+element of the XML representation of the event log record, often contains information of value, you will see later in this chapter how to leverage PowerShell to access this data more efficiently.
+Event log records are recorded in accordance with the Windows audit policy settings, which are set in the Group Policy Management Editor under Computer Configuration ➪ Policies ➪ Windows Settings ➪ Security Settings ➪ Advanced Audit Policy Configuration ➪ Audit Policies. You can find baseline audit policy recommendations from Microsoft here:
+https://docs.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/audit-policy-recommendations
+These policy settings control which systems record which events and other aspects of Windows auditing. As discussed in
+Chapter 2
+, “Incident Readiness,” ensuring that you have adequate logging enabled, with sufficient retention of those logs, is an important step to get right before an incident is detected. The U.S. National Security Agency publishes a useful guide for configuring and using event log data to detect adversary activity. The guide is freely available here:
+https://apps.nsa.gov/iaarchive/library/reports/spotting-the-adversary-with-windows-event-log-monitoring.cfm
+For the remainder of this chapter, we assume that the associated audit policy is enabled to record the event logs discussed, rather than reiterating the importance of this first step in every paragraph that follows.
+Since audit policies control what is and is not logged, attackers may seek to modify these policies to reduce the evidence that they leave behind. Fortunately, changes to audit policy are themselves logged in an event log record with Event ID 4719 (System audit policy was changed). The Audit Policy Change section lists the specific changes that were made to the audit policy. The Subject section of the event description may show the account that made the change, but often (such as when the change is made through Group Policy) this section simply reports the name of the local system. It is also worth noting that regardless of the settings in the audit policy, if the Security event log is cleared, Event ID 1102 will be recorded as the first entry in the new, blank log (although an attacker may use tools such as Mimikatz to prevent this event from being generated). You can tell the name of the user account that cleared the log in the details of the event record entry. A similar event, with Event ID 104, is generated in the System log if it is cleared.
+FOR FURTHER STUDY…
+In this chapter, we provide actionable information on using Windows event logs to reconstruct adversary activity within a network. We will provide so many event IDs and specific indicators that can be used to detect and respond to malicious actors
+that you may find yourself a bit overwhelmed. Because log analysis requires a working knowledge of many event IDs, we also provide a PDF version of much of this information at this book's website,
+www.AppliedIncidentResponse.com
+, so that you have an easily searchable reference of the many event IDs described. In
+Mastering Windows Network Forensics and Investigation
+(Sybex, 2012), we dedicated four chapters to log analysis. Those seeking additional information will find a wealth of detail in that previous work that still applies today. We will cover additional details about Kerberos in
+Chapter 12
+, “Lateral Movement Analysis,” when we explore attacks such as pass‐the‐ticket, golden tickets, and others. Additional information about specific event IDs can be found on Randy Franklin Smith's Security Log Encyclopedia at
+www.ultimatewindowssecurity.com/securitylog/encyclopedia/default.aspx
+.
+Account‐Related Events
+For authenticated access to be granted to a Windows resource, an authentication authority must verify that the credentials provided are valid, and then a system provides access to the desired resource. These two actions may be performed by the same system or by different systems. For example, when a user attempts to log in with a domain account to a domain workstation, the authentication authority that confirms whether the provided credential is valid is a domain controller, but the system providing the access to the desired resource is the client workstation. Similarly, if a local account is used to access a stand‐alone computer, that computer both verifies that the authentication is valid and grants the access to the desired resource.
+When the authentication is approved, Windows records an account logon event in the Security event log of the system that verifies the credential. When a system provides access to a resource based on the results of that authentication, a logon event is recorded in the Security event log of the system providing the access. For example, if a domain user requests access to a file server called FS1, the associated account logon event will be recorded on a domain controller within the network, and the logon event will be recorded on the FS1 server. Similarly, in the case of a local user account, the same computer both approves the authentication requests and permits the access to the system. Therefore, when a local user account is used to interactively logon to a stand‐alone workstation, both the account logon event and the logon event will be recorded on that workstation. You may find it helpful to think of account logon events as authentication events and logon events as records of actual logon activity.
+The default protocol used within a Windows domain for authentication is Kerberos; however, older protocols such as NT LAN Manager version 2 (NTLMv2) may also be used during normal system activity. Kerberos by its very nature
+requires a hostname in order to complete its authentication process. When users reference a remote system by IP address, for example, NTLMv2 is the authentication protocol that will be used. For NTLMv2, the NT hash of the user's password acts as a shared secret between the authentication authority (such as a domain controller or the local security authority subsystem in the case of a local account) and the client seeking to gain access. When the user enters the account password, the local system will calculate the corresponding NT hash for that password and use it to encrypt a challenge that is sent by the remote system to be accessed. The authentication authority can then use its copy of the shared secret (the NT hash of the user's password) to encrypt the same challenge and verify that the response sent by the client seeking access is based on the correct password, thereby proving that the user is authorized to use that account.
+Kerberos is a more involved protocol. When a user authenticates in a domain environment, the hash of the user's password is once again used as a shared secret to authenticate the user's access. Once knowledge of the password (or other authentication requirements in a multifactor authentication environment) is correctly provided, Kerberos issues a ticket‐granting ticket (TGT) that serves as proof of identity in the network. By default, a TGT is valid for a period of 10 hours. If a user wishes to access a remote resource, the user presents this TGT to the domain controller and requests a service ticket for that resource from the domain controller. The service ticket lists the user's group memberships, and by extension the user account effective permissions, and encrypts that information with the shared secret held by both the domain controller and the service being requested. The service can use its copy of the shared secret to decrypt the service ticket, read the requesting user's associated permissions, and grant access to the resource in accordance with the user's permissions.
+Any domain controller within a domain can handle these authentication requests. Issuance of a TGT or a service ticket results in the creation of an account logon event. Whichever domain controller authenticates the user and issues the TGT or service ticket records the associated account logon event record entry. Determining whether a user was authenticated to the domain therefore requires searching the event logs of all domain controllers within that domain for the period in question. Additionally, when the service ticket is used, the system being accessed records an associated logon event in its event logs. Finally, whatever system the user was sitting at when authentication was requested also records a logon event in its event logs since it was also accessed by the user account. As you can see, the event logs necessary to reconstruct authenticated user activity can be strewn throughout your environment across clients, member servers, and domain controllers. While this may at first seem discouraging, since the information you want may be scattered across the environment, it is also discouraging for an attacker who might seek to conceal evidence of
+their presence. Because so many systems are involved in the recording of these events, attempting to clean up the digital footprints left behind is a formidable challenge. Fortunately for incident handlers, high‐value events can be aggregated into a tactical SIEM solution for centralized searching, and PowerShell Remoting can be leveraged to query all systems throughout the environment from a single command line.
+In a domain environment, most organizations rely on domain accounts for most, if not all, authentication. For that reason, account logon events should occur primarily on the domain controllers. Account logon events appearing on clients or member servers indicate that a local account is being used on the system. Attackers will frequently create local accounts to provide backdoor access to a system that was compromised, so looking for authentication using local accounts in event logs across the enterprise may help identify malicious activity. There are several different event IDs involved in Kerberos and NTLMv2 authentication. The following event IDs may be found in the Security event log of domain controllers related to account logon events:
+4768
+The successful issuance of a TGT shows that a user account was authenticated by the domain controller. The Network Information section of the event description contains additional information about the remote host in the event of a remote logon attempt. The Keywords field indicates whether the authentication attempt was successful or failed. In the event of a failed authentication attempt, the result code in the event description provides additional information about the reason for the failure, as specified in RFC 4120. Some of the more commonly encountered codes are listed in
+Table 8.2
+.
+Table 8.2
+:
+Common Event ID 4768 result codes
+Source:
+https://docs.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4768
+DECIMAL
+HEX
+MEANING
+6
+0x6
+Username not valid.
+12
+0xC
+Policy restriction prohibiting this logon (such as a workstation restriction or time‐of‐day restriction).
+18
+0x12
+The account is locked out, disabled, or expired.
+23
+0x17
+The account's password is expired.
+24
+0x18
+The password is incorrect.
+32
+0x20
+The ticket has expired (common on computer accounts).
+37
+0x25
+The clock skew is too great.
+4769
+A service ticket was requested by a user account for a specified resource. This event description shows the source IP of the system that made the request, the user account used, and the service to be accessed. These events provide a useful source of evidence as they track authenticated user access across the network. The Keywords field indicates whether the request for the service ticket was successful or failed. In the case of a failure, the result code indicates the reason for the failure. The ticket encryption type is also recorded, which might be useful for detecting attacks against Kerberos (discussed in more detail in
+Chapter 12
+).
+4770
+A service ticket was renewed. The account name, service name, client IP address, and encryption type are recorded.
+4771
+Depending on the reason for a failed Kerberos logon, either Event ID 4768 or Event ID 4771 is created. In either case, the result code in the event description provides additional information about the reason for the failure.
+4776
+This event ID is recorded for NTLM authentication attempts. The Network Information section of the event description contains additional information about the remote host in the event of a remote logon attempt. The Keywords field indicates whether the authentication attempt succeeded or failed. In the event of authentication failure, the error code in the event description provides additional details about the failure, as described in
+Table 8.3
+.
+A series of failed 4776 events with Error Code C000006A (the password is invalid) followed by an Error Code C0000234 (the account is locked out) may be indicative of a failed password guessing attack (or a user who has simply forgotten the account password). Similarly, a series of failed 4776 events followed by a successful 4776 event may show a successful password guessing attack. The presence of Event ID 4776 on a member server or client is indicative of a user attempting to authenticate to a local account on that system and may in and of itself be cause for further investigation.
+Table 8.3
+:
+Common Event ID 4776 error code descriptions
+Source:
+https://docs.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4776
+ERROR CODE
+MEANING
+0xC0000064
+The username is incorrect.
+0xC000006A
+The password is incorrect.
+0xC000006D
+Generic logon failure. Possibly bad username or password or mismatch in the LAN Manager Authentication Level between the source and target computers.
+0xC000006F
+Account logon outside authorized hours.
+0xC0000070
+Account logon from unauthorized workstation.
+0xC0000071
+Account logon with expired password.
+0xC0000072
+Account logon to account disabled by administrator.
+0xC0000193
+Account logon with expired account.
+0xC0000224
+Account logon with Change Password At Next Logon flagged.
+0xC0000234
+Account logon with account locked.
+0xc0000371
+The local account store does not contain secret material for the specified account.
+PASS‐THE‐HASH ATTACKS
+With the NTLMv2 challenge‐response authentication mechanism, the NT hash (which is the unsalted, MD4 hash value of the case‐sensitive, Unicode‐encoded password) is used as the shared secret to prove that the requesting user has knowledge of the password and is therefore authorized to use the account. As we mentioned in
+Chapter 3
+, “Remote Triage,” these hashes are stored in memory during interactive logons to enable single sign‐on to other systems. Similarly, the TGT is also stored in memory to facilitate the same type of single sign‐on convenience. Tools such as Meterpreter and Mimikatz can reach into RAM and extract these hashes and tickets in order to impersonate users on the network. These pass‐the‐hash and pass‐the‐ticket attacks still complete the Windows authentication mechanisms, and event log records of such activity should exist. Checking for unusual authenticated access, such as a single account logging into many systems, accounts being used to access systems they have not previously accessed, workstation‐to‐workstation communication (rather than workstation‐to‐server), unknown computers that are not part of the domain being used to authenticate within your environment, and similar abnormal logins should be examined for the potential of being malicious. Event ID 4624 with a logon type of 3 (remote) is a good event record type to focus on when looking for authenticated access being used by adversaries to move around your network. Differentiating legitimate versus malicious access will largely come down to understanding normal behavior in your environment and focusing on abnormal logon activity.
+Systems that are accessed after a successful authentication record the logon event in their Security event log. Several event IDs can be examined on these systems to investigate authenticated user access.
+4624
+A logon to a system has occurred. Type 2 indicates an interactive (usually local) logon, whereas a Type 3 indicates a remote or network logon. The event description will contain information about the host and account name involved. For remote logons, focus on the Network Information section of the event description for remote host information. Correlation with the associated 4768, 4769, or 4776 events may yield additional details about a remote host. Discrepancies in the record entry between the recorded hostname and its assigned IP address may be indicative of Server Message Block (SMB) relay attacks, where an attacker relays a request from one system using an IP address not associated with that system.
+The Caller Process Name and Caller Process ID fields in the Process Information section of the event description can provide additional details about the process initiating the logon.
+Successful Remote Desktop Protocol (RDP) connections usually log as logon type 10 in Event ID 4624. This records a successful remote interactive logon and may result in the user's credentials being cached in RAM and possibly on disk. Use of Restricted Admin mode may impact this. Failed RDP logons usually result in logon type 3.
+Logon events contain a Type code in the event description, as described in
+Table 8.4
+.
+Table 8.4
+:
+Logon event type code descriptions
+Source:
+www.ultimatewindowssecurity.com/securitylog/encyclopedia/event.aspx?eventid=4624
+and
+https://docs.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2003/cc787567(v=ws.10)
+.
+LOGON TYPE
+DESCRIPTION
+2
+Interactive, such as logon at the keyboard and screen of the system, or remotely using third‐party remote access tools like VNC, or
+psexec
+with the
+‐u
+switch. Logons of this type will cache the user's credentials in RAM for the duration of the session and may cache the user's credentials on disk.
+3
+Network, such as access to a shared folder on this computer from elsewhere on the network. This represents a noninteractive logon, which does not cache the user's credentials in RAM or on disk.
+4
+Batch (indicating a scheduled task). Batch logon type is used by batch servers, where processes may be executing on behalf of a user without their direct intervention.
+5
+Service indicates that a service was started by the Service Control Manager.
+7
+Unlock indicates that an unattended workstation with a password protected screen is unlocked.
+8
+NetworkCleartext indicates that a user logged on to this computer from the network and the user's password was passed to the authentication package in its unhashed form. The built‐in authentication packages all hash credentials before sending them across the network. The credentials do not traverse the network in plaintext (also called cleartext). Most often indicates a logon to Internet Information Services (IIS) with basic authentication.
+9
+NewCredentials indicates that a user logged on with alternate credentials to perform actions such as with RunAs or mapping a network drive. If you want to track users attempting to log on with alternate credentials, also look for Event ID 4648.
+10
+RemoteInteractive indicates that Terminal Services, Remote Desktop, or Remote Assistance for an interactive logon. See the note on RDP at the end of this section for more details.
+11
+CachedInteractive (logon with cached domain credentials such as when logging on to a laptop when away from the network). The domain controller was not contacted to verify the credential, so no account logon entry is generated.
+4625
+A failed logon attempt. Large numbers of these throughout a network may be indicative of password guessing or password spraying attacks. Again, the Network Information section of the event description can provide valuable information about a remote host attempting to log on to the system. Note that failed logons over RDP may log as Type 3 rather than Type 10, depending on the systems involved.
+You can determine more about the reason for the failure by consulting the Failure Information section of the event description. The status code found there provides additional details about the event, as described in
+Table 8.5
+.
+Table 8.5
+:
+Common logon failure status codes
+Source:
+https://docs.microsoft.com/en-us/windows/security/threat-protection/auditing/event-4625
+STATUS CODE
+DESCRIPTION
+0XC000005E
+Currently no logon servers are available to service the logon request.
+0xC0000064
+User logon with misspelled or bad user account.
+0xC000006A
+User logon with misspelled or bad password.
+0XC000006D
+This is either due to a bad username or incorrect authentication information.
+0XC000006E
+Unknown username or bad password.
+0xC000006F
+User logon outside authorized hours.
+0xC0000070
+User logon from unauthorized workstation.
+0xC0000071
+User logon with expired password.
+0xC0000072
+User logon to account disabled by administrator.
+0XC00000DC
+Indicates the Server was in the wrong state to perform the desired operation.
+0XC0000133
+Clocks between domain controller and other computer too far out of sync.
+0XC000015B
+The user has not been granted the requested logon type (also known as logon right) at this machine.
+0XC000018C
+The logon request failed because the trust relationship between the primary domain and the trusted domain failed.
+0XC0000192
+An attempt was made to log on, but the Netlogon service was not started.
+0xC0000193
+User logon with expired account.
+0XC0000224
+User is required to change their password at next logon.
+0XC0000225
+Evidently a bug in Windows and not a risk.
+0xC0000234
+User logon with account locked.
+0XC00002EE
+Failure Reason: An error occurred during logon.
+0XC0000413
+Logon Failure: The machine you are logging on to is protected by an authentication firewall. The specified account is not allowed to authenticate to the machine.
+4634/4647
+User logoff is recorded by Event ID 4634 or Event ID 4647. The lack of an event showing a logoff should not be considered overly suspicious, as Windows is inconsistent in logging Event ID 4634 in many cases. The Logon ID field can be used to tie the Event ID 4624 logon event with the associated logoff event (the Logon ID is unique between reboots on the same computer). Type 3 (Network) logons will typically disconnect shortly after a request is complete and do not indicate the actual amount of time that a user was engaged in any particular activity. Interactive logons (primarily type 2, but also types 10 and 11 where they exist) can provide a better sense of session duration, but Windows is not overly consistent in logging Event ID 4634 and may disconnect sessions due to inactivity well after a user stopped actively interacting with a session.
+4648
+A logon was attempted using explicit credentials. When a user attempts to use credentials other than the ones used for the current logon session
+(including bypassing User Account Control [UAC] to open a process with administrator permissions), this event is logged.
+4672
+This event is recorded when certain privileges associated with elevated or administrator access are granted to a logon. As with all logon events, the event log will be generated by the system being accessed.
+4778
+This event is logged when a session is reconnected to a Windows station. This can occur locally when the user context is switched via fast user switching. It can also occur when a session is reconnected over RDP. The initial connection over RDP is logged with Event ID 4624 as mentioned earlier. To differentiate between RDP versus local session switching, look at the Session Name field within the event description. If local, the field will contain Console, and if remote, it will begin with RDP. For RDP sessions, the remote host information will be in the Network Information section of the event description.
+4779
+This event is logged when a session is disconnected. This can occur locally when the user context is switched via fast user switching. It can also occur when a session is reconnected over RDP. A full logoff from an RDP session is logged with Event ID 4637 or 4647 as mentioned earlier. To differentiate between RDP versus local session switching, look at the Session Name field within the event description. If local, the field will contain Console, and if remote, it will begin with RDP. For RDP sessions, the remote host information will be in the Network Information section of the event description.
+FOR MORE ON RDP SESSIONS
+Additional information about RDP Sessions can be found in the
+%SystemRoot%\System32\winevt\Logs\Microsoft‐Windows‐TerminalServices‐LocalSessionManager%4Operational
+log file. Event ID 21 in this log shows session logon events, both local and remote, including the IP from which the connection was made if remote. Event ID 24 in this log shows session disconnection, including the IP from which the connection was made if remote. For local logons, the Source Network Address field of the event description will read LOCAL rather than provide the remote IP.
+Additional information about RDP Sessions can also be found in the
+%SystemRoot%\System32\winevt\Logs\Microsoft‐Windows‐TerminalServices‐RemoteConnectionManager%4Operational
+log file. Event ID 1149 in this log will show the user account and source IP used to initiate an RDP session.
+In addition to using stolen credentials, malicious actors may create new accounts, activate previously disabled accounts, or modify existing user accounts to increase their privileges and permissions. Changes to group membership are a simple way to increase the access to resources for a user account. Modern adversaries will attempt to hide in plain sight, and one of the easiest ways to do this is to use a valid user account to perform their activities. Examining
+account management events is therefore an important step in many incident response scenarios. The events described in
+Table 8.6
+will be recorded on the system where the account was created or modified (the local system for a local account or a domain controller for a domain account).
+Table 8.6
+:
+Account management events
+EVENT ID
+DESCRIPTION
+4720
+A user account was created.
+4722
+A user account was enabled.
+4723
+A user attempted to change an account's password.
+4724
+An attempt was made to reset an account's password.
+4725
+A user account was disabled.
+4726
+A user account was deleted.
+4727
+A security‐enabled global group was created.
+4728
+A member was added to a security‐enabled global group.
+4729
+A member was removed from a security‐enabled global group.
+4730
+A security‐enabled global group was deleted.
+4731
+A security‐enabled local group was created.
+4732
+A member was added to a security‐enabled local group.
+4733
+A member was removed from a security‐enabled local group.
+4734
+A security‐enabled local group was deleted.
+4735
+A security‐enabled local group was changed.
+4737
+A security‐enabled global group was changed.
+4738
+A user account was changed.
+4741
+A computer account was created.
+4742
+A computer account was changed.
+4743
+A computer account was deleted.
+4754
+A security‐enabled universal group was created.
+4755
+A security‐enabled universal group was changed.
+4756
+A member was added to a security‐enabled universal group.
+4757
+A member was removed from a security‐enabled universal group.
+4758
+A security‐enabled universal group was deleted.
+4798
+A user's local group membership was enumerated. Large numbers of these events may be indicative of adversary account enumeration.
+4799
+A security‐enabled local group membership was enumerated. Large numbers of these events may be indicative of adversary group enumeration.
+As you can imagine, identifying malicious behavior from thousands of event log records of varying event ID types, spread across multiple systems, can be more than a little challenging. Aggregating these logs into a centralized location such as a SIEM solution or dedicated log aggregation server can help make the process of searching through the logs easier, but making sense out of all this data is still a challenge. The Japan Computer Emergency Response Team Coordination Center (JPCERT/CC) released a tool called LogonTracer to help address this challenge. LogonTracer parses log files for key event IDs and presents the information it finds as a graph that shows which accounts access which systems in the associated event log records that support the graph being presented. The tool also looks for account management entries, differentiates between different logon types, performs statistical analysis to highlight suspicious behavior, and presents its results in an easy‐to‐understand graphical user interface. The graph allows a multitude of different view options to focus on a single user account, rapidly differentiate between standard and privileged users, see detailed information about the underlying event log records, rank users and hosts based on the number of remote connections, and many other useful representations of the event log data. The tool and additional information on its use are freely available from GitHub at
+https://github.com/JPCERTCC/LogonTracer
+. In addition to the LogonTracer tool, JPCERT/CC released an excellent paper on detecting lateral movement using event logs that can be downloaded from
+www.jpcert.or.jp/english/pub/sr/20170612ac-ir_research_en.pdf
+.
+Another open‐source project that can help secure your environment from malicious use of authenticated connections is BloodHound, which is freely available at
+https://github.com/BloodHoundAD/BloodHound
+. BloodHound uses graph theory to analyze systems across the enterprise; determine information about logged‐on users; understand relationships between users, computers, and groups; and use that information to identify exploitation paths where credentials could be stolen by an attacker to escalate privileges and ultimately obtain domain or enterprise administrator credentials. Bloodhound uses data collectors such as SharpHound (included as a component of Bloodhound) to enumerate the environment and query large numbers of systems regarding users, groups, and other details. This enumeration will generate many Event ID 4798 and Event ID 4799 entries, which can be used to detect this type of activity when it is used maliciously. From a defensive perspective, proactive use of BloodHound within your environment can help identify security gaps and allow you to secure those gaps before an adversary leverages them against you. Examples of items BloodHound might highlight include improper use of privileged credentials, allocation of too many permissions to user accounts, and insufficient segmentation in your environment. It also gives you the opportunity to determine if your current detection mechanisms provide adequate visibility to detect malicious use of SMB and valid credentials within your environment. We explore other proactive ways to test and improve your response capabilities in more detail in
+Chapter 14
+, “Proactive Activities.”
+Object Access
+Whether you’re dealing with an insider threat or a remote attacker who has gained access to your systems, determining what data was accessed by an adversary is frequently necessary during an incident response. Windows provides auditing capabilities to answer this question, but only if they are explicitly enabled before an incident occurs. Attackers frequently leverage valid credentials to remotely access data in user‐created shared folders or administrative shares (shares that are created by the system and designated by a dollar sign at the end of the share name). Doing so will generate Account Logon and Logon events as mentioned earlier, but additional logging can also be enabled in the Group Policy Management Console by navigating to Computer Configuration ➪ Policies ➪ Windows Settings ➪ Security Settings ➪ Advanced Audit Policy Configuration ➪ Audit Policies ➪ Object Access ➪ Audit File Share. Once enabled, the event IDs described in
+Table 8.7
+are logged in the Security log of the local system.
+Table 8.7
+:
+Network share event IDs
+EVENT ID
+DESCRIPTION
+5140
+A network share object was accessed. The event entry provides the account name and source address of the account that accessed the object. Note that this entry will show that the share was accessed but not what files in the share were accessed. A large number of these events from a single account may be an indicator of an account being used to harvest or map data on the network.
+5142
+A network share object was added.
+5143
+A network share object was modified.
+5144
+A network share object was deleted.
+5145
+A network share object was checked to see whether the client can be granted desired access. Failure is only logged if the permission is denied at the file share level. If permission is denied at the NTFS level, then no entry is recorded.
+If detailed file share auditing is enabled in the Group Policy Management Console (Computer Configuration ➪ Policies ➪ Windows Settings ➪ Security Settings ➪ Advanced Audit Policy Configuration ➪ Audit Policies ➪ Object Access ➪ Audit Detailed File Share), then each file within each share that is accessed will generate an Event ID 5145 log entry. As you can imagine, this level of logging may generate a large volume of results.
+The system initiating the access may also show evidence of the connections in the registry key
+NTUSER\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2
+. We explore registry analysis in
+Chapter 11
+.
+In addition to auditing shared objects, local object access can be audited. The object audit policy is used to audit files, folders, registry keys, and other objects (excluding Active Directory objects) on a Windows system. Object access auditing is not enabled by default but should be enabled on sensitive systems. To do so, simply use the Local Security Policy to set Security Settings ➪ Local Policies ➪ Audit Policy ➪ Audit Object Access to Enabled for Success and Failure. When object access auditing is enabled, some activities are logged by default and others need to be explicitly configured. The reason for this is that object access occurs constantly on a system, so this log is designed to be more granular to allow objects of importance to receive extra auditing without overwhelming the logs by trying to record all object access on the system. Object access audit events are stored in the Security log. If object access auditing is enabled, scheduled tasks automatically receive additional logging as well. The event IDs related to scheduled tasks are described in
+Table 8.8
+.
+Table 8.8
+:
+Scheduled task events
+EVENT ID
+DESCRIPTION
+4698
+A scheduled task was created. The event description contains the user account that created the task in the Subject section. XML details of the scheduled task are also recorded in the event description under the Task Description section and include the Task Name. Additional tags of interest include the following:
+<Date>
+shows the time of the logged event and matches the Logged field of the event itself.
+<Author>
+shows the user that originally created the task; this does not change if another user later updates the task (see Event ID 4702 for additional information about how to determine whether a scheduled task was updated).
+<Description>
+shows the description entered by the user.
+<Triggers>
+provides information on when the task is scheduled to run.
+<User ID>
+shows the user context under which the task will run, which may be different than the account used to schedule the task. If
+<Logon Type>
+shows Password, then the password for the account listed in
+<User ID>
+was entered at the time the task was scheduled, which may indicate an additionally compromised account.
+<Command>
+shows the path to the executable that will run. Any arguments specified will be listed in the
+<Arguments>
+tag.
+4699
+A scheduled task was deleted. The Subject section of the event description contains the Account Name that deleted the task as well as the Task Name.
+4700
+A scheduled task was enabled. See Event ID 4698 for additional details.
+4701
+A scheduled task was disabled. See Event ID 4698 for additional details.
+4702
+A scheduled task was updated. The user who initiated the update appears in the Subject section of the event description. The details of the task after its modification are listed in the XML in the event description. Compare with previous Event ID 4702 or 4698 entries for this task to determine what changes were made. See Event ID 4698 for additional details.
+Aside from scheduled tasks, individual file objects are frequently audited for object access. In addition to enabling the option for Success and/or Failure for Audit Object Access as mentioned earlier, to audit access to individual files or folders you also need to explicitly set the auditing rules in the file or folder's Properties dialog box by selecting the Security tab, clicking Advanced, selecting the Auditing tab, and setting the type of audit and the user account(s) for which auditing should be set. Detailed instructions can be found here:
+https://docs.microsoft.com/en-us/windows/security/threat-protection/auditing/apply-a-basic-audit-policy-on-a-file-or-folder
+For a process to use a system object, such as a file, it must obtain a handle to that object. Once auditing is enabled, the event IDs described in
+Table 8.9
+can be used to view access to important files and folders by tracking the issuance and use of handles to those objects.
+Table 8.9
+:
+Object handle event IDs
+EVENT ID
+DESCRIPTION
+4656
+A handle to an object was requested. When a process attempts to gain a handle to an audited object, this event is created. The details of the object to which the handle was requested and the handle ID assigned to the handle are listed in the Object section of the event description. Success or failure of the handle request will be indicated in the Keywords field. The account used to request the handle, as well as that account's associated Logon ID, is recorded in the Subject section of the event description. The details of the process requesting the handle are listed under the Process Information section of the event description. The Access Request Information shows the type of access requested. Note that obtaining a handle to an object does not mean that all the permissions requested were actually used. Look for additional Event ID 4663 entries with the same Handle ID (which is kept unique between reboots) to determine which permissions were used. You can also try to determine other actions taken by the same user during that session by searching for occurrences of the Logon ID (which is also unique between reboots).
+4657
+A registry value was modified. The user account and process responsible for opening the handle are listed in the event description. The Object section contains details of the modification, including the Object Name field, which indicates the full path and name of the registry key where the value was modified. The Object Value Name field contains the name of the modified registry key value. Note that this event generates only when a key value is modified, not if the key itself is modified.
+4658
+The handle to an object was closed. The user account and process responsible for opening the handle are listed in the event description. To determine the object itself, refer to the preceding Event ID 4656 with the same Handle ID.
+4660
+An object was deleted. The user account and process responsible for opening the handle are listed in the event description. To determine the object itself, refer to the preceding Event ID 4656 with the same Handle ID.
+4663
+An attempt was made to access an object. This event is logged when a process attempts to interact with an object, rather than just obtain a handle to the object. This can be used to help determine what types of actions may have been taken on an object (for example, read only or modify data). See Event ID 4656 for additional details.
+Since Windows 8/Server 2012, additional logging of removable media can be enabled in the Group Policy Management Console by navigating to Computer Configuration ➪ Policies ➪ Windows Settings ➪ Security Settings ➪ Advanced Audit Policy Configuration ➪ Audit Policies ➪ Object Access ➪ Audit Removeable Storage. Once enabled, Windows creates additional Event ID 4663 entries (see
+Table 8.9
+) whenever an account accesses a filesystem object that is on removable storage. This can help identify when users are copying data to or from external media.
+Object auditing can also be configured on Windows registry keys. A common persistence mechanism, which we will explore in more detail in
+Chapter 11
+, is to modify the registry to cause a malicious process to be executed automatically. When object auditing is configured on a registry key, Event ID 4657 will be generated if a value for that key is created, deleted, or modified.
+Keep in mind that object access can generate a large volume of logs, and wading through those logs can be overwhelming if this capability is excessively enabled. For example, enabling object auditing on the Windows folder of your system drive would generate huge volumes of logs and potentially impact system performance. Focus object auditing on targeted files or folders of high value to your organization. You can also use this feature to set up honey objects in your environment, as discussed in
+Chapter 2
+, by placing interesting looking files on key servers and configuring auditing of those objects to record any interactions with them, which may indicate unauthorized activity on that server.
+Auditing System Configuration Changes
+Once an adversary has control of the system, they will frequently make changes to the configuration of that system to ensure the persistence of their control, such as by modifying user accounts, as discussed earlier. We looked at the Security event log records that are enabled for scheduled tasks when object access auditing is turned on, but additional logging of scheduled tasks can also be configured. Scheduled tasks are frequently used as a persistence mechanism
+by attackers, who will schedule a script or executable to occur on a recurring basis in order to ensure that their code continues to run and that their access to the compromised system remains intact. If task schedule history is enabled (which can be done in the Task Scheduler application, through Event Viewer, or with the
+wevtutil
+command), then the
+%SystemRoot%\System32\winevt\Logs\Microsoft‐Windows‐TaskScheduler%4Operational
+log will record activity relating to scheduled tasks on the local system, as described in
+Table 8.10
+.
+Table 8.10
+:
+Scheduled task activity event IDs
+EVENT ID
+DESCRIPTION
+106
+Scheduled Task Created. The entry shows the user account that scheduled the task and the name the user assigned to the task. The Logged date and time show when the task was scheduled. Look for the associated Event IDs 200 and 201 for additional information.
+140
+Scheduled Task Updated. The entry shows the user account that updated the task and the name of the task. The Logged date and time show when the task was updated. Look for the associated Event IDs 200 and 201 for additional information.
+141
+Scheduled Task Deleted. The entry shows the user account that deleted the task and the name of the task.
+200
+Scheduled Task Executed. Shows the task name and the full path to the executable on disk that was run (listed as the Action). Correlate this with the associated Event ID 106 to determine the user account that scheduled the task.
+201
+Scheduled Task Completed. Shows the task name and the full path to the executable on disk that was run (listed as the Action). Correlate this with the associated Event ID 106 to determine the user account that scheduled the task.
+Services are processes that run without interactive user involvement. Windows manages services so that they can start automatically whenever the system is booted and even restart themselves should they encounter a problem during operation. It is no surprise that adversaries will attempt to install malicious services in order to maintain persistence on a system. When a service is installed on the system, Event ID 7045 will be recorded in the System event log (not the Security event log). If you have enabled Advanced Audit Policy Configuration ➪ System Audit Policies ➪ System ➪ Audit Security System Extension in your GPOs, Windows 10 and Server 2016/2019 systems will also record Event ID 4697 in the Security event log. Not only are services often used as a persistence mechanism, but many attack vectors, including exploitation of SMB to run remote code on a system, will temporarily create a service to accomplish their objective. Frequently, the service names used for these types of malicious activities will
+be randomized, making them stand out in the log files.
+Figure 8.5
+shows an example Event ID 7045 that was generated during an SMB relay attack executed with the responder tool (found at
+https://github.com/SpiderLabs/Responder
+).
+Figure 8.5
+:
+Event ID 7045 showing a malicious service
+Here we see a service name that is very obviously randomized. An SMB relay attack interrupts a legitimate authentication exchange in order to redirect the authentication to a different system, allowing the attacker to impersonate a privileged user. The responder tool has a Python script called
+MultiRelay.py
+that automates this type of attack and allows for commands to be run on the remote target system. The mechanism for doing so works like
+psexec
+by Sysinternals, whereby remote code is copied to the target system (in this case, a program called
+Syssvc.exe
+is copied to the
+%windir%\Temp
+directory) and is launched as a service with a randomized name. The name of the service is listed in the Service Name field. The executable, which is run when the service begins, is listed in the Service File Name field. In this example, the
+Syssvc.exe
+program is launched with the argument of "
+dir /b /s %HOMEPATH% *pass*
+" indicating a command that it should execute (using the
+dir
+command to search the user's home directory for files with the word “Pass” in them in an attempt to find password lists lying around) and a second argument of "
+%windir%\Temp\alVxLoB.txt
+" indicating the randomized text file where it should store the output after it is run. We see that the service type was set to
+Demand start
+since each command to be run in this particular attack creates a new service that runs only one time, whereas when an attacker uses a service as a persistence mechanism,
+they will usually set it to start automatically. In this case, the default User field indicates the credential that was used to launch the service, which is also the credential that was hijacked through the SMB relay attack.
+Windows maintains an event log dedicated to wireless local area network (WLAN) activity, and with rogue access points being a common attack vector for man‐in‐the‐middle and malware attacks, it may be worth looking at unusual connections on devices with Wi‐Fi capability, particularly those allowed to leave your environment. The log is located at
+%SystemRoot%\System32\winevt\Logs\Microsoft‐Windows‐WLAN‐AutoConfig%4Operational.evtx
+. Events of interest are described in
+Table 8.11
+.
+Table 8.11
+:
+Wi‐Fi connection event IDs
+EVENT ID
+DESCRIPTION
+8001
+WLAN service has successfully connected to a wireless network. The event description provides the Connection Mode indicating if this was an automatic connection based on a configured profile (and the associated Profile Name) or a manual connection. The SSID of the access point, its authentication mechanism, and its encryption mechanism are also recorded.
+8002
+WLAN service failed to connect to a wireless network. Once again, the event description will contain the Connection Mode, associated Profile Name, and the SSID along with a Failure Reason field.
+EXAMPLES TO FOLLOW
+If your head is swimming in event IDs at this point, don't worry. The intent of this chapter is to help you understand the immense value of event logs and provide a reference for you to use as you do log analysis. In
+Chapter 12
+, we will provide a series of examples of specific types of attacks that you may encounter and the ways in which you can leverage event logs (and other telemetry) to detect and respond to those threats. An “Event Log Analyst Reference” PDF is also available at
+www.AppliedIncidentResponse.com
+.
+Process Auditing
+Unlike many Linux shells (such as Bash), the Windows
+cmd.exe
+shell does not maintain a history of commands run by users. This has created a noticeable gap in the ability of incident handlers to understand the actions that an attacker takes on a compromised host. The rise of “Living off the Land” attacks that do not rely on malware but instead use built‐in Windows commands has only made this blind spot more damaging. While in the early days of Windows, auditing process creation was considered far too system intensive, modern Windows systems have greatly increased the efficiency of their auditing facilities, allowing
+for process tracking to be used to great effect. The addition of the ability to log full command lines in process‐creation events has gone a long way to remove the blinders from incident handlers and provide a trail that we can follow to uncover the actions taken by an attacker.
+Though not always required on every system, enabling this feature on key systems is increasingly becoming standard practice in security‐conscious environments. Doing so requires setting two separate Group Policy settings. The first is, of course, Computer Configuration ➪ Windows Settings ➪ Security Settings ➪ Local Policies ➪ Audit Policy ➪ Audit Process Tracking. However, to fully benefit from process tracking, you should also enable the ability to capture the command line in those events. This requires a second setting, located at Computer Configuration ➪ Administrative Templates ➪ System ➪ Audit Process Creation ➪ Include Command Line In Process Creation Events. Keep in mind that some command‐line arguments may contain sensitive information such as passwords, so lock down access to such logs accordingly and make users aware of the change in audit policy. Once enabled, Event ID 4688 in the Security log provides a wealth of information regarding processes that have been run on the system, as described in
+Table 8.12
+.
+Table 8.12
+:
+Event ID 4688
+EVENT ID
+DESCRIPTION
+4688
+A new process has been created. The event description provides the Process ID and Process Name, Creator Process ID, Creator Process Name, and Process Command Line (if enabled separately, as outlined earlier in this section).
+In addition to the details about the process, details about the user account used to launch the process are recorded in the Subject section.
+In pre–Windows 10/Server 2016 systems, there is only one Subject. However, in Windows 10 and Server 2016/2019, we now receive details about the Creator Subject and the Target Subject.
+The Creator Subject (which is the same as the pre–Windows 10/Server 2016 Subject) lists the user context under which the Creator Process was running. The Target Subject lists the user context under which the newly created process is running. In addition to the details of the user context, we get information in the Token Elevation Type field about the user's administrative privileges that may have been assigned to the process. A Type 1 token indicates a full token, with all privileges available to that user account, such as when the user is the built‐in administrator account or User Access Control (UAC) is disabled. Type 2 indicates that a full token was issued by the user specifying to bypass UAC, such as through the Run As Administrator option. A Type 3 token indicates that administrator privileges were removed due to UAC.
+In addition to Event ID 4688, activation of process tracking may result in additional Security log entries from the Windows Filtering Platform (WFP) related to network connections and listening ports, as described in
+Table 8.13
+.
+Table 8.13
+:
+Windows Filtering Platform (WFP) event IDs
+EVENT ID
+DESCRIPTION
+5031
+The Windows Firewall Service blocked an application from accepting incoming connections on the network.
+5152
+The WFP blocked a packet.
+5154
+The WFP has permitted an application or service to listen on a port for incoming connections.
+5156
+The WFP has allowed a connection.
+5157
+The WFP has blocked a connection.
+5158
+The WFP has permitted a bind to a local port.
+5159
+The WFP has blocked a bind to a local port.
+The event descriptions of the WFP events are self‐explanatory. The associated event log records are detailed, including information about the local and remote IPs and port numbers as well as the Process ID and Process Name involved.
+The information logged by enabling process tracking auditing can be of immense value, but it can also generate a large amount of data. To achieve a balance between having these details recorded and maintaining logs at a volume level that can be reasonably searched, many organizations will enable these logs locally and use the filtering capabilities of Windows Event Forwarding to send only a subset of these logs to a central log aggregator. We also explore the creation of a tactical security SIEM instance using Elastic Stack in
+Chapter 7
+, “Network Security Monitoring.” Experiment with your test environment to come up with a balance that can appropriately increase security auditing in your production environment without undue performance impact.
+If AppLocker is configured in your environment (a step that can help frustrate an adversary and should be considered), dedicated AppLocker event logs will be generated as well. Presented in Event Viewer under
+Application And Services Logs
+➪
+Microsoft
+➪
+Windows
+➪
+AppLocker
+, these event logs are stored with the other event logs in
+C:\Windows\System32\winevt\Logs
+and have names such as
+Microsoft‐Windows‐AppLocker%4EXE and
+DLL.evtx
+. There are separate logs covering executables and dynamic‐link libraries (DLLs), Microsoft installers (MSI) and scripts, packaged app deployment, and packaged app execution. The event logs generated will vary depending on whether AppLocker is set to
+audit‐only mode or blocking mode. Details of the specific event IDs that may apply to your situation can be found at
+https://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-application-control/applocker/using-event-viewer-with-applocker
+.
+Remember also that your antivirus or other endpoint detection and response systems may generate useful logs that may record files scanned and/or blocked. For example, Windows Defender maintains an event log located at
+C:\Windows\System32\winevt\Logs\Microsoft‐Windows‐Windows Defender%4Operational.evtx
+and
+Microsoft‐Windows‐Windows Defender%4WHC.evtx
+that contains information about potential malware that was detected and suspicious scripts that were run (as reported by the Antimalware Scan Interface [AMSI]). Events of potential interest in this log include those listed in
+Table 8.14
+.
+Table 8.14
+:
+Windows Defender suspicious event IDs
+EVENT ID
+DESCRIPTION
+1006
+The antimalware engine found malware or other potentially unwanted software.
+1007
+The antimalware platform performed an action to protect your system from malware or other potentially unwanted software.
+1008
+The antimalware platform attempted to perform an action to protect your system from malware or other potentially unwanted software, but the action failed.
+1013
+The antimalware platform deleted history of malware and other potentially unwanted software.
+1015
+The antimalware platform detected suspicious behavior.
+1116
+The antimalware platform detected malware or other potentially unwanted software.
+1117
+The antimalware platform performed an action to protect your system from malware or other potentially unwanted software.
+1118
+The antimalware platform attempted to perform an action to protect your system from malware or other potentially unwanted software, but the action failed.
+1119
+The antimalware platform encountered a critical error when trying to take action on malware or other potentially unwanted software.
+5001
+Real‐time protection is disabled.
+5004
+The real‐time protection configuration changed.
+5007
+The antimalware platform configuration changed.
+5010
+Scanning for malware and other potentially unwanted software is disabled.
+5012
+Scanning for viruses is disabled.
+Additional details on Windows Defender event log records can be found here:
+https://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-antivirus/troubleshoot-windows-defender-antivirus
+Windows exploit protection is a feature of Windows 10 that can provide excellent defense against a range of adversary exploitation techniques. This feature can protect both the operating system and individual applications from common attack vectors, blocking the exploitation when it otherwise would have resulted in system compromise. Although some features of exploit protection are enabled by default, many are disabled due to their potential to interfere with legitimate software. When enabled, this feature logs its activities in the
+C:\Windows\System32\winevt\Logs\Microsoft‐Windows‐Security‐Mitigations%4KernelMode.evtx
+and
+Microsoft‐Windows‐Security‐Mitigations%4UserMode.evtx
+log files. More details can be found here:
+https://docs.microsoft.com/en-us/windows/security/threat-protection/microsoft-defender-atp/exploit-protection
+Another option to enhance visibility into processes that run on systems in your environment is to implement Sysmon, a free utility by Sysinternals, which is now a part of Microsoft. Sysmon can be freely downloaded from
+https://docs.microsoft.com/en-us/sysinternals/downloads/sysmon
+When deployed on a system, Sysmon installs as a system service and device driver to generate event logs related to processes, network connections, and modifications to file creation times. It creates a new category of logs that are presented in Event Viewer under
+Applications And Services Logs
+➪
+Microsoft
+➪
+Windows
+➪
+Sysmon
+➪
+Operational
+and is stored in
+C:\Windows\System32\winevt\Logs\Microsoft‐Windows‐Sysmon%4Operational.evtx
+. An example of useful event IDs generated by Sysmon include those listed in
+Table 8.15
+.
+Table 8.15
+:
+Event IDs generated by Sysmon
+EVENT ID
+DESCRIPTION
+1
+Process creation (includes many details such as process ID, path to executable, hash of executable, command line used to launch, user account used to launch, parent process ID, path and command line for parent executable, and more).
+2
+A process changed a file creation time.
+3
+Network connection.
+4
+Sysmon service state changed.
+5
+Process terminated.
+6
+Driver loaded.
+7
+Image loaded (records when a module is loaded in a specific process).
+8
+CreateRemoteThread (creating a thread in another process).
+9
+RawAccessRead (raw access to drive data using \\.\ notation).
+10
+ProcessAccess (opening access to another process's memory space).
+11
+FileCreate (creating or overwriting a file).
+12
+Registry key or value created or deleted.
+13
+Registry value modification.
+14
+Registry key or value renamed.
+15
+FileCreateStreamHash (creation of an alternate data stream).
+16
+Sysmon configuration change.
+17
+Named pipe created.
+18
+Named pipe connected.
+19
+WMIEventFilter activity detected.
+20
+WMIEventConsumer activity detected.
+21
+WMIEventConsumerToFilter activity detected.
+22
+DNS query event (Windows 8 and later)
+255
+Sysmon error
+Sysmon allows granular configurations via an XML configuration file. Setting this configuration up to provide value while reducing noise can be time consuming, but much of this work has already been done by others and can be downloaded and used at no cost. Good baseline configuration files for security use of Sysmon can be found at
+https://github.com/SwiftOnSecurity/sysmon-config
+and
+https://github.com/olafhartong/sysmon-modular
+.
+Properly tuned, Sysmon provides invaluable information about system activity without burdening the system on which is running. The Japan Computer Emergency Response Team Coordination Center (JPCERT/CC) provides a useful tool for visualizing Sysmon logs called SysmonSearch. You can download SysmonSearch from
+https://github.com/JPCERTCC/SysmonSearch
+.
+Auditing PowerShell Use
+Microsoft continues to increase the logging capabilities for PowerShell activity to help combat its malicious use. Once again, these logging facilities must be enabled via Group Policy, specifically at Computer Configuration ➪ Policies ➪
+Administrative Templates ➪ Windows Components ➪ Windows PowerShell. Three basic categories of logging may be available, depending on the version of Windows, with Windows 10 and Server 2016/2019 having all three. Module Logging logs pipeline execution events to Windows event logs. Script Block Logging captures deobfuscated commands sent to PowerShell (but not the resulting output) to event logs. Transcription captures PowerShell input and output to a text file in a user‐specified location.
+Once enabled, these logs can provide a wealth of information about the use of PowerShell on your systems. If you routinely run lots of PowerShell scripts, this can produce a large volume of data, so be sure to test and tune the audit facilities to strike a balance between visibility and load before deploying such changes in production. Consider a staged approach where logs are generated and stored on the local system and only a subset is forwarded to a central aggregation point using the filters available in Windows Event Forwarding.
+PowerShell event log entries appear in multiple event logs. In
+%SystemRoot%\System32\winevt\Logs\Microsoft‐Windows‐PowerShell%4Operational.evtx
+you will find two events of note. Those events are described in
+Table 8.16
+.
+Table 8.16
+:
+Example PowerShell event IDs in Microsoft‐Windows‐PowerShell%4Operational.evtx
+EVENT ID
+DESCRIPTION
+4103
+Shows pipeline execution from the module logging facility. Includes the user context used to run the commands. The Hostname field will contain Console if executed locally or will show if run from a remote system.
+4104
+Shows script block logging entries. Captures the commands sent to PowerShell, but not the output. Logs full details of each block only on first use to conserve space. Will show as a Warning level event if Microsoft deems the activity Suspicious.
+Additional entries can be found in the
+%SystemRoot%\System32\winevt\Logs\Windows PowerShell.evtx
+log, as described in
+Table 8.17
+.
+Table 8.17
+:
+Example PowerShell event IDs in Windows PowerShell.evtx
+EVENT ID
+DESCRIPTION
+400
+Indicates the start of command execution or session. The Hostname field shows if (local) Console or the remote session that caused the execution.
+800
+Shows pipeline execution details. UserID shows account used. The Hostname field shows if (local) Console or the remote session that caused the execution. Since many malicious scripts encode options with Base64, check the HostApplication field for options encoded with the
+‐enc
+or
+‐EncodedCommand
+parameter.
+Transcripts capture the full text of a PowerShell session, both the commands entered and their resulting output. If an external program is run from within PowerShell, its output will not be captured, since only actual PowerShell commands and their direct output are preserved. You can configure these text transcripts to be logged to a local or remote location of your choosing. As we discuss in
+Chapter 12
+, you may also find a PowerShell history file located in each user’s home directory.
+The Australian Signals Directorate has published an excellent guide to securing PowerShell, including configuration and use of PowerShell logging. The guide is freely available at
+www.cyber.gov.au/publications/securing-powershell-in-the-enterprise
+. Remember that PowerShell Remoting requires authenticated access, so look for the associated Account Logon and Logon events as well.
+Using PowerShell to Query Event Logs
+Recall from
+Chapter 4
+, “Remote Triage Tools,” that two PowerShell cmdlets can be used to access event log data. The older option is
+Get‐EventLog
+. This cmdlet supports the
+‐ComputerName
+parameter to access remote systems over Remote Procedure Call/Distributed Component Object Model (RPC/DCOM). It also supports the
+‐Before
+and
+‐After
+parameters to allow for filtering based on the date and time of the event log record, and the
+‐InstanceID
+parameter to search for events based on their event IDs.
+The newer option to access event log data (as well as any other log in the Event Tracing for Windows [ETW] format) is the
+Get‐WinEvent
+cmdlet. This newer command supports more detailed filtering options, allowing you to delve into the detailed data of each event based on its XML structure, as we discussed in the beginning of this chapter. For example, in
+Figure 8.3
+we examined an Event ID 4624 log record, with a logon type of 2, that showed an interactive logon by the jlemburg user. We viewed the beginning of the XML syntax for that event log record in
+Figure 8.4
+. In
+Figure 8.6
+, we saw the
+EventData
+element of that XML data, which is presented by Event Viewer as seen in the top pane of
+Figure 8.3
+, but which is stored in the XML format shown in
+Figure 8.6
+. The
+Get‐WinEvent
+cmdlet gives us the option to parse through this XML data and extract event log records that match a pattern that we define.
+Within the
+EventData
+element, we find numerous
+<Data>
+tags. Each one is given a name followed by the data stored under the name. For example, the line
+<Data Name="LogonType">2</Data>
+shows that the logon type is 2, meaning an interactive logon (as we described earlier in the chapter in the description of Event ID 4624). Similarly, we see that
+TargetUserName
+is set to
+jlemburg
+, the user account under which the logon was made. Using the
+Get‐WinEvent
+cmdlet, we can filter on these specific data elements in order to retrieve only the event log records that match specific criteria which we set. To do so, we first create a query using an XPath expression and then call that query using the
+Get‐WinEvent
+cmdlet with the
+‐FilterXML
+parameter.
+Figure 8.6
+:
+The XML structure of the event‐specific data area of an Event ID 4624 event log record
+To complete the first step, open a text editor and create a file named
+query.xml
+. In that file, we will generate a query list with specific queries of interest to us. For example, the following query requests only Event ID 4624 where the target username is jlemburg:
+<QueryList>
+<Query Id="0">
+<Select Path="Security">
+*[EventData[Data[@Name='TargetUserName'] and Data='jlemburg']]
+and
+*[System[(EventID=4624)]]</Select>
+</Query>
+</QueryList>
+To execute this query, once we have saved the query itself to the
+query.xml
+file, we run the following
+Get‐WinEvent
+command:
+Get-WinEvent -FilterXml ([xml](Get-Content .\query.xml))
+This cmdlet reads the content of our
+query.xml
+text file, casts it as XML, and feeds it into the
+‐FilterXml
+parameter. We can, of course, combine this with
+Enter‐PSSession
+to query a remote system or with
+Invoke‐Command
+to make this query on multiple remote systems simultaneously. We can also increase the complexity of our filter, limiting not only based on the event ID and user, but also on the logon type. For example, the following query syntax would locate only network logons (those that were made from a remote system, indicated by logon type 3) by the jlemburg account. Combining this with
+Invoke‐Command
+will provide the ability to query our entire enterprise looking for systems that were accessed by an account that we suspect may be compromised or may have been used maliciously. The syntax for such a
+query.xml
+would be as follows:
+<QueryList>
+<Query Id="0">
+<Select Path="Security">
+*[EventData[Data[@Name='TargetUserName'] and Data='jlemburg']]
+and
+*[EventData[Data[@Name='LogonType'] and Data='3']]
+and
+*[System[(EventID=4624)]]</Select>
+</Query>
+</QueryList>
+By examining the XML elements in event log records, we can create custom queries for use with
+Get‐WinEvent
+that allow us to make very detailed interrogations of event logs. When combined with
+Invoke‐Command
+, this approach scales to the enterprise level, allowing for sophisticated queries and analysis.
+Conclusion
+Event logs provide a wealth of data to incident responders, but only when they are properly configured and retained. It is important to ensure that adequate auditing policy is applied throughout the organization and that logs are aggregated and stored to be readily available when needed. The Windows event log forwarding feature can be used to send critical logs to a security log server so that the most high‐value logs are found in one location and to allow for efficient
+searches by reducing unnecessary information that may be required for compliance or other nonsecurity purposes. By understanding and using event logs efficiently, incident handlers can detect malicious actors, reconstruct a vast amount of adversary activity, and identify impacted systems. We will explore additional event IDs and provide examples of how they can be used to detect common attack techniques in
+Chapter 12
+.
+
+CHAPTER 9
+Memory Analysis
+Memory analysis continues to be an increasingly important part of the incident response process. As adversaries continue obfuscating or encrypting their code stored on disk, or avoid writing malicious code to disk at all, RAM is a common battleground for the cat‐and‐mouse game between attackers and defenders. Different tools are available to analyze system memory, including many commercial endpoint detection and response (EDR) suites.
+The Volatility Foundation maintains an open‐source initiative that largely blazed the trail for effective memory analysis for incident response purposes, and it continues to be a valuable tool today. A fork of that project, known as Rekall, introduced some changes and additional features to Volatility. Regardless of whether you examine memory with one of these open‐source tools or with an EDR tool, this chapter will provide you with the skills needed to identify evil lurking within RAM.
+Regardless of the tool used, effective memory analysis requires the ability to detect anomalies. As with other types of analysis, understanding what processes, network connections, and other artifacts should be present on a system is an important part of identifying abnormalities that may be caused by malicious activity. In this chapter, we will look at ways to conduct memory forensics by analyzing artifacts captured in a memory dump or running in a live system's memory, and comparing them to what we would expect to find on a system that
+was operating normally. We will also look at ways to apply these techniques to data sources where contents of memory may have been written to nonvolatile storage.
+FOR MORE INFORMATION ABOUT VOLATILITY
+Volatility is an incredibly important and powerful memory analysis tool. We provide a separate online resource on the use of Volatility, which you can find for free at
+www.AppliedIncidentResponse.com
+.
+You can download Volatility and its associated documentation either from GitHub or from
+www.volatilityfoundation.org
+.
+Chad Tilbury makes an excellent cheat sheet of Volatility plug‐ins available at
+https://digital-forensics.sans.org/media/memory-forensics-cheat-sheet.pdf
+.
+You can also read about Volatility in a book written by many of the core developers (Michael Hale Ligh, Andrew Case, Jamie Levy, and AAron Walters)
+The Art of Memory Forensics: Detecting Malware and Threats in Windows, Linux, and Mac Memory
+(John Wiley & Sons, Inc., 2014). While this chapter focuses on ways to apply memory analysis directly to your incident response process, additional details of memory data structures and the technologies that underlie the discipline of memory forensics are very well detailed in the
+Art of Memory Forensics
+.
+Rekall and Volatility have many capabilities and plug‐in names in common, despite the fact that their underlying implementations are different. Most of the techniques described in this chapter can apply to analysis with either Volatility or Rekall. Rekall introduced the concept of analyzing running system memory rather than requiring that memory first be dumped to a static file. This added flexibility has proven useful in many incident response scenarios.
+The Importance of Baselines
+Conducting an effective analysis requires detecting deviations from normal. To do this, you must understand what normal should look like in your environment. We mentioned the importance of maintaining baselines for your systems and demonstrated ways that you can use WMIC and PowerShell to generate these baselines in
+Chapter 4
+, “Remote Triage Tools.” In case a baseline of your environment is not available at the time when you need to perform an incident response,
+Table 9.1
+provides a list of common Windows operating system processes to help focus your analysis. This list is not intended to be exhaustive, but it outlines many of the default operating system processes seen on modern Windows systems. Additional processes will also be present from applications that are running.
+Table 9.1
+:
+Default Windows operating system processes
+PROCESS
+DEFAULT FOLDER ON DISK
+NOTES
+System
+N/A
+Special process for running kernel threads,
+ntoskrnl.exe
+, and drivers.
+Idle
+N/A
+Special process for idle threads.
+smss.exe
+%SystemRoot%\System32\
+Session Manager Subsystem. One persistent master instance, child instances spawn and exit per session.
+csrss.exe
+%SystemRoot%\System32\
+Client/Server Runtime Subsystem. Two or more instances are normal (two near boot time and others as new users log on).
+wininit.exe
+%SystemRoot%\System32\
+Windows initialization process for Session 0 (Services). One instance will be present.
+lsass.exe
+%SystemRoot%\System32\
+One instance will be present (if Credential Guard is enabled,
+lsaiso.exe
+will also be created).
+services.exe
+%SystemRoot%\System32\
+Service Control Manager. One instance will be present.
+svchost.exe
+%SystemRoot%\System32\
+A service host process to host services implemented in DLLs. Multiple instances are normal. Note that the service being hosted can still be malicious even if the
+svchost.exe
+process itself is legitimate.
+taskhost.exe
+,
+taskhostex.exe
+, or
+taskhostw.exe
+%SystemRoot%\System32\
+Called
+taskhost.exe
+in Windows 7,
+taskhostex.exe
+in Windows 8, and
+taskhostw.exe
+in Windows 10. One or more instances is normal, but only with the name appropriate to your Windows version.
+winlogon.exe
+%SystemRoot%\System32\
+One or more instances are normal depending on number of interactive users (Session 1 and above).
+explorer.exe
+%SystemRoot%\
+One per interactive logon.
+Registry
+N/A
+New to Windows 10. Special process to store registry hives in memory.
+Memory Compression (
+MemCompression
+)
+N/A
+Part of the Windows memory compression feature.
+RuntimeBroker.exe
+%SystemRoot%\System32\
+One or more instances are normal depending on number of Universal Windows Platform apps open. Helps enforce app security controls in Windows 8 and later.
+dwm.exe
+%SystemRoot%\System32\
+Desktop Windows Manager, one instance per interactive user logged on.
+dllhost.exe
+%SystemRoot%\System32\
+A COM surrogate process. May appear in zero to multiple instances to host COM objects implemented as DLLs.
+WINDOWS INTERNALS RESOURCES
+If you are not familiar with the core Windows processes listed in
+Table 9.1
+, we recommended digging through the book
+Windows Internals,
+Part 1
+: System Architecture, Processes, Threads, Memory Management, and More
+(Microsoft Press, 2017).
+For a high‐level introduction that gets you up and running quickly, watch the 22‐minute video by Richard Davis called
+Windows Process Genealogy
+found here:
+www.youtube.com/user/davisrichardg
+For additional details on these processes that you can use to identify malicious activity, have a copy of the SANS Hunt Evil poster around. The current online version can be found here:
+www.sans.org/security-resources/posters/dfir
+You can also download a PDF summary of much of the information presented in this section for use as a quick reference from:
+www.AppliedIncidentResponse.com
+Threat actors may try to hide in plain sight by using process names that are similar to normal system processes, such as
+s
+cv
+host.exe
+instead of
+s
+vc
+host.exe
+(note the reversal of the c and v in the first version), or naming malware
+taskhostex.exe
+on a Windows 10 system where the correct name should be
+taskhostw.exe
+(
+taskhostex.exe
+is the name of the task host process on Windows 8 systems, but not on Windows 10, as listed in
+Table 9.1
+). Alternatively, they may run malware using a standard process name but running from a nonstandard location, such as running malware called
+svchost.exe
+that is located in the
+\Windows
+directory rather than in
+\Windows\System32
+. Analysts should confirm the names, number of instances, and location on disk for the processes running on the system being investigated.
+The parent‐child relationship between processes is also important to understand. During normal operation, processes will create, or spawn, other processes. The original process is called the parent, and the process that it creates is its child. During boot time, the core operating system files load in a set manner, creating a fixed parent‐child relationship between them, so any deviation from that can be an indicator of malicious software trying to masquerade as a legitimate process.
+Figure 9.1
+shows the parent‐child relationship of some of the Windows default operating system processes.
+Table 9.1
+, presented earlier in this chapter, describes those common processes and provides more detailed information about their default locations.
+Figure 9.1
+:
+Default Windows process tree
+Note that each Windows system will have at least two sessions. Session 0 is used to host services and similar operating system processes that do not require user interaction to start. Session 1 is the interactive logon session for the first logged‐on user. Both Session 0 and Session 1 are spawned by separate instances of
+smss.exe
+(the Session Manager Subsystem) that are created by the original (master)
+smss.exe
+instance. Each of these
+smss.exe
+instances exits immediately after it spawns an instance of
+csrss.exe
+and either
+wininit.exe
+(for Session 0) or
+winlogon.exe
+(for Session 1). These
+smss.exe
+instances can be seen in
+Figure 9.1
+. Each instance is marked with “(exits)” to indicate that they will no longer be left running on the system after Session 0 and Session 1 are started.
+Session 0 relies on
+wininit.exe
+to spawn many of its processes, whereas Session 1 relies on
+winlogon.exe
+to start many of its processes. In an interactive user session, such as Session 1,
+winlogon.exe
+spawns an instance of
+userinit.exe
+that immediately spawns an instance of
+explorer.exe
+and then exits.
+explorer.exe
+will therefore show the parent process ID of the
+userinit.exe
+process, but that process will no longer be active on the system. A similar circumstance occurs with the processes spawned by the
+smss.exe
+instances that exit shortly after they are spawned. Although live analysis tools like WMIC cannot provide additional details about the processes that have already terminated, memory forensics tools like Rekall may be able to provide additional information about processes even after they exit, as you will see later in this chapter.
+If additional interactive sessions occur (such as through fast user switching or RDP access), then additional sessions will be created, spawning an additional
+smss.exe
+, which exits immediately after spawning an additional
+csrss.exe
+and
+winlogon.exe
+. The
+winlogon.exe
+then spawns additional
+userinit.exe
+and
+dwm.exe
+instances.
+userinit.exe
+then spawns an
+explorer.exe
+instance and immediately terminates. This process is repeated for each new interactive user logon. Session 0 and Session 1 are created near system boot time. Additional sessions are created as needed based on user logon activity.
+Processes in Session 0, such as
+services.exe
+, may also spawn new processes in Session 1 or other interactive sessions. There is no direct correlation between the session of a parent and the session of its children. Each separate process stores a pointer in memory to its associated session. This is shown in
+Figure 9.2
+, which uses the Process Hacker program (freely available at
+https://github.com/processhacker/processhacker
+) to view the processes running on a live Windows 10 system. You can see that though
+services.exe
+and
+svchost.exe
+with process ID (PID) 972 are part of Session 0, some of the other processes spawned by PID 972 are part of Session 1. On this system,
+svchost.exe
+with PID 972 is hosting the DCOM Server Process Launcher, the Local Session Manager, the System Events Broker, and many other services, so it has spawned several different child processes, many related to Universal Windows Platform apps (as discussed in the next paragraph). Windows has traditionally grouped multiple services with compatible security requirements under a single
+svchost.exe
+process. Since the Windows 10 Creators Update, Microsoft reduced the number of services hosted under each
+svchost.exe
+process if the system has more than 3.5 GB of RAM (the test system used for
+Figure 9.2
+had only 2 GB of RAM, so many services were hosted under one
+svchost.exe
+process). With the new
+svchost
+grouping, expect to see dozens of
+svchost.exe
+instances on Windows 10 systems, with most hosting only one service.
+Figure 9.2
+:
+Process Hacker showing child processes in different sessions (last column truncated to fit on the page)
+In addition to the parent‐child relationships shown in
+Figure 9.2
+, desktop applications that are run by a user double‐clicking on them in the GUI will have a parent process of
+explorer.exe
+. Universal Windows Platform (UWP) apps, however, spawn from an instance of
+svchost.exe
+. UWP apps (formally called Metro‐style apps or Windows Store apps) are developed using Windows Runtime (WinRT), allowing them to run across multiple Microsoft devices but providing restricted access to the underlying operating system and its resources. They include programs such as the Windows 10 calculator and Microsoft Edge, and they rely on a
+RuntimeBroker.exe
+process to gain access to system resources in accordance with the permissions granted to the app. On a live system, you can see more about UWP‐related processes and with which app package they are associated by typing the
+tasklist /APPS
+command, as shown in
+Figure 9.3
+.
+Figure 9.3
+:
+tasklist /APPS
+showing UWP app‐related processes
+Sources of Memory Data
+With Rekall, we can examine the live memory of a running system, but there are also many files in which data that was previously stored in memory can be found written to nonvolatile storage. The most obvious location would be intentional memory dumps acquired by an incident responder using a memory acquisition tool. In
+Chapter 5
+, “Acquiring Memory,” we looked at the AFF4 format for storing the data acquired from running system memory, along with an optional capture of the page file, metadata, and other information from the system. Another common format for storing the data from memory to disk is a raw memory dump. In this case, the data is acquired from memory and written directly to disk with no additional headers or metadata involved. Raw memory dumps are often given an extension of
+.img
+,
+.bin
+, or
+.raw
+but can have any extension since the data itself has no headers or metadata associated with it. If you have captured an AFF4 archive using one of the pmem tools, remember that the AFF4 archive is a container for the data acquired from the target system. Rekall offers two modules,
+imagecopy
+and
+aff4export
+, that can be used to extract a raw memory dump from an AFF4 container if needed to facilitate the use of a different tool that supports only raw memory files. For example,
+with the Rekall shell open (described later in this chapter), enter
+imagecopy
+"
+\path\to\file.img
+"
+to extract the raw memory dump to a file called
+file.img
+with the path specified. You can also capture the memory dump in raw format from the running system using tools like DumpIt from Comae Technologies, as mentioned in
+Chapter 5
+.
+As also noted in
+Chapter 5
+, you may be able to analyze virtual machine snapshot files, such as the VMWare
+.vmem
+,
+.vmss
+, and
+.vmsn
+files, stored on the hypervisor data store. Depending on the version of the hypervisor and the format used to store the memory, additional processing with tools like
+vmss2core
+may be needed to extract a usable memory dump. You should consult your hypervisor vendor for the proper files and process to extract a memory dump from a snapshot or suspended virtual machine.
+You may also find data that was previously in RAM in crash dumps created by the operating system when problems are encountered. If configured to create crash dumps, your system may place them in the
+%SystemRoot%
+folder with the name
+Memory.dmp
+. For additional details on configuration options, see:
+www.technlg.net/windows/windows-crash-dump-memorydmp-file
+Crash dumps are not raw memory captures but have headers containing metadata about the dump. These dumps are designed to be analyzed with the Windows Debugger, WinDbg, but if they are a full memory dump, memory forensics tools may be able to parse these files to provide information about the state of the system at the time the crash occurred.
+Windows hibernation files are another potential source of memory data. When a computer goes into hibernation mode, the contents of RAM are compressed and copied to disk in a file called
+hiberfil.sys
+in the root of the system drive. This also occurs in support of the Windows fast startup mode, so
+hiberfil.sys
+may be found on desktop or laptop computers. The
+hiber2bin
+utility (a free part of the Comae Toolkit from
+www.comae.com
+) will decompress the hibernation file to allow for analysis. The Volatility command
+imagecopy
+can also convert a hibernation file to a raw memory dump for analysis. Note that the act of hibernating will have an impact on network connections that may have been active when the system went into the reduced power mode, and therefore information about active network connections may be altered.
+Any of these files may contain data that was previously stored in RAM. Analysis with strings, YARA (see
+Chapter 10
+, “Malware Analysis,” for more on these techniques), or commercial tools may yield valuable evidence. Commercial tools like Magnet Axiom (see
+Chapter 11
+, “Disk Forensics”), Passware, and others may be able to extract forensic artifacts from any of these file types. In addition, memory dump files can be processed with Volatility and Rekall, which we will explore in the rest of this chapter.
+PROFILES, PLUG‐INS, UPDATES, AND OPTIONS
+With Windows 10, Microsoft began releasing new operating system versions more frequently than in years past. With each new version, and even between versions, changes occur to the kernel and new memory analysis profiles must be built. For any memory analysis tool, keeping up with these changes is a challenge. In addition to the profiles, individual plug‐ins must also be updated to work with new versions of operating systems as they are released, which often involves reverse‐engineering undocumented memory structures. All of this creates challenges for the memory forensics tool's authors, and the result is that the latest and greatest operating system release may be limited in the numbers of plug‐ins that support it. This holds true for both Rekall and Volatility. Since the two tools are maintained by different teams, being able to switch between the two will help increase the chances that you are able to find updated plug‐ins and profiles for the version of the operating system that you need to analyze in any specific case. Also, unless you are certain that you have a working profile and plug‐ins for a specific system, collecting information about the state of the system using the techniques described in
+Chapter 3
+, “Remote Triage,” and
+Chapter 4
+before shutting the system down or leaving the scene is highly advisable. In addition, using tools such as Velociraptor (written by one of the primary developers of Rekall, as mentioned in
+Chapter 4
+) can help ensure that critical data is collected even if memory analysis ultimately proves to be impossible for the version of the operating system in use.
+Using Volatility and Rekall
+Both Volatility and Rekall are written in Python. Rekall began as a fork of the Volatility project; however, much of the Rekall code has been rewritten. Since they are Python‐based, both will run on any operating system where Python is running, including Windows, *nix, and macOS systems. You are therefore able to select your analyst platform of choice. Many security and incident response distributions of Linux, including Kali and SIFT, come with one or both tools already installed.
+One of the key differences between Rekall and Volatility is that Rekall introduced automated detection and even generation of a suitable profile for the memory sample being analyzed. The profile contains details of the locations and format of key data structures found within system memory, which are critical to being able to interpret and analyze the data. Rekall will scan the memory dump and/or the metadata gathered by
+pmem
+to identify the globally unique identifier (GUID) associated with the kernel of the system being examined (GUIDs in this case are unique to a particular kernel version, not unique to each system on which they are running). Rekall will then look in its public
+profile repository to see if a profile has already been built for that GUID. If not, Rekall will automatically reach out to the Microsoft servers to try to pull down the symbols related to that GUID and construct the required profile on the fly. This profile is then stored locally in your Rekall cache in case it is encountered again in the future. Obviously, this process requires that you have Internet access from the system where the memory is being analyzed, but offline copies of the Rekall public repository can be stored locally if desired.
+In previous versions of Volatility, it was up to the analyst to determine and explicitly specify the correct profile. The
+imageinfo
+and
+kdbgscan
+plug‐ins could help you determine which profile was a best match for your memory sample. The
+winver
+program could also be run at the time of RAM capture to help provide the details needed on Windows systems. Profiles were provided on the Volatility GitHub site as they were developed and released. The dynamic nature of Rekall profile creation sometimes meant that profiles for new OS updates could be accessed sooner with Rekall rather than waiting for the Volatility team to update the GitHub repository with each new operating system release. The latest version of Volatility (version 3 available at
+https://github.com/volatilityfoundation/volatility3
+) uses symbol tables, manually constructed or based on information downloaded from the Microsoft Symbol Server, to eliminate the need to specify a profile for each memory sample. This change promises to simplify analysis when using Volatility.
+Both tools provide analysis capability for a wide range of operating systems across the *nix, Apple, and Windows spectrum. Since both tools can run on different operating systems, and each relies on a profile or templates to describe the sample being analyzed, we can freely analyze Linux samples on Windows, Windows samples on Linux, or any other combination that we choose.
+Both Volatility and Rekall can operate within your normal operating system shell (such as Bash or
+cmd.exe
+), receive requests to execute specific plug‐ins at the command line, and return the results to standard output. This allows you to use shell pipelines to send the results to other programs (such as
+grep
+or
+findstr
+) for further processing. Rekall offers a second option of entering an interactive Rekall shell rather than specifying the modules to be executed within the operating system shell. In this case, plug‐ins can be executed with fewer keystrokes, but results are kept within the Rekall shell itself rather than returning to the system shell. Although this can be convenient when multiple plug‐ins will be run, the results cannot be piped into other system shell commands for further processing without knowledge of Python to manipulate the output. Both approaches have their use, and we will demonstrate both in this chapter.
+As you saw near the end of
+Chapter 4
+, the command to use Rekall to examine live system memory is
+rekal ‐‐live Memory
+(the switches and arguments in Rekall are case sensitive, even in Windows). This command will enter the Rekall shell, causing your prompt to change to indicate that you are now examining live
+memory. The driver component of Rekall (the same as used by pmem) accesses running system memory for analysis (shown in
+Figure 9.4
+).
+TIP  Note that the name of the command is either rekal or rekall depending on the operating system and version, but rekal with one “L” seems to work consistently.
+As with any executable, if the rekal program is not in the system's
+PATH
+variable, you may need to run it from the installation directory (on Windows, the full path to the executable is normally
+C:\Program Files\Rekall\rekal.exe
+).
+Figure 9.4
+:
+Entering the Rekall shell to examine live system memory
+Once in the Rekall shell, you can enter plug‐in names as if they were shell commands. For example,
+pslist
+analyzes the running system for information about processes. Rekall plug‐ins are written in Python. Although some plug‐in names are similar to, or even identical to, shell commands, it is important to understand that they are completely separate. For example, Rekall has a plug‐in called
+netstat
+. Although there is also a Windows command called
+netstat
+, and a *nix command called
+netstat
+, both are separate from the Rekall plug‐in that shares the same name. The arguments or switches used for the shell commands do not apply to the Rekall plug‐in. Similarly, the mechanisms used by the shell commands and the plug‐in are different, and their output is likewise different. Do not be confused by the fact that the names are overloaded.
+When you first enter the name of a plug‐in on a new memory sample, Rekall may display several lines of output as it attempts to automatically determine or create a suitable profile to analyze the sample. Future plug‐ins should run without repeating this process while you are in the same Rekall shell session. When you are done with the session, type
+exit
+to close the Rekall shell and return to your system shell prompt. A bit of fair warning: When you exit the Rekall shell, the tool will display a random quote from the Arnold Schwarzenegger movie
+Total Recall
+. Unfortunately, some of these quotes may contain
+inappropriate language. Keep this in mind if you're capturing screen casts or screenshots for documentation purposes.
+Many plug‐ins support options. To see what options any Rekall plug‐in supports, type a question mark immediately after the name of the plug‐in inside the interactive Rekall shell to see the associated help (do not enter a space before the question mark). You can use tab completion to help complete the names of plug‐ins as you are typing. You can also see a list of all available plug‐ins by typing
+plugins.
+(that's a period after the word
+plugins
+with no space before or after it) and then immediately pressing the Tab key. This will cause a pop‐up box to appear in which you can use the up and down arrow keys to navigate the list of available plug‐ins.
+You do not need to enter the Rekall shell to use the tool. As shown back in
+Chapter 5
+(
+Figure 5.12
+), you can place the name of the plug‐in that you want to run at the end of the Rekall command, such as
+rekal ‐‐live Memory pslist
+, to have Rekall execute the plug‐in and return its results to the standard output of the system shell. You have the option to redirect standard output to a file or pipe it into another command such as
+grep
+or
+findstr
+for further processing of the output. As soon as the command completes and the plug‐in result is returned, the prompt returns to the normal shell prompt. It does not enter the interactive Rekall shell. Volatility, which does not have a dedicated shell environment, is used in the same manner.
+To analyze memory that was previously captured to a file, use the
+‐f
+or
+‐‐filename
+option and specify the location of the file to be analyzed. For example, the command
+rekal -f \Case\server1.aff4
+opens the interactive Rekall shell for analysis of an AFF4 file previously captured. Alternatively, to stay within the system shell and have Rekall run the
+pslist
+plug‐in against that previously captured AFF4 file, the command would be
+rekal -f \Case\server1.aff4 pslist
+Similarly, to use
+findstr
+to limit the results displayed to only instances of the
+svchost
+process, we could use the command
+rekal -f \Case\server1.aff4 pslist | findstr /i svchost.exe
+to select only the desired processes and avoid having to manually wade through all the other processes discovered by the
+pslist
+plug‐in.
+In this chapter, we will cover a variety of useful plug‐ins.
+Table 9.2
+provides a brief overview of some useful plug‐ins and will serve as a handy reference for you as you continue using Rekall and Volatility. Not all plug‐ins are supported by both tools, and the supported plug‐ins vary based on the operating system of the memory sample being examined.
+Table 9.2
+:
+Sample Rekall/Volatility plug‐ins
+PLUG‐IN NAME
+DESCRIPTION
+pslist
+Displays details of processes
+pstree
+Displays parent‐child relationship between processes
+psxview
+Displays processes detected by various means to help identify malicious processes attempting to hide
+dlllist
+Shows the executable, DLLs, and command line used for each process
+services
+Displays information about services as recorded in the registry
+svcscan
+Scan memory for service objects
+handles
+Displays information about the handles used by each process
+malfind
+Analyzes memory segments to help locate injected code
+netstat
+Display active TCP connections
+netscan
+Scan for network connections and sockets
+printkey
+Display information from a registry key
+ldrmodules
+Display information about loaded kernel modules/drivers
+dlldump
+Extract DLLs from memory to disk
+procdump
+Extract process memory to disk
+imagecopy
+Extract memory data to disk
+moddump
+Extract kernel modules/drivers to disk
+timeliner
+Display objects based on time stamp
+autoruns
+Correlates running processes to ASEPs
+filescan
+Scan for file objects in memory
+cmdscan
+Scan for
+cmd.exe
+history in memory
+getsids
+Show the security identifiers associated with a process
+imageinfo
+Display information about the memory sample being analyzed
+We will begin by looking at several of these plug‐ins in more detail. After you understand how the plug‐ins operate, we will provide examples of them being used to detect anomalies on victim systems.
+USING VOLATILITY
+When this chapter was written, Volatility 3.0 was still in pre‐release. To ensure the most current coverage after the book goes to print, more details on the use of Volatility are provided in our “Memory Analysis with Volatility Analyst Reference” PDF, which can be downloaded for free from:
+www.AppliedIncidentResponse.com
+Many of the plug‐ins discussed in this chapter exist within both Rekall and Volatility; however, that is not the case for all. Feel free to experiment with both tools and determine in advance which provides the most accurate results for the operating system versions in use in your environment. Since plug‐ins and templates often need to be updated to support new operating system versions, you may find that one tool offers better results for some uses whereas the other tool is better for other purposes. You should rely on current documentation and your own testing to provide the details of which plug‐ins function best for a particular operating system. The details of the plug‐ins provided in this chapter are based on version 2.6 of Volatility and version 1.7.2RC1 of Rekall.
+Examining Processes
+Processes provide the environment for code to execute on the system. As such, understanding the processes running on a target system, and the code that those processes contain, is a frequent focus of memory analysis. Fortunately, many plug‐ins are available to help you examine processes, understand the resources to which they have access, and view the contents of their allocated memory. We will examine several of these in this section.
+The
+pslist
+Plug‐in
+The first plug‐in that we will examine is
+pslist
+. As its name suggests, this plug‐in provides a list of the processes on the system at the time that the memory sample was collected. Of course, for live memory analysis conducted with Rekall, the output reflects the state of the system at the time the plug‐in is executed. Rekall and Volatility implement this plug‐in in different ways, so the output may vary somewhat between the two, and you will see such variations across many of the plug‐ins. On the Rekall version,
+pslist
+offers a
+proc_regex
+option to search for a process by name (or part of a name) and limit the results returned to only those that match the pattern provided. In the example shown in
+Listing 9.1
+that uses the
+proc_regex
+option, the result shows processes that contain only
+svchost
+in the process filename. We cut some of the lines of output for readability, indicated by
+<snip>
+.
+Listing 9.1
+Rekall
+proc_regex
+option search output
+C:\Program Files\Rekall>
+rekal.exe ‐f \client2.aff4 pslist ‐‐proc_regex="svchost"
+_EPROCESS     name         pid     ppid  thread_count handle_count session_id wow64 process_create_time process_exit_time
+-------------- -------------------- ----- ------ ------------ ------------ ---------- ------ ------------- ---------- ------
+0x8f0e54b1e580 svchost.exe   488  800      18      -     0 False 2019-10-08 01:11:12Z -
+0x8f0e55801580 svchost.exe   984  800      22      -     0 False 2019-10-08 01:11:12Z -
+0x8f0e5532e400 svchost.exe  1036  800      11      -     0 False 2019-10-08 01:11:14Z -
+<snip>
+0x8f0e55a732c0 svchost.exe  2232  800      14      -     0 False 2019-10-08 01:11:15Z -
+0x8f0e55f88580 svchost.exe  3504  800       7      -     0 False 2019-10-08 01:11:36Z -
+0x8f0e54422580 svchost.exe  3536  800      10      -     1 False 2019-10-08 01:20:18Z -
+In
+Listing 9.1
+, you can see that the
+pslist
+plug‐in returns columns for this information:
+The offset in memory to the
+_EPROCESS
+structure for each process
+The name of the process (this is truncated if more than 14 characters)
+The process ID
+Parent process ID
+Thread count
+Handle count
+Indication of whether the process is using
+wow64
+(a subsystem to allow 32‐bit processes to run on a 64‐bit system)
+The process's creation time
+Its exit time (if it already terminated gracefully)
+We will examine uses for many of these columns in this section, but some should be immediately obvious. Creation time gives us the ability to use time analysis to associate processes with each other (such as processes started at the same time may have a relationship to one another) and look for anomalies (such as instances of
+svchost.exe
+that start well after boot time and/or outside of business hours).
+You may find that some processes returned by the plug‐in have already terminated. You can determine those processes because they will have a thread count of zero (all processes need at least one thread of execution since threads are responsible for running code on the CPU) and will show a process exit time and date. Since we are analyzing a memory sample, we may find residual data structures representing processes, network connections, and other objects still in memory even after the process has terminated. This is one advantage of performing memory analysis rather than relying exclusively on querying the running system with the commands described in
+Chapter 4
+.
+In
+Figure 9.5
+, you can see the results of running Rekall's
+pslist
+plug‐in on a Windows 10 system. Note that process identifier (PID) 628 is an
+smss.exe
+process that was spawned by PID 532 (the master instance of
+smss.exe
+). You can tell this relationship from the PPID column, which stands for parent process identifier. We can also see that PID 628 spawned an instance of
+csrss.exe
+with PID 636 as well as spawned an instance of
+wininit.exe
+(PID 704) before it then terminated. This is all consistent with the setup of Session 0 that occurs at boot time as described earlier.
+Figure 9.5
+:
+Rekall's
+pslist
+plug‐in output
+The
+pstree
+Plug‐in
+To better see the parent‐child relationship between processes, we can use the
+pstree
+plug‐in, which provides a hierarchical representation of the processes based on their parent‐child relationships. You can think of this view as a sideways tree so that processes listed farther to the right are descended from processes that are listed farther to the left. To help make the tree more readable, each generation or level in the tree is represented by a single period in the text output. The process ID of each process is listed next to its name in parentheses, and its parent process ID is listed in the ppid column.
+The example that follows shows the same memory sample being analyzed with the
+pstree
+plug‐in on Rekall. At the top of the process tree in
+Listing 9.2
+, you see the
+System
+process (PID 4). Below that you see the registry process and the master
+smss.exe
+process, which were both spawned by
+System
+. You can confirm this parent‐child relationship both by examining the ppid column and by noting the number of periods that begin each line (zero periods for
+System
+and one period each for
+Registry
+and
+smss.exe
+). Continuing down, you can see that the master
+smss.exe
+(PID 532) spawned another instance of
+smss.exe
+with PID 628. Note that the line providing the details for this instance begins with two periods to illustrate that it is deeper in the process genealogy tree. On the next two lines, you can see the two child processes that were spawned by PID 628. Each of these has three periods at the beginning of its line.
+Listing 9.2
+The
+pstree
+plug‐in in use
+C:\Program Files\Rekall>
+rekal.exe ‐f \client2.aff4 pstree
+_EPROCESS                                 ppid  thd_count hnd_count    create_time
+---------------------------------------- ------ --------- --------- --------------------
+0x8f0e522c5040 System (4)                    0       102         - 2019-10-08 01:11:08Z
+. 0x8f0e52353040 Registry (68)                4         3         - 2019-10-08 01:11:03Z
+. 0x8f0e52272040 smss.exe (532)               4         2         - 2019-10-08 01:11:08Z
+.. 0x8f0e54f65580 smss.exe (628)            532         0         - 2019-10-08 01:11:11Z
+... 0x8f0e543bb080 csrss.exe (636)          628         9         - 2019-10-08 01:11:11Z
+... 0x8f0e54a63080 wininit.exe (704)        628         1         - 2019-10-08 01:11:11Z
+.... 0x8f0e546c3080 services.exe (800)      704         6         - 2019-10-08 01:11:11Z
+..... 0x8f0e54b1e580 svchost.exe (488)      800        18         - 2019-10-08 01:11:12Z
+..... 0x8f0e55801580 svchost.exe (984)      800        22         - 2019-10-08 01:11:12Z
+...... 0x8f0e56206580 RuntimeBroker. (368)  984         1         - 2019-10-08 01:37:35Z
+...... 0x8f0e544f5580 ShellExperienc (372)  984        32         - 2019-10-08 02:04:58Z
+...... 0x8f0e562e3580 dllhost.exe (1436)    984         4         - 2019-10-08 01:20:46Z
+...... 0x8f0e52831580 RuntimeBroker. (2776) 984         1         - 2019-10-08 01:20:27Z
+...... 0x8f0e55aea580 WmiPrvSE.exe (2804)   984         9         - 2019-10-08 01:11:16Z
+...... 0x8f0e548ca580 dllhost.exe (3116)    984         5         - 2019-10-08 01:20:21Z
+...... 0x8f0e54db1580 RuntimeBroker. (4484) 984         9         - 2019-10-08 01:20:24Z
+...... 0x8f0e54c6b580 RuntimeBroker. (4560) 984        10         - 2019-10-08 01:20:24Z
+...... 0x8f0e5486b580 ApplicationFra (4632) 984         6         - 2019-10-08 01:20:24Z
+<snip>
+.... 0x8f0e55618080 lsass.exe (808)         704        10         - 2019-10-08 01:11:11Z
+.... 0x8f0e54b52380 fontdrvhost.ex (916)    704         5         - 2019-10-08 01:11:12Z
+.. 0x8f0e54aae080 smss.exe (696)            532         0         - 2019-10-08 01:11:11Z
+... 0x8f0e54c58080 csrss.exe (716)          696        11         - 2019-10-08 01:11:11Z
+... 0x8f0e55617080 winlogon.exe (776)       696         6         - 2019-10-08 01:11:11Z
+.... 0x8f0e54709580 userinit.exe (896)      776         0         - 2019-10-08 01:20:19Z
+..... 0x8f0e548a5080 explorer.exe (3180)    896         0         - 2019-10-08 01:20:19Z
+...... 0x8f0e52bbe580 vmtoolsd.exe (1620)   3180        8         - 2019-10-08 01:20:38Z
+...... 0x8f0e52b92580 OneDrive.exe (4212)   3180       16         - 2019-10-08 01:20:40Z
+...... 0x8f0e52bc3580 MSASCuiL.exe (6088)   3180        1         - 2019-10-08 01:20:38Z
+...... 0x8f0e56308580 cmd.exe (6596)        3180        1         - 2019-10-08 01:20:53Z
+....... 0x8f0e5633a580 conhost.exe (6604)   6596        4         - 2019-10-08 01:20:53Z
+....... 0x8f0e542e5440 rekal.exe (7016)     6596      109         - 2019-10-08 02:01:41Z
+.... 0x8f0e54b53580 fontdrvhost.ex (908)     776        5         - 2019-10-08 01:11:12Z
+.... 0x8f0e5473a300 dwm.exe (1004)           776       11         - 2019-10-08 01:11:12Z
+.... 0x8f0e52988380 explorer.exe (6920)      776       84         - 2019-10-08 02:04:50Z
+..... 0x8f0e5476c090 cmd.exe (4860)         6920        1         - 2019-10-08 02:11:20Z
+...... 0x8f0e52638080 conhost.exe (444)     4860        5         - 2019-10-08 02:11:20Z
+...... 0x8f0e5539d580 rekal.exe (4768)      4860      110         - 2019-10-08 02:11:41Z
+..... 0x8f0e54f8f580 cmd.exe (6224)         6920        2         - 2019-10-08 02:05:08Z
+...... 0x8f0e52dad080 conhost.exe (1060)    6224        5         - 2019-10-08 02:05:08Z
+...... 0x8f0e5470f580 winpmem-2.1.po (4312) 6224        2         - 2019-10-08 02:15:25Z
+. 0x8f0e551e6040 MemCompression (1708)         4       34         - 2019-10-08 01:11:14Z
+As you continue to analyze the processes going down the list, you see that they are all descendants of the
+smss.exe
+process with PID 628, until you reach a few lines past the
+<snip>
+. Three lines below the
+<snip>
+, you will find another instance of
+smss.exe
+with PID 696. Note that its creation time is the same as the creation time for its sibling
+smss.exe
+, with PID 628, that we saw earlier (both were spawned by the master
+smss.exe
+with PID 532). In this case,
+smss.exe
+with PID 696 spawned an instance of
+csrss.exe
+(PID 716) and
+winlogon.exe
+(PID 776) before it terminated (note that the thread count column shows 0 for PID 696 since it has exited).
+If desired, you can also have the
+pstree
+plug‐in display additional details of each process, such as the command line used to launch each process and the path to the associated executable on disk, by increasing the value set for the Rekall
+verbosity
+option. The syntax to do so from within your operating system shell is
+rekal.exe -f \client2.aff4 pstree --verbosity=10
+From within the interactive Rekall shell, you would type
+pstree verbosity=10
+to achieve the same result. Note that within the interactive Rekall shell, you do not need to use the dashes in front of the option. When running
+pstree
+from your operating system shell, the dashes are required. This syntax for designating options is used in the same manner with other Rekall plug‐ins (as you saw with the
+proc_regex
+option for the
+pslist
+plug‐in earlier).
+The
+dlllist
+Plug‐in
+The
+dlllist
+plug‐in provides the location of a process's executable on disk as well as each dynamic‐link library (DLL) that it uses. As a bonus, the command line used to launch the process is also provided. You can look for DLLs or executables running from unusual locations, such as tmp or download folders. This includes looking for processes using standard system process names but running from unusual locations, as mentioned in the beginning of the chapter. You can also look for system DLLs that should not be included in the process being examined by comparing the results from another computer running the same process, or by researching the capabilities provided by each DLL to see if they make sense given the nature of the process being examined. For example, you would not expect to see DLLs required for network functionality in a process such as
+Notepad.exe
+. If you run the
+dlllist
+plug‐in with no further arguments, it will provide these details for every process found within the memory sample. For a more targeted result, provide the PID of the process that you would like to examine after the name of the plug‐in, such as
+dlllist 4768
+to see the results for process ID 4768. This syntax works within the Rekall interactive shell or from the command line, such as
+rekal.exe ‐f
+\client2.aff4 dlllist 4768
+. For Volatility 2.6, the syntax is slightly different. You would specify the
+‐‐pid=4768
+argument after the name of the
+dlllist
+plug‐in. For example, if you were trying to analyze a Windows 10 dump file located in the user's home directory on a Linux analyst workstation and want to provide the
+dlllist
+results for process ID 4768, the command is
+vol.py -f ~/Client5.dmp --profile=Win10x64_17134 dlllist --pid=4768
+The
+psxview
+Plug‐in
+There are many ways to enumerate the processes that are (or were) running on a system from which a memory sample has been obtained. If you suspect that a rootkit may be trying to hide processes, you can use the
+psxview
+plug‐in to enumerate processes using different methods and cross‐reference the results obtained from each method. If the method used detects the presence of a process, the entry underneath that method will be listed as
+True
+. If the method does not detect the presence of the process, the entry for that process under that method will be
+False
+. If a process appears in the results of some methods but is not present in the results of other methods, it may be indicative of malicious manipulation of memory structures in an attempt to conceal the presence of the process.
+When using this approach, note that not all processes should appear in the list generated by every method. Processes that have terminated will not appear in the results of methods that only look for active processes. Some methods used by the
+psxview
+plug‐in may not have been updated to work correctly on the version of the operating system that you are analyzing and therefore may not show any processes. Other methods, such as the CSRSS method, rely on data structures found within specific processes that may intentionally not include all processes (such as
+csrss.exe
+not being included in the list of processes maintained by itself). To help eliminate some of these known exceptions, Volatility's implementation of the
+psxview
+plug‐in offers the
+‐‐apply‐rules
+option. When used, known cases of these anomalies will cause the
+False
+entry to be replaced by
+Okay
+to indicate that the process's absence is a known exception and is not cause for alarm. This can help reduce false positives from an analyst not familiar with the idiosyncrasies of each method.
+The
+handles
+Plug‐in
+For a process to access resources like a file, mutex, or network connection, it must first obtain a handle to that object. You can use the
+handles
+plug‐in to determine which handles a process had open. Just as with the
+dlllist
+plug‐in, this plug‐in can produce a large volume of output for each process, so you will want to narrow the focus to the process of interest. The syntax to do so is the
+same as it was for the
+dlllist
+plug‐in. Handles can be obtained for many different types of objects, and the
+handles
+plug‐in will tell you the object type for each handle it reports. Some useful examples include Key, File, and Mutant.
+Malware will frequently modify registry keys, often as a persistence mechanism. Using the
+handles
+plug‐in allows you to determine which process has access to modify specific registry keys. The description field produced by the plug‐in will tell you to which key each handle refers. Similarly, if malware accesses a file, you can find the details of the file path in the associated handle description. File handles do not necessarily refer to a file on disk. The operating system may refer to other object types as if they were a file, such as when we map a network drive to refer to a remote network connection as if it were a local device and file. File handles to
+\Device\MUP
+(MUP stands for multiple UNC provider) may refer to network connections, as you will see later in the chapter. Finally, malware often uses a unique mutant (also known as a mutex) name to mark systems that it has infected to avoid re‐infecting the same machine again. If you identify the name of a mutant as an indicator of compromise, the
+handles
+plug‐in can help you determine which process accessed that mutant.
+The
+malfind
+Plug‐in
+As attackers seek to evade endpoint protection systems, they will often inject malicious code directly into the process space of an otherwise benign process. This allows them to keep their malicious code from being written to disk where it is more likely to be scanned by antivirus or other endpoint defenses. The
+malfind
+plug‐in is designed to help you detect hidden or injected code.
+Memory is allocated in units known as
+pages
+. Although pages may vary in size from system to system, 4,096 bytes is a common value. The concept of a page is like a cluster on disk in that a page is the smallest unit that can be allocated in memory and a cluster is typically the smallest unit on disk that can be allocated by the operating system. Each page must be provided with security permissions indicating whether the data contained within it can be read, executed, or written. DLLs are typically loaded with permissions indicating that they can be read, but if they are written to, a new copy must be made and the changes made only on that copy (copy on write). This allows multiple processes to share a single instance of a DLL in memory, but if one of the processes attempts to make a change to that DLL, it must copy its own instance of the DLL into its process memory space before it is allowed to make changes. This avoids one process modifying code that may be in use by other processes in the case of a shared DLL.
+For malicious code to be injected into the memory space of a running process, the page holding that memory must allow new code to be written to that page. For the code to then be of any use to the attacker, the code must be able to be
+read and executed as well. Normally, if a page of memory contains executable code, that code will have been loaded into memory from disk, so the code in the page is backed by a file on disk. When a page is marked with read, write, and execute permissions but there is no associated file on disk to explain from where that code came, that is suggestive of code having been injected into the process maliciously. The
+malfind
+plug‐in automates the detection of memory segments that are marked with read, write, and execute permissions that are also not backed by a file on disk.
+Although the plug‐in helps identify potentially suspicious segments within a process's memory, it is up to you to complete the analysis and confirm that the segments discovered contain executable code. One of the easiest ways to identify executable code is by the presence of the MZ header at the beginning of the segment. This header is used by Windows systems to identify executable files. Even if the MZ header is not present, the segment may still contain executable code, so the
+malfind
+plug‐in will display the hexadecimal and ASCII representations of the data as well as display the assembly language instructions that data would represent if it was intended as executable code. It is up to the human analyst to decide whether the data contained in the segment is executable code or simply other types of data that would not be harmful to the system.
+KEEPING UP WITH WINDOWS 10
+Although the process of keeping memory forensics tools up to date has always been a challenge, the increased update frequency that came with Windows 10 and changes in how Microsoft makes information about those changes available to developers have exacerbated the issue. As a result, finding profiles and plug‐ins that are updated for the latest release of Windows 10 is increasingly challenging. As of this writing, Volatility 3 is preparing to release its first public beta. It will be interesting to watch how the team at the Volatility Foundation addresses this challenge moving forward. In addition, the team at FireEye have done research on extracting information from Windows 10 compressed memory and made their updates available for both Volatility and Rekall. You can learn more about their efforts at
+www.fireeye.com/blog/threat-research/2019/07/finding-evil-in-windows-ten-compressed-memory-part-one.html
+. Keeping up with the pace of change of Windows 10 and its undocumented data structures continues to be a challenge for the maintainers of memory forensics tools. Incident handlers should always ensure that they collect data through other means as well, including use of the commands presented in
+Chapter 4
+and the use of agent‐based technologies such as Velociraptor, to maximize the amount of data that will be available for analysis of each incident.
+Examining Windows Services
+Services run without direct user interaction, typically starting up when the system is booted. As a result, they are frequently used by attackers to maintain persistence on compromised systems. As discussed earlier, many services are implemented as DLLs, which require a host process in which to run. The
+svchost
+process is used for this purpose, and as a result, there are many instances of
+svchost.exe
+running on any given Windows system. Since there are many services occurring on a Windows system, and most administrators do not fully understand each service running inside of the many
+svchost.exe
+instances, they make a good target for attacker activity.
+The
+services
+plug‐in allows us to enumerate each service registered on the system. For a service to be registered, it must have been started by the service control manager (SCM), which is implemented by
+services.exe
+. Services started through legitimate means will be registered; however, attackers can use other mechanisms of starting a service that will bypass this registration process. During normal system activity, each service receives a subkey under the
+HKLM\SYSTEM\CurrentControlSet\services
+registry key. Each subkey name is the name of a service, and the values of each key will show the
+ImagePath
+to the associated code on disk as well as configuration information, such as whether the service is configured to automatically start.
+Attackers can register a new service with an
+ImagePath
+that points to malicious code, setting the service to automatically start each time the system boots. This is an effective and common means of obtaining persistence on a victim system. Alternatively, attackers may modify the
+ImagePath
+to an existing service to point to malicious code, causing the service to launch the malware instead (and in most cases, the malware will also launch the legitimate service executable as well to try to avoid detection). In
+Chapter 11
+, you will learn how to analyze the time stamps associated with each subkey to determine the last time a change was made to this information. As services are started by the SCM, it maintains an internal list of each service, its associated PID, and its current state. This is the list that tools running on live systems will typically access to report information about running services. Since attackers can bypass having their service appear in this list, we will instead use manual scan techniques to look for the data structures associated with running services directly in memory to increase our chances of detecting services that may have been intentionally hidden by an attacker.
+The
+svcscan
+plug‐in carves through memory looking for data structures associated with services and reports the results. This plug‐in will tell us the name and description of the service, the offset in memory to its associated data
+structure, its current state (such as running or stopped), its startup configuration (such as automatic or manual), the location of its associated executable on disk, and other information. An example entry from the Volatility
+svcscan
+module, showing a service implemented as a DLL that runs under an
+svchost
+process, is provided here:
+Offset: 0x29ea2860ea0
+Order: 414
+Start: SERVICE_DEMAND_START
+Process ID: 820
+Service Name: TimeBrokerSvc
+Display Name: Time Broker
+Service Type: SERVICE_WIN32_SHARE_PROCESS
+Service State: SERVICE_RUNNING
+Binary Path: C:\Windows\System32\svchost.exe -k
+LocalServiceNetworkRestricted
+In this example, the service is implemented as a DLL, which is hosted within a
+svchost.exe
+instance. You would therefore need to consult the service's registry key to determine the path on disk for this service's DLL. In cases where the service is implemented as a stand‐alone executable, the full path to that executable would be in the Binary Path field. Rekall provides the
+services
+plug‐in, which will read through the registry for you and report the services described there, including the path to the DLL or executable that implements that service. You can also compare the results achieved by scanning memory to the services recorded in the registry. This will also help you determine the location of associated DLL files on disk when services are implemented as
+svchost.exe
+instances.
+In addition to the Rekall
+services
+plug‐in, we can manually examine the registry keys. While registry hives are stored on disk, they may also be in memory during system operation and therefore available during memory analysis. Some registry data even exists only in memory and is not written back to disk. To view registry keys that are stored in memory, we can use the
+printkey
+plug‐in. While we will look at ways to query registry keys on disk and many of the keys of interest to incident responders in
+Chapter 11
+, you can use the
+printkey
+plug‐in to examine those keys in memory as well. For example, the
+TimeBrokerSvc
+key from the
+svcscan
+output example earlier can be enumerated as follows:
+$ vol.py -f ~/target.dmp --profile=Win10x64_14393 printkey -K ↵
+"ControlSet001\Services\TimeBrokerSvc"
+Volatility Foundation Volatility Framework 2.6
+Legend: (S) = Stable  (V) = Volatile
+----------------------------
+Registry: \REGISTRY\MACHINE\SYSTEM
+Key name: TimeBrokerSvc (S)
+Last updated: 2016-07-16 11:48:53 UTC+0000
+Subkeys:
+(S) Parameters
+(S) Security
+(S) TriggerInfo
+Values:
+REG_BINARY    ServiceHostSid     : (S)
+0x00000000 01 01 00 00 00 00 00 05 13 00 00 00 ............
+REG_SZ        DisplayName        : (S)
+@%windir%\system32\TimeBrokerServer.dll,‐1001
+REG_DWORD     ErrorControl       : (S) 1
+REG_EXPAND_SZ ImagePath          : (S)
+%SystemRoot%\system32\svchost.exe ‐k LocalServiceNetworkRestricted
+REG_DWORD     Start              : (S) 3
+REG_DWORD     Type               : (S) 32
+REG_SZ        Description        : (S)
+@%windir%\system32\TimeBrokerServer.dll,‐1002
+REG_SZ        ObjectName         : (S) NT AUTHORITY\LocalService
+REG_DWORD     ServiceSidType     : (S) 1
+REG_MULTI_SZ  RequiredPrivileges : (S)
+['SeChangeNotifyPrivilege', 'SeCreateGlobalPrivilege', '', '']
+REG_BINARY        FailureActions : (S)
+0x00000000 80 51 01 00 00 00 00 00 00 00 00 00 03 00 00 00
+.Q..............
+0x00000010 14 00 00 00 01 00 00 00 c0 d4 01 00 01 00 00 00
+................
+0x00000020 e0 93 04 00 00 00 00 00 00 00 00 00
+............
+You can see from the Description field that the Time Broker service is implemented in a DLL located at
+%windir%\system32\TimeBrokerServer.dll
+on the target system. You can use this same approach to enumerate other registry keys that may be stored in your memory sample.
+Examining Network Activity
+Network activity is usually a component of any incident. Even Stuxnet, which was designed to autonomously attack a programmable logic controller in an air‐gapped network without the need for a command‐and‐control channel or exfiltration of data, still had network components to self‐propagate. To examine traces of network activity in a memory sample with Rekall or Volatility, you can rely on the
+netscan
+plug‐in. Rekall also offers a
+netstat
+plug‐in, which limits its output to active TCP sessions, but
+netscan
+provides us with the most complete view.
+Much like the
+svcscan
+plug‐in,
+netscan
+carves through memory looking for known data structures, this time focused on network activity.
+netscan
+extracts information on connections, TCP listeners, and UDP endpoints. You can think
+of an endpoint as one half of a connection, whereas a network connection object can describe both ends of the connection. Since an endpoint represents only one end of the connection, the IP address of the local system will be reported but no information will be provided about the remote or foreign system.
+Figure 9.6
+shows an example of the output from the
+netscan
+plug‐in on Volatility. We can see that the PID and name of the process (Owner column) are available for each connection/endpoint. The date that the object was created is also provided. We also note that both IPv4‐ and IPv6‐related network activity is displayed. For TCP connections, the state (
+LISTENING
+,
+CONNECTED
+,
+TIME‐WAIT
+,
+CLOSED
+, etc.) is also provided.
+Figure 9.6
+:
+netscan
+plug‐in in action
+Since an endpoint does not report a foreign address, the plug‐in displays *:* for the other end. Note that when a connection object is in the
+LISTENING
+state, the remote connection is reported as 0.0.0.0:0 for IPv4 and :::0 for IPv6 since the other end of the connection has not yet been established (using standard
+IP address
+:
+port number
+notation). If we are only interested in established TCP sessions, we can use
+grep
+or
+findstr
+to reduce the output to only established sessions. You can see an example of this type of search in
+Listing 9.3
+. (Note that the
+‐i
+switch tells
+grep
+that the string being searched is not case sensitive, and the
+/I
+switch can be used to the same effect with
+findstr
+on a Windows system.) The column headers in
+Listing 9.3
+are not included in the output and were added here for clarity. We have also truncated the output from some lines to fit the width of the page. We will discuss
+Listing 9.4
+and
+Listing 9.5
+later in this section.
+Listing 9.3
+grep
+being used to reduce the netscan plug‐in output to only established connections
+$ vol.py ‐f ˜/Desktop/Client4.img ‐‐profile=Win10x64_14393 netscan | grep ‐i established
+Volatility Foundation Volatility Framework 2.6
+Offset(P)      Proto Local Address    Foreign Address   State       Pid  Owner         Created
+0x900fd34e79f0 TCPv4 10.0.1.124:1160  52.230.84.217:443 ESTABLISHED 600  svchost.exe   2019-10-12 06:58:24 UTC+0000
+0x900fd4e3c520 TCPv4 10.0.1.124:1252  52.230.7.59:443   ESTABLISHED 600  svchost.exe   2019-10-12 06:59:25 UTC+0000
+0x900fd50838e0 TCPv4 10.0.1.124:1253  52.230.7.59:443   ESTABLISHED 3344 explorer.exe  2019-10-12 06:59:28 UTC+0000
+0x900fd2002520 TCPv6 fe80::ed7f:cbe1:4ebe:631b:1292 fe80::c1bd:7f99:8cbf:4e37:445 ESTABLISHED  4 System <snip>
+Listing 9.4
+netscan
+plug‐in output to examine established connections
+$ vol.py ‐f ˜/Client4_infected.img ‐‐profile=Win10x64_14393 netscan | grep ‐i established
+Volatility Foundation Volatility Framework 2.6
+Offset(P)      Proto Local Address   Foreign Address   State       Pid  Owner          Created
+0xc58196983010 TCPv4 10.0.1.124:1620 111.125.97.66:443 ESTABLISHED 4428 admin_assistan 2019-10-14 08:42:16 UTC+0000
+0xc58198328460 TCPv4 10.0.1.124:1634 10.0.1.123:445    ESTABLISHED    4 System         2019-10-14 08:45:24 UTC+0000
+Listing 9.5
+Inspection of process PID 4428 using the
+pslist
+plug‐in with
+‐‐pid
+option
+$ vol.py ‐f ˜/Client4_infected.img ‐‐profile=Win10x64_14393 pslist ‐‐pid=4428
+Volatility Foundation Volatility Framework 2.6
+Offset(V)          Name             PID   PPID  Thds      Hnds  Sess   Wow64 Start                          Exit
+------------------ ---------------- ---- ------ ----- -------- ------ ------ ------------------------------ ----------------------------
+0xffffc581972e6080 admin_assistan  4428   4512      0 -------- ------      1 2019-10-14 08:42:16 UTC+0000   2019-10-14 08:43:15 UTC+0000
+Note that in the previous example there are three IPv4 sessions to external IP addresses using port 443 for HTTPS, and one IPv6 connection using SMB on port 445 to another internal host. Two of the HTTPS connections are made by an instance of
+svchost.exe
+(PID 600), and one is made by
+explorer.exe
+(PID 3344). The SMB connection is owned by the
+System
+process (PID 4), which is normal behavior when a Windows API is used to initiate an SMB connection, such as with the
+net use
+command.
+When examining memory from production systems, you should expect to see several different connections, as well as artifacts of previous connections that are no longer active. Modern systems will frequently establish many connections in the background during normal operation.
+Detecting Anomalies
+Now that you understand what normal system behavior looks like and how to use the Rekall and Volatility plug‐ins to analyze a memory sample, let's apply that knowledge to detecting unusual behavior on systems being examined. For this scenario, we will assume that you have network security monitoring (NSM) in place (we discussed NSM in
+Chapter 7
+, “Network Security Monitoring”). Deep packet inspection technologies look at the protocols being used and compare them to the protocols expected across known ports. In this example, our deep packet inspection device detected nonstandard protocol activity using port 443, and we received an alert. The connection involved our internal host 10.0.1.124 using port 1620 to initiate an outbound connection to outside IP address 111.125.97.66 on port 443. Incident handlers quickly captured a memory dump from the internal host assigned IP address 10.0.1.124, which is a Windows 10 client, and you can begin your analysis.
+Since we already have a network indicator, the
+netscan
+plug‐in is a logical place to start. When we do an analysis of this type, it is useful to open copies of the memory sample in both Rekall and Volatility. Since each tool is maintained by different teams, and since …plug‐ins, profiles and symbol tables require frequent updates to keep up with the latest operating system releases, using both tools to verify findings and take advantage of the most recent features of each is a good approach. Let's start off with using Volatility for analysis. To get an initial view of this memory sample, you can use
+grep
+(or
+findstr
+) to search for established TCP connections. The output is shown in
+Listing 9.4
+. The column headers in the listing were added for clarity. They do not appear in the
+grep
+output.
+You can see from the output listed in
+Listing 9.4
+that there were two active connections. One is the identified suspicious connection to IP address 111.125.97.66 and the other is a connection to an internal host over the SMB port (445). You can see that the suspicious outbound connection is owned by process ID 4428, and the connection to internal host 10.0.1.123 is owned by the
+System
+process (PID 4). As a next step, let's get a closer look at the process with PID 4428 by using the
+pslist
+plug‐in with the
+‐‐pid
+option to reduce the output to only the one process.
+Listing 9.5
+lists the results.
+The first 14 characters of the process name are
+admin_assistan
+(remember that this field is truncated in memory). This process was spawned by PID 4512. Strangely, despite having an active session at the time the memory sample was collected, process ID 4428 has already exited. You can tell this since the process has an exit time and shows zero threads. This anomaly certainly warrants further investigation. Since the process has already exited, in this case the
+dlllist
+plug‐in, which would normally give us the full path to its associated executable (including its full name), does not return any results. Likewise, checking for further information about its parent process 4512 also reveals that its parent has already terminated. Let's try to understand a bit more about the relationship of this process with other processes by using the
+pstree
+plug‐in. We used Rekall's interactive console this time rather than Volatility to demonstrate the use of both tools. You can review the output in
+Listing 9.6
+.
+We've removed some of the entries near the middle for brevity (indicated by
+<snip>
+), but in this case, the
+admin_assistan
+process appears near the bottom. Since its parent process has exited, there is not enough information left in memory to determine its full genealogy. The
+pstree
+plug‐in therefore shows it at the bottom as being the root of its own process tree, which you can see in the last few lines in the output. All is not lost, however, since you are able to identify that our suspicious
+admin_assistan
+process spawned a child process of its own. Once a process is identified as suspicious, you must also be wary of any child processes or grandchild processes that may have spawned from it. The last few lines of output in
+Listing 9.6
+shows the process
+admin_assistan
+with PID 4428 spawned a process with the name
+taskhost.exe
+and PID 4592. Since this is a Windows 10 system, as mentioned near the beginning of this chapter, there should not be a default process named
+taskhost.exe
+running (we would find that name on a Windows 7 system). In the output, in the line just above the
+<snip>
+, we can see the legitimate
+taskhostw.exe
+process already running on this Windows 10 system. It appears that our attacker is attempting to hide a malicious process by using a legitimate‐sounding name.
+Listing 9.6
+Output using
+pstree
+plug‐in and the Rekall interactive console
+[1] Client4_infected.aff4 04:32:56>
+pstree
+----------------------------------> pstree()
+_EPROCESS                                ppid   thd_count hnd_count      create_time
+---------------------------------------- ------ --------- --------- --------------------
+0xc5819425f040 System (4)                    0        85         - 2019-10-12 07:01:06Z
+. 0xc58195a92040 smss.exe (508)               4         2         - 2019-10-12 07:01:06Z
+.. 0xc5819622f080 smss.exe (652)            508         0         - 2019-10-12 07:01:07Z
+… 0xc5819624c090 csrss.exe (672)            652        12         - 2019-10-12 07:01:07Z
+… 0xc5819629f800 winlogon.exe (712)         652         2         - 2019-10-12 07:01:07Z
+…. 0xc581963dc090 dwm.exe (1020)            712        11         - 2019-10-12 07:01:07Z
+…. 0xc58195c67440 userinit.exe (4008)       712         0         - 2019-10-14 08:37:29Z
+0xc58195daf080 csrss.exe (584)             576        11         - 2019-10-12 07:01:06Z
+0xc58196231440 wininit.exe (660)           576         1         - 2019-10-12 07:01:07Z
+. 0xc581962f4080 services.exe (788)         660         5         - 2019-10-12 07:01:07Z
+.. 0xc581963fe800 svchost.exe (604)         788        40         - 2019-10-12 07:01:07Z
+… 0xc581982fa300 GoogleUpdate.e (2460)      604         3         - 2019-10-14 08:37:15Z
+… 0xc58196553800 sihost.exe (3788)          604         9         - 2019-10-14 08:37:29Z
+… 0xc58195c02080 taskhostw.exe (3844)       604        14         - 2019-10-14 08:37:29Z
+<snip>
+.. 0xc58195e95800 dllhost.exe (2684)        788        10         - 2019-10-14 08:37:16Z
+.. 0xc58195ebb680 svchost.exe (2752)        788         9         - 2019-10-14 08:37:16Z
+.. 0xc58195ed7800 msdtc.exe (2804)          788         9         - 2019-10-14 08:37:16Z
+.. 0xc58196965800 svchost.exe (3796)        788         7         - 2019-10-14 08:37:29Z
+. 0xc581962fb080 lsass.exe (796)            660        10         - 2019-10-12 07:01:07Z
+.. 0xc58195f16080 cmd.exe (4836)            796         1         - 2019-10-14 08:43:19Z
+… 0xc58195f40080 conhost.exe (4740)         4836        3         - 2019-10-14 08:43:19Z
+0xc581972e6080 admin_assistan (4428)       4512        0         - 2019-10-14 08:42:16Z
+. 0xc58198584800 taskhost.exe (4592)        4428        1         - 2019-10-14 08:42:53Z
+Out<04:32:57> Plugin: pstree (PSTree)
+Listing 9.7
+Rekall
+dlllist
+plug‐in output
+[1] Client4_infected.aff4 04:54:30>
+dlllist 4592
+----------------------------------> dlllist(4592)
+base           size                  reason             dll_path
+-------------- -------------- ------------------------------ --------
+---------------------------
+taskhost.exe pid: 4592
+Command line : taskhost.exe
+---------------------------
+0x7ff75e5c0000    0x189000 LoadReasonDynamicLoad        C:\windows\SysWoW64\taskhost.exe
+0x7ffc2f760000    0x1d1000 LoadReasonStaticDependency   C:\Windows\SYSTEM32\ntdll.dll
+0x7ffc2f530000     0xab000 LoadReasonDynamicLoad        C:\Windows\System32\KERNEL32.DLL
+0x7ffc2bf30000    0x21d000 LoadReasonStaticDependency   C:\Windows\System32\KERNELBASE.dll
+0x7ffc2d4c0000     0x52000 LoadReasonStaticDependency   C:\Windows\System32\SHLWAPI.dll
+0x7ffc2d5c0000     0x9e000 LoadReasonStaticDependency   C:\Windows\System32\msvcrt.dll
+0x7ffc2d140000    0x2c8000 LoadReasonStaticDependency   C:\Windows\System32\combase.dll
+0x7ffc2cad0000     0xf5000 LoadReasonStaticDependency   C:\Windows\System32\ucrtbase.dll
+0x7ffc2ebf0000    0x121000 LoadReasonStaticDependency   C:\Windows\System32\RPCRT4.dll
+<snip>
+0x7ffc2a350000     0x95000 LoadReasonDynamicLoad        C:\Windows\SYSTEM32\uxtheme.dll
+0x7ffc2cd00000     0x2e000 LoadReasonDynamicLoad        C:\Windows\System32\IMM32.DLL
+0x7ffc26310000     0xcd000 LoadReasonStaticDependency   C:\Windows\SYSTEM32\WINHTTP.dll
+0xb28abbd6fe44  0xbd981f87 UNKNOWN (392093349)
+0x0         0x0 LoadReasonStaticDependency
+0x0         0x0 LoadReasonStaticDependency
+Out<04:54:30> Plugin: dlllist (WinDllList)
+In Rekall, you can use the
+verbosity=10
+option with the
+pstree
+plug‐in to display the path on disk to each process's associated executable. Or, with both Rekall and Volatility, you can also use the
+dlllist
+plug‐in to view this information. For the output shown in
+Listing 9.7
+, we used the Rekall
+dlllist
+plug‐in within the interactive Rekall shell to view further information about the suspicious
+taskhost.exe
+process.
+Since the first code to be loaded by an executable is the executable file itself, the path to the executable on disk is the first loaded code listed, in this case
+C:\windows\SysWoW64\taskhost.exe
+. Once again, this is not a default file running on a Windows 10 system, so you should pull this file from its location on disk and do additional analysis. We will discuss analysis of suspicious binaries in
+Chapter 10
+. You could also use the
+procdump
+plug‐in to pull it from memory to aid in that analysis.
+You now have strong indicators that this host has been compromised. You should therefore do a thorough analysis of all network connections and processes running on the system. If you remember from the first step of the analysis, there were two active connections at the time that this memory sample was collected. You determined that the first one, to outside IP address 111.125.97.66, was indeed suspicious and have identified the processes with which it was associated. Let's back up and see what else you can determine about the second active connection, an internal SMB connection to IP address 10.0.1.123 that was owned by PID 4 (
+System
+). We have reprinted the Volatility
+netscan
+output in
+Listing 9.8
+for your reference.
+When standard system API calls are used to make an SMB connection to another Windows system, the connection itself is associated with the system process, since the kernel makes the connection on behalf of the requesting process. This is normal Windows behavior, and you will encounter it frequently as you handle incidents. But this does not mean that you cannot determine anything about the process requesting access to the connection. You can use the
+handles
+plug‐in to see which process, or processes, were using the connection.
+Listing 9.9
+shows the output created using the Volatility
+handles
+plug‐in and
+grep
+to search for the IP address involved in the connection we are investigating.
+Remember from earlier in this chapter that the MUP device refers to the Multiple Universal Naming Convention (UNC) Provider, and that file handles to this device are common with network SMB connections. You can see from the output in
+Listing 9.9
+(headers added to the listing for clarity) that two processes (PID 1108 and 4836) had handles to the SMB connection to 10.0.1.123. Also note that its C: drive administrative share (
+C$
+) was mapped as device letter Z: on the 10.0.1.124 system. You can learn more about the processes with access to that handle with the
+pslist
+plug‐in, as shown in
+Listing 9.10
+.
+Listing 9.8
+grep
+being used to reduce the netscan plug‐in output to only established connections
+$ vol.py ‐f ˜/Client4_infected.img ‐‐profile=Win10x64_14393 netscan | grep ‐i established
+Volatility Foundation Volatility Framework 2.6
+Offset(P)        Proto  Local Address   Foreign Address    State        Pid  Owner          Created
+0xc58196983010   TCPv4  10.0.1.124:1620 111.125.97.66:443  ESTABLISHED  4428 admin_assistan 2019-10-14 08:42:16 UTC+0000
+0xc58198328460   TCPv4  10.0.1.124:1634 10.0.1.123:445     ESTABLISHED  4    System         2019-10-14 08:45:24 UTC+0000
+Listing 9.9
+Output from the
+handles
+plug‐in
+$ vol.py ‐f ˜/Client4_infected.img ‐‐profile=Win10x64_14393 handles | grep 10.0.1.123
+Volatility Foundation Volatility Framework 2.6
+Offset(V)             Pid Handle   Access  Type  Details
+------------------ ------ ------- -------- ----- ----- -------
+0xffffc581942eeca0  1108 0xaec 0x100000 File \Device\Mup\;Z:00000000000003e7\10.0.1.123\c$
+0xffffc581953a5330  4836  0x94 0x100020 File \Device\Mup\;Z:00000000000003e7\10.0.1.123\c$\
+Listing 9.10
+Examining two processes with the
+pslist
+plug‐in
+$ vol.py ‐f ˜/Client4_infected.img ‐‐profile=Win10x64_14393 pslist ‐‐pid=1108,4836
+Volatility Foundation Volatility Framework 2.6
+Offset(V)          Name            PID   PPID   Thds     Hnds   Sess  Wow64 Start                          Exit
+------------------ ------------ ------ ------ ------ -------- ------ ------ ------------------------------ ------
+0xffffc58196b28800 svchost.exe  1108  788   29    0   0   0 2019-10-12 07:01:08 UTC+0000
+0xffffc58195f16080 cmd.exe      4836  796    1    0   0   0 2019-10-14 08:43:19 UTC+0000
+Listing 9.11
+Output from
+pstree
+repeated
+[1] Client4_infected.aff4 04:32:56> pstree
+----------------------------------> pstree()
+_EPROCESS                                ppid   thd_count hnd_count    create_time
+---------------------------------------- ------ --------- --------- --------------------
+0xc5819425f040 System (4)                    0        85         - 2019-10-12 07:01:06Z
+. 0xc58195a92040 smss.exe (508)               4         2         - 2019-10-12 07:01:06Z
+.. 0xc5819622f080 smss.exe (652)            508         0         - 2019-10-12 07:01:07Z
+... 0xc5819624c090 csrss.exe (672)          652        12         - 2019-10-12 07:01:07Z
+... 0xc5819629f800 winlogon.exe (712)       652         2         - 2019-10-12 07:01:07Z
+.... 0xc581963dc090 dwm.exe (1020)          712        11         - 2019-10-12 07:01:07Z
+.... 0xc58195c67440 userinit.exe (4008)     712         0         - 2019-10-14 08:37:29Z
+0xc58195daf080 csrss.exe (584)             576        11         - 2019-10-12 07:01:06Z
+0xc58196231440 wininit.exe (660)           576         1         - 2019-10-12 07:01:07Z
+<snip>
+.. 0xc58196965800 svchost.exe (3796)        788         7         - 2019-10-14 08:37:29Z
+. 0xc581962fb080 lsass.exe (796)            660        10         - 2019-10-12 07:01:07Z
+.. 0xc58195f16080 cmd.exe (4836)            796         1         - 2019-10-14 08:43:19Z
+... 0xc58195f40080 conhost.exe (4740)      4836         3         - 2019-10-14 08:43:19Z
+0xc581972e6080 admin_assistan (4428)      4512         0         - 2019-10-14 08:42:16Z
+. 0xc58198584800 taskhost.exe (4592)       4428         1         - 2019-10-14 08:42:53Z
+Out<04:32:57> Plugin: pstree (PSTree)
+You can see that an
+svchost.exe
+instance and a
+cmd.exe
+instance both had handles to the internal network connection. Using the
+dlllist
+plug‐in and the
+services
+plug‐in, you could examine this
+svchost.exe
+instance in more detail. That analysis would show that PID 1108 was a legitimate system process. You could continue digging into the
+cmd.exe
+process with PID 4836 as well. In this case, the
+dlllist
+plug‐in would show that it is running from the correct location on disk, so let's focus on how this process came into being with the
+pstree
+plug‐in. Although you already saw the output of
+pstree
+earlier, we've reprinted the relevant portion in
+Listing 9.11
+.
+Two lines below the snip, you see the
+lsass.exe
+process. One line below that, you see the
+cmd.exe
+process with PID 4836 as a child of
+lsass.exe
+. This is a red flag. The
+LSASS
+process does not have any legitimate reason to spawn an interactive user shell. You could use
+dlllist
+to confirm that this instance of
+LSASS
+is indeed running from the correct system location, and in this case it is. You could also double‐check to make sure that no other instances of
+LSASS
+are running, since only one instance of
+LSASS
+should be running on a system at one time (note that if Credential Guard is in use,
+lsaiso.exe
+will also be running, but only one instance of
+lsass.exe
+is normal). You could do this by using the
+pslist
+plug‐in and piping its output through
+grep
+(or
+findstr
+) for the string
+lsass
+. Only one line should be printed, and in this case there is indeed only one instance of
+LSASS
+running. If you have determined that this is your legitimate
+LSASS
+process but we observe abnormal behavior, you should now begin to wonder if additional malicious code has been injected into your otherwise legitimate
+LSASS
+process. You can use the
+malfind
+plug‐in to explore this possibility.
+Remember that the
+malfind
+plug‐in identifies memory segments marked with permissions for read, write, and execute. Since these permissions would be necessary for a segment to contain injected, executable code, they are a good starting point for identifying malicious code injection. The next thing that the
+malfind
+plug‐in does is present only segments that are also not backed by a file on disk. Legitimately loaded code should come from a source on disk such as an executable file or a DLL. When a segment is marked for read, write, and execute permissions but is not backed by a file on disk, that segment may contain maliciously injected code. The last step is to confirm that the page identified by the
+malfind
+plug‐in does indeed contain executable code. This last step is left to the analyst to perform.
+malfind
+presents the hexadecimal and ASCII representations of the data contained at the beginning of the memory segment, as well as the assembly language instructions which that data would represent. The analyst must determine if the memory segment contains executable code or simply data that has been marked by the process for read, write, and execute permissions. If the segment contains executable code, you have most likely detected malicious code injection. If the segment contains nonexecutable data, then you have likely just identified a segment marked in an unusual way by the
+developers of the process but that does not contain any code that can be harmful to your system. We see the results of the
+malfind
+plug‐in being run by Volatility on our memory sample listed in
+Listing 9.12
+.
+Listing 9.12
+Results of the
+malfind
+plug‐in
+$ vol.py ‐f ˜/Client4_infected.img ‐‐profile=Win10x64_14393 malfind
+Volatility Foundation Volatility Framework 2.6
+<snip>
+Process: lsass.exe Pid: 796 Address: 0x2b615620000
+Vad Tag: VadS Protection: PAGE_EXECUTE_READWRITE
+Flags: PrivateMemory: 1, Protection: 6
+0x2b615620000 4d 5a 90 00 03 00 00 00 04 00 00 00 ff ff 00 00
+MZ..............
+0x2b615620010 b8 00 00 00 00 00 00 00 40 00 00 00 00 00 00 00
+........@.......
+0x2b615620020 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+................
+0x2b615620030 00 00 00 00 00 00 00 00 00 00 00 00 10 01 00 00
+................
+0x15620000 4d        DEC EBP
+0x15620001 5a        POP EDX
+0x15620002 90        NOP
+<snip>
+0x1562003e 0000      ADD [EAX], AL
+Process: lsass.exe Pid: 796 Address: 0x2b615690000
+Vad Tag: VadS Protection: PAGE_EXECUTE_READWRITE
+Flags: PrivateMemory: 1, Protection: 6
+0x2b615690000 4d 5a 90 00 03 00 00 00 04 00 00 00 ff ff 00 00
+MZ..............
+0x2b615690010 b8 00 00 00 00 00 00 00 40 00 00 00 00 00 00 00
+........@.......
+0x2b615690020 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+................
+0x2b615690030 00 00 00 00 00 00 00 00 00 00 00 00 e8 00 00 00
+................
+0x15690000 4d        DEC EBP
+0x15690001 5a        POP EDX
+0x15690002 90        NOP
+0x15690003 0003      ADD [EBX], AL
+<snip>
+0x1569003f 00        DB 0x0
+In this example, we showed two segments identified by
+malfind
+. We can see that they are marked for read, write, and execute permissions, and the fact that
+malfind
+displays them means that they are also not backed by a file on disk. As we look at the data they contain, the first two bytes of each segment begin
+with the MZ header, used to designate an executable file. We therefore have strong evidence that malicious code has indeed been injected into our
+LSASS
+process, accounting for the unusual creation of a
+cmd.exe
+process. Since that
+cmd.exe
+has a handle to an administrative share on 10.0.1.123, we can conclude that the SMB connection was likewise being used maliciously and with elevated account permissions (administrative shares require administrator permissions on the remote system).
+Our incident response process must now expand out to include the 10.0.1.123 system, any other internal hosts connecting to the external host 111.125.97.66, and any user that was interactively logged on to 10.0.1.124 since the credentials may now be compromised by an attacker. We also have the suspicious presence of the
+taskhost.exe
+and
+admin_assistan
+processes, which we can use to conduct remote triage of other systems to identify other potentially impacted hosts, as discussed in
+Chapter 3
+. The analysis of one impacted system can help us identify other impacted systems, and identifying additional impacted systems gives us more data to analyze to identify new indicators of compromise.
+Our next steps would be to look at other network telemetry to identify additional systems that may be impacted. We should also use the
+procdump
+plug‐in and perform malware analysis of the
+LSASS
+process to attempt to determine more about the code that was injected. We could also examine the
+LSASS
+process to determine whether any cached credentials were present in its memory space, since the attacker may have been able to access them and reuse those credentials on other systems. We need to review all remaining processes and network connections (both active or previously terminated) on the victim system for further indicators of attacker activity. We should also conduct full analysis of both the memory and the disk storage on this system to identify additional indicators of compromise and reconstruct attacker activity. This would include an analysis of code that executed around the time that our suspicious
+admin_assistan
+process was created (as displayed by the
+pslist
+plug‐in) to help determine the root cause of the infection. We will discuss additional ways to examine the registry for evidence of process execution in
+Chapter 11
+, and some registry data can also be examined in memory using the
+printkey
+and
+shimcache
+plug‐ins (the
+shimcachemem
+plug‐in released on GitHub by FireEye can also be useful for this purpose).
+Practice Makes Perfect
+To help you understand the results of the analysis, we will explain the attacker's activity with the benefit of being the attacker that set up this demonstration. The initial attack vector was a malicious executable named
+admin_assistant.exe
+. A social‐engineering campaign tricked the administrator into running this executable from the
+Downloads
+folder. When the malicious executable was run,
+it initiated a reverse TCP Meterpreter shell back to the 111.125.97.25 IP address on port 443, where the attacker had a Metasploit handler awaiting the connection. This created the entry showing the initial TCP connection over port 443 and associating that connection with the process ID of the
+admin_assistant.exe
+process (remember that the structure in memory to hold the process name truncates the name after 14 characters). Using the Meterpreter access to the system, the attacker uploaded another malicious file called
+taskhost.exe
+to the victim system and executed it. The attacker then used the
+migrate
+function of the Meterpreter shell to inject malicious code into the
+LSASS
+process and continue execution from there. When such migration occurs, the original process exits but the data structures associated with the network connection, showing it as being launched by
+admin_assistant.exe
+, do not update since migration through malicious code injection is not normal system activity that the OS is programmed to expect. From there, the attacker, now operating from code injected into the
+LSASS
+process, opened a
+cmd.exe
+and used the
+net use
+command to make an SMB connection to another internal host. Now that you understand the process of events in detail, you can review this section again to reinforce your knowledge of the information provided by Rekall and Volatility.
+If desired, you can learn more about Meterpreter and the Metasploit framework by working through the free online training provided by Offensive Security at
+www.offensive-security.com/metasploit-unleashed
+. Understanding common attack tools will help further your knowledge of incident response, and one of the best ways to gain proficiency in performing memory analysis is to attack a test VM, take a snapshot, and analyze the resulting VMEM file as a memory sample. If you start off with a snapshot of the system in a known‐good state, you can quickly execute an attack, take a snapshot of the victim system, examine the impact of that attack with Rekall and Volatility (both of which can process a VMEM file generated by the desktop VMware products), and then reset the virtual machine to a known‐good state to try another attack. By seeing both sides of the equation, you can rapidly gain proficiency at detecting anomalies related to common attack vectors.
+Conclusion
+Memory analysis is a powerful tool in the incident responder's toolbox, but the lack of documentation on internal memory data structures and the frequent changes in the structures by operating system vendors means that keeping analysis tools up to date can be challenging. The use of multiple tools increases the chances of finding plug‐ins or templates capable of analyzing a particular memory sample and provides a mechanism to cross‐check the results of any particular tool for accuracy. Since accurate analysis of a memory sample is not
+guaranteed, interrogation of systems for data stored in memory such as network connections and running processes should also be done using the techniques outlined in
+Chapter 4
+or through agent‐based tools such as Velociraptor. This will help you address situations where the memory sample does not provide as much information as you had hoped and gives you another point of comparison to help identify anomalies that may exist on the system. While uncommon, anti‐forensics measures may negatively impact your analysis, so it is important to gather information from a multitude of perspectives to assist with that analysis.

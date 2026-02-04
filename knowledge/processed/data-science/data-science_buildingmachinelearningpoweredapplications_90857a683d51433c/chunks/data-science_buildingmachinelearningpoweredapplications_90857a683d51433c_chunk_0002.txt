@@ -1,0 +1,2759 @@
+ing API to allow a model to process examples as they arrive. You can use a batch workflow that will process multiple data points at once on a regular schedule. Alternatively, you can choose to deploy your models on the client side by either packaging them in an application or serving them through a web browser. Doing so would lower your inference costs and infrastructure needs but make your deployment process more complex.
+The right approach depends on your application’s needs, such as latency requirements, hardware, network and privacy concerns, and inference costs. For a simple prototype like the ML Editor, start with an endpoint or a simple batch workflow and iterate from there.
+Deploying a model comes with more than just exposing it to users, however. In
+Chapter 10
+, we will cover methods to build safeguards around models to mitigate errors, engineering tools to make the deployment process more effective, and approaches to validate that models are performing the way they should be.
+
+Chapter 10.
+Build Safeguards for Models
+When
+designing databases or distributed systems, software engineers concern themselves with fault tolerance, the ability for a system to continue working when some of its components fail. In software, the question is not whether a given part of the system will fail, but when. The same principles can be applied to ML. No matter how good a model is, it will fail on some examples, so you should engineer a system that can gracefully handle such failures.
+In this chapter, we will cover different ways to help prevent or mitigate failures. First, we’ll see how to verify the quality of the data that we receive and produce and use this verification to decide how to display results to users. Then, we will take a look at ways to make a modeling pipeline more robust to be able to serve many users efficiently. After that, we’ll take a look at options to leverage user feedback and judge how a model is performing. We’ll end the chapter with an interview with Chris Moody about deployment best practices.
+Engineer Around Failures
+Let’s
+cover some of the most likely ways for an ML pipeline to fail. The observant reader will notice that these failure cases are somewhat similar to the debugging tips we saw in
+“Debug Wiring: Visualizing and Testing”
+. Indeed, exposing a model to users in production comes with a set of challenges that mirrors the ones that come with debugging a model.
+Bugs and errors can show up anywhere, but three areas in particular are most important to verify: the inputs to a pipeline, the confidence of a model, and the outputs it produces. Let’s address each in order.
+Input and Output Checks
+Any
+given model was trained on a specific dataset that exhibited particular characteristics. The training data had a certain number of features, and each of these features was of a certain type. Furthermore, each feature followed a given distribution that the model learned in order to perform accurately.
+As we saw in
+“Freshness and Distribution Shift”
+, if production data is different from the data a model was trained on, a model may struggle to perform. To help with this, you should check the inputs to your pipeline.
+Check inputs
+Some
+models may still perform well when faced with small differences in data distributions. However, if a model receives data that is very different from its training data or if some features are missing or of an unexpected type, it will struggle to perform.
+As we saw previously, ML models are able to run even when given incorrect inputs (as long as these inputs are of the right shape and type). Models will produce outputs, but these outputs may be widely incorrect. Consider the example illustrated in
+Figure 10-1
+. A pipeline classifies a sentence into one of two topics by first vectorizing it and applying a classification model on the vectorized representation. If the pipeline receives a string of random characters, it will still transform it into a vector, and the model will make a prediction. This prediction is absurd, but there is no way to know it only by looking at the results of the model.
+Figure 10-1.
+Models will still output a prediction for random inputs
+To prevent a model from running on incorrect outputs, we need to detect that these inputs are incorrect before passing them to the model.
+Checks Versus Tests
+In this section, we are speaking of input checks, as opposed to the input tests we saw in
+“Test Your ML Code”
+. The difference is subtle but important. Tests validate that code behaves as expected given a known, predetermined input. Tests are commonly run every time code or models change to validate that a pipeline still works properly. The input checks in this section are part of the pipeline itself and change the control flow of a program based on the quality of inputs. Input checks that fail may result in running a different model or not running a model at all.
+The checks cover similar domains to the tests in
+“Test Your ML Code”
+. In order of importance, they will:
+Verify that all necessary features are present
+Check every feature type
+Validate feature values
+Verifying feature values in isolation can be hard, as feature distributions can be complex. A simple way to perform such validation is to define a reasonable range of values a feature could take and validate that it falls within that range.
+If any of the input checks fail, the model should not run. What you should do depends on the use case. If the data that is missing represents a core piece of information, you should return an error specifying the source of the error. If you estimate that you can still provide a result, you can replace a model call with a heuristic. This is an additional reason to start any ML project by building a heuristic; it provides you with an option to fall back on!
+In
+Figure 10-2
+, you can see an example of this logic, where the path taken depends on the results of the input checks.
+Figure 10-2.
+Example branching logic for input checks
+Following is an example of some control flow logic from the ML Editor that checks for missing features and feature types. Depending on the quality of the input, it either raises an error or runs a heuristic. I’ve copied the example here, but you can also find it on
+this book’s GitHub repository
+with the rest of the ML Editor code.
+def
+validate_and_handle_request
+(
+question_data
+):
+missing
+=
+find_absent_features
+(
+question_data
+)
+if
+len
+(
+missing
+)
+>
+0
+:
+raise
+ValueError
+(
+"Missing feature(s)
+%s
+"
+%
+missing
+)
+wrong_types
+=
+check_feature_types
+(
+question_data
+)
+if
+len
+(
+wrong_types
+)
+>
+0
+:
+# If data is wrong but we have the length of the question, run heuristic
+if
+"text_len"
+in
+question_data
+.
+keys
+():
+if
+isinstance
+(
+question_data
+[
+"text_len"
+],
+float
+):
+return
+run_heuristic
+(
+question_data
+[
+"text_len"
+])
+raise
+ValueError
+(
+"Incorrect type(s)
+%s
+"
+%
+wrong_types
+)
+return
+run_model
+(
+question_data
+)
+Verifying model inputs allows you to narrow down failure modes and identify data input issues. Next, you should validate a model’s outputs.
+Model outputs
+Once
+a model makes a prediction, you should determine whether it should be displayed to the user. If the prediction falls outside of an acceptable range of answers for a model, you should consider not displaying it.
+For example, if you are predicting the age of a user from a photo, output values should be between zero to a little over 100 years old (if you are reading this book in the year 3000, feel free to adjust the bounds). If a model outputs a value outside of this range, you should not display it.
+In this context, an acceptable outcome is not only defined by an outcome that is plausible. It also depends on your estimation of the kind of outcome that would be
+useful to our user
+.
+For our ML editor, we want to only provide recommendations that are actionable. If a model predicts that everything a user wrote should be entirely deleted, this would consist of a rather useless (and insulting) recommendation. Here is an example snippet validating model outputs and reverting to a heuristic if necessary:
+def
+validate_and_correct_output
+(
+question_data
+,
+model_output
+):
+# Verify type and range and raise errors accordingly
+try
+:
+# Raises value error if model output is incorrect
+verify_output_type_and_range
+(
+model_output
+)
+except
+ValueError
+:
+# We run a heuristic, but could run a different model here
+run_heuristic
+(
+question_data
+[
+"text_len"
+])
+# If we did not raise an error, we return our model result
+return
+model_output
+When a model fails, you can revert to a heuristic just as we saw earlier or to a simpler model you may have built earlier. Trying an earlier type of model can often be worthwhile because different models may have uncorrelated errors.
+I’ve illustrated this on a toy example in
+Figure 10-3
+. On the left, you can see a better-performing model with a more complex decision boundary. On the right, you can see a worse, simpler model. The worse model makes more mistakes, but its mistakes are different from the complex model because of the different shape of its decision boundary. Because of this, the simpler model gets some examples right that the complex model gets wrong. This is the intuition for why using a simple model as a backup is a reasonable idea when a primary model fails.
+If you do use a simpler model as a backup, you should also validate its outputs in the same manner and fall back to a heuristic or display an error if they do not pass your checks.
+Validating that the outputs of a model are in a reasonable range is a good start, but it isn’t sufficient. In the next section, we will cover additional safeguards we can build around a model.
+Figure 10-3.
+A simpler model often makes different errors
+Model Failure Fallbacks
+We
+have built safeguards to detect and correct erroneous inputs and outputs. In some cases, however, the input to our model can be correct, and our model’s output can be reasonable while being entirely wrong.
+To go back to the example of predicting a user’s age from a photo, guaranteeing that the age predicted by the model is a plausible human age is a good start, but ideally we’d like to predict the correct age for this specific user.
+No model will be right 100 percent of the time, and slight mistakes can often be acceptable, but as much as possible, you should aim to detect when a model is wrong. Doing so allows you to potentially flag a given case as too hard and encourages users to provide an easier input (in the form of a well-lit photo, for example).
+There
+are two main approaches to detecting errors. The simplest one is to track the confidence of a model to estimate whether an output will be accurate. The second one is to build an additional model that is tasked with detecting examples a main model is likely to fail on.
+For the first method, classification models can output a probability that can be used as an estimate of the model’s confidence in its output. If those probabilities are well calibrated (see
+“Calibration Curve”
+), they can be used to detect instances where a model is uncertain and decide not to display results to a user.
+Sometimes, models are wrong despite assigning a high probability to an example. This is where the second approach comes in: using a model to filter out the hardest inputs.
+Filtering model
+On top of not always being trustworthy, using a model’s
+confidence score comes with another strong drawback. To get this score, the entire inference pipeline needs to be run regardless of whether its predictions will be used. This is especially wasteful when using more complex models that need to be run on a GPU, for example. Ideally, we would like to estimate how well a model will perform on an example without running the model on it.
+This is the idea behind filtering models. Since you know some inputs will be hard for a model to handle, you should detect them ahead of time and not bother running a model on them at all. A filtering model is the ML version of input tests. It is a binary classifier that is trained to predict whether a model will perform well on a given example. The core assumption between such a model is that there are trends in the kind of data points that are hard for the main model. If such hard examples have enough in common, the filtering model can learn to separate them from easier inputs.
+Here are some types of inputs you may want a filtering model to catch:
+Inputs that are qualitatively different from ones the main model performs well on
+Inputs that the model was trained on but struggled with
+Adversarial inputs that are meant to fool the main model
+In
+Figure 10-4
+, you can see an updated example of the logic in
+Figure 10-2
+, which now includes a filtering model. As you can see, the filtering model is only run if the input checks pass, because you only need to filter out inputs that could have made their way to the “Run Model” box.
+To train a filtering model, you simply need to gather a dataset containing two categories of examples; categories that your main model succeeded on and others that it failed on. This can be done using our training data and requires no additional data collection!
+Figure 10-4.
+Adding a filtering step to our input checks (bolded)
+In
+Figure 10-5
+, I show how to do this by leveraging a trained model and its result on a dataset, as seen in the chart on the left. Sample some data points that the model predicted correctly and some that the model failed on. You can then train a filtering model to predict which of the data points are ones that the original model failed on.
+Figure 10-5.
+Getting training data for a filtering model
+Once you have a trained classifier, training a filtering model can be relatively straightforward. Given a test set and a trained classifier, the following function will do just that.
+def
+get_filtering_model
+(
+classifier
+,
+features
+,
+labels
+):
+"""
+Get prediction error for a binary classification dataset
+:param classifier: trained classifier
+:param features: input features
+:param labels: true labels
+"""
+predictions
+=
+classifier
+.
+predict
+(
+features
+)
+# Create labels where errors are 1, and correct guesses are 0
+is_error
+=
+[
+pred
+!=
+truth
+for
+pred
+,
+truth
+in
+zip
+(
+predictions
+,
+labels
+)]
+filtering_model
+=
+RandomForestClassifier
+()
+filtering_model
+.
+fit
+(
+features
+,
+is_error
+)
+return
+filtering_model
+This
+approach is used by Google for their Smart Reply feature, which suggests a few short responses to an incoming email (see this article by A. Kanan et al.,
+“Smart Reply: Automated Response Suggestion for Email”
+). They use what they call a
+triggering model, responsible for deciding whether to run the main model that suggests responses. In their case, only about 11% of emails are suitable for this model. By using a filtering model, they reduce their infrastructure needs by an order of magnitude.
+A filtering model generally needs to satisfy two criteria. It should be fast since its whole purpose is to reduce the computational burden, and it should be good at eliminating hard cases.
+A filtering model that tries to identify hard cases doesn’t need to be able to catch all of them; it simply needs to detect enough to justify the added cost of running it on each inference. Generally, the faster your filtering model is, the less effective it needs to be. Here is why:
+Let’s say your average inference time using only one model is
+i
+.
+Your average inference time using a filtering model will be
+f
++
+i
+(
+1
+-
+b
+)
+where
+f
+is the execution time of your filtering model, and
+b
+is the average proportion of examples it filters out (b for block).
+To reduce your average inference time by using a filtering model, you thus need to have
+f
++
+i
+(
+1
+-
+b
+)
+<
+i
+, which translates to
+f
+i
+<
+b
+.
+This means the proportion of cases your model filters out needs to be higher than the ratio between its inference speed and the speed of your larger model.
+For example, if your filtering model is 20 times faster than your regular model (
+f
+i
+=
+5
+%
+), it would need to block more than 5% of cases (
+5
+%
+<
+b
+) to be useful in production.
+Of course, you would also need to make sure that the precision of your filtering model is good, meaning that the majority of the inputs it blocks are actually too hard for your main model.
+One way to do this would be to regularly let a few examples through that your filtering model would have blocked and examine how your main model does on them. We will cover this in more depth in
+“Choose What to Monitor”
+.
+Since the filtering model is different from the inference model and trained specifically to predict hard cases, it can detect these cases more accurately than by relying on the main model’s probability output. Using a filtering model thus helps both decreasing the likelihood of poor results and improving resource usage.
+For these reasons, adding filtering models to existing input and output checks can significantly increase the robustness of a production pipeline. In the next section, we will tackle more ways to make pipelines robust by discussing how to scale ML applications to more users and how to organize complex training processes.
+Engineer for Performance
+Maintaining performance
+when deploying models to production is a significant challenge, especially as a product becomes more popular and new versions of a model get deployed regularly. We will start this section by discussing methods to allow models to process large amounts of inference requests. Then, we will cover features that make it easier to regularly deploy updated model versions. Finally, we will discuss methods to reduce variance in performance between models by making training pipelines more reproducible.
+Scale to Multiple Users
+Many
+software workloads are horizontally scalable, meaning that spinning up additional servers is a valid strategy to keep response time reasonable when the number of requests increases. ML is no different in this aspect, as we can simply spin up new servers to run our models and handle the extra capacity.
+Note
+If you use a deep learning model, you may need a GPU to serve results in an acceptable time. If that is the case and you are expecting to have enough requests to require more than a single GPU-enabled machine, you should run your application logic and your model inference on two different servers.
+Because GPU instances are often an order of magnitude more expensive than regular instances for most cloud providers, having one cheaper instance scale out your application and GPU instances tackling only inference will significantly lower your compute costs. When using this strategy, you should keep in mind that you are introducing some communication overhead and make sure that this is not too detrimental to your use case.
+In addition to increasing resource allocation, ML lends itself to efficient ways to handle additional traffic, such as caching.
+Caching for ML
+Caching
+is the practice of storing results to function calls so that future calls to this function with the same parameters can be run faster by simply retrieving the stored results. Caching is a common practice to speed up engineering pipelines and is very useful for ML.
+Caching inference results
+A
+least recently used (LRU) cache is a simple caching approach, which entails keeping track of the most recent inputs to a model and their corresponding outputs. Before running the model on any new input, look up the input in the cache. If a corresponding entry is found, serve the results directly from the cache.
+Figure 10-6
+shows an example of such a workflow. The first row represents the caching step when an input is initially encountered. The second row depicts the retrieval step once the same input is seen again.
+Figure 10-6.
+Caching for an image captioning model
+This sort of caching strategy works well for applications where users will provide the same kind of input. It is not appropriate if each input is unique. If an application takes in photos of paw prints to predict which animal they belong to, it should rarely receive two identical photos, so a LRU cache would not help.
+When using caching, you should only cache functions with no side effects. If a
+run_model
+function also stores results to a database, for example, using an LRU cache will cause duplicate function calls to not be saved, which may not be the intended behavior.
+In Python, the
+functools
+module proposes a default
+implementation
+of an LRU cache that you can use with a simple decorator, as shown here:
+from
+functools
+import
+lru_cache
+@lru_cache
+(
+maxsize
+=
+128
+)
+def
+run_model
+(
+question_data
+):
+# Insert any slow model inference below
+pass
+Caching is most useful when retrieving features, processing them, and running inference is slower than accessing a cache. Depending on your approach to caching (in memory versus on disk, for example) and the complexity of the model you are using, caching will have different degrees of usefulness.
+Caching by indexing
+While
+the caching method described is not appropriate when receiving unique inputs, we can cache other aspects of the pipeline that can be precomputed. This is easiest if a model does not only rely on user inputs.
+Let’s say we are building a system that allows users to search for content that is related to either a text query or an image they provide. It is unlikely that caching user queries would boost performance by much if we expect queries to vary significantly. Since we are building a search system, however, we have access to a list of potential items in our catalog that we could return. This list is known to us in advance, whether we are an online retailer or a document indexing platform.
+This means that we could precompute modeling aspects that depend only on the items in our catalog. If we chose a modeling approach that allows us to do this computation ahead of time, we can make inference significantly faster.
+For this reason, a common approach when building a search system is to first embed all indexed documents to a meaningful vector (refer to
+“Vectorizing”
+for more on vectorization methods). Once embeddings are created, they can be stored in a database. This is illustrated on the top row of
+Figure 10-7
+. When a user submits a search query, it is embedded at inference time, and a lookup is performed in the database to find the most similar embeddings and return the products that correspond to these embeddings. You can see this illustrated in the bottom row of
+Figure 10-7
+.
+This approach significantly speeds up inference since most of the calculations have been done ahead of time. Embeddings have been successfully used in large-scale production pipelines at companies such as Twitter (see this
+post on Twitter’s blog
+) and Airbnb (see this article by M. Haldar et al.,
+“Applying Deep Learning To Airbnb Search”
+.
+Figure 10-7.
+A search query with cached embeddings
+Caching can improve performance, but it adds a layer of complexity. The size of the cache becomes an additional hyperparameter to tune depending on your application’s workload. In addition, any time a model or the underlying data is updated, the cache needs to be cleared in order to prevent it from serving outdated results. More generally, updating a model running in production to a new version often requires care. In the next section, we will cover a few domains that can help make such updates easier.
+Model and Data Life Cycle Management
+Keeping
+caches and models up-to-date can be challenging. Many models require regular retraining to maintain their level of performance. While we will cover when to retrain your models in
+Chapter 11
+, I’d
+like to briefly talk about how to deploy updated models to users.
+A trained model is usually stored as a binary file containing information about its type and architecture, as well as its learned parameters. Most production applications load a trained model in memory when they start and call it to serve results. A simple way to replace a model with a newer version is to replace the binary file the application loads. This is illustrated in
+Figure 10-8
+, where the only aspect of the pipeline that is impacted by a new model is the bolded box.
+In practice, however, this process is often much more involved. Ideally, an ML application produces reproducible results, is resilient to model updates, and is flexible enough to handle significant modeling and data processing changes. Guaranteeing this involves a few additional steps that we will cover next.
+Figure 10-8.
+Deploying an updated version of the same model can seem like a simple change
+Reproducibility
+To
+track down and reproduce errors, you’ll need to know which model is running in production. To do so requires keeping an archive of trained models and the datasets they were trained on. Each model/dataset pair should be assigned a unique identifier. This identifier should be logged each time a model is used in production.
+In
+Figure 10-9
+, I’ve added these requirements to the load and save boxes to represent the complexity this adds to an ML pipeline.
+Figure 10-9.
+Adding crucial metadata when saving and loading
+In addition to being able to serve different versions of existing models, a production pipeline should aim to update models without significant downtime.
+Resilience
+Enabling
+an application to load a new model once it is updated requires building a process to load a newer model, ideally without disrupting service to your users. This can consist of launching a new server serving the updated model and slowly transition traffic to it, but it quickly becomes more complex for larger systems. If a new model performs poorly, we’d like to be able to roll back to the previous one. Doing both of these tasks properly is challenging and would traditionally be categorized in the realm of DevOps. While we won’t cover this domain in depth, we will introduce monitoring in
+Chapter 11
+.
+Production changes can be more complex than updating a model. They can include large changes to data processing, which should also be deployable.
+Pipeline flexibility
+We
+previously saw that the best way to improve a model is often by iterating on data processing and feature generation. This means that new versions of a model will often require additional preprocessing steps or different features.
+This kind of change is reflected in more than just the model binary and would often be tied to a new version of your application. For this reason, the application version should also be logged when a model makes a prediction in order to make this prediction reproducible.
+Doing so adds another level of complexity to our pipeline, depicted with the added preprocessing and postprocessing boxes in
+Figure 10-10
+. These now also need to be reproducible and modifiable.
+Deploying and updating models is challenging. When building a serving infrastructure, the most important aspect is to be able to reproduce the results of a model running in production. This means tying each inference call to the model that was run, the dataset that model was trained on, and the version of the data pipeline that served this model.
+Figure 10-10.
+Adding model and application version
+Data Processing and DAGs
+To
+produce reproducible results as described earlier, a training pipeline should also be reproducible and deterministic. For a given combination of dataset, preprocessing steps, and model, a training pipeline should produce the same trained model on every training run.
+Many successive transformation steps are required to building a model, so pipelines will often break at different locations. This makes guaranteeing that each part was run successfully and that they were all run in the right order.
+One way to make this challenge easier is by representing our process of going from raw data to trained model as a directed acyclic graph (DAG), with each node representing a processing step and each step representing a dependency between two nodes. This idea is at the core of dataflow programming, a programming paradigm that the popular ML library TensorFlow is based on.
+DAGs can be a natural way to visualize
+preprocessing. In
+Figure 10-11
+, each arrow represents a task that depends on another one. The representation allows us to keep each task simple, using the graph structure to express complexity.
+Figure 10-11.
+An example of a DAG for our application
+Once we have a DAG, we can then guarantee that we follow the same set of operations for each model that we produce. There are multiple solutions to define DAGs for ML, including
+active opensource projects such as
+Apache Airflow
+or Spotify’s
+Luigi
+. Both packages allow you to define DAGs and provide a set of dashboards to allow you to monitor the progress of your DAGs and any associated logs.
+When first building an ML pipeline, using a DAG can be unnecessarily cumbersome, but once a model becomes a core part of a production system, reproducibility requirements make DAGs very compelling. Once models are being regularly retrained and deployed, any tool that helps systematize, debug, and version a pipeline will become a crucial time-saver.
+To conclude this chapter, I will cover an additional and direct way to guarantee that a model is performing well—asking users.
+Ask for Feedback
+This
+chapter covered systems that can help ensure we give every user an accurate result in a timely manner. To guarantee the quality of results, we covered tactics to detect whether a model’s predictions are inaccurate. Why don’t we ask users?
+You
+can gather feedback from users both by explicitly asking for feedback and by measuring implicit signals. You can ask for explicit feedback when displaying a model’s prediction, by accompanying it with a way for users to judge and correct a prediction. This can be as simple as a dialog asking “was this prediction useful?” or something more subtle.
+The budgeting application Mint, for example, categorizes each transaction on an account automatically (categories include
+Travel
+,
+Food
+, etc.). As depicted in
+Figure 10-12
+, each category is shown in the UI as a field the user can edit and correct if needed. Such systems allow valuable feedback to be collected to continuously improve models in a way that is less intrusive than a satisfaction survey, for example.
+Figure 10-12.
+Let users fix mistakes directly
+Users cannot provide feedback for each prediction a model makes, so gathering implicit feedback is an important way to judge ML performance. Gathering such feedback consists of looking at actions users perform to infer whether a model provided useful results.
+Implicit signals are useful but harder to interpret. You shouldn’t hope to find an implicit signal that always correlates with model quality, only one that does so in aggregate. For example, in a recommendation system, if a user clicks on a recommended item, you can reasonably assume that the recommendation was valid. This will not be true in all cases (people click on the wrong things sometimes!), but as long as it is true more often than not, it is a reasonable implicit signal.
+By collecting this information, as shown in
+Figure 10-13
+, you can then estimate how often users found results useful. The collection of such implicit signals is useful but comes with the added risk of collecting and storing this data and potentially introducing negative feedback loops as we discussed in
+Chapter 8
+.
+Figure 10-13.
+User actions as a source for feedback
+Building implicit feedback mechanisms in your product can be a valuable way to gather additional data. Many actions can be considered a mix of implicit and explicit feedback.
+Let’s say we added a “Ask the question on Stack Overflow” button to the recommendations of our ML editor. By analyzing which predictions led to users clicking this button, we could measure the proportion of recommendations that were good enough to be posted as questions. By adding this button, we aren’t directly asking users whether the suggestion is good, but we allow them to act on it, thus giving us a “weak label” (see
+“Data types”
+for a reminder on weakly labeled data) of question quality.
+In addition to being a good source of training data, implicit and explicit user feedback can be the first way to notice a degradation in performance in an ML product. While ideally errors should be caught before being displayed to users, monitoring such feedback helps detect and fix bugs quicker. We will cover this in more detail in
+Chapter 11
+.
+Strategies for deploying and updating models vary tremendously depending on the size of a team and their experience with ML. Some of the solutions in this chapter are excessively complex for a prototype such as the ML Editor. On the other hand, some teams that have invested a significant amount of resources into ML have built complex systems that allow them to simplify their deployment process and guarantee a high level of quality to users. Next, I’ll share an interview with Chris Moody, who leads Stitch Fix’s AI Instruments team and will take us through their philosophy when it comes to deploying ML models.
+Chris Moody: Empowering Data Scientists to
+Deploy Models
+Chris Moody
+came from a physics background from Caltech and UCSC and is now leading Stitch Fix’s AI Instruments team. He has an avid interest in NLP and has dabbled in deep learning, variational methods, and Gaussian processes. He’s contributed to the
+Chainer
+deep learning library, contributed to the super fast Barnes–Hut version of t-SNE to
+scikit-learn
+, and written (one of the few!) sparse tensor factorization libraries in
+Python
+. He also built his own NLP model,
+lda2vec
+.
+Q:
+What part of the model life cycle do data scientists work on at Stitch Fix?
+A: At Stitch Fix, data scientists own the entire modeling pipeline. This pipeline is broad and includes things such as ideation, prototyping, design and debugging, ETL, and model training in languages and frameworks such as scikit-learn, pytorch, and R. In addition, data scientists are in charge of setting up systems to measure metrics and building “sanity checks” for their models. Finally, data scientists run the A/B test, monitor errors and logs, and redeploy updated model versions as needed based on what they observe. To be able to do this, they leverage the work done by the platform and engineering team.
+Q:
+What does the platform team do to make data science work easier?
+A: The goal of engineers on the platform team is to find the right abstractions for modeling. This means they need to understand how a data scientist works. Engineers don’t build individual data pipelines for data scientists working on a given project. They build solutions that enable data scientists to do so themselves. More generally, they build tools to empower data scientists to own the entire workflow. This empowers engineers to spend more time making the platform better and less time building one-off solutions.
+Q:
+How do you judge the performance of models once they are deployed?
+A: A big part of Stitch Fix’s strength is in making humans and algorithms work together. For example, Stitch Fix spends a lot of time thinking about the right way to present information to their stylists. Fundamentally, if you have an API that exposes your model on one end and a user such as a stylist or merchandise buyer on the other hand, how should you design interactions between them?
+At first glance, you could be tempted to build a frontend to simply present the results of your algorithm to users. Unfortunately, this can lead users to feel like they have no control over the algorithm and the overall system and can lead to frustration when it isn’t performing well. Instead, you should think about this interaction as a feedback loop, allowing users to correct and adjust results. Doing so lets users train algorithms and have a much larger impact on the entire process by being able to give feedback. In addition, this allows you to gather labeled data to judge the performance of your models.
+To do this well, data scientists should ask themselves how they can expose a model to a user in order to both make their job easier and empower them to make the model better. This means that since data scientists know best what kind of feedback would be the most useful for their models, it is integral for them to own the process end-to-end up to this point. They can catch any errors because they can see the entire feedback loop.
+Q:
+How do you monitor and debug models?
+A: When your engineering team builds great tooling, monitoring and debugging get much easier. Stitch Fix has built an internal tool that takes in a modeling pipeline and creates a Docker container, validates arguments and return types, exposes the inference pipeline as an API, deploys it on our infrastructure, and builds a dashboard on top of it. This tooling allows data scientists to directly fix any errors that happen during or after deployment. Because data scientists are now in charge of troubleshooting models, we have also found that this setup incentivizes simple and robust models that tend to break more rarely. Ownership of the entire pipeline leads individuals to optimize for impact and reliability, rather than model complexity.
+Q:
+How do you deploy new model versions?
+A: In addition, data scientists run experiments by using a custom-built A/B testing service that allows them to define granular parameters. They then analyze test results, and if they are deemed conclusive by the team, they deploy the new version
+themselves.
+When it comes to deployment, we use a system similar to canary development where we start by deploying the new version to one instance and progressively update instances while monitoring performance. Data scientists have access to a dashboard that shows the number of instances under each version and continuous performance metrics as the deployment progresses.
+Conclusion
+In this chapter, we’ve covered ways to make our responses more resilient by detecting potential failures of our model proactively and finding ways to mitigate them.  This has included both deterministic validation strategies and the use of filtering models. We also covered a few of the challenges that come with keeping a production model up-to-date. Then, we discussed some of the ways that we can estimate how well a model is performing. Finally, we took a look at a practical example of a company that deploys ML frequently and at large scale, and the processes they have built to do so.
+In
+Chapter 11
+, we will cover additional methods to keep an eye on the performance of models and leverage a variety of metrics to diagnose the health of an ML-powered application.
+
+Chapter 11.
+Monitor and Update Models
+Once
+a model is deployed, its performance should be monitored just like any other software system. As they did in
+“Test Your ML Code”
+, regular software best practices apply. And just like in
+“Test Your ML Code”
+, there are additional things to consider when dealing with ML models.
+In this chapter, we will describe key aspects to keep in mind when monitoring ML models. More specifically, we will answer three questions:
+Why should we monitor our models?
+How do we monitor our models?
+What actions should our monitoring drive?
+Let’s start by covering how monitoring models can help decide when to deploy a new version or surface problems in production.
+Monitoring Saves Lives
+The
+goal of monitoring is to track the health of a system. For models, this means monitoring their performance and the quality of their predictions.
+If a change in user habits suddenly causes a model to produce subpar results, a good monitoring system will allow you to notice and react as soon as possible. Let’s cover some key issues that monitoring can help us catch.
+Monitoring to Inform Refresh Rate
+We saw in
+“Freshness and Distribution Shift”
+that most models need to be regularly updated to maintain a given level of performance. Monitoring
+can be used to detect when a model is not fresh anymore and needs to be retrained.
+For example, let’s say that we use the implicit feedback that we get from our users (whether they click on recommendations, for example) to estimate the accuracy of a model. If we continuously monitor the accuracy of the model, we can train a new model as soon as accuracy drops below a defined threshold.
+Figure 11-1
+shows a timeline of this process, with retraining events happening when accuracy dips below a threshold.
+Figure 11-1.
+Monitoring to trigger redeploy
+Before redeploying an updated model, we would need to verify that the new model is better. We will cover how to do this later in this section,
+“CI/CD for ML”
+. First, let’s tackle other aspects to monitor, such as potential abuse.
+Monitor to Detect Abuse
+In some cases such as when building abuse prevention or
+fraud detection systems, a fraction of users are actively working to defeat models. In these cases, monitoring becomes a key way to detect attacks and estimate their success rate.
+A monitoring system can use
+anomaly detection to detect attacks. When tracking every attempt to log in to a bank’s online portal, for example, a monitoring system could raise an alert if the number of login attempts suddenly increased tenfold, which could be a sign of an attack.
+This monitoring could raise an alert based on a threshold value being crossed, as you can see in
+Figure 11-2
+, or include more nuanced metrics such as the rate of increase of login attempts. Depending on the complexity of attacks, it may be valuable to build a model to detect such anomalies with more nuance than a simple threshold could.
+Figure 11-2.
+An obvious anomaly on a monitoring dashboard. You could build an additional ML model to automatically detect it.
+In addition to monitoring freshness and detecting anomalies, which other metrics should we monitor?
+Choose What to Monitor
+Software applications
+commonly monitor metrics such as the average time it takes to process a request, the proportion of requests that fail to be processed, and the amount of available resources. These are useful to track in any production service and allow for proactive remediation before too many users are impacted.
+Next, we will cover more metrics to monitor to detect when a model’s performance is starting to decline.
+Performance Metrics
+A
+model can become stale if the distribution of data starts to change. You can see this illustrated in
+Figure 11-3
+.
+Figure 11-3.
+Example of drift in a feature’s distribution
+When it comes to distribution shifts, both the input and the output distribution of data can change. Consider the example of a model that tries to guess which movie a user will watch next. Given the same user history as an input, the model’s prediction should change based on new entries in a catalog of available movies.
+Tracking changes in the input distribution
+(also called feature drift) is easier
+than tracking the output distribution, since it can be challenging to access the ideal value of outputs to satisfy users.
+Monitoring the input distribution
+can be as simple
+as monitoring summary statistics such as the mean and variance of key features and raising an alert if these statistics drift away from the values in the training data by more than a given threshold.
+Monitoring distribution shifts
+can be more challenging. A first approach is to monitor the distribution of model outputs. Similarly to inputs, a significant change in the distribution of outputs may be a sign that model performance has degraded. The distribution of the results users would have liked to see, however, can be harder to estimate.
+One of the reasons for why estimating ground truth can be hard is that a model’s actions can often prevent us from observing it. To see why that may be the case, consider the illustration of a
+credit card fraud detection model in
+Figure 11-4
+. The distribution of the data that the model will receive is on the left side. As the model makes predictions on the data, application code acts on these predictions by blocking any transaction predicted as fraudulent.
+Once a transaction is blocked, we are thus unable to observe what would have happened if we had let it through. This means that we are not be able to know whether the blocked transaction was actually fraudulent or not. We are only able to observe and label the transactions we let through. Because of having acted on a model’s predictions, we are only able to observe a skewed distribution of nonblocked transactions, represented on the right side.
+Figure 11-4.
+Taking action based on a model’s predictions can bias the observed distribution of data
+Only having access to a skewed sample of the true distribution makes it impossible to correctly evaluate a model’s performance. This
+is the focus of
+counterfactual evaluation
+, which aims to evaluate what would have happened if we hadn’t actioned a model. To perform such evaluation in practice, you can withhold running a model on a small subset of examples (see the article by Lihong Li et al.,
+“Counterfactual Estimation and Optimization of Click Metrics for Search Engines”
+). Not acting on a random subset of examples will then allow us to observe an unbiased distribution of fraudulent transactions. By comparing model predictions to true outcomes for the random data, we can begin to estimate a model’s precision and recall.
+This approach provides a way to evaluate models but comes at the cost of letting a proportion of fraudulent transactions go through. In many cases, this trade-off can be favorable since it allows for model benchmarking and comparisons. In some cases, such as in medical domains where outputting a random prediction is not acceptable, this approach should not be used.
+In
+“CI/CD for ML”
+, we’ll cover other strategies to compare models and decide which ones to deploy, but first, let’s cover the other key types of metrics to track.
+Business Metrics
+As
+we’ve seen throughout this book, the most important metrics are the ones related to product and business goals. They are the yardstick against which we can judge our model’s performance. If all of the other metrics are in the green and the rest of the production system is performing well but users don’t click on search results or use recommendations, then a product is failing by definition.
+For
+this reason, product metrics should be closely monitored. For
+systems such as search or recommendation systems, this monitoring could track the CTR, the ratio at which people that have seen a model’s recommendation clicked on it.
+Some applications may benefit from modifications to the product to more easily track product success, similarly to the feedback examples we saw in
+“Ask for Feedback”
+. We discussed adding a share button, but we could track feedback at a more granular level. If we can have users click on recommendations in order to implement them, we can track whether each recommendation was used and use this data to train a new version of the model.
+Figure 11-5
+shows an illustrated comparison between the aggregate approach on the left side and the granular one on the right.
+Figure 11-5.
+Proposing word-level suggestions gives us more opportunities to collect user feedback
+Since I do not expect the ML Editor prototype to be used frequently enough for the method described to provide a large enough dataset, we will abstain from building it here. If we were building a product we were intending to maintain, collecting such data would allow us to get precise feedback about which recommendations the user found the most useful.
+Now that we have discussed reasons and methods to monitor models, let’s cover ways to address any issues detected by monitoring.
+CI/CD for ML
+CI/CD stands
+for continuous integration (CI) and continuous delivery (CD). Roughly speaking, CI is the process of letting multiple developers regularly merge their code back into a central codebase, while CD focuses on improving the speed at which new versions of software can be released. Adopting CI/CD practices allows individuals and organizations to quickly iterate and improve on an application, whether they are releasing new features or fixing existing bugs.
+CI/CD for ML thus aims to make it easier to deploy new models or update existing ones. Releasing updates quickly is easy; the challenge comes in guaranteeing their quality.
+When it comes to ML, we saw that having a test suite is not enough to guarantee that a new model improves upon a previous one. Training a new model and testing that it performs well on held-out data is a good first step, but ultimately, as we saw earlier, there is no substitute for live performance to judge the quality of a model.
+Before
+deploying a model to users, teams will often deploy them in what Schelter et al., in their paper,
+“On Challenges in Machine Learning Model Management”
+, refer to as
+shadow mode
+. This refers to the process of deploying a new model in parallel to an existing one. When running inference, both models’ predictions are computed and stored, but the application only uses the prediction of the existing model.
+By logging the new predicted value and comparing it both to the old version and to ground truth when it is available, engineers can estimate a new model’s performance in a production environment without changing the user experience. This approach also allows to test the infrastructure required to run inference for a new model that may be more complex than the existing one. The only thing shadow mode doesn’t provide is the ability to observe the user’s response to the new model. The only way to do that is to actually deploy it.
+Once a model has been tested, it is a candidate for deployment. Deploying a new model comes with the risk of exposing users to a degradation of performance. Mitigating that risk requires some care and is the focus of the field of experimentation.
+Figure 11-6
+shows a visualization of each of the three approaches we covered here, from the safest one of evaluating a mode on a test set to the most informative and dangerous one of deploying a model live in production. Notice that while shadow mode does require engineering effort in order to be able to run two models for each inference step, it allows for the evaluation of a model to be almost as safe as using a test set and provides almost as much information as running it in production.
+Figure 11-6.
+Ways to evaluate a model, from safest and least accurate to riskiest and most accurate
+Since deploying models in production can be a risky process, engineering teams have developed methods to deploy changes incrementally, starting by showing new results to only a subset of users. We will cover this next.
+A/B Testing and Experimentation
+In ML, the goal
+of experimentation is to maximize chances of using the best model, while minimizing the cost of trying out suboptimal models. There are many experimentation approaches, the most popular being A/B testing.
+The principle behind A/B testing is simple: expose a sample of users to a new model, and the rest to another. This is commonly done by having a larger “control” group being served the current model and a smaller “treatment” group being served a new version that we want to test. Once we have run an experiment for a sufficient amount of time, we compare the results for both groups and choose the better model.
+In
+Figure 11-7
+, you can see how to randomly sample users from a total population to allocate them to a test set. At inference time, the model used for a given user is determined by their allocated group.
+The idea behind A/B testing is simple, but experimental design concerns such as choosing the control and the treatment group, deciding which amount of time is sufficient, and evaluating which model performs better are all challenging issues.
+Figure 11-7.
+An example of an A/B test
+In addition, A/B testing requires the building of additional infrastructure to support the ability to serve different models to different users. Let’s cover each of these challenges in more detail.
+Choosing groups and duration
+Deciding which users should be served which model comes with a few requirements. Users in both groups should be as similar as possible so that any observed difference in outcome can be attributed to our model and not to a difference in cohorts. If all users in group A are power users and group B contains only occasional users, the results of an experiments will not be conclusive.
+In addition, the treatment group B should be large enough to draw a statistically meaningful conclusion, but as small as possible to limit exposure to a potentially worse model. The duration of the test presents a similar trade-off: too short and we risk not having enough information, too long and we risk losing users.
+These two constraints are challenging enough, but consider for a minute the case of large companies with hundreds of data scientists who run dozens of A/B tests in parallel. Multiple A/B tests may be testing the same aspect of the pipeline at the same time, making it harder to determine the effect of an individual test accurately. When companies get to this scale, this leads them to building experimentation platforms to handle the complexity. See Airbnb’s ERF, as described in Jonathan Parks’s article,
+“Scaling Airbnb’s Experimentation Platform”
+; Uber’s XP as described in A. Deb et al.’s post,
+“Under the Hood of Uber’s Experimentation Platform”
+; or the GitHub repo for Intuit’s open source
+Wasabi
+.
+Estimating the better variant
+Most A/B tests choose a metric they would like to compare between groups such as CTR. Unfortunately, estimating which version performed better is more complex than selecting the group with the highest CTR.
+Since we expect there to be natural fluctuations in any metric results, we first need to determine whether results are statistically significant. Since we are estimating a difference between two populations, the most common tests that are used are two-sample hypothesis tests.
+For an experiment to be conclusive, it needs to be run on a sufficient amount of data. The exact quantity depends on the value of the variable we are measuring and the scale of the change we are aiming to detect. For a practical example, see Evan Miller’s
+sample size calculator
+.
+It is also important to decide on the size of each group and the length of the experiment before running it. If you instead continuously test for significance while an A/B test is ongoing and declare the test successful as soon as you see a significant result, you will be committing a repeated significance testing error. This kind of error consists of severely overestimating the significance of an experiment by opportunistically looking for significance (once again, Evan Miller has a great explanation
+here
+).
+Note
+While most experiments focus on comparing the value of a single metric, it is important to also consider other impacts. If the average CTR increases but the number of users who stop using the product doubles, we probably should not consider a model to be better.
+Similarly, results of A/B tests should take into account results for different segments of users. If the average CTR increases but the CTR for a given segment plummets, it may be better to not deploy the new model.
+Implementing an experiment requires the ability to assign users to a group, track each user’s assignment, and present different results based on it. This necessitates building additional infrastructure, which we cover next.
+Building the infrastructure
+Experiments also come with infrastructure requirements. The simplest way to run an A/B test is to store each user’s associated group with the rest of user-related information, such as in a database.
+The application can then rely on branching logic that decides which model to run depending on the given field’s value. This simple approach works well for systems where users are logged in but becomes significantly harder if a model is accessible to logged-out users.
+This is because experiments usually assume that each group is independent and exposed to only one variant. When serving models to logged out users, it becomes harder to guarantee that a given user was always served the same variant across each session. If most users are exposed to multiple variants, this could invalidate the results of an experiment.
+Other information to identify users such as browser cookies and IP addresses can be used to identify users. Once again, however, such approaches require building new infrastructure, which may be hard for small, resource-constrained teams.
+Other Approaches
+A/B testing is a popular experimentation method, but other approaches exist that try to address some of A/B testing’s limitations.
+Multiarmed bandits are a more flexible approach that can test variants continually and on more than two alternatives. They dynamically update which model to serve based on how well each option is performing. I’ve illustrated how multiarmed bandits work in
+Figure 11-8
+. Bandits continuously keep a tally of how each alternative is performing based on the success of each request they route. Most requests are simply routed to the current best alternative, as shown on the left. A small subset of requests gets routed to a random alternative, as you can see on the right. This allows bandits to update their estimate of which model is the best and detect if a model that is currently not being served is starting to perform better.
+Figure 11-8.
+Multiarmed bandits in practice
+Contextual multiarmed bandits take this process even further, by learning which model is a better option for each particular user. For more information, I recommend this
+overview
+by the Stitch Fix team.
+Note
+While this section covered the usage of experimentation to validate models, companies increasingly use experimentation methods to validate any significant change they make to their applications. This allows them to continuously evaluate which functionality users are finding useful and how new features are performing.
+Because experimentation is such a hard and error-prone process, multiple startups have started offering “optimization services” allowing customers to integrate their applications with a hosted experimentation platform to decide which variants perform best. For organizations without a dedicated experimentation team, such solutions may be the easiest way to test new model versions.
+Conclusion
+Overall, deploying and monitoring models is still a relatively new practice. It is a crucial way to verify that models are producing value but often requires significant efforts both in terms of infrastructure work and careful product design.
+As the field has started to mature, experimentation platforms such as
+Optimizely
+have emerged to make some of this work easier. Ideally, this should empower builders of ML applications to make them continuously better, for everyone.
+Looking back at all the systems described in this book, only a small subset aims to train models. The majority of work involved with building ML products consists of data and engineering work. Despite this fact, most of the data scientists I have mentored found it easier to find resources covering modeling techniques and thus felt unprepared to tackle work outside of this realm. This book is my attempt at helping bridge that gap.
+Building an ML application requires a broad set of skills in diverse domains such as statistics, software engineering, and product management. Each part of the process is complex enough to warrant multiple books being written about it. The goal of this book is to provide you with a broad set of tools to help you build such applications and let you decide which topics to explore more deeply by following the recommendations outlined in
+“Additional Resources”
+, for example.
+With that in mind, I hope this book gave you tools to more confidently tackle the majority of the work involved with building ML-powered products. We’ve covered every part of the ML product life cycle, starting by translating a product goal to an ML approach, then finding and curating data and iterating on models, before validating their performance and deploying them.
+Whether you’ve read this book cover to cover or dove into specific sections that were most relevant to your work, you should now have the required knowledge to start building your own ML-powered applications. If this book has helped you to build something or if you have any questions or comments about its content, please reach out to me by emailing
+mlpoweredapplications@gmail.com
+. I look forward to hearing from you and seeing your ML work.
+
+Index
+A
+A/B testing
+,
+A/B Testing and Experimentation
+accuracy
+defined
+,
+Judge Performance
+looking beyond
+,
+Evaluate Your Model: Look Beyond Accuracy
+adversarial actors
+abuse and dual-use
+,
+Abuse Concerns and Dual-Use
+,
+Monitor to Detect Abuse
+defeating ML models
+,
+Defeating a model
+exploiting models
+,
+Exploiting a model
+aggregate metrics
+,
+Going beyond aggregate metrics
+,
+Inclusive Model Performance
+algorithms
+being the algorithm
+,
+The Simplest Approach: Being the Algorithm
+,
+Be the Algorithm
+classification and regression
+,
+Classification and regression
+clustering analysis
+,
+Explore and Label Efficiently
+k-means
+,
+Clustering
+supervised versus unsupervised
+,
+Models
+,
+Freshness and Distribution Shift
+anomaly detection
+,
+Classification and regression
+,
+Monitor to Detect Abuse
+Apache Airflow
+,
+Data Processing and DAGs
+applications
+(
+see
+also ML-powered applications)
+building practical
+,
+Use ML to Build Practical Applications
+challenges of applying ML to
+,
+The Goal of Using Machine Learning Powered Applications
+determining what is possible
+,
+Estimate What Is Possible
+,
+Monica Rogati: How to Choose and Prioritize ML Projects
+process of building ML–powered
+,
+The ML Process
+AUC (area under the curve)
+,
+ROC Curve
+automated photo tagging systems
+,
+Inclusive Model Performance
+AutoRegressive Integrated Moving Average (ARIMA)
+,
+Our data has a temporal aspect
+autoregressive models
+,
+Trying to Do It All with ML: An End-to-End Framework
+B
+bag of words
+,
+Text data
+batch predictions
+,
+Batch Predictions
+BERT
+,
+Text data
+bias
+data bias
+,
+Data Bias
+systemic bias
+,
+Systemic Bias
+bias-variance trade-off
+,
+Judge Performance
+-
+Bias variance trade-off
+black-box explainers
+,
+Black-Box Explainers
+,
+Extracting Local Feature Importance
+BLEU Score
+,
+Model Performance
+Bokeh
+,
+Be the Algorithm
+bounding boxes
+,
+Knowledge extraction from unstructured data
+C
+caching
+defined
+,
+Caching for ML
+by indexing
+,
+Caching by indexing
+inference results
+,
+Caching inference results
+calibration curves
+,
+Calibration Curve
+,
+Using a Model’s Score
+case study (writing assistant tool)
+assessing data quality
+,
+ML editor data inspection
+-
+ML editor data inspection
+data ethics
+,
+Data Ownership
+extracting recommendations
+,
+Extracting Recommendations from Models
+-
+Extracting Local Feature Importance
+feature generation
+,
+ML Editor Features
+framing in ML paradigm
+,
+Framing the ML Editor
+-
+Middle Ground: Learning from Our Experience
+being the algorithm
+,
+The Simplest Approach: Being the Algorithm
+end-to-end framework
+,
+Trying to Do It All with ML: An End-to-End Framework
+learning from data (classifier approach)
+,
+Middle Ground: Learning from Our Experience
+initial prototype
+building
+,
+Prototype of an ML Editor
+-
+Generating Features
+evaluating
+,
+ML Editor Prototype Evaluation
+-
+User Experience
+mock-up diagram
+,
+Find the Correct ML Approach
+model comparison
+,
+Comparing Models
+-
+Version 3: Understandable Recommendations
+model evaluation
+feature importance
+,
+Directly from a Classifier
+top-k method
+,
+The k worst performing examples
+,
+Top-k method for the ML Editor
+model selection
+,
+ML Editor model
+model training
+judging performance
+,
+Judge Performance
+split datasets
+,
+ML Editor Data Split
+overview of
+,
+Our Case Study: ML–Assisted Writing
+performance metrics
+freshness and distribution shift
+,
+Freshness and Distribution Shift
+recommendation usefulness
+,
+Business Performance
+planning
+initial editor plan
+,
+Initial Plan for an Editor
+levels of increasing complexity
+,
+Measuring Success
+simple pipeline
+,
+Pipeline for the ML Editor
+simple starting model
+,
+Always Start with a Simple Model
+visualizing and exploring data
+inspecting and labeling using Bokeh
+,
+Be the Algorithm
+summary statistics
+,
+Summary statistics for ML editor
+catalog organization
+,
+Catalog organization
+CI/CD (continuous improvement/continuous delivery)
+A/B testing and experimentation
+,
+A/B Testing and Experimentation
+defined
+,
+CI/CD for ML
+shadow mode deployment
+,
+CI/CD for ML
+classification and regression
+,
+Classification and regression
+,
+Middle Ground: Learning from Our Experience
+,
+Contrast Data and Predictions
+cleaning data
+,
+Parse and Clean Data
+click-through rate (CTR)
+,
+Business Performance
+,
+Calibration Curve
+,
+Business Metrics
+client-side deployment
+,
+Client-Side Deployment
+clustering analysis
+,
+Explore and Label Efficiently
+,
+Clustering
+,
+Dimensionality Reduction for Errors
+code examples, obtaining and using
+,
+Using Code Examples
+code quality estimation
+,
+The Simplest Scaffolding
+collaborative filtering recommendation systems
+,
+Catalog organization
+comments and questions
+,
+How to Contact Us
+Common Crawl
+,
+Be Efficient, Start Small
+computer vision
+,
+Classification and regression
+,
+Chris Harland: Shipping Experiments
+confidence scores
+,
+Filtering model
+confusion matrices
+,
+Contrast Data and Predictions
+considering application context
+,
+Considering Context
+content-based recommendation systems
+,
+Catalog organization
+,
+Feedback Loops
+convolutional neural networks (CNNs)
+,
+From Product Goal to ML Framing
+,
+Each data point is a combination of patterns
+corrupted data
+,
+Data Bias
+count vectors
+,
+Text data
+counterfactual evaluation
+,
+Performance Metrics
+cross-entropy
+,
+Model Performance
+,
+Optimization Problems
+cross-validation
+,
+Validation set
+D
+data and datasets
+acquiring initial datasets
+,
+Data availability
+,
+Explore Your First Dataset
+assessing quality of
+,
+Insights Versus Products
+-
+ML editor data inspection
+assuring representative training data
+,
+Test set
+,
+Test sets
+common sources of errors in
+,
+Data Bias
+data leakage
+,
+Tabular data
+,
+Data leakage
+-
+ML Editor Data Split
+,
+Data Leakage
+data mismatch
+,
+Start with One Example
+data types
+,
+Data types
+determining available data
+,
+Models
+,
+Data availability
+expert advice on finding, labeling, and leveraging
+,
+Robert Munro: How Do You Find, Label, and Leverage Data?
+freshness and distribution shift
+,
+Freshness and Distribution Shift
+,
+Performance Metrics
+imperfect datasets
+,
+Data availability
+iterative nature of
+,
+Datasets are iterative
+,
+Iterate on Datasets
+life cycle management
+,
+Model and Data Life Cycle Management
+-
+Pipeline flexibility
+normalizing data
+,
+Tabular data
+parsing and cleaning data
+,
+Parse and Clean Data
+preprocessing data
+,
+ML editor data inspection
+,
+Validation set
+,
+Data Processing and DAGs
+publicly accessible data
+,
+Stand on the Shoulders of Giants
+,
+Be Efficient, Start Small
+quality, quantity, and diversity of data
+,
+Data quality, quantity, and diversity
+removing bias from
+,
+Systemic Bias
+role in machine learning
+,
+Do Data Science
+split datasets
+,
+Split Your Dataset
+-
+Sample contamination
+Stack Exchange
+,
+Initial Plan for an Editor
+structured versus unstructured data
+,
+Knowledge extraction from unstructured data
+tangential datasets
+,
+Open data
+time series data
+,
+Classification and regression
+,
+Our data has a temporal aspect
+training speech recognition systems
+,
+Data
+validating data flow
+,
+Debug Wiring: Visualizing and Testing
+-
+Test model outputs
+visualizing and exploring data
+clustering analysis
+,
+Explore and Label Efficiently
+,
+Clustering
+dimensionality reduction
+,
+Dimensionality reduction
+exploratory data analysis
+,
+Examining the data
+finding data trends
+,
+Label to Find Data Trends
+,
+Data Trends
+process of labeling data
+,
+Be the Algorithm
+summary statistics
+,
+Summary Statistics
+vectorization
+,
+Vectorizing
+-
+Image data
+weakly labeled data
+,
+Data availability
+data augmentation strategies
+,
+Data augmentation
+data ethics
+data bias
+,
+Data Bias
+data ownership
+,
+Data Ownership
+questions you should ask
+,
+Considerations When Deploying Models
+resources for
+,
+Considerations When Deploying Models
+systemic bias
+,
+Systemic Bias
+debugging
+generalization
+,
+Debug Generalization: Make Your Model Useful
+-
+Consider the Task at Hand
+data augmentation
+,
+Data augmentation
+data leakage
+,
+Data Leakage
+dataset redesign
+,
+Dataset redesign
+overfitting
+,
+Overfitting
+overly complex tasks
+,
+Consider the Task at Hand
+regularization
+,
+Regularization
+ML-specific best practices
+,
+ML-Specific Best Practices
+resources for
+,
+Software Best Practices
+software best practices
+,
+Software Best Practices
+testing ML code
+,
+Test Your ML Code
+-
+Test model outputs
+data ingestion
+,
+Test data ingestion
+data processing
+,
+Test data processing
+model outputs
+,
+Test model outputs
+training process
+,
+Debug Training: Make Your Model Learn
+-
+Optimization Problems
+optimization problems
+,
+Optimization Problems
+task difficulty
+,
+Task Difficulty
+validating data flow
+,
+Debug Wiring: Visualizing and Testing
+-
+Test model outputs
+cleaning and feature selection
+,
+Cleaning and feature selection
+data formatting
+,
+Data formatting
+data loading
+,
+Data loading
+feature generation
+,
+Feature generation
+initial steps
+,
+Start with One Example
+model output
+,
+Model output
+modular organization
+,
+Separate your concerns
+systematizing visual validation
+,
+Systematizing our visual validation
+visualization steps
+,
+Visualization steps
+decision threshold
+,
+ROC Curve
+decision trees
+,
+We want to ignore feature scale
+deployment and monitoring
+deployability
+,
+Deployable
+deploying updated models to users
+,
+Model and Data Life Cycle Management
+deployment options
+client-side deployment
+,
+Client-Side Deployment
+hybrid approach
+,
+Federated Learning: A Hybrid Approach
+server-side deployment
+,
+Server-Side Deployment
+-
+Batch Predictions
+deployment planning
+data concerns
+,
+Data Concerns
+-
+Systemic Bias
+expert advice on shipping ML-powered products
+,
+Chris Harland: Shipping Experiments
+modeling concerns
+,
+Modeling Concerns
+-
+Abuse Concerns and Dual-Use
+questions you should ask
+,
+Considerations When Deploying Models
+monitoring and updating models
+CI/CD for ML
+,
+CI/CD for ML
+-
+Other Approaches
+key issues discovered by
+,
+Monitoring Saves Lives
+selecting metrics to monitor
+,
+Choose What to Monitor
+-
+Business Metrics
+safeguards for models
+creating robust pipelines
+,
+Engineer for Performance
+-
+Data Processing and DAGs
+expert advice on deploying ML models
+,
+Chris Moody: Empowering Data Scientists to Deploy Models
+incorporating user feedback
+,
+Ask for Feedback
+model failure fallbacks
+,
+Model Failure Fallbacks
+-
+Filtering model
+verifying data quality
+,
+Input and Output Checks
+-
+Model outputs
+shadow mode deployment
+,
+CI/CD for ML
+detecting attacks
+,
+Monitor to Detect Abuse
+dimensionality reduction
+,
+Dimensionality reduction
+,
+Dimensionality Reduction for Errors
+directed acyclic graphs (DAGs)
+,
+Data Processing and DAGs
+-
+Data Processing and DAGs
+discounted cumulative gain (DCG)
+,
+Modeling Results
+distribution shift
+,
+Freshness and Distribution Shift
+-
+Freshness and Distribution Shift
+,
+Performance Metrics
+domain expertise
+,
+Leverage Domain Expertise
+dropout
+,
+Regularization
+dual-use technologies
+,
+Abuse Concerns and Dual-Use
+E
+Elbow method
+,
+Clustering
+end-to-end frameworks
+challenges of
+,
+Trying to Do It All with ML: An End-to-End Framework
+debugging
+(
+see
+debugging)
+inference pipeline
+,
+The Simplest Scaffolding
+testing workflow
+,
+Test Your Workflow
+-
+Finding the impact bottleneck
+error analysis
+detecting errors
+,
+Model Failure Fallbacks
+dimensionality reduction
+,
+Dimensionality Reduction for Errors
+modeling versus product domains
+,
+Finding the impact bottleneck
+experimentation
+,
+A/B Testing and Experimentation
+explainability
+,
+Understandable
+exploratory data analysis (EDA)
+,
+Examining the data
+F
+f1 score, defined
+,
+Judge Performance
+fairness constraints
+,
+Systemic Bias
+false positive rate (FPR)
+,
+ROC Curve
+fastText
+,
+Text data
+feasibility, determining
+,
+Estimate What Is Possible
+,
+Monica Rogati: How to Choose and Prioritize ML Projects
+-
+Monica Rogati: How to Choose and Prioritize ML Projects
+,
+Measuring Success
+feature crosses
+,
+Feature crosses
+feature drift
+,
+Performance Metrics
+feature generation
+building features out of patterns
+,
+Build Features Out of Patterns
+-
+Giving your model the answer
+defined
+,
+Classification and regression
+example of
+,
+Generating Features
+inspecting feature values
+,
+Feature generation
+visualizing hard examples
+,
+Dimensionality Reduction for Errors
+feature importance
+evaluating
+,
+The Simplest Approach: Being the Algorithm
+,
+Evaluate Feature Importance
+extracting
+,
+Extracting Global Feature Importance
+feature scale, ignoring
+,
+We want to ignore feature scale
+feature selection
+,
+Classification and regression
+,
+Cleaning and feature selection
+feature statistics
+,
+Using feature statistics
+federated learning
+,
+Federated Learning: A Hybrid Approach
+feedback loops
+,
+Feedback Loops
+feedback, requesting
+,
+Ask for Feedback
+filtering models
+,
+Filtering model
+forecasting
+,
+Classification and regression
+,
+Insights Versus Products
+fraud detection systems
+classifying individual examples
+,
+Classification and regression
+defending against attacks
+,
+Defeating a model
+,
+Monitor to Detect Abuse
+illustration of
+,
+Performance Metrics
+labeled or unlabeled data for
+,
+Models
+seasonality aspect of
+,
+Insights Versus Products
+freshness
+,
+Freshness and Distribution Shift
+-
+Freshness and Distribution Shift
+G
+generative models
+,
+Generative models
+global feature importance
+,
+Extracting Global Feature Importance
+gradient descent
+,
+We want to ignore feature scale
+,
+Optimization Problems
+gradient-boosted decision trees
+,
+We want to ignore feature scale
+GroupShuffleSplit class
+,
+ML Editor Data Split
+guardrail metrics
+,
+Business Performance
+H
+Harland, Chris
+,
+Chris Harland: Shipping Experiments
+heuristics
+benefits of building
+,
+Measuring Success
+examples of great
+,
+The Simplest Scaffolding
+identifying good
+,
+Leverage Domain Expertise
+I
+image data
+automated photo tagging systems
+,
+Inclusive Model Performance
+knowledge extraction
+,
+Knowledge extraction from unstructured data
+selecting models based on
+,
+Each data point is a combination of patterns
+vectorizing
+,
+Image data
+-
+Image data
+ImageNet
+,
+Image data
+,
+Image data
+impact bottlenecks
+benefits of prototypes for identifying
+,
+Build Your First End-to-End Pipeline
+defined
+,
+Monica Rogati: How to Choose and Prioritize ML Projects
+finding
+,
+Finding the impact bottleneck
+implementation
+challenges of end-to-end models
+,
+Trying to Do It All with ML: An End-to-End Framework
+quick to implement models
+,
+Quick to implement
+implicit signals, measuring
+,
+Ask for Feedback
+inclusive model performance
+,
+Inclusive Model Performance
+indexing
+,
+Caching by indexing
+inference pipeline
+,
+The Simplest Scaffolding
+informing users
+,
+Considering Context
+input checks
+,
+Check inputs
+input distribution
+,
+Performance Metrics
+Insight Data Science
+,
+The Simplest Scaffolding
+interpretability
+,
+Understandable
+J
+Jaccard index
+,
+Other Models
+K
+k-means algorithm
+,
+Clustering
+Kaggle
+,
+Be Efficient, Start Small
+Keras
+,
+Image data
+KISS (Keep It Stupid Simple)
+,
+Software Best Practices
+knowledge extraction
+from images
+,
+Knowledge extraction from unstructured data
+structured versus unstructured data
+,
+Knowledge extraction from unstructured data
+L
+L1 and L2 regularization
+,
+Regularization
+labels
+applying efficiently
+,
+Explore and Label Efficiently
+labeled versus unlabeled data
+,
+Models
+levels of data availability based on
+,
+Data availability
+poorly formatted
+,
+Data formatting
+process of labeling data
+,
+Be the Algorithm
+lead scoring
+,
+Batch Predictions
+least recently used (LRU) cache
+,
+Caching inference results
+life cycle management
+,
+Model and Data Life Cycle Management
+-
+Pipeline flexibility
+LIME
+,
+Black-Box Explainers
+,
+Extracting Local Feature Importance
+linear regression
+,
+Our predicted variable is a linear combination of predictors
+local feature importance
+,
+Extracting Local Feature Importance
+logistic regression
+,
+Our predicted variable is a linear combination of predictors
+loss functions
+,
+Optimization Problems
+Luigi
+,
+Data Processing and DAGs
+M
+machine learning (ML)
+additional resources
+,
+Additional Resources
+approach to learning
+,
+A technical, practical case study
+best practices
+,
+ML-Specific Best Practices
+challenges of applying to applications
+,
+The Goal of Using Machine Learning Powered Applications
+data ethics and
+,
+Considerations When Deploying Models
+defined
+,
+Practical ML
+identifying the right ML approach
+,
+Find the Correct ML Approach
+-
+Conclusion
+,
+Measuring Success
+predicting success of applications using
+,
+Estimate What Is Possible
+prerequisites to learning
+,
+Prerequisites
+process of building ML–powered applications
+,
+The entire process of ML
+,
+The ML Process
+products powered by
+,
+The Goal of Using Machine Learning Powered Applications
+,
+Practical ML
+versus traditional programming
+,
+From Product Goal to ML Framing
+,
+Iterate on Datasets
+mapping inputs to outputs
+,
+Data types
+measurement errors
+,
+Data Bias
+metrics
+(
+see
+performance metrics)
+metrics for binary classification
+,
+ROC Curve
+Minimum Viable Product (MVP)
+,
+Build a Working Pipeline
+ML writing assistants
+,
+Chris Harland: Shipping Experiments
+ML-powered applications
+building initial prototype
+,
+Build a Working Pipeline
+-
+Conclusion
+first end-to-end pipeline
+,
+Build Your First End-to-End Pipeline
+-
+Conclusion
+initial dataset
+,
+Acquire an Initial Dataset
+-
+Conclusion
+deployment and monitoring
+,
+Deploy and Monitor
+-
+Conclusion
+building model safeguards
+,
+Build Safeguards for Models
+-
+Conclusion
+deployment options
+,
+Choose Your Deployment Option
+-
+Conclusion
+deployment planning
+,
+Considerations When Deploying Models
+-
+Conclusion
+monitoring and updating models
+,
+Monitor and Update Models
+-
+Conclusion
+determining what is possible
+,
+Estimate What Is Possible
+,
+Monica Rogati: How to Choose and Prioritize ML Projects
+-
+Monica Rogati: How to Choose and Prioritize ML Projects
+identifying the right ML approach
+,
+Find the Correct ML Approach
+-
+Conclusion
+creating a plan
+,
+Create a Plan
+-
+Conclusion
+from product goal to ML framing
+,
+From Product Goal to ML Framing
+-
+Conclusion
+iterating on models
+,
+The Simplest Scaffolding
+,
+Iterate on Models
+-
+Conclusion
+core parts of process
+,
+The Simplest Scaffolding
+debugging
+,
+Debug Your ML Problems
+-
+Conclusion
+training and evaluation
+,
+Train and Evaluate Your Model
+-
+Conclusion
+using classifiers for writing recommendations
+,
+Using Classifiers for Writing Recommendations
+-
+Conclusion
+ML–powered applications
+build challenges
+,
+The Goal of Using Machine Learning Powered Applications
+build process overview
+,
+The entire process of ML
+-
+The ML Process
+ML–powered editors
+,
+Our Case Study: ML–Assisted Writing
+(
+see
+also case study)
+model disclaimers
+,
+Considering Context
+model metrics
+,
+Model Performance
+models
+debugging
+(
+see
+debugging)
+evaluating
+calibration curves
+,
+Calibration Curve
+confusion matrices
+,
+Confusion Matrix
+contrasting data and predictions
+,
+Contrast Data and Predictions
+error analysis
+,
+Dimensionality Reduction for Errors
+feature importance
+,
+Evaluate Feature Importance
+-
+Black-Box Explainers
+looking beyond accuracy
+,
+Evaluate Your Model: Look Beyond Accuracy
+ROC curves
+,
+ROC Curve
+top-k method
+,
+The Top-k Method
+-
+Top-k method for the ML Editor
+identifying failure modes and resolutions
+,
+Finding the impact bottleneck
+,
+Test set
+,
+Engineer Around Failures
+-
+Filtering model
+key to building successful
+,
+Going beyond aggregate metrics
+levels of increasing complexity
+,
+Measuring Success
+performance metrics
+,
+Model Performance
+-
+Model Performance
+generating additional model metrics
+,
+Model Performance
+making modeling tasks easier
+,
+Model Performance
+model precision
+,
+Model Performance
+reasonable expectations for
+,
+Model Performance
+selecting
+,
+From Product Goal to ML Framing
+-
+Estimate What Is Possible
+,
+The Simplest Appropriate Model
+-
+Going beyond aggregate metrics
+based on data patterns
+,
+From Patterns to Models
+benefits of prototypes for
+,
+Modeling Results
+data driven assumptions
+,
+Be the Algorithm
+determining deployability
+,
+Deployable
+estimating what is possible
+,
+Estimate What Is Possible
+flowchart for
+,
+Each data point is a combination of patterns
+quick to implement
+,
+Quick to implement
+scoring models based on simplicity
+,
+Deployable
+understandable models
+,
+Understandable
+taxonomy of
+autoregressive
+,
+Trying to Do It All with ML: An End-to-End Framework
+catalog organization
+,
+Catalog organization
+classification and regression
+,
+Classification and regression
+end-to-end
+,
+Trying to Do It All with ML: An End-to-End Framework
+generative
+,
+Generative models
+knowledge extraction from unstructured data
+,
+Knowledge extraction from unstructured data
+labeled versus unlabeled data
+,
+Models
+,
+Data availability
+list of approaches
+,
+Models
+sequence-to-sequence
+,
+Trying to Do It All with ML: An End-to-End Framework
+structured versus unstructured data
+,
+Knowledge extraction from unstructured data
+supervised versus unsupervised
+,
+Models
+,
+Freshness and Distribution Shift
+training
+data leakage
+,
+Data leakage
+eliminating undesirable bias in
+,
+Modeling Concerns
+-
+Abuse Concerns and Dual-Use
+judging performance
+,
+Judge Performance
+-
+Going beyond aggregate metrics
+relative proportions of data
+,
+Relative proportions
+split datasets
+,
+Split Your Dataset
+test datasets
+,
+Test set
+,
+Test sets
+validation datasets
+,
+Validation set
+Moody, Chris
+,
+Chris Moody: Empowering Data Scientists to Deploy Models
+movie recommendations
+,
+Catalog organization
+multi-layer neural networks
+,
+Our predicted variable is a linear combination of predictors
+Munro, Robert
+,
+Robert Munro: How Do You Find, Label, and Leverage Data?
+N
+naive Bayes classifiers
+,
+Our predicted variable is a linear combination of predictors
+natural language processing
+,
+Text data
+,
+Robert Munro: How Do You Find, Label, and Leverage Data?
+neural networks
+,
+Optimization Problems
+neural style transfer
+,
+Generative models
+nonlinear models
+,
+Our predicted variable is a linear combination of predictors
+O
+object detection
+,
+Knowledge extraction from unstructured data
+,
+Other Models
+offline metrics
+,
+Model Performance
+one-hot encoding
+,
+Tabular data
+open source code
+,
+Stand on the Shoulders of Giants
+,
+Open source code
+optimization problems
+,
+Optimization Problems
+outliers
+,
+Data quality, quantity, and diversity
+output checks
+,
+Model outputs
+overfitting
+,
+Bias variance trade-off
+,
+Overfitting
+P
+parsing and cleaning data
+,
+Parse and Clean Data
+patterns
+building features out of
+,
+Build Features Out of Patterns
+-
+Giving your model the answer
+selecting models based on
+,
+From Patterns to Models
+PCA (Principal Component Analysis)
+,
+Dimensionality reduction
+performance metrics
+business performance
+,
+Business Performance
+,
+Business Metrics
+deceptive nature of
+,
+Going beyond aggregate metrics
+freshness and distribution shift
+,
+Freshness and Distribution Shift
+-
+Freshness and Distribution Shift
+,
+Performance Metrics
+measuring success
+,
+Measuring Success
+model performance
+,
+Model Performance
+-
+Model Performance
+degradation of performance
+,
+Inclusive Model Performance
+generating additional model metrics
+,
+Model Performance
+making modeling tasks easier
+,
+Model Performance
+model precision
+,
+Model Performance
+reasonable expectations for
+,
+Model Performance
+speed
+,
+Speed
+performance, engineering for
+data processing and DAGs
+,
+Data Processing and DAGs
+-
+Data Processing and DAGs
+model and data life cycle management
+,
+Model and Data Life Cycle Management
+-
+Pipeline flexibility
+scaling to multiple users
+,
+Scale to Multiple Users
+-
+Caching by indexing
+pipelines
+creating robust
+,
+Engineer for Performance
+-
+Data Processing and DAGs
+debugging
+(
+see
+debugging)
+flexibility of
+,
+Pipeline flexibility
+types of
+,
+The Simplest Scaffolding
+planning
+estimating scope and challenges
+,
+Estimate Scope and Challenges
+exploratory data analysis (EDA)
+,
+Examining the data
+leveraging domain expertise
+,
+Leverage Domain Expertise
+simple starting model
+,
+To Make Regular Progress: Start Simple
+-
+Pipeline for the ML Editor
+understanding and reproducing existing results
+,
+Stand on the Shoulders of Giants
+-
+Bring both together
+precision, defined
+,
+Judge Performance
+preprocessing data
+,
+ML editor data inspection
+,
+Validation set
+,
+Data Processing and DAGs
+private information, protecting
+,
+Exploiting a model
+product goals
+estimating scope and challenges
+,
+Estimate Scope and Challenges
+evaluating ML feasibility
+,
+Estimate What Is Possible
+,
+Measuring Success
+framing in ML paradigm
+,
+Framing the ML Editor
+-
+Middle Ground: Learning from Our Experience
+being the algorithm
+,
+The Simplest Approach: Being the Algorithm
+,
+Be the Algorithm
+end-to-end framework
+,
+Trying to Do It All with ML: An End-to-End Framework
+expert advice on
+,
+Monica Rogati: How to Choose and Prioritize ML Projects
+learning from data (classifier approach)
+,
+Middle Ground: Learning from Our Experience
+overview of
+,
+Conclusion
+steps for
+,
+Estimate What Is Possible
+identifying failure modes and resolutions
+,
+Finding the impact bottleneck
+,
+Test set
+misalignment with model metrics
+,
+Create a Plan
+product metrics
+,
+Business Performance
+prototypes
+benefits of building
+,
+Modeling Results
+building initial
+,
+Build Your First End-to-End Pipeline
+,
+Prototype of an ML Editor
+-
+Generating Features
+evaluating
+,
+ML Editor Prototype Evaluation
+inference pipeline
+,
+The Simplest Scaffolding
+selecting heuristics
+,
+The Simplest Scaffolding
+testing workflow
+,
+Test Your Workflow
+-
+Finding the impact bottleneck
+publicly accessible data
+,
+Open data
+Q
+questions and comments
+,
+How to Contact Us
+R
+random forests
+,
+We want to ignore feature scale
+,
+Regularization
+recall, defined
+,
+Judge Performance
+Recurrent Neural Networks (RNN)
+,
+Our data has a temporal aspect
+refresh rate
+,
+Monitoring to Inform Refresh Rate
+regression and classification
+,
+Classification and regression
+,
+Middle Ground: Learning from Our Experience
+,
+Contrast Data and Predictions
+regularization
+,
+Regularization
+representation
+,
+Data Bias
+reproducibility
+,
+Reproducibility
+resilience
+,
+Resilience
+RGB images
+,
+Image data
+ROC (receiver operating characteristic) curves
+,
+ROC Curve
+Rogati, Monica
+,
+Monica Rogati: How to Choose and Prioritize ML Projects
+,
+Be the Algorithm
+S
+sample contamination
+,
+Sample contamination
+seasonality
+,
+Build Features Out of Patterns
+segmentation masks
+,
+Knowledge extraction from unstructured data
+,
+Data formatting
+self-reinforcing feedback loops
+,
+Feedback Loops
+sentence simplification model
+,
+Other Models
+sentiment classification
+,
+Classification and regression
+,
+Summary Statistics
+sequence-to-sequence models
+,
+Trying to Do It All with ML: An End-to-End Framework
+server-side deployment
+,
+Server-Side Deployment
+-
+Batch Predictions
+shadow mode deployment
+,
+CI/CD for ML
+SHAP
+,
+Black-Box Explainers
+Silhouette plots
+,
+Clustering
+simple models
+characteristics of
+,
+Simple Models
+scoring models based on simplicity
+,
+Deployable
+Smart Reply feature
+,
+Filtering model
+software best practices
+,
+Software Best Practices
+spaCy
+,
+Text data
+spam filters
+,
+Classification and regression
+speech recognition systems
+,
+Data
+,
+Each data point is a combination of patterns
+,
+Confusion Matrix
+speed
+,
+Speed
+Stack Exchange
+,
+Initial Plan for an Editor
+Stack Overflow
+,
+Framing the ML Editor
+standard score
+,
+Tabular data
+streaming applications
+,
+Streaming Application or API
+structured data
+,
+Knowledge extraction from unstructured data
+subtitle generation
+,
+Generative models
+summarization tasks
+,
+Generative models
+summary statistics
+,
+Summary Statistics
+,
+Performance Metrics
+supervised algorithms
+,
+Models
+,
+Freshness and Distribution Shift
+systemic bias
+,
+Systemic Bias
+T
+t-SNE
+,
+Dimensionality reduction
+tabular data, vectorizing
+,
+Tabular data
+-
+Tabular data
+tangential datasets
+,
+Open data
+task difficulty
+data quality, quantity, and diversity
+,
+Data quality, quantity, and diversity
+data representation
+,
+Data representation
+,
+Test sets
+model capacity
+,
+Model capacity
+overview of
+,
+Task Difficulty
+temporal data leakage
+,
+Temporal data leakage
+Tensorboard
+,
+Optimization Problems
+tensors
+,
+Image data
+test sets
+,
+Test set
+,
+Test sets
+text data
+classifying
+,
+Each data point is a combination of patterns
+properly formatted
+,
+Data formatting
+tokenizing
+,
+Tokenizing Text
+vectorizing
+,
+Text data
+-
+Text data
+TF-IDF (Term Frequency-Inverse Document Frequency)
+,
+Text data
+time series data
+,
+Classification and regression
+,
+Our data has a temporal aspect
+,
+Temporal data leakage
+tokenization
+,
+Tokenizing Text
+top-k method
+identifying challenging data points with
+,
+The Top-k Method
+implementation tips
+,
+Top-k implementation tips
+k best performing examples
+,
+The k best performing examples
+k most uncertain examples
+,
+The k most uncertain examples
+k worst performing examples
+,
+The k worst performing examples
+training loss
+,
+Data Leakage
+transfer learning
+,
+Image data
+translation invariant filters
+,
+Each data point is a combination of patterns
+translation tasks
+,
+Generative models
+,
+Trying to Do It All with ML: An End-to-End Framework
+triggering models
+,
+Filtering model
+true positive rate (TPR)
+,
+ROC Curve
+U
+ULMFit
+,
+Text data
+UMAP
+,
+Dimensionality reduction
+underfitting
+,
+Bias variance trade-off
+,
+Overfitting
+understandable models
+,
+Understandable
+Unix time
+,
+Raw datetime
+unstructured data
+,
+Knowledge extraction from unstructured data
+unsupervised algorithms
+,
+Models
+usage metrics
+,
+Model Performance
+user experience, evaluating
+,
+User Experience
+,
+User Experience
+,
+Ask for Feedback
+V
+validation loss
+,
+Data Leakage
+validation sets
+,
+Validation set
+vectorization
+data leakage and
+,
+Tabular data
+defined
+,
+Vectorizing
+image data
+,
+Image data
+-
+Image data
+tabular data
+,
+Tabular data
+-
+Tabular data
+text data
+,
+Text data
+-
+Text data
+VGG
+,
+Image data
+visualization libraries
+,
+Be the Algorithm
+W
+weak labels
+,
+Always Start with a Simple Model
+weakly labeled data
+,
+Data availability
+weakly supervised algorithms
+,
+Models
+weight histograms
+,
+Optimization Problems
+WikiText
+,
+Image data
+window size
+,
+Text data
+word embeddings, pretrained
+,
+Text data
+Word2Vec
+,
+Text data
+workflow, testing
+,
+Test Your Workflow
+-
+Finding the impact bottleneck
+writing assistant tool
+,
+Our Case Study: ML–Assisted Writing
+,
+Chris Harland: Shipping Experiments
+(
+see
+also case study)
+writing recommendation systems
+best way to iterate
+,
+Other Models
+comparing models
+,
+Comparing Models
+-
+Version 3: Understandable Recommendations
+heuristic-based version
+,
+Version 1: The Report Card
+key metrics
+,
+Comparing Models
+leveraging features explainable to users
+,
+Version 3: Understandable Recommendations
+simple model
+,
+Version 2: More Powerful, More Unclear
+extracting recommendations from models
+,
+Extracting Recommendations from Models
+-
+Extracting Local Feature Importance
+using a model's score
+,
+Using a Model’s Score
+using feature statistics
+,
+Using feature statistics
+using global feature importance
+,
+Extracting Global Feature Importance
+using local feature importance
+,
+Extracting Local Feature Importance
+generating editing recommendations
+,
+Generating Editing Recommendations
+-
+Generating Editing Recommendations
+judging performance of
+,
+Model Performance
+monitoring
+,
+Business Metrics
+X
+XGBoost
+,
+We want to ignore feature scale
+
+About the Author
+Emmanuel Ameisen
+has been building ML-powered products for years. He is currently working on ML engineering at
+Stripe
+. Previously, he was head of AI at
+Insight Data Science
+, where he led more than 150 ML projects. Before, Emmanuel was a data scientist at
+Zipcar
+, where he worked on on-demand prediction and building frameworks and services to help deploy ML models in production. He has a background at the intersection of ML and business, with an M.S. in AI from Université Paris-Sud, an M.S. in Engineering from CentraleSupélec, and an M.S. in Management from ESCP Europe.
+
+Colophon
+The animal on the cover of
+Building Machine Learning Powered Applications
+is the poplar admiral butterfly (
+Limenitis populi
+). This butterfly is a large but increasingly rare butterfly of North Africa, northern Asia, the Middle East, and Europe.
+Poplar admirals have a three-inch wingspan. Its wings are white-spotted dark brown above with margins of slate and orange, and undersides marked in orange.
+In late August, butterflies lay their eggs on the leaves of poplar trees (mostly trembling aspen,
+Populus tremula
+), as the caterpillars eat only these leaves. Caterpillars have horn-like appendages, and molt through shades of green and brown as they grow, for camouflage. They begin growing in late summer, but in the fall start spinning silk for a protective cocoon where they overwinter. In spring, they re-emerge as the first poplar leaves bud and immediately begin feeding, to complete their final transition: in late May, they attach themselves with silk to a leaf and grow a hard surface skin in which they pupate, emerging as butterflies in June and July.
+Unlike most butterflies, poplar admirals do not visit flowers for nectar, instead using their probing proboscis to draw food and nutrients from carrion, animal droppings, tree sap, and the salts in mud (and at times the salts in human sweat). They seem attracted to smells of decomposition.
+Poplar admiral numbers are declining as deciduous forests are cleared for development, though its current IUCN Red List is “Least Concern.” Many of the animals on O’Reilly covers are endangered; all of them are important to the world.
+The color illustration on the cover is by Jose Marzan Jr., based on a black-and-white engraving from the
+Meyers Kleines Lexicon
+. The cover fonts are Gilroy Semibold and Guardian Sans. The text font is Adobe Minion Pro; the heading font is Adobe Myriad Condensed; and the code font is Dalton Maag’s Ubuntu Mono.

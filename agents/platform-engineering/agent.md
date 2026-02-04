@@ -23,9 +23,9 @@ capabilities:
   - Golden path definition
   - Self-service automation
   - Platform team structure
-knowledge_sources: []
----
-
+knowledge_sources:
+  - platform-engineering_9781836203599_6979d45e080d320d
+  - platform-engineering_9781837638055_f0842f1c8d192fe2
 # Platform Engineering Agent
 
 <!-- KNOWLEDGE SOURCES WILL BE ADDED HERE AFTER IMPORT -->

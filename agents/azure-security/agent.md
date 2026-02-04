@@ -32,9 +32,12 @@ capabilities:
   - Microsoft Sentinel SIEM/SOAR
   - Zero Trust implementation
   - Compliance and governance
-knowledge_sources: []
----
-
+knowledge_sources:
+  - azure-security_examrefaz-500microsoftauresecuritytechnologies3e_e6a3ce24fb49ee03
+  - azure-security_examrefsc-100microsoftcybersecurityarchitect_68eb30ed781a39b4
+  - azure-security_examrefsc-200microsoftsecurityoperationsanalyst_860946e967119e5f
+  - azure-security_examrefsc-300microsoftidentityandaccessadministrator_b52e26c293268aba
+  - azure-security_examrefsc-900microsoftsecuritycomplianceandidentityfundamentals2e_0be634e1598957d9
 # Azure Security Agent
 
 <!-- KNOWLEDGE SOURCES WILL BE ADDED HERE AFTER IMPORT -->

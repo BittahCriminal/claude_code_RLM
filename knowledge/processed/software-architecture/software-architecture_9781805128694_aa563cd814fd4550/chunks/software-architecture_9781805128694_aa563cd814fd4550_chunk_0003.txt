@@ -1,0 +1,3359 @@
+ul during development, they should be locked down before use in production.
+In the next chapter, we will learn how we can use
+Resilience4j
+to mitigate the potential drawbacks of overusing synchronous communication between microservices.
+Questions
+What API call can we expect from a review service to the config server during startup to retrieve its configuration?
+The review service was started up using the following command:
+docker compose up -d
+.
+What configuration information should we expect back from an API call to the config server using the following command?
+curl https://dev-usr:dev-pwd@localhost:8443/config/application/default -ks | jq
+What types of repository backend does Spring Cloud Config support?
+How can we encrypt sensitive information on disk using the Spring Cloud Config Server?
+How can we protect the config server API from misuse?
+Mention some pros and cons for clients that first connect to the config server as opposed to those that first connect to the discovery server.
+
+13
+Improving Resilience Using Resilience4j
+In this chapter, we will learn how to use Resilience4j to make our microservices more resilient, that is, how to mitigate and recover from errors. As we already discussed in
+Chapter 1
+,
+Introduction to Microservices
+, in the
+Circuit breaker
+section, and
+Chapter 8
+,
+Introduction to Spring Cloud
+, in the
+Using Resilience4j for improved resilience
+section, a circuit breaker can be used to minimize the damage that a slow or unresponsive downstream microservice can cause in a large-scale system landscape of synchronously communicating microservices. We will see how the circuit breaker in Resilience4j can be used together with a time limiter and retry mechanism to prevent two of the most common error situations:
+Microservices that start to respond slowly or not at all
+Requests that randomly fail from time to time, for example, due to temporary network problems
+The following topics will be covered in this chapter:
+Introducing the three Resilience4j mechanisms: circuit breaker, time limiter, and retry
+Adding the mechanisms to the source code
+Trying out the mechanisms when deployed in the system landscape
+Technical requirements
+For instructions on how to install the tools used in this book and how to access the source code for this book, see:
+Chapter 21
+,
+Installation Instructions for macOS
+Chapter 22
+,
+Installation Instructions for Microsoft Windows with WSL 2 and Ubuntu
+The code examples in this chapter all come from the source code in
+$BOOK_HOME/Chapter13
+.
+If you want to view the changes applied to the source code in this chapter, that is, see what it took to add resilience using Resilience4j, you can compare it with the source code for
+Chapter 12
+,
+Centralized Configuration
+. You can use your favorite
+diff
+tool and compare the two folders,
+$BOOK_HOME/Chapter12
+and
+$BOOK_HOME/Chapter13
+.
+Introducing the Resilience4j resilience mechanisms
+The circuit
+breaker, time
+limiter, and retry mechanisms
+are potentially useful in any
+synchronous communication between two software components, for example, microservices. In this chapter, we will apply these mechanisms in one place, in calls from the
+product-composite
+service to the
+product
+service. This is illustrated in the following figure:
+Figure 13.1: Adding resilience capabilities to the system landscape
+Note that the
+synchronous calls to the discovery and config servers from the other microservices are not shown in the preceding diagram (to make it easier to read).
+With the Spring Cloud Hoxton release in November 2019, the
+Spring Cloud Circuit Breaker
+project
+was added. It provides an abstraction layer for circuit breakers. Resilience4j can be configured to be used under the hood. This project does not provide other resilience mechanisms such as retries, time limiters, bulkheads, or rate limiters in an integrated way as the
+Resilience4j project does. For more information on the project, see
+https://spring.io/projects/spring-cloud-circuitbreaker
+.
+A number of other alternatives exist as well. For example, the Reactor project comes with built-in support for retries and timeouts; see
+Mono.retryWhen()
+and
+Mono.timeout()
+. Spring also has a
+retry mechanism (see
+https://github.com/spring-projects/spring-retry
+), but it does not support a reactive programming model.
+However, none of the alternatives provide such a cohesive and well-integrated approach to providing a set of resilience mechanisms as Resilience4j does, specifically, in a Spring Boot environment, where dependencies, annotations, and configuration are used in an elegant and consistent way. Finally, it is worth noting that the Resilience4j annotations work independently of the programming style used, be it reactive or imperative.
+Introducing the circuit breaker
+Let’s quickly revisit the
+state diagram for a circuit breaker from
+Chapter 8
+,
+Introduction to Spring Cloud
+, in the
+Using Resilience4j for improved resilience
+section:
+Figure 13.2: Circuit breaker state diagram
+The key features of a circuit breaker are as follows:
+If a
+circuit breaker detects too many faults, it will open its circuit, that is, not allow new calls.
+When the circuit is open, a circuit breaker will perform fail-fast logic. This means that it doesn’t wait for a new fault, for example, a timeout, to happen on subsequent calls. Instead, it directly redirects the call to a
+fallback method
+. The fallback method can apply various business logic to
+produce a best-effort response. For example, a fallback method can return data from a local cache or simply return an immediate error message. This will prevent a microservice from becoming unresponsive if the services it depends on stop responding normally. This is specifically useful under high load.
+After a while, the circuit breaker will be half-open, allowing new calls to see whether the issue that caused the failures is gone. If new failures are detected by the circuit breaker, it will open the circuit again and go back to the fail-fast logic. Otherwise, it will close the circuit and go back to normal operation. This makes a microservice resilient to faults, or self-healing, a capability that is indispensable in a system
+landscape of microservices that communicate synchronously with each other.
+Resilience4j exposes information
+about circuit breakers at runtime in a number of ways:
+The current state of a circuit breaker can be monitored using the microservice’s
+actuator
+health
+endpoint,
+/actuator/health
+.
+The circuit breaker also publishes events on an
+actuator
+endpoint, for example, state transitions and
+/actuator/circuitbreakerevents
+.
+Finally, circuit breakers are integrated with Spring Boot’s metrics system and can use it to publish metrics to monitoring tools such as Prometheus.
+We will try out the
+health
+and
+event
+endpoints in this chapter. In
+Chapter 20
+,
+Monitoring Microservices
+, we will see Prometheus in action and how it can collect metrics that are exposed by Spring Boot, for example, metrics from our circuit breaker.
+To control the logic in a circuit breaker, Resilience4j can be configured using standard Spring Boot configuration files. We will use the following configuration parameters:
+slidingWindowType
+: To
+determine if a circuit breaker needs to be opened, Resilience4j uses a sliding window, counting the most recent events to make the decision. The sliding windows can either be based on a fixed number of calls or a fixed elapsed time. This parameter is used to configure what type of sliding window is used.
+We will use a count-based sliding window, setting this parameter to
+COUNT_BASED
+.
+slidingWindowSize
+: The number of calls in a closed state, which are used to determine whether the circuit should be opened.
+We will set this parameter to
+5
+.
+failureRateThreshold
+: The threshold, in percent, for failed calls that will cause the circuit to be opened.
+We will set this parameter to
+50%
+. This setting, together with
+slidingWindowSize
+set to
+5
+, means that if three or more of the last five calls are faults, then the circuit will open.
+automaticTransitionFromOpenToHalfOpenEnabled
+: Determines whether the circuit breaker will automatically transition to the half-open state once the waiting period is over. Otherwise, it will wait for the first call after the waiting period is over until it transitions to the half-open state.
+We will set this parameter to
+true
+.
+waitDurationInOpenState
+: Specifies how long the circuit stays in an open state, that is, before it transitions to the half-open state.
+We will set this parameter to
+10000 ms
+. This setting, together with enabling the automatic transition to the half-open state, set by the previous parameter, means that the circuit breaker will keep the circuit open for 10 seconds and then transition to the half-open state.
+permittedNumberOfCallsInHalfOpenState
+: The number of calls in the half-open state, which are used to determine whether the circuit will be opened again or go back to the normal, closed state.
+We will set this parameter to
+3
+, meaning that the circuit breaker will decide whether the circuit will be opened or closed based on the first three calls after the circuit has transitioned to the half-open state. Since the
+failureRateThreshold
+parameters are set to 50%, the circuit will be open again if two or all three calls fail. Otherwise, the circuit will be closed.
+ignoreExceptions
+: This can be used to specify exceptions that should not be counted as faults. Expected business exceptions such as
+not found
+or
+invalid input
+are typical exceptions that the circuit breaker should ignore; users who search for non-existing data or enter invalid input should not cause the circuit to open.
+We will set this
+parameter to a list containing the exceptions
+NotFoundException
+and
+InvalidInputException
+.
+Finally, to configure Resilience4j to report the state of the circuit breaker in the
+actuator
+health
+endpoint in the correct way, the following parameters are set:
+registerHealthIndicator = true
+enables Resilience4j to fill in the
+health
+endpoint with information regarding the state of its circuit breakers.
+allowHealthIndicatorToFail = false
+tells Resilience4j not to affect the status of the
+health
+endpoint. This means that the
+health
+endpoint will still report
+"UP"
+even if one of the component’s circuit breakers is in an open or half-open state. It is very important that the health state of the component is not reported as
+"DOWN"
+just because one of its circuit breakers is not in a closed state. This means that the component is still considered to be OK, even though one of the components it depends on is not.
+This is actually the core value of a circuit breaker, so setting this value to
+true
+would more or less spoil the value of bringing in a circuit breaker. In earlier versions of Resilience4j, this was actually the behavior. In more recent versions, this has been corrected, and
+false
+is actually the default value for this parameter. But since I consider it very important to understand the relation between the health state of the component and the state of its circuit breakers, I have added it to the configuration.
+Finally, we must also configure Spring Boot Actuator to add the circuit breaker health information that Resilience4j produces in the response to a request to its
+health
+endpoint:
+management.health.circuitbreakers.enabled:
+true
+For a full list of available configuration parameters, see
+https://resilience4j.readme.io/docs/circuitbreaker#create-and-configure-a-circuitbreaker
+.
+Introducing the time limiter
+To help a circuit
+breaker handle slow or unresponsive services, a timeout mechanism can be helpful. Resilience4j’s timeout mechanism, called a
+TimeLimiter
+, can be
+configured using standard Spring Boot configuration files. We will use the following configuration parameter:
+timeoutDuration
+: Specifies how long a
+TimeLimiter
+instance waits for a call to complete before it throws a timeout exception. We will set it to
+2s
+.
+Introducing the retry mechanism
+The
+retry
+mechanism is
+very useful for random and infrequent faults, such as temporary network glitches. The retry mechanism can simply retry a failed request a number of times with a configurable delay between the attempts. One very important restriction on the use of the retry mechanism is that the services that it retries must be
+idempotent
+, that is, calling the service one or many times with the same request parameters gives the same result. For example, reading information is idempotent, but creating information is typically not. You don’t want a retry mechanism to accidentally create two orders just because the response from the first order’s creation got lost in the network.
+Resilience4j exposes retry information in the same way as it does for circuit breakers when it comes to events and metrics but does not provide any health information. Retry events are accessible on the
+actuator
+endpoint,
+/actuator/retryevents
+. To control the retry logic, Resilience4j can be configured using standard Spring Boot configuration files. We will use the following configuration
+parameters:
+maxAttempts
+: The number of attempts before giving up, including the first call. We will set this parameter to
+3
+, allowing a maximum of two retry attempts after an initial failed call.
+waitDuration
+: The wait time before the next retry attempt. We will set this value to
+1000
+ms, meaning that we will wait 1 second between retries.
+retryExceptions
+: A list of exceptions that will trigger a retry. We will only trigger retries on
+InternalServerError
+exceptions, that is, when HTTP requests respond with a
+500
+status code.
+Be careful when configuring retry and circuit breaker settings so that, for example, the circuit breaker doesn’t open the circuit before the intended number of retries has been completed!
+For a full list of available configuration parameters, see
+https://resilience4j.readme.io/docs/retry#create-and-configure-retry
+.
+With this introduction, we are ready to see how to add these resilience mechanisms to the source code in the
+product-composite
+service.
+Adding the resilience mechanisms to the source code
+Before we add the
+resilience mechanisms to the source code, we will add code that makes it possible to force an error to occur, as a delay and/or as a random fault. Next, we will add a circuit breaker together with a time limiter to handle slow or unresponsive APIs, as well as a retry mechanism that can handle faults that happen randomly. Adding these features from Resilience4j follows the Spring Boot way, which we have been using in the previous chapters:
+Add a starter dependency on Resilience4j in the build file
+Add annotations in the source code where the resilience mechanisms will be applied
+Add a configuration that controls the behavior of the resilience mechanisms
+Handling resilience challenges is a responsibility of the integration layer; therefore, the resilience mechanisms will be placed in the
+ProductCompositeIntegration
+class. The source code in the business logic, implemented in the
+ProductCompositeServiceImpl
+class, will not be aware of the presence of the resilience mechanisms.
+Once we have the
+mechanisms in place, we will finally extend our test script,
+test-em-all.bash
+, with tests that automatically verify that the circuit breaker works as expected when deployed in the system landscape.
+Adding programmable delays and random errors
+To be able to test our resilience mechanisms, we need a way to control when errors happen. A
+simple way to
+achieve this is by adding optional query parameters in the API used to retrieve a product and a composite product.
+The code and API parameters added in this section to force delays and errors to occur should only be used during development and tests, not in production. When we learn about the concept of a service mesh in
+Chapter 18
+,
+Using a Service Mesh to Improve Observability and Management
+, we will learn about better methods that can be used in production to introduce delays and errors in a controlled way. Using a service mesh, we can introduce delays and errors, typically used for verifying resilience capabilities, without affecting the source code of the microservices.
+The composite product API will simply pass on the parameters to the product API. The following query parameters have been added to the two APIs:
+delay
+: Causes the
+getProduct
+API on the
+product
+microservice to delay its response. The parameter is specified in seconds. For example, if the parameter is set to
+3
+, it will cause a delay of three seconds before the response is returned.
+faultPercentage
+: Causes the
+getProduct
+API on the
+product
+microservice to throw an exception randomly with the probability specified by the query parameter, from 0 to 100%. For example, if the parameter
+is set to
+25
+, it will cause every fourth call to the API, on average, to
+fail with an exception. It will return an
+HTTP error 500 (Internal Server Error)
+in these cases.
+Changes in the API definitions
+The two query
+parameters that we introduced above,
+delay
+and
+faultPercentage
+, have been defined in the
+api
+project in the following two Java interfaces:
+ProductCompositeService
+:
+Mono<ProductAggregate>
+getProduct
+(
+@PathVariable
+int
+productId,
+@RequestParam(value = "delay", required = false, defaultValue =
+"0")
+int
+delay,
+@RequestParam(value = "faultPercent", required = false,
+defaultValue = "0")
+int
+faultPercent
+)
+;
+ProductService
+:
+Mono<Product>
+getProduct
+(
+@PathVariable
+int
+productId,
+@RequestParam(value = "delay", required = false, defaultValue
+= "0")
+int
+delay,
+@RequestParam(value = "faultPercent", required = false,
+defaultValue = "0")
+int
+faultPercent
+)
+;
+The query parameters are declared optional with default values that disable the use of the error mechanisms. This means that if none of the query parameters are used in a request, neither a delay will be applied nor an error will be thrown.
+Changes in the product-composite microservice
+The
+product-composite
+microservice
+simply passes the parameters to the product API. The service implementation receives the API request and passes on the parameters to the integration component that makes the call to the product API:
+The call from the
+ProductCompositeServiceImpl
+class to the integration component looks like this:
+public
+Mono<ProductAggregate>
+getProduct
+(
+int
+productId,
+int
+delay,
+int
+faultPercent)
+{
+return
+Mono.zip(
+        ...
+        integration.getProduct(productId, delay, faultPercent),
+        ....
+The call from the
+ProductCompositeIntegration
+class to the product API looks like this:
+public
+Mono<Product>
+getProduct
+(
+int
+productId,
+int
+delay,
+int
+faultPercent)
+{
+URI
+url
+=
+UriComponentsBuilder.fromUriString(
+      PRODUCT_SERVICE_URL +
+"/product/{productId}?delay={delay}"
++
+"&faultPercent={faultPercent}"
+)
+      .build(productId, delay, faultPercent);
+return
+webClient.get().uri(url).retrieve()...
+Changes in the product microservice
+The
+product
+microservice implements the actual delay and random error generator
+in the
+ProductServiceImpl
+class by extending the existing stream used to read product information from the MongoDB database. It looks like this:
+public
+Mono<Product>
+getProduct
+(
+int
+productId,
+int
+delay,
+int
+faultPercent)
+{
+  ...
+return
+repository.findByProductId(productId)
+    .map(e -> throwErrorIfBadLuck(e, faultPercent))
+    .delayElement(Duration.ofSeconds(delay))
+    ...
+}
+When the stream returns a response from the Spring Data repository, it first applies the
+throwErrorIfBadLuck
+method to see whether an exception needs to be thrown. Next, it applies a delay using the
+delayElement
+function in the
+Mono
+class.
+The random
+error generator,
+throwErrorIfBadLuck()
+, creates a random number between
+1
+and
+100
+and throws an exception if it is higher than, or equal to, the specified fault percentage. If no exception is thrown, the product entity is passed on in the stream. The source code looks like this:
+private
+ProductEntity
+throwErrorIfBadLuck
+(
+ProductEntity entity,
+int
+faultPercent)
+{
+if
+(faultPercent ==
+0
+) {
+return
+entity;
+  }
+int
+randomThreshold
+=
+getRandomNumber(
+1
+,
+100
+);
+if
+(faultPercent < randomThreshold) {
+    LOG.debug(
+"We got lucky, no error occurred, {} < {}"
+, 
+      faultPercent, randomThreshold);
+  
+  }
+else
+{
+    LOG.info(
+"Bad luck, an error occurred, {} >= {}"
+,
+      faultPercent, randomThreshold);
+throw
+new
+RuntimeException
+(
+"
+Something went wrong..."
+);
+  }
+return
+entity;
+}
+private
+final
+Random
+randomNumberGenerator
+=
+new
+Random
+();
+private
+int
+getRandomNumber
+(
+int
+min,
+int
+max)
+{
+if
+(max < min) {
+throw
+new
+IllegalArgumentException
+(
+"Max must be greater than min"
+);
+  }
+return
+randomNumberGenerator.nextInt((max - min) +
+1
+) + min;
+}
+With the
+programmable delays and random error functions in place, we are ready to start adding resilience mechanisms to the code. We will start with the circuit breaker and the time limiter.
+Adding a circuit breaker and a time limiter
+As we mentioned
+previously, we need to add dependencies, annotations, and
+configuration. We also need to add some code for implementing fallback logic for fail-fast scenarios. We will see how to do this in the following sections.
+Adding dependencies to the build file
+To add a circuit breaker
+and a time limiter, we have to add dependencies to the appropriate Resilience4j libraries in the build file,
+build.gradle
+.
+From the product documentation (
+https://resilience4j.readme.io/docs/getting-started-3#setup
+), we can learn that the following three dependencies need to be added. We will use the latest available version (
+v2.0.2
+, when this chapter was written):
+ext {
+   resilience4jVersion =
+"2.0.2"
+}
+dependencies
+{
+    implementation
+"io.github.resilience4j:resilience4j-spring-
+boot2:${resilience4jVersion}"
+implementation
+"io.github.resilience4j:resilience4j-reactor:${resilience4jVersion}"
+implementation
+'org.springframework.boot:spring-boot-starter-aop'
+...
+To avoid Spring Cloud overriding the version used with the older version of Resilience4j that it bundles, we also import a
+resilience4j-bom
+(Bill Of Material) file, as described in the Spring Boot 3 demo project
+https://github.com/resilience4j/resilience4j-spring-boot3-demo
+. We add this
+bom
+file to the
+existing
+bom
+file for Spring Cloud in the
+dependencyManagement
+section:
+dependencyManagement {
+    imports {
+        mavenBom
+"org.springframework.cloud:spring-cloud-dependencies:${springCloudVersion}"
+mavenBom
+"io.github.resilience4j:resilience4j-bom:${resilience4jVersion}"
+}
+}
+Adding annotations in the source code
+The circuit breaker can
+be applied by annotating the method it is expected to protect with
+@CircuitBreaker(...)
+, which, in this case, is the
+getProduct()
+method in the
+ProductCompositeIntegration
+class. The circuit breaker is triggered by an exception, not by a timeout itself. To be able to trigger the circuit breaker after a timeout, we will add a time limiter that can be applied with the annotation
+@TimeLimiter(...)
+. The source code looks as follows:
+@TimeLimiter(name = "product")
+@CircuitBreaker(
+name = "product", fallbackMethod = "getProductFallbackValue")
+public
+Mono<Product>
+getProduct
+(
+int
+productId,
+int
+delay,
+int
+faultPercent)
+{
+  ...
+}
+The
+name
+of the circuit breaker and the time limiter annotation,
+"product"
+, is used to identify the configuration that will be applied. The
+fallbackMethod
+parameter in the circuit breaker annotation is used to specify what fallback method to call (
+getProductFallbackValue
+, in this case) when the circuit breaker is open; see below for information on how it is used.
+To activate the circuit breaker, the annotated method must be invoked as a Spring bean. In our case, it’s the integration class that’s injected by Spring into the service implementation class,
+ProductCompositeServiceImpl
+, and therefore used as a Spring bean:
+private
+final
+ProductCompositeIntegration integration;
+@Autowired
+public
+ProductCompositeServiceImpl
+(... ProductCompositeIntegration integration)
+{
+this
+.integration = integration;
+}
+public
+Mono<ProductAggregate>
+getProduct
+(
+int
+productId,
+int
+delay,
+int
+faultPercent)
+{
+return
+Mono.zip(
+    ..., 
+    integration.getProduct(productId, delay, faultPercent), 
+    ...
+Adding fail-fast fallback logic
+To be able to apply
+fallback logic when the circuit breaker is
+open, that is, when a request fails fast, we can specify a fallback method on the
+CircuitBreaker
+annotation, as seen in the previous source code. The method must follow the signature of the method the circuit breaker is applied for and also have an extra last argument used for passing the exception that triggered the circuit breaker. In our case, the method signature for the fallback method looks like this:
+private
+Mono<Product>
+getProductFallbackValue
+(
+int
+productId,
+int
+delay,
+int
+faultPercent, CallNotPermittedException ex)
+{
+The last parameter specifies that we want to be able to handle exceptions of type
+CallNotPermittedException
+. We are only interested in exceptions that are thrown when the circuit breaker is in its open state so that we can apply fail-fast logic. When the circuit breaker is open, it will not permit calls to the underlying method; instead, it will immediately throw a
+CallNotPermittedException
+exception. Therefore, we are only interested in catching
+CallNotPermittedException
+exceptions.
+The fallback logic can look up information based on the
+productId
+from alternative sources, for example, an internal cache. In our case, we will return hardcoded values based on the
+productId
+, to simulate a hit in a cache. To simulate a miss in the cache, we will throw a
+not found
+exception in the case where the
+productId
+is
+13
+.
+The implementation of the fallback method looks like this:
+private
+Mono<Product>
+getProductFallbackValue
+(
+int
+productId,
+int
+delay,
+int
+faultPercent, CallNotPermittedException ex)
+{
+if
+(productId ==
+13
+) {
+String
+errMsg
+=
+"Product Id: "
++ productId 
+      +
+" not found in fallback cache!"
+;
+throw
+new
+NotFoundException
+(errMsg);
+  }
+return
+Mono.just(
+new
+Product
+(productId,
+"Fallback product"
++ productId, productId, serviceUtil.getServiceAddress()));
+}
+Adding configuration
+Finally, the configuration of
+the circuit breaker and time limiter is added to the
+product-composite.yml
+file in the config repository, as follows:
+resilience4j.timelimiter:
+instances:
+product:
+timeoutDuration:
+2s
+management.health.circuitbreakers.enabled:
+true
+resilience4j.circuitbreaker:
+instances:
+product:
+allowHealthIndicatorToFail:
+false
+registerHealthIndicator:
+true
+slidingWindowType:
+COUNT_BASED
+slidingWindowSize:
+5
+failureRateThreshold:
+50
+waitDurationInOpenState:
+10000
+permittedNumberOfCallsInHalfOpenState:
+3
+automaticTransitionFromOpenToHalfOpenEnabled:
+true
+ignoreExceptions:
+-
+se.magnus.api.exceptions.InvalidInputException
+-
+se.magnus.api.exceptions.NotFoundException
+The values in the configuration have already been described in the previous sections,
+Introducing the circuit breaker
+and
+Introducing the time limiter
+.
+Adding a retry mechanism
+In the same way as for the
+circuit breaker, a retry mechanism is set up by adding dependencies, annotations, and configuration. The dependencies were added previously in the
+Adding dependencies to the build file
+section, so we only need to add the annotation and set up the configuration.
+Adding the retry annotation
+The retry mechanism can be applied to
+a method by annotating it with
+@Retry(name="nnn")
+, where
+nnn
+is the name of the configuration entry to be used for this method. See the following
+Adding configuration
+section for details on the configuration. The method, in our case, is the same as it is for the circuit breaker and time limiter,
+getProduct()
+in the
+ProductCompositeIntegration
+class:
+@Retry(name = "product")
+@TimeLimiter(name = "product")
+@CircuitBreaker(name = "product", fallbackMethod =
+"getProductFallbackValue")
+public
+Mono<Product>
+getProduct
+(
+int
+productId,
+int
+delay,
+int
+faultPercent)
+{
+Adding configuration
+Configuration for the retry
+mechanism is added in the same way as for the circuit breaker and time limiter in the
+product-composite.yml
+file in the config repository, like so:
+resilience4j.retry:
+instances:
+product:
+maxAttempts:
+3
+waitDuration:
+1000
+retryExceptions:
+-
+org.springframework.web.reactive.function.client.WebClientResponseException$InternalServerError
+The actual values were discussed in the
+Introducing the retry mechanism
+section above.
+While using multiple mechanisms of Resilience4j (in our case, the circuit breaker, time limiter, and retry mechanism), understanding the order of how these aspects are applied is of importance. For information, see
+https://resilience4j.readme.io/docs/getting-started-3#aspect-order
+.
+That is all the
+dependencies, annotations, source code, and configuration required. Let’s wrap up by extending the test script with tests that verify that the circuit breaker works as expected in a deployed system landscape.
+Adding automated tests
+Automated tests for the
+circuit breaker have been added to the
+test-em-all.bash
+test script in a separate function,
+testCircuitBreaker()
+:
+...
+function
+testCircuitBreaker
+() {
+echo
+"Start Circuit Breaker tests!"
+...
+}
+...
+testCircuitBreaker
+...
+echo
+"End, all tests OK:"
+`
+date
+`
+To be able to perform some of the required verifications, we need to have access to the
+actuator
+endpoints of the
+product-composite
+microservice, which are not exposed through the edge server. Therefore, we will access the
+actuator
+endpoints by running a command in the
+product-composite
+microservice using the Docker Compose
+exec
+command. The base image used by the microservices,
+Eclipse Temurin
+, bundles
+curl
+, so we can simply run a
+curl
+command in the
+product-composite
+container to get the information required. The command looks like this:
+docker-compose exec -T product-composite curl -s http://product-composite:8080/actuator/health
+The
+-T
+argument is used to disable the use of a terminal for the
+exec
+command. This is important to make it possible to run the
+test-em-all.bash
+test script in an environment where no terminals exist, for example, in an automated build pipeline used for CI/CD.
+To be able to extract the information we need for our tests, we can pipe the output to the
+jq
+tool. For example, to extract the actual state of the circuit breaker, we can run the following command:
+docker-compose exec -T product-composite curl -s http://product-composite:8080/actuator/health | jq -r .components.circuitBreakers.details.product.details.state
+It will return either
+CLOSED
+,
+OPEN
+, or
+HALF_OPEN
+, depending on the actual state.
+The test starts by doing exactly this, that is, verifying that the circuit breaker is closed before the tests are executed:
+assertEqual
+"CLOSED"
+"
+$(docker-compose exec -T product-composite curl -s
+http://product
+-composite:8080/actuator/health | jq -r .components.circuitBreakers.details.product.details.state)
+"
+Next, the test will force
+the circuit breaker to open up by running three commands in a row, all of which will fail on a timeout caused by a slow response from the
+product
+service (the
+delay
+parameter is set to
+3
+seconds):
+for
+((n=
+0
+; n<
+3
+; n++))
+do
+assertCurl 500
+"curl -k
+https://$HOST:$PORT
+/product-composite/
+$PROD_ID_REVS_RECS
+?delay=3
+$AUTH
+-s"
+message=$(
+echo
+$RESPONSE
+| jq -r .message)
+    assertEqual
+"Did not observe any item or terminal signal within 2000ms"
+"
+${message:0:57}
+"
+done
+A quick reminder of the configuration
+: The timeout of the
+product
+service is set to two seconds so that a delay of three seconds will cause a timeout. The circuit breaker is configured to evaluate the last five calls when closed. The tests in the script that precede the circuit breaker-specific tests have already performed a couple of successful calls. The failure threshold is set to 50%; three calls with a three-second delay are enough to open the circuit.
+With the circuit
+open, we expect a fail-fast behavior, that is, we won’t need to wait for the timeout before we get a response. We also expect the
+fallback
+method to be called to return a best-effort response. This should also apply to a normal call, that is, without requesting a delay. This is verified with the following code:
+assertEqual
+"OPEN"
+"
+$(docker-compose exec -T product-composite curl -s
+http://product
+-composite:8080/actuator/health | jq -r .components.circuitBreakers.details.product.details.state)
+"
+assertCurl 200
+"curl -k
+https://$
+HOST
+:
+$PORT
+/product-composite/
+$PROD_ID_REVS_RECS
+?delay=3
+$AUTH
+-s"
+assertEqual
+"Fallback product
+$PROD_ID_REVS_RECS
+"
+"
+$(echo
+"
+$RESPONSE
+"
+| jq -r .name)
+"
+assertCurl 200
+"curl -k
+https://$
+HOST
+:
+$PORT
+/product-composite/
+$PROD_ID_REVS_RECS
+$AUTH
+-s"
+assertEqual
+"Fallback product
+$PROD_ID_REVS_RECS
+"
+"
+$(echo
+"
+$RESPONSE
+"
+| jq -r .name)
+"
+The product ID
+1
+is stored in a variable,
+$PROD_ID_REVS_RECS
+, to make it easier to modify the script if required.
+We can also verify that the simulated
+not found
+error logic works as expected in the fallback method, that is, the fallback method returns
+404, NOT_FOUND
+for product ID
+13
+:
+assertCurl 404
+"curl -k
+https://$
+HOST
+:
+$PORT
+/product-composite/
+$PROD_ID_NOT_FOUND
+$AUTH
+-s"
+assertEqual
+"Product Id:
+$PROD_ID_NOT_FOUND
+not found in fallback cache!"
+"
+$(echo $RESPONSE | jq -r .message)
+"
+The product ID
+13
+is stored in a variable,
+$PROD_ID_NOT_FOUND
+.
+As configured, the circuit breaker will change its state to half-open after
+10
+seconds. To be able to verify that, the test waits for
+10
+seconds:
+echo
+"Will sleep for 10 sec waiting for the CB to go Half Open..."
+sleep
+10
+After verifying the
+expected state (half-open), the test runs three normal requests to make the circuit breaker go back to its normal state, which is also verified:
+assertEqual
+"HALF_OPEN"
+"
+$(docker-compose exec -T product-composite curl -s
+http://product
+-composite:8080/actuator/health | jq -r .components.circuitBreakers.details.product.details.state)
+"
+for
+((n=
+0
+; n<
+3
+; n++))
+do
+assertCurl 200
+"curl -k
+https://$
+HOST
+:
+$PORT
+/product-composite/
+$PROD_ID_REVS_RECS
+$AUTH
+-s"
+assertEqual
+"product name C"
+"
+$(echo
+"
+$RESPONSE
+"
+| jq -r .name)
+"
+done
+assertEqual
+"CLOSED"
+"
+$(docker-compose exec -T product-composite curl -s
+http://product
+-composite:8080/actuator/health | jq -r .components.circuitBreakers.details.product.details.state)
+"
+The test code also verifies that it got a response with data from the underlying database. It does that by comparing the returned product name with the value stored in the database. For the product with product ID
+1
+, the name is
+"product name C"
+.
+A quick reminder of the configuration
+: The circuit breaker is configured to evaluate the first three calls when in the half-open state. Therefore, we need to run three requests where more than 50% are successful before the circuit is closed.
+The test wraps up by using the
+/actuator/circuitbreakerevents
+actuator API, which is exposed by the circuit breaker to reveal internal events. It is used to find out what state transitions the circuit breaker has performed. We expect the last three state transitions to be as follows:
+First state transition: Closed to open
+Next state transition: Open to half-open
+Last state transition: Half-open to closed
+This is verified by the following code:
+assertEqual
+"CLOSED_TO_OPEN"
+"
+$(docker-compose exec -T product-composite curl -s
+http://product
+-composite:8080/actuator/circuitbreakerevents/product/STATE_TRANSITION | jq -r
+.circuitBreakerEvents[-3].stateTransition)
+"
+assertEqual
+"OPEN_TO_HALF_OPEN"
+"
+$(docker-compose exec -T product-composite curl -s
+http://product
+-composite:8080/actuator/circuitbreakerevents/product/STATE_TRANSITION | jq -r .circuitBreakerEvents[-2].stateTransition)
+"
+assertEqual
+"HALF_OPEN_TO_CLOSED"
+"
+$(docker-compose exec -T product-composite curl -s
+http://product
+-composite:8080/actuator/circuitbreakerevents/product/STATE_TRANSITION | jq -r .circuitBreakerEvents[-1].stateTransition)
+"
+The
+jq
+expression,
+circuitBreakerEvents[-1]
+, means the last entry in the array of circuit breaker events,
+[-2]
+is the second to last event, while
+[-3]
+is the third to last event. Together, they are the three latest events, the ones we are interested in.
+We added quite
+a lot of steps to the test script, but with this, we can automatically verify that the expected basic behavior of our circuit breaker is in place. In the next section, we will try it out. We will run tests both automatically by running the test script and manually by running the commands in the test script by hand.
+Trying out the circuit breaker and retry mechanism
+Now, it’s
+time to try
+out the circuit breaker and retry mechanism. We will start, as usual, by building the Docker images and running the test script,
+test-em-all.bash
+. After that, we will manually run through the tests we described previously to ensure that we understand what’s going on! We will perform the following manual tests:
+Happy days tests of the circuit breaker, to verify that the circuit is closed under normal operations
+Negative tests of the circuit breaker, to verify that the circuit opens up when things start to go wrong
+Going back to normal operation, to verify that the circuit goes back to its closed state once the problems are resolved
+Trying out
+the
+retry mechanism with random errors
+Building and running the automated tests
+To build and run the automated tests, we need to
+do the
+following:
+First, build the Docker images with the following commands:
+cd $BOOK_HOME/Chapter13
+./gradlew build && docker-compose build
+Next, start the system landscape in Docker and run the usual tests with the following command:
+./test-em-all.bash start
+When the test script prints out
+Start Circuit Breaker tests!
+, the tests we described previously have been executed!
+Verifying that the circuit is closed under normal operations
+Before we can call
+the API, we need an access token. Run the following commands to acquire an access token:
+unset ACCESS_TOKEN
+ACCESS_TOKEN=$(curl -k https://writer:secret-writer@localhost:8443/oauth2/token -d grant_type=client_credentials -d scope="product:read product:write" -s | jq -r .access_token)
+echo $ACCESS_TOKEN
+An access token issued by the authorization server is valid for 1 hour. So, if you start to get
+401 – Unauthorized
+errors after a while, it is probably time to acquire a new access token.
+Try a normal request and verify that it returns the HTTP response code
+200
+:
+curl -H "Authorization: Bearer $ACCESS_TOKEN" -k https://localhost:8443/product-composite/1 -w "%{http_code}\n" -o /dev/null -s
+The
+-w "%{http_code}\n"
+switch is used to print the HTTP return status. As long as the command returns
+200
+, we are not interested in the response body, so we suppress it with the switch
+-o /dev/null
+.
+Verify that the
+circuit breaker is closed using the
+health
+API:
+docker-compose exec product-composite curl -s http://product-composite:8080/actuator/health | jq -r .components.circuitBreakers.details.product.details.state
+We expect it to respond with
+CLOSED
+.
+Forcing the circuit breaker to open when things go wrong
+Now, it’s
+time to make things go wrong! By that, I mean it’s time to try out some negative tests to verify that the circuit opens up when things start to go wrong. Call the API three times and direct the
+product
+service to cause a timeout on every call, that is, delay the response by
+3
+seconds. This should be enough to trip the circuit breaker:
+curl -H "Authorization: Bearer $ACCESS_TOKEN" -k https://localhost:8443/product-composite/1?delay=3 -s | jq .
+We expect a response such as the following each time:
+Figure 13.3: Response after a timeout
+The circuit breaker
+is now open, so if you make a fourth attempt (within
+waitInterval
+, that is,
+10
+seconds), you will see fail-fast behavior and the
+fallback
+method in action. You will get a response back immediately instead of an error message once the time limiter kicks in after
+2
+seconds:
+Figure 13.4: Response when the circuit breaker is open
+The response will
+come from the fallback method. This can be recognized by looking at the value in the name field,
+Fallback product1
+.
+Fail-fast and fallback methods are key capabilities of a circuit breaker. A configuration with a wait time set to only 10 seconds in the open state requires you to be rather quick to be able to see fail-fast logic and fallback methods in action! Once in a half-open state, you can always submit three new requests that cause a timeout, forcing the circuit breaker back to the open state, and then quickly try the fourth request. Then, you should get a fail-fast response from the fallback method. You can also increase the wait time to a minute or two, but it can be rather boring to wait that amount of time before the circuit switches to the half-open state.
+Wait 10 seconds for the circuit breaker to transition to half-open, and then run the following command to verify that the circuit is now in a half-open state:
+docker-compose exec product-composite curl -s http://product-composite:8080/actuator/health | jq -r .components.circuitBreakers.details.product.details.state
+Expect it to respond with
+HALF_OPEN
+.
+Closing the circuit breaker again
+Once the circuit breaker
+is in a half-open state, it waits for three calls to see whether it should open the circuit again or go back to normal by closing it.
+Let’s submit three normal requests to close the circuit breaker:
+curl -H "Authorization: Bearer $ACCESS_TOKEN" -k https://localhost:8443/product-composite/1 -w "%{http_code}\n" -o /dev/null -s
+They should all respond with
+200
+. Verify that the circuit is closed again by using the
+health
+API:
+docker-compose exec product-composite curl -s http://product-composite:8080/actuator/health | jq -r .components.circuitBreakers.details.product.details.state
+We expect it to respond with
+CLOSED
+.
+Wrap this up by listing the last three state transitions using the following command:
+docker-compose exec product-composite curl -s http://product-composite:8080/actuator/circuitbreakerevents/product/STATE_TRANSITION | jq -r '.circuitBreakerEvents[-3].stateTransition, .circuitBreakerEvents[-2].stateTransition, .circuitBreakerEvents[-1].stateTransition'
+Expect it to respond with the following:
+Figure 13.5: Circuit breaker state changes
+This response tells
+us that we have taken our circuit breaker through a full lap of its state diagram:
+From closed to open when the timeout errors start to prevent requests from succeeding
+From open to half-open to see whether the error is gone
+From half-open to closed when the error is gone, that is, when we are back to normal operation
+With that, we are done with testing the circuit breaker; let’s move on and see the retry mechanism at play.
+Trying out retries caused by random errors
+Let’s simulate that
+there is a – hopefully temporary – random issue with our
+product
+service or the communication with it.
+We can do this by using the
+faultPercent
+parameter. If we set it to
+25
+, we expect every fourth request on average to fail. We hope that the retry mechanism will kick in to help us by automatically retrying failed requests. One way of noticing that the retry mechanism has kicked in is to measure the response time of the
+curl
+command. A normal response should take around 100 ms. Since we have configured the retry mechanism to wait 1 second (see the
+waitDuration
+parameter in the section on the configuration of the retry mechanism), we expect the response time to increase by 1 second per retry attempt. To force a random error to occur, run the following command a couple of times:
+time curl -H "Authorization: Bearer $ACCESS_TOKEN" -k https://localhost:8443/product-composite/1?faultPercent=25 -w "%{http_code}\n" -o /dev/null -s
+The command should respond with
+200
+, indicating that the request succeeded. A response time prefixed with
+real
+, for example,
+real 0m0.078s
+, means that the response time was 0.078 s, or 78 ms. A normal response, that is, without any retries, should report a response time of around 100 ms as follows:
+Figure 13.6: Elapsed time for a request without a retry
+A response
+after one retry should take a little over 1 second and look as follows:
+Figure 13.7: Elapsed time for a request with one retry
+The HTTP status code
+200
+indicates that the request has succeeded, even though it required one retry before succeeding!
+After you
+have noticed a response time of 1 second, indicating that the request required one retry to succeed, run the following command to see the last two retry events:
+docker-compose exec product-composite curl -s http://product-composite:8080/actuator/retryevents | jq '.retryEvents[-2], .retryEvents[-1]'
+You should be able to see the failed request and the next successful attempt. The
+creationTime
+timestamps are expected to differ by 1 second. Expect a response such as the following:
+Figure 13.8: Retry events captured after a request with one retry
+If you are really unlucky, you will get two faults in a row, and then you will get a response time of 2 seconds instead of 1. If you repeat the preceding command, you will be able to see that the
+numberOfAttempts
+field is counted for each retry attempt, which is set to
+1
+in this case:
+"numberOfAttempts": 1
+. If calls continue to fail, the circuit breaker will kick in and open its circuit, that is, subsequent calls will apply fail-fast logic and the fallback method will be applied!
+This concludes the chapter. Feel free to experiment with the parameters in the configuration to learn more about the resilience mechanisms.
+Don’t forget to shut down the system landscape:
+docker-compose down
+Summary
+In this chapter, we have seen Resilience4j and its circuit breaker, time limiter, and retry mechanism in action.
+A microservice that has synchronous dependencies to other services can become unresponsive or even crash if these services stop responding as expected, especially under a high load. These types of error scenarios can be avoided by using a circuit breaker, which applies fail-fast logic and calls fallback methods when it is open. A circuit breaker can also make a microservice resilient by allowing requests when it is half-open to see whether the failing service is operating normally again and close the circuit if so. To support a circuit breaker in handling unresponsive services, a time limiter can be used to maximize the time a circuit breaker waits before it kicks in.
+A retry mechanism can retry requests that randomly fail from time to time, for example, due to temporary network problems. It is very important to only apply retry requests on idempotent services, that is, services that can handle the same request being sent two or more times.
+Circuit breakers and retry mechanisms are implemented by following Spring Boot conventions: declaring dependencies and adding annotations and configuration. Resilience4j exposes information about its circuit breakers and retry mechanisms at runtime, using
+actuator
+endpoints. For circuit breakers, information regarding health, events, and metrics is available. For retries, information regarding events and metrics is available.
+We have seen the usage of endpoints for both health and events in this chapter, but we will have to wait until
+Chapter 20
+,
+Monitoring Microservices
+, before we use any of the metrics.
+In the next chapter, we will cover the last part of using Spring Cloud, where we will learn how to trace call chains through a set of cooperating microservices using Spring Cloud Sleuth and Zipkin. Head over to
+Chapter 14
+,
+Understanding Distributed Tracing
+, to get started!
+Questions
+What are the states of a circuit breaker and how are they used?
+How can we handle timeout errors in the circuit breaker?
+How can we apply fallback logic when a circuit breaker fails fast?
+How can a retry mechanism and a circuit breaker interfere with each other?
+Provide an example of a service that you can’t apply a retry mechanism to.
+
+14
+Understanding Distributed Tracing
+In this chapter, we will learn how to use distributed tracing to better understand how our microservices cooperate, for example, in fulfilling a request sent to the external API. Being able to utilize distributed tracing is essential for being able to manage a system landscape of cooperating microservices. As already described in
+Chapter 8
+,
+Introduction to Spring Cloud
+, Micrometer Tracing will be used to collect trace information, and Zipkin will be used for the storage and visualization of said trace information.
+In this chapter, we will learn about the following topics:
+Introducing distributed tracing with Micrometer Tracing and Zipkin.
+How to add distributed tracing to the source code.
+How to programmatically add information to the traces.
+How to perform distributed tracing, visualizing both successful and unsuccessful API requests. We will see how both synchronous and asynchronous processing can be visualized.
+Technical requirements
+For instructions on how to install the tools used in this book and how to access the source code for this book, see:
+Chapter 21
+,
+Installation Instructions for macOS
+Chapter 22
+,
+Installation Instructions for Microsoft Windows with WSL 2 and Ubuntu
+The code examples in this chapter all come from the source code in
+$BOOK_HOME/Chapter14
+.
+If you want to view the changes applied to the source code in this chapter, that is, see what it took to add distributed tracing using Micrometer Tracing and Zipkin, you can compare it with the source code for
+Chapter 13
+,
+Improving Resilience Using Resilience4j
+. You can use your favorite
+diff
+tool and compare the two folders,
+$BOOK_HOME/Chapter13
+and
+$BOOK_HOME/Chapter14
+.
+Introducing distributed tracing with Micrometer Tracing and Zipkin
+To recapitulate
+Chapter 8
+,
+Introduction to Spring Cloud
+, in reference to the
+Using Micrometer Tracing and Zipkin for distributed tracing
+section, the tracing
+information from a complete
+workflow is called a
+trace
+or a
+trace tree
+, and sub-parts of the tree, for
+example, the basic
+units of work, are called
+spans
+. Spans can consist of sub-spans
+forming the trace tree. Metadata
+can be added to a trace
+and its spans
+as key-value pairs called
+tags
+. The Zipkin UI can visualize a trace tree and its spans as follows:
+Figure 14.1: Example of a trace with its spans
+Micrometer Tracing is used to collect trace information, propagate trace contexts (for example, trace and span IDs) in calls to other microservices and export the trace information into trace analysis tools like Zipkin. The handling
+of the trace information is done under the hood, by a
+tracer
+. Micrometer supports
+auto-configuration of tracers based on
+OpenTelemetry
+(
+https://opentelemetry.io/
+) or
+OpenZipkin Brave (
+https://github.com/openzipkin/brave
+)
+. Exporting the trace information
+into a trace
+analysis tool is done by a
+reporter
+.
+By default, trace headers
+are propagated between microservices using
+W3C trace context
+headers (
+https://www.w3.org/TR/trace-context/
+), most importantly the
+traceparent
+header, but can
+be configured to use OpenZipkin’s
+B3
+headers. In this chapter, we will use the W3C trace context headers. In
+Chapter 18,
+we will use the
+B3
+headers.
+A sample W3C trace context
+traceparent
+header looks like this:
+traceparent:"00-2425f26083814f66c985c717a761e810-fbec8704028cfb20-01"
+The value of the
+traceparent
+header contains four parts, separated by a
+-
+:
+00
+, indicates the version used. Will always be “
+00
+" using the current specification.
+124…810
+, is the trace ID.
+fbe…b20
+is the span ID.
+01
+, the last part, contains various flags. The only flag supported by the current specification is a flag named
+sampled
+, with the value
+01
+. It means that the caller is recording the trace data for this request. We will configure our microservices to record trace data for all requests, so this flag will always have the value of
+01
+.
+Use of OpenZipkin Brave
+B3
+headers will look like this:
+X
+-B
+3
+-TraceId:
+"64436ea679e8eb6e6fa028bb3459e703"
+X
+-B
+3
+-SpanId:
+"120678270898ddd5"
+X
+-B
+3
+-ParentSpanId:
+"
+3c431d3d01987c22"
+X
+-B
+3
+-Sampled:
+"1"
+The header names are self-explanatory, and we can see that headers are not only provided for the trace and span ID but also for the parent span’s ID.
+Traces and spans are created automatically by Spring Boot for incoming traffic, both for incoming HTTP requests and messages received by Spring Cloud Stream. If an incoming request contains a trace ID, it will be used when creating spans; if not, a new trace id will be created. Trace and span IDs are automatically propagated to outgoing traffic, either as HTTP requests or by sending messages using Spring Cloud Stream.
+If required, extra trace info can be added
+programmatically, either by adding custom spans or by adding custom
+tags to all spans created by a microservice. This is done by using
+Micrometer Observability
+(
+https://micrometer.io/docs/observation
+) and its
+Observation
+API.
+The initial release of Micrometer Tracing together with Spring Boot 3 came with some limitations for supporting distributed tracing in reactive clients. This affects the microservices used in this book that use Project Reactor under the hood. In the section
+Adding workarounds for lacking support of reactive clients
+, we will learn how to mitigate these shortcomings.
+Zipkin comes with native support for storing trace information either in memory, or in a database such as Apache Cassandra, Elasticsearch, or MySQL. Added to this, a number of extensions
+are available. For details, refer to
+https://zipkin.io/pages/extensions_choices.html
+. In this chapter, we will store the trace information in memory.
+With
+Micrometer Tracing
+and Zipkin
+introduced, let’s see what
+changes are required in the source code to enable distributed tracing.
+Adding distributed tracing to the source code
+In this section, we will learn how
+to update the source code
+to enable distributed tracing. This can be done with the following steps:
+Add dependencies to the build files to bring in Micrometer Tracing with a tracer implementation and a reporter.
+Add a Zipkin server to the Docker Compose files.
+Configure the microservices to send trace information to Zipkin.
+Add workarounds for the lacking support of reactive clients.
+Add code for creating custom spans and custom tags in existing spans.
+We will go through
+each of the steps
+in turn.
+Adding dependencies to build files
+To be able to utilize Micrometer Tracing
+and the ability to export trace information
+to Zipkin, we need to add a dependency to the selected tracer and reporter to the Gradle project build files,
+build.gradle
+.
+This is accomplished by adding the following two lines:
+implementation
+'io.micrometer:micrometer-tracing-bridge-otel'
+implementation
+'io.opentelemetry:opentelemetry-exporter-zipkin'
+For the review service, a dependency has also been added to enable trace information regarding SQL database operations. It looks like:
+implementation
+'net.ttddyy.observation:datasource-micrometer-spring-boot:1.0.0'
+This library can create spans for the SQL operations executed by the review service. These spans will contain information about the SQL query that was executed and its execution time.
+Adding configuration for Micrometer Tracing and Zipkin
+Configuration for using Micrometer Tracing
+and Zipkin is added
+to the common configuration
+file,
+config-repo/application.yml
+. In the default
+profile, it is specified that trace information will be sent to Zipkin using the following URL:
+management.zipkin.tracing.endpoint: http://zipkin:9411/api/v2/spans
+By default, Micrometer Tracing only sends 10% of the traces to Zipkin. To ensure that all traces are sent to Zipkin, the following property is added to the default profile:
+management.tracing.sampling.probability:
+1.0
+We also want trace and span IDs to be written to logs; this will enable us to correlate log output from cooperating microservices that, for example, fulfill a request sent to the external API.
+We will investigate how to use this in
+Chapter 19
+, Centralized Logging with the EFK Stack
+.
+We can include the trace and span IDs in the log output by specifying the following log format:
+logging.pattern.level:
+"%5p [${spring.application.name:},%X{traceId:-},%X{spanId:-}]"
+With the above log format, the log output will look like:
+2023-04-22T14:02:07.417Z  INFO [product-composite,01234,56789]
+Where
+product-composite
+is the name of the microservice,
+01234
+is the trace ID, and
+56789
+is the span ID.
+To reduce the log output, we also change the log level from
+DEBUG
+to
+INFO
+for each microservice’s configuration file in the
+config-repo
+. This makes it easier to verify that trace and span IDs are added as expected. This change is applied by the line:
+se.magnus:
+INFO
+For the
+product-composite
+microservice, the log level
+for the
+HttpWebHandlerAdapter
+class has been
+changed
+from
+TRACE
+to
+INFO
+for the same
+reason:
+org.springframework.web.server.adapter.HttpWebHandlerAdapter:
+INFO
+Adding Zipkin to the Docker Compose files
+To run the Zipkin server
+as a Docker
+container, we will use a Docker image,
+openzipkin/zipkin
+, published by the Zipkin
+project. Refer to
+https://hub.docker.com/r/openzipkin/zipkin
+for details. The definition of the Zipkin server appears as follows:
+zipkin:
+image:
+openzipkin/zipkin:2.24.0
+restart:
+always
+mem_limit:
+1024m
+environment:
+-
+STORAGE_TYPE=mem
+ports:
+-
+9411
+:9411
+Let’s explain the preceding source code:
+The version of the Docker image,
+openzipkin/zipkin
+, is specified to be version 2.24.0.
+The
+STORAGE_TYPE=mem
+environment variable is used to specify that Zipkin will keep all trace information in memory.
+The memory limit for Zipkin is increased to 1,024 MB, compared to 512 MB for all other containers. The reason for this is that since Zipkin is configured to keep all trace information in memory, it will consume more memory than the other containers after a while.
+If Zipkin happens to run out of memory and stops, we have applied a restart policy that requests the Docker engine to always restart the container. This will apply both if the container itself crashes or if the Docker engine is restarted.
+Zipkin exposes the HTTP port
+9411
+for web browsers
+to access its web user
+interface.
+While it is OK to store the trace information in Zipkin in memory for development and test activities, Zipkin should be configured to store trace information in a database in a production environment.
+Adding workarounds for lacking support of reactive clients
+As mentioned above, the current versions
+of Spring Boot, Project Reactor, and Micrometer Tracing do not yet work together perfectly. Therefore, a couple of workarounds have been applied to the source code for reactive clients. That is, the four microservices and the gateway. The problems are mainly related to the complexity of propagating trace contexts (for example, trace and span IDs) between different threads involved in reactive asynchronous processing, specifically if parts of the processing involve imperative synchronous processing.
+If all processing of a request is done with a synchronous implementation, using one and the same thread for all processing, propagating trace context is not an issue. A
+ThreadLocal
+variable can be used to store the trace context. The trace context can be retrieved from the
+ThreadLocal
+variable in any place of the implementation since all code runs in one and the same thread.
+An example of this mix of reactive and imperative processing is the implementation of the
+review
+microservice, where calls to the underlying SQL database are done synchronously.
+If you are interested in understanding the challenges in more detail, see the three-part blog series “
+Unified Bridging between Reactive and Imperative
+” published by the Spring team. It can be found here:
+https://spring.io/blog/2023/03/30/context-propagation-with-project-reactor-3-unified-bridging-between-reactive
+.
+It is also worth noting that the predecessor of Micrometer Tracing, Spring Cloud Sleuth, has better support for reactive clients than the current versions of Spring Boot, Project Reactor, and Micrometer Tracing. Hopefully, the coming versions will soon address these shortcomings.
+If you have a code base that already uses Spring Cloud Sleuth, you can find migration guidelines here:
+https://github.com/micrometer-metrics/tracing/wiki/Spring-Cloud-Sleuth-3.1-Migration-Guide
+.
+To address many of the challenges with context propagation, we can turn on automatic context propagation by calling the method
+Hooks.enableAutomaticContextPropagation()
+in a reactive client’s
+main()
+method. For details, see the blog series “
+Unified Bridging between Reactive and Imperative
+” referred to above. For the
+product-composite
+service, it looks like this:
+public
+static
+void
+main
+(String[] args)
+{
+  Hooks.enableAutomaticContextPropagation();
+  SpringApplication.run(ProductCompositeServiceApplication.class, args);
+}
+However, for the
+product-composite
+service, one problem remains. To ensure that a
+WebClient
+instance is correctly instrumented for observation, for example, to be able to propagate the current trace and span IDs as headers in an outgoing request, the
+WebClient.Builder
+instance is expected to be injected using auto-wiring. Unfortunately, when using Eureka for service discovery, the
+WebClient.Builder
+instance is recommended to be created as a bean annotated with
+@LoadBalanced
+as:
+@Bean
+@LoadBalanced
+public
+WebClient.Builder
+loadBalancedWebClientBuilder
+()
+{
+return
+WebClient.builder();
+  }
+So, there is a conflict in how to create a
+WebClient
+instance when used with both Eureka and Micrometer Tracing. To resolve this conflict, the
+@LoadBalanced
+bean can be replaced by a load-balancer-aware exchange-filter function,
+ReactorLoadBalancerExchangeFilterFunction
+. An exchange-filter function can be set on an auto-wired
+WebClient.Builder
+instance like:
+@Autowired
+private
+ReactorLoadBalancerExchangeFilterFunction lbFunction;
+@Bean
+public
+WebClient
+webClient
+(WebClient.Builder builder)
+{
+return
+builder.filter(lbFunction).build();
+  }
+This means that the application class,
+ProductCompositeServiceApplication
+, registers a
+WebClient
+bean instead of a
+WebClient.Builder
+bean. This affects the
+ProductCompositeIntegration
+class; it now needs to auto-wire a
+WebClient
+bean instead of a
+WebClient.Builder
+bean.
+To get access
+to the
+ReactorLoadBalancerExchangeFilterFunction
+function, a dependency to
+org.springframework.cloud:spring-cloud-starter-loadbalancer
+has been added to the build file,
+build.gradle
+.
+Adding custom spans and custom tags to existing spans
+Besides relying on the built-in support
+for creating traces
+and spans for the ongoing processing, we can also use the
+Observation
+API provided by Micrometer Observability to, for example, add our own spans or add custom tags to existing spans created by a microservice. The
+Observation
+API is implemented behind a Java interface with the same name.
+Let’s first see how to add a custom span, and after that, see how we can add custom tags to all spans created by a microservice.
+For any observation to take place using the
+Observation
+API, observation objects need to be registered in an
+ObservationRegistry
+bean. An
+ObservationRegistry
+bean can be injected using auto-wiring
+like in the following
+example:
+@Component
+public
+class
+MyComponent
+{
+private
+final
+ObservationRegistry registry;
+public
+MyComponent
+(ObservationRegistry registry)
+{
+this
+.registry = registry;
+  }
+Adding a custom span
+To add a custom
+span, the
+Observation
+interface
+provides a static method,
+createNotStarted()
+, that can be used to create a span. To execute the span, an
+observe()
+method can be used to provide the code that the span shall cover. If the code doesn’t return any value, it can be specified as a
+Runnable
+function; otherwise, it needs to be specified as a
+Supplier
+function.
+An example of the creation of a custom span for the execution of a minimalistic
+Supplier
+function looks like this:
+int
+y
+=
+Observation.createNotStarted(
+"my observation"
+, registry)
+      .observe(() -> {
+int
+x
+=
+1
+;
+        LOG.info(
+"Will return {}"
+, x);
+return
+1
+;
+      });
+    LOG.info(
+"Got {}"
+, y);
+The
+registry
+parameter is a bean of type
+ObservationRegistry
+and is auto-wired as described above.
+The execution of this code will result in log output like:
+2023-04-22T14:02:07.417Z  INFO [product-composite,9761b2b2b2da59c5096e78252c48ab3d,d8bcbd9cde9fe2d7] 1 --- [     parallel-6] s.m.m.c.p.s.ProductCompositeServiceImpl  : Will return 1
+2023-04-22T14:02:07.417Z  INFO [product-composite,9761b2b2b2da59c5096e78252c48ab3d,4c8ea2820fb74ec9] 1 --- [     parallel-6] s.m.m.c.p.s.ProductCompositeServiceImpl  : Got 1
+From the log output, we can see that both log statements refer to the same trace ID,
+9761b2b2b2da59c5096e78252c48ab3d
+, but specifies different span IDs,
+d8bcbd9cde9fe2d7
+being the span ID of the custom span!
+If we want to add metadata
+regarding the span, we can specify it by adding a contextual
+name and a set of tags as key-value pairs. The contextual name will be the name of the span and it can be used to identify the span when a trace tree is visualized in Zipkin. If the possible values for the information are bounded, limited to a finite number of alternatives, the tag should be specified using the
+lowCardinalityKeyValue()
+method. For unbounded values, the
+highCardinalityKeyValue()
+method should be used. Calling these methods will result in tags being added to the current span, while low-cardinality values will also be tagged to metrics created by the observation.
+We will investigate how to use metrics in
+Chapter 20
+, Monitoring Microservices
+.
+An example of specifying information as tags looks like this:
+int
+y
+=
+Observation.createNotStarted(
+"my observation"
+, registry)
+      .contextualName(
+"product info"
+)
+      .lowCardinalityKeyValue(
+"template-url"
+,
+"/product-composite/{productId}"
+)
+      .highCardinalityKeyValue(
+"actual-url"
+,
+"/product-composite/12345678"
+)
+      .observe(() -> {
+int
+x
+=
+1
+;
+        LOG.info(
+"Will return {}"
+, x);
+return
+x;
+      });
+    LOG.info(
+"Got {}"
+, y);
+From the example above, we can see that:
+The contextual name is set to
+"product info"
+.
+A key,
+"template-url"
+, that only has a few possible values, is specified with the
+lowCardinalityKeyValue()
+method. In our case, it has only three possible values for the create, get, and delete methods.
+A key,
+"actual-url"
+, with an unlimited number of values depending on the specified
+productId
+, has been specified with the
+highCardinalityKeyValue()
+method.
+Let’s apply this to the
+product-composite
+service to create a custom span that provides the
+productId
+as a tag. Since the number of product IDs is unlimited, we will specify it using the
+highCardinalityKeyValue()
+method. We will create a span that specifies the current
+productId
+for each of the three API methods for creating, retrieving, and deleting composite products. The creation of a custom span that contains one high-cardinality tag is handled by a utility class,
+ObservationUtil
+. The utility class is placed in the package
+se.magnus.microservices.composite.product.services.tracing
+. The utility method
+observe()
+in this class looks like this:
+public
+<T>
+T
+observe(String
+observationName,
+String
+contextualName,
+String
+highCardinalityKey,
+String
+highCardinalityValue,
+Supplier<T>
+supplier)
+{
+return
+Observation.createNotStarted(observationName
+,
+registry)
+.contextualName(contextualName)
+.highCardinalityKeyValue(highCardinalityKey
+,
+highCardinalityValue)
+.observe(supplier);
+}
+The
+observe()
+method wraps the call to the method
+Observation.createNotStarted()
+. The use of this method is explained in the example above, so it needs no further explanation.
+This utility method is used in the
+ProductCompositeServiceImpl
+class by a helper method
+observationWithProductInfo()
+that applies common values to the
+ProductCompositeServiceImpl
+class:
+private
+<T> T observationWithProductInfo(
+int
+productInfo, Supplier<T> supplier) {
+return
+observationUtil.observe(
+"composite observation"
+,
+"product info"
+,
+"productId"
+,
+    String.valueOf(productInfo),
+    supplier);
+}
+Finally, the helper method
+is used by the three API methods,
+createProduct()
+,
+getProduct()
+, and
+deleteProduct()
+. The custom span is created by wrapping the existing
+code in each method. The existing code has been moved to corresponding “internal” methods to simplify the structure of the solution. The “internal” methods are called by the
+observationWithProductInfo()
+method. For the
+getProduct()
+, the implementation now looks like this:
+public
+Mono<ProductAggregate>
+getProduct(int
+productId,
+...)
+{
+return
+observationWithProductInfo(productId
+,
+()
+->
+getProductInternal(productId
+,
+...));
+}
+private
+Mono<ProductAggregate>
+getProductInternal(int
+productId,
+...)
+{
+return
+observationWithProductInfo(productId
+,
+()
+->
+{
+LOG.info("Will
+get
+composite
+product
+info
+for
+product.id=
+{}
+", productId);
+return Mono.zip(
+values -> createProductAggregate(...
+integration.getProduct(productId, ...),
+integration.getRecommendations(productId).collectList(),
+integration.getReviews(productId).collectList())
+...);
+}
+If compared with the corresponding implementation in
+Chapter 13
+, we can see that the changes required to create a custom span are limited to adding a new “
+inner
+” method and calling it from the
+observationWithProductInfo()
+method:
+public
+Mono<ProductAggregate>
+getProduct
+(
+int
+productId, ...)
+{
+    LOG.info(
+"Will get composite product info for product.id={}"
+, productId);
+return
+Mono.zip(
+      values -> createProductAggregate(...
+      integration.getProduct(productId, ...),
+      integration.getRecommendations(productId).collectList(),
+      integration.getReviews(productId).collectList())
+      ...);
+  }
+So, adding a custom
+span to existing code can be made with a very small change, given
+a proper utility method that handles the details of setting up a custom span. When we try out the distributed tracing later in this chapter, we will see this custom span in action. With a custom span in place, let’s see how we can add custom tags to any span created in a microservice!
+Adding custom tags to existing spans
+If we want to add some custom information
+to all spans that
+are created by a microservice, we can use an
+ObservationFilter
+. It needs to be registered in the
+ObservationRegistry
+bean using an
+ObservationRegistryCustomizer
+bean.
+Let’s apply a filter that registers the current version of the
+product-composite
+microservice as a tag on every span it creates. We need to do the following:
+Update the build file to make Gradle create build info, including the current version specified by the
+version
+property in the
+build.gradle
+file.
+Create a filter that adds the current version as a low-cardinality tag to all spans.
+Create a registry configuration bean that registers the filter.
+To make Gradle create build info, the following is added to the build file,
+build.gradle
+:
+springBoot
+{
+buildInfo
+()
+}
+This addition will result in the file
+build/resources/main/META-INF/build-info.properties
+being created when the
+./gradlew build
+command is executed. This file will specify the current version as:
+build.version=1.0.0-SNAPSHOT
+The build info file will be bundled into the microservice’s JAR file, and its information can be accessed using a
+BuildProperties
+bean.
+The filter looks like this:
+public
+class
+BuildInfoObservationFilter
+implements
+ObservationFilter
+{
+private
+final
+BuildProperties buildProperties;
+public
+BuildInfoObservationFilter
+(BuildProperties buildProperties)
+{
+this
+.buildProperties = buildProperties;
+  }
+@Override
+public
+Observation.
+Context
+map
+(
+final
+Observation.Context context)
+{
+    KeyValue buildVersion = KeyValue.of(
+"build.version"
+, buildProperties.getVersion());
+return
+context.
+addLowCardinalityKeyValue
+(buildVersion)
+;
+  }
+}
+From the source code above, we can see that:
+A
+BuildProperties
+bean is injected into the filter’s constructor.
+The filter’s
+map()
+method retrieves the microservice version from using the
+BuildProperties
+bean and sets it as a low-cardinality tag on the provided observation context.
+The registry configuration bean looks like this:
+@Configuration(proxyBeanMethods = false)
+public
+class
+ObservationRegistryConfig
+implements
+ObservationRegistryCustomizer
+<ObservationRegistry> {
+private
+final
+BuildProperties buildProperties;
+public
+ObservationRegistryConfig
+(BuildProperties buildProperties)
+{
+this
+.buildProperties = buildProperties;
+  }
+@Override
+public
+void
+customize
+(
+final
+ObservationRegistry registry)
+{
+    registry.observationConfig().observationFilter(
+new
+BuildInfoObservationFilter
+(buildProperties));
+  }
+}
+From the source code above, we can learn that:
+A
+BuildProperties
+bean is also injected into the configuration class’s constructor.
+In the
+customize()
+method, the filter is created and registered. The filter also gets the
+BuildProperties
+bean injected here.
+The filter and the registry configuration bean can be found in the
+se.magnus.microservices.composite.product.services.tracing
+package. When we try out the distributed tracing later in this chapter, we will see this observation filter in action.
+For more ways of handling custom spans, for example, setting up predicates for when to apply an observation
+filter or using annotations to describe an observation, see
+https://micrometer.io/docs/observation
+.
+That’s what it takes
+to add distributed tracing using Micrometer
+Tracing and Zipkin, so let’s try it out in the next section!
+Trying out distributed tracing
+With the necessary changes
+to the source code in place, we can try out distributed tracing. We will do this by performing the following steps:
+Build, start, and verify the system landscape.
+Send a successful API request and see what trace information we can find in Zipkin related to this API request.
+Send an unsuccessful API request and see what error information we can find.
+Send a successful API request that triggers asynchronous processing and see how its trace information is represented.
+We will discuss these steps in detail in the upcoming sections.
+Starting up the system landscape
+Let’s start up
+the system landscape. Build the Docker images with the following commands:
+cd $BOOK_HOME/Chapter14
+./gradlew build && docker-compose build
+Start the system landscape in Docker and run the usual tests with the following command:
+./test-em-all.bash start
+Before we can call the API, we need an access token. Run the following commands to acquire an access token:
+unset ACCESS_TOKEN
+ACCESS_TOKEN=$(curl -k https://writer:secret-writer@localhost:8443/oauth2/token -d grant_type=client_credentials -d scope="product:read product:write" -s | jq -r .access_token)
+echo $ACCESS_TOKEN
+As noticed in previous chapters, an access token issued by the authorization server is valid for one hour. So, if you start to get
+401 Unauthorized
+errors after a while, it is probably time to acquire a new access token.
+Sending a successful API request
+Now, we are ready
+to send a normal request to the API. Run the following command:
+curl -H "Authorization: Bearer $ACCESS_TOKEN" -k https://localhost:8443/product-composite/1 -w "%{http_code}\n" -o /dev/null -s
+Expect the command to return the HTTP status code for success,
+200
+.
+We can now launch the Zipkin UI to look into what trace information has been sent to Zipkin:
+Open the following URL in your web browser:
+http://localhost:9411/zipkin/
+.
+To find the trace information for our request, we can search for traces that have passed through the
+gateway
+service. Perform the following steps:
+Click on the large plus sign (a white
++
+sign on a red background) and select
+serviceName
+and then
+gateway
+.
+Click on the
+RUN
+QUERY
+button.
+Click on the
+Start Time
+header to see the results ordered by the latest first (a down arrow should be visible to the left of the
+Start Time
+header).
+The response from finding
+traces should look like the following screenshot:
+Figure 14.2: Searching for distributed traces using Zipkin
+The trace information from our preceding API request is the first one in the list. Click on its
+SHOW
+button to see details pertaining to the trace:
+Figure 14.3: Sample distributed trace visualized in Zipkin
+In the detailed trace
+information view, we can observe the following:
+The request was received by the
+gateway
+service.
+The
+gateway
+service delegated the processing of the request to the
+product-composite
+service.
+The
+product-composite
+service, in turn, sent three parallel requests to the core services:
+product
+,
+recommendation
+, and
+review
+. See spans named
+product-composite: http get
+.
+Once the
+product-composite
+service received the response from all three core services, it created a composite response and sent it back to the caller through the
+gateway
+service.
+The custom span created in the previous section is named
+product-composite: product info
+. Click on it to see its tags. In the details view to the right, we can see both the tag created by the custom span,
+productId = 1
+, and the tag created by the observation filter
+build.version = 1.0.0-SNAPSHOT
+.
+To verify that the tag created by the observation filter works as expected, click on other spans created by the
+product-composite
+service, and verify that the
+build.version
+is present.
+Select the span named
+review: query
+to see a span reported by the
+review
+microservice’s database layer:
+Figure 14.4: A span that describes the execution of a SQL query
+In the span’s list of tags, we can see the actual SQL query it has performed. We can also see its execution time of 0.8 ms. Rather valuable information!
+To better understand how trace
+and span IDs are propagated between microservices, we can change the logging configuration of the
+product-composite
+service so that HTTP headers in outgoing requests are written to its log. This can be achieved by taking the following steps:
+Add the following two lines to the configuration file
+config-repo/product-composite.yml
+:
+spring.codec.log-request-details:
+true
+logging.level.org.springframework.web.reactive.function.client.ExchangeFunctions:
+TRACE
+The two lines already exist in the configuration file but are commented out. They are preceded by the following comment:
+# To see tracing headers, uncomment the following two lines and restart the product-composite service
+Find the preceding comment in the configuration file and uncomment the two lines below it.
+After that, restart the
+product-composite
+service:
+docker-compose restart product-composite
+Display the log output from the
+product-composite
+service:
+docker-compose log -f --tail 0 product-composite
+Rerun the above
+curl
+request and you will see the log output containing the
+traceparent
+HTTP header mentioned above. For example, a request sent to the
+recommendation
+service:
+chapter14-product-composite-1  | 2023-04-23T09:24:50.849Z TRACE [product-composite,e1420dcc38901378e888b8ce7022510e,06867b65cf84b552] 1 --- [     parallel-2] o.s.w.r.f.client.ExchangeFunctions       : [14606b71] HTTP GET http://d40874197b77:8080/recommendation?productId=1, headers=[traceparent:"00-e1420dcc38901378e888b8ce7022510e-06867b65cf84b552-01"]
+In the sample log output, we can see the value of the
+traceparent
+HTTP header, where the trace ID is set to
+e1420dcc38901378e888b8ce7022510e
+, and the span ID is set to
+06867b65cf84b552
+.
+If you don’t want to keep
+the logging of the
+traceparent
+HTTP header, comment out the two lines in
+config-repo/product-composite.yml
+and restart the
+product-composite
+service.
+Sending an unsuccessful API request
+Let’s see what the trace information
+looks like if we make an unsuccessful API request; for example, searching for a product that causes a timeout:
+Send an API request for product ID
+1
+and enforce a delay of three seconds, which will trigger the time limiter, and verify that it returns the HTTP status code
+500
+:
+curl -H "Authorization: Bearer $ACCESS_TOKEN" -k https://localhost:8443/product-composite/1?delay=3 -w "%{http_code}\n" -o /dev/null -s
+In the Zipkin UI, go back to the search page (use the back button in the web browser) and click on the
+RUN QUERY
+button again. To see the results ordered by the latest first, click on the
+Start Time
+header.
+Expect a result similar to the following screenshot:
+Figure 14.5: Finding a failed request using Zipkin
+You should see the failed request
+at the top of the returned list. Note that its duration bar is red, indicating that an error has occurred. Click on its
+SHOW
+button to see details:
+Figure 14.6: Viewing a trace of a failed request using Zipkin
+Here, we can see a span,
+product-composite: secured request
+, with an error symbol in front of it (a red circle with an exclamation mark).
+Click on the span to see its tags. You will find a tag named
+error
+that clearly indicates that the error
+is caused by a timeout that occurred after two seconds.
+Sending an API request that triggers asynchronous processing
+The third type of request
+that is interesting to see represented in the Zipkin UI is a request where parts of its processing are done asynchronously. Let’s try a delete request, where the delete process in the core services is done asynchronously.
+The
+product-composite
+service sends a delete event to each of the three core services over the message broker and each core service picks up the delete event and processes it asynchronously. Thanks to Micrometer Tracing, trace information is added to the events that are sent to the message broker, resulting in a coherent view of the total processing of the delete request.
+Perform the following steps:
+Run the following command to delete the product with a product ID of
+12345
+and verify that it returns the HTTP status code for the request being accepted,
+202
+:
+curl -X DELETE -H "Authorization: Bearer $ACCESS_TOKEN" -k https://localhost:8443/product-composite/12345 -w "%{http_code}\n" -o /dev/null -s
+Remember that the delete operation is idempotent, that is, it will succeed even if the product doesn’t exist!
+In the Zipkin UI, go back to the search page (use the back button in the web browser) and click on the
+RUN QUERY
+button again. To see the results ordered by the latest first, click on the
+Start Time
+header. Expect a result like the following screenshot:
+Figure 14.7: Finding a delete request using Zipkin
+You should see the delete
+request at the top of the returned list. Note that the root service name,
+gateway
+, is suffixed by the HTTP method used,
+delete
+. Click on its
+SHOW
+button to see details:
+Figure 14.8: Viewing a delete request using Zipkin
+Here, we can see the trace information for processing the delete request:
+The request was received by the
+gateway
+service.
+The
+gateway
+service delegated the processing of the request to the
+product-composite
+service.
+The
+product-composite
+service has created a custom span named
+product-composite: product info
+, as expected.
+The
+product-composite
+service, in turn, published three events on the message broker (RabbitMQ, in this case). See spans with names suffixed with
+send
+.
+The
+product-composite
+service is now done and returns an HTTP
+success
+status code,
+200
+, through the
+gateway
+service back to the caller. Note that this is done before all processing is completed by the core services!
+The core services (
+product
+,
+recommendation
+, and
+review
+) receive the
+delete
+events and start to process them asynchronously, that is, independently of one another. See spans with names suffixed with
+receive
+.
+To confirm the involvement
+of the message broker, click on the first product span:
+Figure 14.9: Viewing information about the asynchronous processing of an event using Zipkin
+The selected span contains a tag named
+peer.service
+that reveals that RabbitMQ is used, and the tag
+spring.rabbit.listener.id
+points out that the messages are received by the consumer group
+productsGroup
+.
+Finally, to see the
+traceparent
+header in a message sent through RabbitMQ, we can inspect the message stored in the audit queue for the products. Open
+http://localhost:15672/#/queues/%2F/products.auditGroup
+in your web browser.
+Click on the button named
+Get Messages(s)
+to see the oldest message in the queue. The web page should look like the following:
+Figure 14.10: A message with a traceparent header in RabbitMQ
+In the
+Properties
+section, you will find the
+traceparent
+header for this message. In this case, the trace ID is
+99a9f2501e4d454643184c6b1cb0a232
+and the span ID is
+7458430fe56d6df1
+.
+This completes the tests of distributed tracing
+for this chapter!
+The Zipkin UI contains much more functionality for finding traces of interest!
+To get more accustomed to the Zipkin UI, try out the query functionality by clicking on the plus sign and selecting
+tagQuery
+. For example, to find requests that failed on a
+403 - Forbidden
+error, set its value to
+tagQuery=http.status_code=403
+, searching for traces that failed on a Forbidden (
+403
+) error. Also, try setting limits for the lookback range (start and end time) and the maximum number of hits by clicking on the cogwheel icon to the right of the
+RUN QUERY
+button.
+Wrap up the tests by bringing down the system
+landscape. Run the following command:
+docker-compose down
+Summary
+In this chapter, we learned how to use distributed tracing to understand how our microservices cooperate. We learned how to use Micrometer Tracing to collect trace information, and Zipkin to store and visualize the trace information.
+We saw how adding Micrometer Tracing to microservices is affected by adding a couple of dependencies to the build files and setting up a few configuration parameters. Reactive microservices are currently not fully supported, but we learned how to work around the most important issues. If required, we can use the
+Observation
+API to create custom spans or add tags to all spans created by a microservice. We also saw how the Zipkin UI makes it very easy to identify which part of a complex workflow caused either an unexpectedly long response time or an error. Both synchronous and asynchronous workflows can be visualized with the Zipkin UI.
+In the next chapter, we will learn about container orchestrators, specifically Kubernetes. We will learn how to use Kubernetes to deploy and manage microservices, while also improving important runtime characteristics such as scalability, high availability, and resilience.
+Questions
+What is the purpose of the
+management.tracing.sampling.probability
+configuration parameter?
+How can you identify the longest-running request after executing the
+test-em-all.bash
+test script?
+How can we find requests that have been interrupted by a timeout introduced in
+Chapter 13
+,
+Improving Resilience Using Resilience4j
+?
+What does the trace look like for an API request when the circuit breaker introduced in
+Chapter 13
+,
+Improving Resilience Using Resilience4j
+, is open?
+How can we locate APIs that failed on the caller not being authorized to perform the request?
+How can we programmatically add trace information?
+
+15
+Introduction to Kubernetes
+In this chapter, we will start to learn about Kubernetes, the most popular and widely used container orchestrator at the time of writing this book. Since the subjects on container orchestrators in general and Kubernetes itself are too big to be covered in one chapter, I will focus on introducing the areas that I have found to be the most important in my use of Kubernetes over the last few years.
+The following topics will be covered in this chapter:
+Introducing Kubernetes concepts
+Introducing Kubernetes API objects
+Introducing Kubernetes runtime components
+Creating a local Kubernetes cluster
+Trying out a sample Deployment and getting used to the
+kubectl
+Kubernetes CLI tool
+Managing a local Kubernetes cluster
+Technical requirements
+For instructions on how to install the tools used in this book and how to access the source code for this book, see:
+Chapter 21
+,
+Installation Instructions for macOS
+Chapter 22
+,
+Installation Instructions for Microsoft Windows with WSL 2 and Ubuntu
+The code examples in this chapter all come from the source code in
+$BOOK_HOME/Chapter15
+. The source code for the sample Deployment on Kubernetes that will be performed in this chapter can be found in the folder
+$BOOK_HOME/Chapter15/kubernetes/first-attempts
+.
+Introducing Kubernetes concepts
+At a high level, as a container orchestrator, Kubernetes
+makes a cluster of (physical or virtual) servers that runs containers appear to be one big logical server running containers.
+As an operator, we declare a
+desired state
+to the Kubernetes cluster
+by creating objects using the Kubernetes API. Kubernetes continuously compares the desired state with the current state. If it detects differences, it takes action to ensure that the current state is the same as the desired state.
+One of the main purposes of a Kubernetes cluster is to deploy and run containers, but also to support zero-downtime rolling upgrades using techniques such as green/blue and canary Deployments. Kubernetes
+can schedule containers, that is,
+Pods
+that contain one or more co-located containers, to the available nodes in the cluster. To be able to monitor the health of running containers, Kubernetes
+assumes that containers implement a
+liveness probe
+. If a liveness probe reports an unhealthy container, Kubernetes will restart the container. Containers can be scaled in the cluster manually or automatically using a horizontal autoscaler. To optimize the use of the available hardware resources in a cluster, for example, memory and CPU, containers
+can be configured with
+quotas
+that specify the amount of resources a container needs. On the other hand, limits regarding how much a container is allowed to consume can be specified on the Pod
+or for a group of Pods at the
+namespace
+level. Namespaces will be introduced as we proceed through this chapter. This is of extra importance if several teams share a common Kubernetes cluster.
+Another main purpose of Kubernetes is to provide Service discovery of the running Pods and their containers. Kubernetes
+Service
+objects
+can be defined for Service discovery and will also load-balance incoming requests over the available Pods. Service objects can be exposed to the outside of a Kubernetes cluster. However, as we
+will see, an
+Ingress
+object is, in many cases, better suited to handling externally incoming traffic to a group of Services. To help Kubernetes find out whether a container is ready to accept incoming
+requests, a container can implement a
+readiness probe
+.
+Internally, a Kubernetes cluster provides one big flat IP network where each Pod gets its own IP address and can reach all the other Pods, independent of which node they run on. To support multiple network vendors, Kubernetes
+allows the use of network plugins that comply with the
+Container Network Interface
+(
+CNI
+) specification (
+https://github.com/containernetworking/cni
+). Pods are not isolated by default; they accept all incoming requests. CNI plugins that support the use of network policy definitions can be used to lock down access to Pods, for example, only allowing traffic from Pods in the same namespace.
+To allow multiple
+teams to work on the same
+Kubernetes cluster in a safe way,
+Role-Based Access Control
+(
+RBAC
+,
+https://kubernetes.io/docs/reference/access-authn-authz/rbac/
+) can be applied. For example, administrators can be authorized to access resources at the cluster level, while the access of team members can be locked down to resources that are created in a namespace owned by the teams.
+In total, these concepts provide a platform
+for running containers that is scalable, secure, highly available, and resilient.
+Let’s look a bit further into the API objects that are available in Kubernetes and, after that, the runtime components that make up a Kubernetes cluster.
+Introducing Kubernetes API objects
+Kubernetes defines an API
+that is used to manage different types of
+objects
+or
+resources
+, as they are also known. Some of the most commonly used types, or
+kinds
+, as referred to in the API, are as follows:
+Node
+: A node
+represents a server, virtual
+or physical, in the cluster.
+Pod
+: A Pod represents
+the smallest possible
+deployable component in Kubernetes, consisting of one or more co-located containers. The containers share the same IP address and port range. This means that containers in the same Pod instance can talk to each other over localhost, but need to be aware of potential port collisions. Typically, a Pod consists of one container, but there are use cases for extending the functionality of the main container by running the second container in a Pod. In
+Chapter 18
+,
+Using a Service Mesh to Improve Observability and Management
+, a second container will be used in the Pods, running a sidecar that makes the main container join the Service mesh.
+Deployment
+: A Deployment is used to deploy
+and upgrade Pods. The Deployment
+objects hand over the responsibility of creating and monitoring the Pods to a ReplicaSet. When creating a Deployment for the first time, the work performed by the Deployment object is not much more than creating the ReplicaSet object. When performing a rolling upgrade of a Deployment, the role of the Deployment object is more involved.
+ReplicaSet
+: A ReplicaSet is used to ensure
+that a specified number of Pods is running
+at all times. If a Pod is deleted, it will be replaced with a new Pod by the ReplicaSet.
+Service
+: A Service is a stable network endpoint
+that you can use to connect to one
+or multiple Pods. A Service is assigned an IP address and a DNS name in the internal network of the Kubernetes cluster. The IP address of the Service will stay the same for the lifetime of the Service. Requests that are sent to a Service will be forwarded to one of the available Pods using round-robin-based load balancing. By default, a Service is only exposed inside the cluster using a cluster IP address. It is also possible to expose a Service outside the cluster, either on a dedicated port on each node in the cluster or – even better – through an external load balancer that is aware of Kubernetes; that is, it can automatically provision a public IP address and/or DNS name for the Service. Cloud providers that offer Kubernetes as a Service, in general, support this type of load balancer.
+Ingress
+: Ingress can manage external access
+to Services in a Kubernetes
+cluster, typically using HTTP or HTTPS. For example, it can route traffic to the underlying Services based on URL paths or HTTP headers such as the hostname. Instead of exposing a number of Services externally, either using node ports or through load balancers, it is, in general, more convenient to set up an Ingress in front of the Services. To handle the actual communication defined by the Ingress objects, an Ingress controller must be running in the cluster. We
+will see an example of an Ingress controller as we proceed.
+Namespace
+: A namespace is used to group
+and, on some levels, isolate resources
+in a Kubernetes cluster. The names of resources must be unique in their namespaces, but not between namespaces.
+ConfigMap
+: A ConfigMap is used to store configuration
+that’s used
+by containers. ConfigMaps can be mapped into a running container as environment variables or files.
+Secret
+: This is used to store sensitive
+data used by containers, such as credentials. Secrets
+can be made available to containers in the same way as ConfigMaps. Anyone with full read access to the API server can access the values of created Secrets, so they are not as safe as the name might imply.
+DaemonSet
+: This ensures that one Pod
+is running on each node in a set of nodes
+in the cluster. In
+Chapter 19
+,
+Centralized Logging with the EFK Stack
+, we will see an example of a log collector, Fluentd, that will run on each worker node as a DaemonSet.
+For a full list of resource objects
+that the Kubernetes API covers in v1.26, see
+https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.26/
+.
+The following diagram summarizes
+the Kubernetes resources that are involved in handling incoming requests:
+Figure 15.1: Overview of Kubernetes resources
+In the preceding diagram, we can see the following:
+Two Deployments,
+Deployment A
+and
+Deployment B
+, have been deployed to a cluster with two nodes,
+Node 1
+and
+Node 2
+Deployment A
+contains two Pods,
+Pod A1
+and
+Pod A2
+Deployment B
+contains one Pod,
+Pod B1
+Pod A1
+is scheduled to
+Node 1
+Pod A2
+and
+Pod B1
+are scheduled to
+Node 2
+Each Deployment has a corresponding Service deployed,
+Service A
+and
+Service B
+, and they are available on all nodes
+An
+Ingress
+is defined to route incoming requests to the two Services
+A client typically sends requests to the cluster via an
+external load balancer
+These objects are not, by themselves, running components; instead, they are definitions of different types of desired states. To reflect the desired state in the cluster’s current state, Kubernetes comes
+with an architecture consisting of a number of runtime components, as described in the next section.
+Introducing Kubernetes runtime components
+A Kubernetes cluster contains two types of nodes:
+master nodes
+and
+worker nodes
+. Master nodes
+manage the cluster, while the main purpose
+of worker nodes is to run the actual workload, for example, the containers we deploy in the cluster. Kubernetes is built up of a number
+of runtime components. The most important components are as follows:
+There are components that run on master
+nodes, constituting the
+control plane
+:
+The
+API server
+, the entry point to the
+control plane. This exposes
+a RESTful API, which, for
+example, the Kubernetes CLI tool known as
+kubectl
+uses.
+etcd
+, a highly available and distributed
+key-value
+store, used as a database for all cluster data.
+A
+controller manager
+, which contains a number of controllers
+that continuously evaluate
+the desired state versus the current state for the objects defined in the etcd database. Whenever the desired or current state changes, a controller that’s responsible for that type of state takes action to move the current state to the desired state. For example, a replication controller that’s responsible for managing Pods will react if a new Pod is added through the API server or a running Pod is deleted and ensures that new Pods are started. Another example of a controller is the node controller. It is responsible for acting if a node becomes unavailable, ensuring that Pods running on a failing node are rescheduled on other nodes in the cluster.
+A
+scheduler
+, which is responsible for assigning
+newly created
+Pods to a node with available capacity, for example, in terms of memory and CPU.
+Affinity rules
+can be used to control
+how Pods are assigned to nodes. For example, Pods that perform a lot of disk I/O operations can be assigned to a group of worker nodes that have fast SSD disks. Anti-affinity rules can be defined to separate Pods, for example, to avoid scheduling Pods from the same Deployment to the same worker node.
+Components that run
+on all the nodes, constituting the
+data plane
+:
+kubelet
+, a node agent that executes
+as a process directly in the nodes’ operating system and not as a container. A kubelet ensures that the Pods that are scheduled to its node have their containers up and running and that they are healthy. It acts as a conduit between the API server and the container runtime on its node.
+kube-proxy
+, a network proxy that enables the Service
+concept in Kubernetes and is capable of forwarding requests to the appropriate Pods, typically in a round-robin fashion if more than one Pod is available for the specific Service.
+kube-proxy
+is deployed as a DaemonSet.
+Container runtime
+, which is the software that runs
+the containers on a node. Historically, Kubernetes used Docker
+Engine, but today any implementation of the Kubernetes
+Container Runtime Interface
+(
+CRI
+) can be used, for example,
+cri-o
+(
+https://cri-o.io
+) and
+containerd
+(
+https://containerd.io/
+). Support for Docker
+Engine
+was removed
+in Kubernetes v1.24.
+containerd
+is actually the container engine of Docker. It was separated from Docker back in 2017 and is today a graduated CNCF project.
+Kubernetes DNS
+, which is a DNS server that’s used in the cluster’s internal network. Services
+and Pods are assigned a DNS name, and Pods are configured to use this DNS server to resolve the internal DNS names. The DNS server is deployed as a Deployment object and a Service object.
+The following diagram summarizes the Kubernetes runtime components described above:
+Figure 15.2: Overview of Kubernetes runtime components
+Based on the diagram, we can imagine the following
+sequence of events:
+An operator uses
+kubectl
+to send in a new desired state to Kubernetes, containing manifests declaring a new
+Deployment
+,
+Service
+, and
+Ingress
+object. The Ingress defines a route to the Service object and the Service object is defined to select Pods that are configured by the Deployment object.
+kubectl
+talks to the
+API server
+and it stores the new desired state as objects in the
+etcd
+database.
+Various
+controllers
+will react to the creation of the new objects and take the following actions:
+For the Deployment object:
+New
+ReplicaSet
+and
+Pod
+objects will be registered in the API server.
+The
+scheduler
+will see the new Pod(s) and schedule them to the appropriate worker nodes.
+On each worker node, the
+kubelet
+agent will launch containers as described by the Pods. The kubelet will use the
+container runtime
+on the worker node to manage the containers.
+For the Service object:
+A DNS name will be registered in the internal DNS server for the Service object and the
+kube-proxy
+will be able to route requests that use the DNS name to one of the available Pods.
+Note that Pods are reachable from any node in the cluster, so the kube-proxy does not need to run on the same node as the Pod to be able to forward requests to it.
+For the Ingress object:
+An
+Ingress controller
+will set up routes according to the Ingress object and be ready to accept requests from outside of the Kubernetes cluster. External requests that match the routes defined by the Ingress object will be forwarded by the Ingress controller to the Service object. These requests will be forwarded by the kube-proxy to a Pod as described above.
+Now that we understand
+the Kubernetes runtime components and what they support and run on, let’s move on to creating a Kubernetes cluster with Minikube.
+Creating a Kubernetes cluster using Minikube
+Now, we are ready to create a Kubernetes
+cluster! We will use Minikube to create
+a local single-node cluster. Minikube can be deployed in a VM, a container, or on bare metal using different drivers. We will use one of the preferred drivers, the Docker driver, where the Minikube instance runs in a container managed by Docker Desktop on macOS and Windows with
+Windows Subsystem for Linux, v2
+(WSL 2).
+For information
+on the available drivers in Minikube, see
+https://minikube.sigs.k8s.io/docs/drivers/
+.
+Docker and its containers are already running in a separate WSL 2 instance; see the
+Installing Docker Desktop for Windows
+section in
+Chapter 22
+,
+Installation Instructions for Microsoft Windows with WSL 2 and Ubuntu
+.
+One drawback of running Minikube as a container on Docker is that ports exposed by Minikube are only accessible on the host that runs Docker. To make the ports available to Docker clients, for example, macOS or the Linux server we will use on WSL 2, we can specify port mappings when creating the Minikube cluster.
+Before creating the Kubernetes cluster, we need to learn a bit about Minikube profiles, the Kubernetes CLI tool known as
+kubectl
+, and its use of contexts.
+Working with Minikube profiles
+In order to run multiple Kubernetes
+clusters locally, Minikube comes with the concept of
+profiles
+. For example, if you want to work with multiple versions of Kubernetes, you can create multiple Kubernetes clusters using Minikube. Each cluster will be assigned a separate Minikube profile. Most of the Minikube commands accept a
+--profile
+flag (or
+-p
+for short), which can be used to specify which of the Kubernetes clusters the command will be applied to. If you plan to work with one specific profile for a while, a more convenient alternative exists, where you specify the current profile with the following command:
+minikube profile my-profile
+This command will set the
+my-profile
+profile as the current profile.
+To get the current profile, run the following command:
+minikube config get profile
+If no profile is specified, either using the
+minikube profile
+command or the
+--profile
+switch, a default profile named
+minikube
+will be used.
+Information regarding existing
+profiles can be found with the command
+minikube profile
+list
+.
+Working with the Kubernetes CLI, kubectl
+kubectl
+is the Kubernetes CLI tool. Once a cluster
+has been set up, this is usually the only tool you need to manage the cluster!
+For managing the API objects, as we described earlier in this chapter, the
+kubectl
+apply
+command
+is the only command you need to know about. It is a
+declarative command
+; that is, as an operator, we ask Kubernetes to apply the object definition we give to the command. It is then up to Kubernetes to figure out what actually needs to be done.
+Another example of a declarative command that’s hopefully familiar to many readers of this book is a
+SQL SELECT
+statement, which can join information from several database tables. We only declare the expected result in the SQL query, and it is up to the database query optimizer to figure out in what order the tables should be accessed and what indexes to use to retrieve the data in the most efficient way.
+In some cases,
+imperative statements
+that explicitly tell Kubernetes what to do are
+preferred. One example is the
+kubectl delete
+command, where we explicitly tell Kubernetes to delete some API objects. Creating a namespace object can also be conveniently done with an explicit
+kubectl create namespace
+command.
+Repetitive usage of the imperative statements will make them fail, for example, deleting the same API object twice using
+kubectl delete
+or creating the same namespace twice using
+kubectl create
+. A declarative command, that is, using
+kubectl apply
+, will not fail with repetitive usage – it will simply state that there is no change and exit without taking any action.
+Some commonly used commands for retrieving information about a Kubernetes cluster are as follows:
+kubectl get
+shows information about the specified API object
+kubectl describe
+gives more detail about the specified API object
+kubectl logs
+displays log output from containers
+We will see a lot of examples of these and other
+kubectl
+commands in this and the upcoming chapters!
+If in doubt about how to use the
+kubectl
+tool, the
+kubectl help
+and
+kubectl
+<command> --help
+commands are always available and provide very useful information. Another helpful command is
+kubectl explain
+, which can be used to show what fields are available when declaring a Kubernetes object. For example, run the following command if you need to look up the fields available to describe a container in the template
+of a Deployment object:
+kubectl explain deployment.spec.template.spec.containers
+Working with kubectl contexts
+To be able to work
+with more than one Kubernetes cluster, using either Minikube locally or Kubernetes clusters set up on on-premises servers or in the cloud,
+kubectl
+comes with the concept of
+contexts
+. A context is a combination of the following:
+A Kubernetes cluster
+Authentication information for a user
+A default namespace
+By default, contexts are saved in the
+~/.kube/config
+file, but the file can be changed using the
+KUBECONFIG
+environment variable. In this book, we will use the default location, so we will unset
+KUBECONFIG
+using the
+unset KUBECONFIG
+command.
+When a Kubernetes cluster is created in Minikube, a context is created with the same name as the Minikube profile and is then set as the current context. So,
+kubectl
+commands that are issued after the cluster is created in Minikube will be sent to that cluster.
+To list the available contexts, run the following command:
+kubectl config get-contexts
+The following is a sample response:
+Figure 15.3: List of kubectl contexts
+The wildcard,
+*
+, in the first column marks the current context.
+You will only see the
+handson-spring-boot-cloud
+context in the preceding response once the cluster has been created, the process for which we will describe shortly.
+If you want to switch the current context to another context, that is, work with another Kubernetes cluster, run the following command:
+kubectl config use-context my-cluster
+In this example, the current context will be changed to
+my-cluster
+.
+To update a context, for example, switching the default namespace used by
+kubectl
+, use the
+kubectl config set-context
+command.
+For example, to change the default namespace of the current context to
+my-namespace
+, use the following command:
+kubectl config set-context $(kubectl config current-context) --namespace my-namespace
+In this command,
+kubectl config current-context
+is used to get the name
+of the current context.
+Creating a Kubernetes cluster
+To create a Kubernetes cluster using Minikube, we need
+to run a few
+commands:
+Unset the
+KUBECONFIG
+environment variable to ensure that the
+kubectl
+context is created in the default config file,
+~/.kube/config
+.
+Create the cluster using the
+minikube start
+command, where we can also specify what version of Kubernetes to use and the amount of hardware resources we want to allocate to the cluster:
+To be able to complete the examples in the remaining chapters of this book, allocate 10 GB of memory, that is, 10,240 MB, to the cluster. The samples should also work if only 6 GB (6,144 MB) is allocated to the Minikube cluster, albeit more slowly.
+Allocate the number of CPU cores and disk space you find suitable; 4 CPU cores and 30 GB of disk space are used in the following example.
+Specify what version of Kubernetes will be used. In this book, we will use v1.26.1.
+Specify that we will use the Docker driver as described above.
+Specify the required port mappings. The ports
+8080
+and
+8443
+will be used by the Ingress controller, and the ports
+30080
+and
+30443
+will be used by Services of type
+NodePort
+.
+See
+Chapter 16
+, Deploying Our Microservices to Kubernetes,
+for information on how the Gateway server deploys a Service of type
+NodePort
+.
+Specify the Minikube profile to be used for the coming
+minikube
+commands. We will use
+handson-spring-boot-cloud
+as the profile name.
+After the cluster has been created, we will use the add-on manager in Minikube to enable an Ingress controller and a metrics server that comes out of the box with Minikube. The Ingress controller and the metrics server will be used in the next chapters.
+Run the following
+commands to create the Kubernetes
+cluster:
+unset KUBECONFIG
+minikube start \
+ --profile=handson-spring-boot-cloud \
+ --memory=10240 \
+ --cpus=4 \
+ --disk-size=30g \
+ --kubernetes-version=v1.26.1 \
+ --driver=docker \
+ --ports=8080:80 --ports=8443:443 \
+ --ports=30080:30080 --ports=30443:30443
+minikube profile handson-spring-boot-cloud
+minikube addons enable ingress
+minikube addons enable metrics-server
+After the preceding commands complete, you should be able to communicate with the cluster. Try the
+kubectl get nodes
+command. It should respond with something that looks similar to the following:
+Figure 15.4: List of nodes in the Kubernetes cluster
+Once created, the cluster will initialize itself in the background, starting up a number of system Pods in the
+kube-system
+and the
+ingress-nginx
+namespace. We can monitor its progress by issuing the following command:
+kubectl get pods --all-namespaces
+Once the startup is complete, the preceding command should report the status for all Pods as
+Running
+and the
+READY
+count should be
+1/1
+, meaning that a single container in each Pod is up and running:
+Figure 15.5: List of running system Pods
+Note that two Pods are reported as
+Completed
+, and not
+Running
+. They are Pods created by
+Job
+objects, used to execute a container
+a fixed number of times like a batch
+job. Run the command
+kubectl get jobs --namespace=ingress-nginx
+to reveal the two Job objects.
+We are now ready for some action!
+Trying out a sample Deployment
+Let’s see how we can do the following:
+Deploy a simple web server
+based on NGINX in our
+Kubernetes cluster
+Apply some changes to the Deployment:
+Change the current state by deleting the Pod and verify that the
+ReplicaSet
+creates a new one
+Change the desired state by scaling the web server to three Pods and verify that the
+ReplicaSet
+fills the gap by starting up two new Pods
+Route external traffic to the web server using a Service with a node port
+First, create a namespace,
+first-attempts
+, and update the
+kubectl
+context to use this namespace by default:
+kubectl create namespace first-attempts
+kubectl config set-context $(kubectl config current-context) --namespace=first-attempts
+We can now create a Deployment of NGINX
+in the namespace
+using the
+kubernetes/first-attempts/nginx-deployment.yaml
+file. This file looks as follows:
+apiVersion:
+apps/v1
+kind:
+Deployment
+metadata:
+name:
+nginx-deploy
+spec:
+replicas:
+1
+selector:
+matchLabels:
+app:
+nginx-app
+template:
+metadata:
+labels:
+app:
+nginx-app
+spec:
+containers:
+-
+name:
+nginx-container
+image:
+nginx:latest
+ports:
+-
+containerPort:
+80
+Let’s explain this source code in more detail:
+The
+kind
+and
+apiVersion
+attributes are used to specify that we are declaring a Deployment object.
+The
+metadata
+section is used to describe the Deployment object. For example, we give it the name
+nginx-deploy
+.
+Other commonly used metadata for a Kubernetes object includes the name of the
+namespace
+it belongs to,
+label
+s, and
+annotation
+s. We will see them used in this chapter and the following chapters.
+Next comes a
+spec
+section that defines our desired state for the Deployment object:
+replicas: 1
+specifies we want to have one Pod up and running.
+A
+selector
+section that specifies how the Deployment will find the Pods it manages. In this case, the Deployment will look for Pods that have the
+app
+label set to
+nginx-app
+.
+The
+template
+section is used to specify how Pods will be created.
+The
+metadata
+section specifies the
+label
+,
+app: nginx-app
+, which is used to identify the Pods, thereby matching the selector.
+The
+spec
+section specifies details for the creation of the single container in the Pod, that is,
+name
+,
+image
+, and what
+ports
+it uses.
+Create the Deployment with the following commands:
+cd $BOOK_HOME/Chapter15
+kubectl apply -f kubernetes/first-attempts/nginx-deployment.yaml
+Let’s see what
+we got
+with the
+kubectl get all
+command:
+Figure 15.6: Kubernetes objects created by the sample deployment
+As expected, we got a Deployment, ReplicaSet, and Pod object. After a short while, which mainly depends on the time it takes to download the NGINX Docker image, the Pod will be up and running, reported as
+1/1
+in the
+READY
+column, meaning that the desired state is equal to the current state!
+Now, we will change the current state by deleting the Pod. Before deleting the Pod, run the command
+kubectl get pod --watch
+in another terminal. The use of the
+--watch
+option makes the command hang, waiting for state changes of Pods in the current namespace. Delete the Pod using the following command:
+kubectl delete pod --selector app=nginx-app
+Since the Pod has a random name (
+nginx-deploy-59b8c5f7cd-mt6pg
+in the preceding example), the Pod is selected based on the
+app
+label, which is set to
+nginx-app
+in the Pod.
+Note how
+kubectl get pod --watch
+reports how the current Pod is terminated and at the same time a new Pod is started up.
+It is the ReplicaSet that detects the difference between the desired and current state and almost immediately starts up a new Pod to compensate for the deviation. The reported events should look like the following screenshot:
+Figure 15.7: kubectl get pod --watch reporting changes to the Pods
+In the screenshot, we can see that the Pod with a name ending with
+d69ln
+was stopped by the
+delete
+command and that the ReplicaSet immediately started up a new Pod with a name ending with
+ptbkf
+.
+Change the desired
+state by setting the number of desired Pods to three
+replicas in the
+kubernetes/first-attempts/nginx-deployment.yaml
+Deployment file. Apply the change in the desired state by simply repeating the
+kubectl apply
+command, as we mentioned previously.
+Again, note that the
+kubectl get pod --watch
+command reports new Pods being launched by the ReplicaSet to get the current state equivalent to the new desired state, that is, three Pods. After a few seconds, two new NGINX Pods will be reported as up and running. Stop the command with
+Ctrl + C
+.
+Run the
+kubectl get all
+command and expect a response that looks similar to the following:
+Figure 15.8: New Pods started up by Kubernetes to meet the desired state
+Note the three Pods and that the Deployment object reports
+3/3
+. This is interpreted as 3 ready and 3 desired Pods, meaning that all desired Pods are ready to be used.
+To enable external communication
+with the web servers, create a Service
+using the
+kubernetes/first-attempts/nginx-service.yaml
+file. It looks like the following:
+apiVersion:
+v1
+kind:
+Service
+metadata:
+name:
+nginx-service
+spec:
+type:
+NodePort
+selector:
+app:
+nginx-app
+ports:
+-
+targetPort:
+80
+port:
+80
+nodePort:
+30080
+The
+kind
+and
+apiVersion
+attributes are used to specify that we are declaring a
+Service
+object.
+The
+metadata
+section is used to describe the
+Service
+object, for example, to give it a name:
+nginx-service
+.
+Next comes a
+spec
+section, which defines the desired state of the
+Service
+object:
+With the
+type
+field, we specify that we want
+NodePort
+, that is, a Service that is accessible externally on a dedicated port on each node in the cluster. This means that an external caller can reach the Pods behind this Service using this port on any of the nodes in the cluster, independent of which nodes the Pods actually run on.
+The selector is used by the Service to find available Pods, which, in our case, are Pods labeled with
+app: nginx-app
+.
+Finally,
+ports
+are declared as follows:
+port: 80
+specifies which port the Service will be accessible on, that is, internally in the cluster.
+targetPort: 80
+specifies the port in the Pod where the requests will be forwarded to.
+nodePort: 30080
+specifies which port the Service will be externally accessible on using any of the nodes in the cluster. By default, a node port must be in the range of
+30000
+to
+32767
+.
+This port range is used to minimize the risk of colliding with other ports in use. In a production system, a load balancer is typically placed in front of the Kubernetes cluster, shielding the external users both from the knowledge of these ports and the IP numbers of the nodes in the Kubernetes cluster. See
+Chapter 18
+,
+Using a Service Mesh to Improve Observability and Management
+, specifically the
+Setting up access to Istio Services
+section, for more on the usage of a
+LoadBalanced
+Kubernetes Service.
+Create the Service with the following command:
+kubectl apply -f kubernetes/first-attempts/nginx-service.yaml
+To see what we got, run the
+kubectl get svc
+command. Expect a response like the following:
+Figure 15.9: NodePort Service for our Deployment
+kubectl
+supports short names for many of the API objects as an alternative to their full name. For example,
+svc
+was used in the preceding command instead of the full name,
+service
+. Run the command
+kubectl api-resources
+to see all available short names.
+To access the web server
+through the Service’s node port, we need to know the IP address
+or hostname of the single node in our cluster. When using the Docker driver, the hostname is always
+localhost
+.
+The node port,
+30080
+, is forwarded from Docker Engine by the
+–ports
+option in the
+minikube start
+command. See the
+Creating a Kubernetes cluster
+section above for details. This means that the
+Service
+can be reached at the address
+localhost:30080
+.
+Ports opened in a WSL 2 instance are accessible in Windows on
+localhost
+.
+With this information, we can direct a web browser on macOS and Windows to the deployed web server using the address
+http://localhost:30080
+. Expect a response such as the following:
+Figure 15.10: NGINX default web page
+Great! But what about the internal cluster IP address and port?
+One way to verify that
+the web server is also reachable internally in the cluster
+is to launch a small Pod that we can use to run
+curl
+from the inside. The
+curl
+command will use the internal cluster IP address and port. We don’t need to use the internal IP address; instead, we can use a DNS name that is created for the Service in the internal DNS server. The short name of the DNS name is the same as the name of the Service, that is,
+nginx-service
+.
+The full DNS name of a Service is
+<service-name>.<namespace>.svc.cluster.local
+. The full name for this Service is
+nginx-service.first-attempts.svc.cluster.local
+. Since we will run the command below in the same namespace, we can use the short name.
+Run the following command:
+kubectl run -i --rm --restart=Never curl-client --image=curlimages/curl --command -- curl -s 'http://nginx-service:80'
+The command looks a bit complex, but it will do the following:
+Create a Pod with a small container based on the Docker image
+curlimages/curl
+, which contains the
+curl
+command.
+Run the
+curl -s 'http://nginx-service:80'
+command inside the container and redirect the output to the Terminal using the
+-i
+option.
+Delete the Pod using the
+--rm
+option.
+Expect the output from the preceding command to contain the following information (we are only showing parts of the response here):
+Figure 15.11: Accessing NGINX inside the Kubernetes cluster
+This means that the web server is also accessible internally in the cluster!
+This is basically all we need to know to be able to deploy our system landscape.
+Wrap this up by removing the namespace containing the
+nginx
+Deployment:
+kubectl delete namespace first-attempts
+Before we end this
+introductory chapter on Kubernetes, we need
+to learn how to manage our Kubernetes cluster.
+Managing a local Kubernetes cluster
+A running Kubernetes cluster
+consumes a lot of resources, mostly memory. So, when we are done working with a Kubernetes cluster in Minikube, we must be able to hibernate it in order to release the resources allocated to it. We also need to know how to resume the cluster when we want to continue working with it. Eventually, we must also be able to permanently remove the cluster when we don’t want to keep it on disk anymore.
+Minikube comes with a
+stop
+command that can be used to hibernate a Kubernetes cluster. The
+start
+command we used to initially create the Kubernetes cluster can also be used to resume the cluster from its hibernated state. To permanently remove a cluster, we can use the
+delete
+command from Minikube.
+Hibernating and resuming a Kubernetes cluster
+Run the following
+command to hibernate (that is,
+stop
+) the Kubernetes
+cluster:
+minikube stop
+Run the following command to resume (that is,
+start
+) the Kubernetes cluster again:
+minikube start
+Running
+kubectl
+commands directly after restarting the cluster might result in error messages like:
+E0428 09:44:16.333361   79175 memcache.go:106] couldn't get resource list for metrics.k8s.io/v1beta1: the server is currently unable to handle the request
+This is due to the
+metrics-server
+being a bit slow on starting up; the error message will disappear after a short while.
+When resuming an already existing cluster, the
+start
+command ignores switches that were used when you were creating the cluster.
+After resuming the Kubernetes cluster, the
+kubectl
+context will be updated to use this cluster with the currently used namespace set to
+default
+. If you are working with another namespace, for example, the
+hands-on
+namespace that we will use in the upcoming chapter,
+Chapter 16
+,
+Deploying Our Microservices to Kubernetes
+, you can update the
+kubectl
+context with the following command:
+kubectl config set-context $(kubectl config current-context) --namespace=hands-on
+Subsequent
+kubectl
+commands will be applied to the
+hands-on
+namespace when applicable.
+Minikube also comes with a more lightweight and faster alternative to the
+stop
+and
+start
+commands: the
+pause
+and
+unpause
+commands. In this case, the components in the control plane are paused, not stopped, reducing the CPU consumption of the cluster to a minimum. I have, however, seen issues with these commands when used in the recent chapters, so I recommend using the
+start
+and
+stop
+commands.
+Terminating a Kubernetes cluster
+If you later want to terminate
+the Kubernetes cluster, you can run the following command:
+minikube delete --profile handson-spring-boot-cloud
+You can actually run the
+delete
+command without specifying the profile, but I find it safer to be explicit about the profile. Otherwise, you may accidentally delete the wrong Kubernetes cluster!
+We’ve successfully learned how to manage a Kubernetes cluster that runs in Minikube. We now know how to suspend and resume
+a cluster and, when no longer needed, we know how to permanently remove it.
+Summary
+In this chapter, we were introduced to Kubernetes as a container orchestrator.
+Using Kubernetes, we can handle a cluster of servers as one big logical server that runs our containers. We declare a desired state for the Kubernetes cluster, and it ensures that the actual state is the same as the desired state at all times, provided that enough hardware resources are available in the cluster.
+The desired state is declared by creating resources using the Kubernetes API server. The controller manager in Kubernetes and its controllers react to the various resources that were created by the API server and take actions to ensure that the current state meets the new desired state. The scheduler assigns nodes to newly created containers, that is, Pods that contain one or more containers. On each node, an agent, a
+kubelet
+, runs and ensures that the Pods that were scheduled to its node are up and running. The
+kube-proxy
+acts as a network proxy, enabling a Service abstraction by forwarding requests that are sent to the Service to available Pods in the cluster. External requests can be handled either by a Kubernetes-aware load balancer that can provision a public IP address and/or DNS name for the Service, a node port that’s available on all of the nodes in the cluster, or through a dedicated Ingress resource.
+We have also tried out Kubernetes by creating a local single-node cluster using Minikube. The Minikube cluster runs as a Docker container using the Docker driver. To make ports accessible outside of Docker Engine, we can use the
+--ports
+option on the
+minikube start
+command. Using the Kubernetes CLI tool known as
+kubectl
+, we deployed a simple web server based on NGINX. We tried out resilience capabilities by deleting the web server, and we observed it being recreated automatically. We learned how to manually scale it by requesting that three Pods run on the web server. We created a Service with a node port and verified that we could access it both externally and from the inside of the cluster.
+Finally, we learned how to manage a Kubernetes cluster running in Minikube in terms of how to hibernate, resume, and terminate the cluster.
+We are now ready to deploy our system landscape from the earlier chapters in Kubernetes. Head over to the next chapter to find out how to do this!
+Questions
+What happens if you run the same
+kubectl create
+command twice?
+What happens if you run the same
+kubectl apply
+command twice?
+In terms of questions 1 and 2, why do they act differently the second time they are run?
+What is the purpose of a ReplicaSet, and what other resource creates a ReplicaSet?
+What is the purpose of
+etcd
+in a Kubernetes cluster?
+How can a container find out the IP address of another container that runs in the same Pod?
+What happens if you create two Deployments with the same name but in different namespaces?
+What configuration of two Services with the same name can make them fail, even if they are created in two different namespaces?
+Join our community on Discord
+Join our community’s Discord space for discussion with the author and other readers:
+https://packt.link/SpringBoot3e

@@ -1,0 +1,1601 @@
+ions that come with creating these foundational constructs. As we move forward, we’ll see more concrete versions of these mechanisms and see how different deployment models and technology stacks can influence the design and implementation of onboarding and identity. We’ll also see this notion of tenant context showing up in our review of other dimensions of your architecture, including data partitioning, tenant isolation, multi-tenant microservices, and so on.
+First, though, we’re going to look a little deeper inside the control plane and examine the Tenant Management component. This chapter already hinted at how Tenant Management surfaces as part of the onboarding experience. Now, I want to look more exclusively at the role of this service within your control plane. While not exotic or overly complex, it often sits at the middle of our multi-tenant story. I’ll look at what it means to create this service and outline some of the key considerations that can influence its implementation.
+
+Chapter 5.
+Tenant Management
+In the previous chapter, we started our foray into the control plane, looking at the broader role that onboarding and identity play in bringing your multi-tenant architecture to life. As part of that process, I touched on how the Tenant Management service is used to introduce new tenants into the system. Now, it’s time to dig more into this service, getting a better sense of its inner workings and examining the full scope of its responsibility. This will give you a better sense of the data, operations, and constructs that put tenant management at the center of configuring aspects of your tenant architecture and managing the lifecycle of key tenant events.
+We’ll start by looking at the fundamentals of what it means to build your Tenant Management service, exploring
+the elements of its core design and implementation. As part of this, I’ll get into some of the common tenant attributes that are managed by this service. You’ll see that storing and managing these attributes is mostly straightforward. However, what you choose to store here can have other downstream implications, expanding its role and usage across the overall footprint of your SaaS architecture.
+To better understand the broader role and experience of tenant management, we also have to look at how you will enable management of your tenants. We’ll look at how this can surface through APIs or a system administration console. It’s here that you’ll get another view into how your Tenant Management service fits into the control plane experience. We’ll look at how you can use the Tenant Management service to create operational views into your environment, enabling you to manage the state of your system’s tenants.
+The other dimension of tenant management we’ll review is tenant lifecycle management. The goal is to look beyond the initial configuration of a tenant and examine the different events that can happen that will impact the state of a tenant. What does it mean for tenants to change from an active to an inactive state? How does your system manage and apply a tenant’s move from one tier to another? How does the state of other systems (billing, for example) get conveyed to your Tenant Management service? These are all areas that can have some interaction with tenant management and, potentially, have some cascading impact across different layers of your SaaS
+architecture.
+The focus of this chapter is to highlight all these nuances of tenant management and equip you with a better sense of the considerations that can influence the multi-tenant strategies and patterns that are applied within your solution.
+Tenant Management Fundamentals
+To get a better understanding of the scope and nature of tenant management, let’s start by looking at the core moving parts of the tenant management universe.
+Figure 5-1
+provides a conceptual view of the various elements that are often part of the overall tenant management footprint.
+Figure 5-1.
+Tenant management’s influence
+You’ll see that I have placed tenant management in the center of the diagram and identified the areas that are commonly configured or managed through their connection to a tenant. At the top I’ve represented a few areas that might commonly interact with the Tenant Management service. A key player here is onboarding (discussed in
+Chapter 4
+), which has a significant
+influence on tenant management. Each time a tenant is created, this will trigger the configuration and setup of a number of different resources that are related to your new tenant. I’ve shown some specific examples here. You’ll also see that I’ve put offboarding and billing, both of which will have touch points with tenant management as tenants go through different stages of their life­cy⁠cle (changing tiers, being decommissioned, and so on).
+On the righthand side of
+Figure 5-1
+, you’ll see two different flavors of data are managed and configured through the Tenant Management service. In this grouping, you’ll see what I’ve labeled as core tenant
+attributes. This represents the core, baseline data that is needed for most tenants: tenant identifier, status (enabled/disabled), tier, company name, onboarding status, date last active, and so on. I’ve also shown a separate placeholder for Identity settings. These settings
+hold the different tenant authentication properties that could be configured through the Tenant Management service. Here’s where MFA, password policies, identity provider mappings, and other identity related settings live. Routing policy configuration is also here. The
+configuration data stored here captures any tenant-specific settings that are used to determine how tenants might be routed to different parts of your infrastructure. URLs, for example, might appear here.
+On the left of
+Figure 5-1
+, I’ve shown the configuration of keys and secrets. These settings are used to configure different security aspects of your environment. You might, for example, have per-tenant secrets or encryption keys that are managed by this experience. For some environments, management of these settings can play a bigger role in the overall isolation and security profile of your SaaS solution.
+Finally, at the bottom of
+Figure 5-1
+is a representation of the different users that can be associated with a tenant. I’ve shown a tenant administrator and a few
+tenant users to illustrate the relationship between a tenant and the various users that may be associated with that tenant. The tenant administrator is created when the tenant is first introduced. However, after onboarding, the tenant can also create additional users for their system, including other tenant administrators. These users are all logically connected to a tenant. Any change in tenant configuration will be applied to all of these users.
+Note
+There is a tendency for some to want to equate tenants to users. Now, in a B2C setting, it’s true that tenants are likely to have a one-to-one mapping to users. However, even in this case, you still have a tenant, and there are still attributes and policies that may
+need to be configured for that tenant. I still want to draw a line between managing users and managing tenants, and I would generally keep a user’s role and its other application-related settings separate from its tenant settings. This isn’t a hard-and-fast rule, but I see teams folding these two into one construct when, in many cases, they should be separately managed.
+As I get into the details of specific multi-tenant architectures later in this book, you’ll see how tenant management interacts with these different services. You’ll also see more examples of how tenant management is used to shape the per-tenant configuration options of your multi-tenant infrastructure and identity experience.
+Building a Tenant Management Service
+Let’s shift from the conceptual view of tenant management and its role and look more at what it actually
+means to implement a Tenant Management service. The interface of this service is typically broken down into two logical categories. First, you’ll have a range of operations that are focused on the basic management of configuration data. These operations are typically exposed via a create, read, update, and delete (CRUD) interface. The other category of operations that land here are centered around broader tenant management operations (tenant deactivation, tenant decommissioning, and so on). These operations tend to contribute the most to the overall complexity of your Tenant Management service.
+Figure 5-2
+provides a simple view of the moving parts of a sample Tenant Management service. What I’ve tried to do here is provide a conceptual view into the common interfaces and experience that could be included in this service. On the left, you’ll see all the entry points that mirror the summary I provided earlier. The top set of functions manages configuration, and the bottom entry points support the different management-related operations.
+Figure 5-2.
+A sample tenant management implementation
+The righthand side of this diagram highlights the various backend resources and integrations that would be part of your tenant management experience. At the top right, I’ve shown some storage. For this example, I chose to use NoSQL storage
+(DynamoDB)
+to
+hold my tenant configuration information. Generally, the size and consumption patterns for this data tends to fit well with a schemaless storage model. This also makes it easy to apply changes to the tenant configuration structure without needing to update schemas or migrate data.
+I’ve also put placeholders here to represent some of the tenant lifecycle components that may be
+part of your tenant management service. I’ll be covering these lifecycle concepts in more detail later, but I wanted to show them here to make it clear that this service may need to support decommissioning of tenants, tier migration, and other tenant lifecycle events. Each of these may require some level of infrastructure configuration, provisioning, or removal depending on the nature of the operation. This often means invoking infrastructure automation scripts or code associated with these operational events. I’ve shown these concepts as being integrated via a queue only to highlight the idea that the actual work of processing these events might be triggered by an event and executed as part of some asynchronous job.
+The last piece that I
+included was billing. Your service may have multiple integrations with your control plane’s billing service (or directly with your billing provider). Your billing system may trigger events that make updates to the state of tenants. Or, your tenant management service might trigger events that end up sending requests to the billing service.
+You can see that the Tenant Management service, on its own, doesn’t introduce a significant amount of complexity into your control plane. At the same time, it sits at the center
+of managing key elements of your tenant state that directly influence the implementation and behavior of your multi-tenant architecture. It also provides a centralized home for processing tenant lifecycle events.
+Generating a Tenant Identifier
+Within the implementation of your Tenant Management service, you’ll be responsible for generating
+the tenant identifier that represents the universal unique identity of any tenant in your system. The most common mechanism that is used for tenant identifiers is a GUID. It
+provides a natural way to have a globally unique value that has no dependency on other attributes of the tenant. The goals here are twofold. First, you just need to have some separate immutable value that can universally represent your tenant across your multi-tenant environment. Second, you want to ensure that any other consumer of this identity cannot map it back to a specific tenant or entity in your system. This identifier provides a way to represent tenants without surfacing anything specific about the tenant.
+It’s important to note that some multi-tenant environments may include alter­nate, more friendly ways to identify a tenant. For example, If the system uses a sub­domain or vanity domain for individual tenants, then you’ll need some way to map from
+that entity name
+to the tenant identifier. In this case, I might have
+mycompany.saasprovider.com
+where the “mycompany” subdomain represents an externally facing name that would then get mapped to an internal tenant identifier. Even when you have some other name you’re using as part of the entry into your system, these entity names or references should not be viewed as your tenant identifier. There are good reasons to keep these separate. The most obvious of these is the need to ensure that you can change these friendly names without having any impact on the rest of the system. This goes back to the basics of data management that led to the use of GUIDs to identify the different items in a database.
+Storing Infrastructure Configuration
+In addition to storing basic tenant attributes, tenant management can also be used to store tenant-specific
+infrastructure configuration information. Depending on the deployment model of your multi-tenant application, you might have identity configuration, routing patterns, and other infrastructure options stored and managed by your tenant management service. This data is not typically managed directly by your administration experience. Instead, it’s stored here during the configuration of your multi-tenant infrastructure then referenced by different parts of your experience that need this information to configure or resolve tenant mappings that are part of your environment.
+The data that you end up putting here is shaped by the specifics of your SaaS architecture. If, for example, you have separate identity constructs for each of your tenants, you may need to use tenant management to store a tenant’s mapping to its identity construct. If you have siloed tenant environments and you have mapping to tenant specific entry points or URLs, those could be stored by the tenant management service. These are just a few examples. The key is that tenant management may manage data that goes beyond the scope of basic tenant attributes.
+While the tenant management service makes a good, centralized home for tenant state and configuration, you always need to ensure that this service does not become a bottleneck of your system. If the data that’s stored here is being frequently accessed by all the moving parts of your system, you’ll need to consider alternate strategies for managing and accessing this data. Ideally, the state that’s here will not be used heavily by the application services of your application. This is part of why we put the critical tenant attributes into the JWT, limiting your need to continually return to any single, centralized service to continually acquire this context.
+Managing Tenant Configuration
+Much of the initial focus of tenant management is on its role in creating and configuring tenants as part of
+the onboarding experience. It’s important to note that tenant management has a life beyond onboarding. This service is also used to support different operations and use cases throughout the lifetime of a tenant. To better understand this, let’s return to the system admin console that we discussed in
+Chapter 4
+. This console provides an administrative view into your multi-tenant environment, allowing you to inspect, configure, and manage your tenants (see
+Figure 5-3
+).
+Figure 5-3.
+Managing tenants from the admin console
+This is a very straightforward experience that essentially grabs a list of tenants and lists them on the screen. This list, of course, is acquired from your Tenant Management service, which fetches all the tenants that are stored by your service and lists them on this page. With each tenant, you’ll see its identifier, name, status, and any other attributes that you might deem worthy of including in this view.
+At a minimum, this view would be used to look up and resolve the status of tenants. It’s also commonly used to locate the unique identifier when you’re searching logs or doing any other troubleshooting that might rely on the tenant
+information.
+In addition to surfacing information about the tenant, the console is also where you would edit and manage any policies for a given tenant. Perhaps the most common functionality that’s configured here is the tier or status of the tenant. In this particular example, you can see additional configuration details by selecting the link to the tenant identifier.
+Figure 5-4
+provides an example of a detailed view of a specific
+tenant.
+Figure 5-4.
+Managing tenant details from the console
+Again, this is just an example, but it highlights some of the additional options you might attach to your tenant management view. Here you see the next level of detail associated with your tenants, including subdomain, onboarding status, and so on. You can imagine how this screen would be filled with more detail based on the presence of any additional tenant configuration options that are part of your multi-tenant environment.
+There are two key things to note here as conceptual placeholders. First, in the top portion of
+Figure 5-4
+, you’ll see additional details that provide more data on the state of a single tenant. Then, at the bottom of the image, you’ll see a section that includes hyperlinks that take you to key infrastructure resources that are associated with the current tenant. These links take you directly to the admin or cloud provider infrastructure page for each resource,
+allowing you to rapidly
+access resources in the
+context
+of a specific tenant. This can streamline your operational experience, allowing you to rapidly navigate (with tenant context) to any specific tenant infrastructure resources.
+It’s important to note that you may or may not choose to include these links. They are especially valuable if you are running full stack silo environments. However, the more pooled your environment is, the less likely that you’ll get lots of value out of providing this tenant contextual access to infrastructure resources.
+Finally, you’ll also see that there’s an Actions pulldown button in the top right of
+Figure 5-4
+. This is where you’ll perform specific operations on your tenant. At a minimum, your system will likely include functionality to update the active status of a tenant. To perform this operation, an operator would access the administrator console and temporarily deactivate a tenant. There may be additional options here to decommission a tenant or move them between tiers (these options are explored more in the section that follows).
+This particular example focuses more on managing tenants through a console. However, all functionality enabled here typically is enabled through operations that are performed on the API of the Tenant Management service. In reality, you could create an experience where these operations and insights were performed directly through the API. How you approach this will vary based on the nature of the tenant management experience you need to support. You can do everything through a console, everything through an API, or a mix of the two.
+In our discussion of onboarding in
+Chapter 4
+, I talked about the different models for triggering the onboarding of a tenant. I emphasized the point that onboarding of new tenants could be executed by tenants as part of a self-service experience or through some internal onboarding tooling developed by your team. In fact, the internal mechanism could be surfaced as part of the admin console.
+The self-service flavor of onboarding is pretty straightforward. You land on the sign-up page, fill in the data, and submit your request. The question is, though, where should you surface an internally managed onboarding experience? There is no one answer to this. You might have your own command-line interface (CLI) or other tools that allow you to onboard tenants. However, one common approach would be to manage this onboarding through your tenant management console
+experience.
+You could achieve this by
+adding an “Onboarding Tenant” action to your console. Triggering that action would open a form where you would fill in all the data needed to onboard a new tenant.
+Figure 5-5
+provides an example of what this form might look like.
+Figure 5-5.
+Internally onboarding a tenant
+This is a basic form that just collects and submits your data. Every multi-tenant onboarding process will likely include a tenant entity name, an email address for the tenant admin user, and the plan or tier they’re signing up for. From there, the rest would depend on the configuration options and nature of your multi-tenant environment. You might need to collect a subdomain here, for example. Or, you might have a more elaborate process that allows you to bring in a full vanity domain for a tenant. The key at this point is just to highlight the fact that the tenant management experience may provide a good home for surfacing your internal process
+via the admin
+console.
+Managing Tenant Lifecycle
+Up to this point, the focus of tenant management has largely been on the mechanics of the front of the tenant
+management process where you’re onboarding and configuring tenants. Now, I want to shift gears and look at the role tenant management plays beyond this initial phase. The focus now transitions to thinking about the various states that a tenant might go through during its time within your system.
+Teams often overlook the entire notion of managing a tenant’s lifecycle. They focus squarely on what it means to get a tenant introduced or configured and view that as the one and only role of their Tenant Management service. It’s true that, for some tenants, you’ll create them once and that will be it for them. However, there will also be tenants in your system that will need to go through changes in state that are more involved than just changing the value of some attribute in your tenant database.
+When you set out to build your multi-tenant environment, you have to consider all the phases that a tenant could go through within your system. How will these state changes be conveyed to you? Will they be in response to some external event or driven directly from your Tenant Management service? What are the policies associated with these state changes? These are amongst the questions you’ll want to ask yourself as you assemble the tenant management elements of your SaaS solution.
+While there are any number of phases that could be part of your tenant lifecycle, there are a few common states that you’ll want to consider when building any multi-tenant SaaS environment. The sections that follow will enumerate these lifecycle changes.
+Activating and Deactivating a Tenant
+The first and most obvious state you’ll want to focus on is activation/deactivation. In general, your SaaS
+environment should include some ability to enable and disable tenants. Generally, this setting is used to manage a tenant’s ability to access your system. In this mindset, we’re
+not
+removing tenants from the system. We’re only flipping a switch to turn their access on or off. When a tenant is deactivated, your Tenant Management service will need to own responsibility for figuring out what actions may need to be orchestrated to ensure that a tenant is blocked from accessing the system. This could be as simple as making a call to the User Management service to disable authentication for all users for that tenant or it could be more involved.
+Managing a tenant’s active state can also be connected to the billing experience of your application. It’s the billing system that can, in some cases, be at the front line of
+managing your tenant’s active state. Imagine a scenario where a tenant has stopped making payments. In this case, this information might surface first within your billing system, which identifies delinquent tenants. When this event is triggered by the billing system, you have to determine how your system will respond to these events. You might have policies that send messages during some grace period that allow tenants to continue using the system while the billing issues are being resolved. At some point, though, you can reach a point where you’ve determined that a tenant needs to be deactivated. In this case, if the billing system originates this event, you’ll need some way for this to be conveyed to your Tenant Management service.
+Figure 5-6
+provides a view of how billing might be connected with other services within the control plane of your SaaS environment.
+Figure 5-6.
+Deactivation triggered by the Billing service
+In this example, I’ve pulled in the various services that could be used to deactivate a tenant based on an event that originates from your billing provider. I also have a third-party billing system that’s being used to manage the billing state of my tenants. For this scenario let’s assume that a customer success manager or some automation policies within the billing provider has deactivated a tenant. Now, the Billing service within your control plane needs some way to acquire and react to this event. How this is achieved will depend largely on the nature of the billing provider’s API and integration model. Ideally, the billing provider will generate an event when a tenant is deactivated. If not, your Billing service may need to have some process that periodically looks for these changes in state. In this scenario, I’ve presumed the billing provider is sending a message to my Billing service (step 1).
+Once the billing system detects this event, it will call your Tenant Management service with a deactivate tenant request (step 2). The service will update the state of the tenant to inactive and convey this new state change to any part of your system that might be impacted by this change in status. In this diagram, I’ve presumed that deactivation is achieved by preventing tenants from authenticating. This is represented by a call to your control plane’s User Management service,
+which updates the active status of all users associated with your tenant (step 3). Ideally, if your identity provider supports a group construct for your tenants, you may be able to apply this change at the group level. This would certainly be much simpler than toggling the states of individual users.
+As part of deactivation, you also have to determine how this impacts the state of any users currently logged into the system. Do you allow them to continue or do you immediately terminate their active session? Many SaaS providers tend to lean toward a model that is more passive, allowing tenant users to finish any active sessions.
+Of course, whatever can be deactivated may also be reactivated, so you’ll want to consider that path as well. This is likely just a matter of reversing whatever was done to deactivate a tenant. In our example, this would just update the status of the tenant to active and re-enable authentication for your tenant.
+In some cases, deactivation may be initiated by your own services (instead of via a billing system). This would mean that your admin console would provide a specific operation that would be used to trigger tenant deactivation. Here, your Tenant Management service would originate the deactivation event and update any downstream services that would be impacted by this deactivation event.
+The key takeaway is that tenant status must be centrally managed by your Tenant Management service. It should be viewed as the single source of truth for managing the state of tenants, ensuring that any impacts of changes in status are synchronized
+with dependent parts of your system.
+Decommissioning a Tenant
+Now let’s look at what it means to decommission a tenant. You might be wondering where the line is between deactivation and decommissioning. Deactivation is only meant to suspend a
+tenant’s account. It does not impact the existing footprint of the tenant’s environment. Essentially, it’s just disabling access, allowing for the fact that the tenant may be reactivated at some point.
+Decommissioning would typically come after deactivation. Imagine a scenario where a tenant decides not to renew its subscription. When they reach the last day of the subscription period, your system might choose to deactivate the tenant and leave them in a deactivated state for some window of time. This strategy allows a tenant to return, reactivate, and continue to resume using their system with no impact. It’s as if they never left the system. This certainly creates a better customer experience. However, after a certain amount of time, the unused resources of this tenant may be contributing to costs and complexity that are not adding any value for the business. Now, you have to consider how you move from a deactivated state to decommissioning the tenant’s resources.
+There is no one-size-fits-all approach to choosing your system’s decommissioning policies. The strategy you choose will be influenced by a variety of factors. How much overhead is a deactivated tenant adding to your system? How frequently are tenants deactivating? How are these deactivated tenants impacting the complexity of your management and operations experience? There are a wide range of factors you’ll need to consider to determine how, when, and if you choose to decommission tenants.
+Now, let’s assume you’ve reached a point where you’ve decided tenants do need to be decommissioned. You have a few choices when it comes to picking a decommissioning strategy. You could choose to simply delete any resources that are associated with the tenant, essentially removing them completely from the system, or you could choose to archive the tenant’s state before decommissioning its resources. As part of this, you’ll want to reconsider what it means to rehydrate a tenant that has been decommissioned. You might, for example, leave elements of the tenant in place that have minimal impact on your system (the tenant, its users, and so on). This could make bringing the tenant back to life a somewhat simpler process without adding much cost or complexity to your environment. Ultimately, this is all part of the balancing act that comes with creating your decommissioning strategy.
+Figure 5-7
+provides a conceptual view of some of the moving parts that might be included in your decommissioning model.
+Figure 5-7.
+Decommissioning tenant resources
+In this example, I’ve shown a scenario where a system administrator starts the decommissioning process, which sends a decommission request to the Tenant Management service (step 1). At this point, you could have decommissioning implemented within the scope of the Tenant Management service. Instead, I’ve shown decommissioning as a completely separate service that owns orchestration of all the steps needed to remove a tenant from your system. This service is then called by the Tenant Management service to begin the decommissioning process (step 3).
+To me, it feels more natural to carve this out and allow decommissioning to exist as its own process that would be deployed, managed, and executed outside the context of the Tenant Management service. The Decommissioning service has the job of iterating over all the different tenant constructs and removing each one. This will be achieved through a combination of infrastructure automation tooling and scripts as well as API calls. The nature of each tenant resource may require a different decommissioning strategy.
+While each SaaS solution will have its own unique blend of tenant resources, I did include a few examples in the diagram to highlight the kinds of resources that might be touched by your Decommissioning service. Naturally, if we have any siloed tenant infrastructure here, those siloed resources will be removed from your system. This may be about removing all the pieces of a full stack silo deployment or just the individual resources that might be deployed in a siloed model. Tenant configuration and tenant users are also listed here as examples of resources that would get touched as part of this process.
+Tenant data can certainly be one of the more challenging areas to address when you’re decommissioning a tenant. Imagine all the places where you might have pooled storage in your system. When you have pooled data, that means that your decommissioning process will need to be able to locate and selectively remove the data that sits alongside the data of other tenants.
+Figure 5-8
+provides a conceptual view of the nature of this decommissioning challenge.
+Figure 5-8.
+Decommissioning tenant data
+I’ve provided an example of the data that might be associated with our product service. Within this table, I have a TenantId column that includes the GUIDs that associate each product with a tenant. Now, let’s assume we want to decommission the tenant with the ID efaf7680-21cf-4f39-a1e8-3481ff0495ef. Our decommissioning process must locate and remove all the items in this table that are associated with this tenant.
+On the surface, this may not seem all that challenging. However, consider that this table is one of many in our system that may hold data in a pooled model. Each microservice in our system could manage pooled tenant data and each of these services may rely on different storage technologies. This means that your decommissioning process may need separate code to remove data from each of these sources.
+In some instances, decommissioning can be more involved than your onboarding process. The nuances of identifying and gracefully removing these tenant resources can be quite involved. Automating this process can be daunting, requiring teams to be hypervigilant about ensuring that their decommissioning strategy doesn’t impact existing tenants. This includes ensuring that the load of your decommissioning process avoids creating bottlenecks or performance issues for your existing tenants. Generally, if you can run this as an asynchronous process that has a very conservative consumption profile, you’ll be better positioned to limit tenant impacts. This falls very much into the old school batch mentality, where we try to run processes of this nature after hours to limit impacts. For some SaaS providers, that will work; others may not have this luxury.
+The last piece around decommissioning focuses on archiving tenant state and data. For some SaaS providers, this can allow them to continue to preserve existing tenant state without retaining all the other moving parts of a tenant’s environment. This is especially valuable when you have high-profile tenants or tenants with a significant investment in their data.
+While the concept of archiving decommissioned tenant state and data is not all that complex, the variations in multi-tenant architecture models make it difficult to prescribe any one approach for this problem. There is no standard “take a snapshot” of my tenant environment model—especially if you rely on pooled resources. Instead, this is usually more about taking on the heavy lifting of building your own tools and strategies that can navigate the nuances of your tenant environment.
+Ultimately, how or if you choose to decommission data will vary based on the nature of your SaaS offering. This is often about weighing the business, cost, and complexity trade-offs. For some businesses, the value of being able to reactivate with minimal friction
+could be essential to reacquiring key customers. For others, the nature of their data and the tendencies of their customers may suggest that there’s not enough upside in investing in the build out of this capability.
+Changing Tenant Tiers
+The last piece of our tenant lifecycle management story looks at what it means to move from a tenant from one
+tier to another. For many, this change represents one of the more challenging dimensions of managing tenant state.
+For simple use cases, the move from one tier to another may not be all that exotic. Let’s consider a scenario where you have basic and premium tier tenants where the primary difference between these tiers is throughput and features. Essentially, the premium tier tenants have better overall throughput and are granted access to additional features based on their move from the basic tier.
+Figure 5-9
+provides a view of how these concepts might land in a multi-tenant architecture.
+Figure 5-9.
+Switching tiers in a full stack pool model
+Moving between basic and premium tiers in this example is limited to a few very isolated areas of this multi-tenant environment. Here, feature flags are used within our application to enable paths, features, and workflows that are available to the premium tier tenant. Also, the tier-based throttling policies that are configured as part of our API gateway will simply apply the throttling policies of the premium tier tenant to our requests (instead of the basic tier policies). This will prevent the tenant from being throttled based on the more restrictive constraints of the basic tier and, generally, ensure this tenant will have better SLAs.
+You can see how moving between tiers is a pretty straightforward model. With all of your tenant resources running in a pooled model, your system will simply update the tenant configuration to reflect the new tier. From there, the system will just use the existing feature flag and throttling policies to apply the new tier to your tenant’s experience. This is the upside of having a pooled experience. You can apply changes of this nature with minimal complexity and overhead.
+Now, let’s consider what it would mean to move between tiers in an environment that has a more complex footprint.
+Figure 5-10
+looks at what it would mean to migrate between tiers that are using the full stack pool and full stack silo deployment models that we talked about in
+Chapter 3
+.
+Figure 5-10.
+Migrating from full stack pool to full stack silo
+In this example, Tenant 2 is migrating from the basic tier where it is running in a full stack pool model sharing all of its resources with other tenants. Now, when this tenant migrates to the premium tier, they are essentially moving into the full stack silo deployment model on the right. This migration starts by provisioning a full stack of resources for Tenant 2 and configuring any routing that’s needed to send traffic to this silo. If you think about it, parts of this migration will very much simulate your onboarding experience of any premium tier tenant. In fact, it would not be unheard of to leverage parts of your onboarding code to facilitate this migration.
+Where this gets a bit trickier is when you have to move the existing state of the tenant to the full stack silo environment. Now you must think about whether this will be a zero-downtime migration or whether you’ll require tenants to deactivate to move to the new tier. You’ll also have to write the new code that moves all the data and state from the pooled environment to your new full stack silo. This is where lifting gets heavy. In many respects, you’re taking on lots of the classic challenges that come with any environment migration. Many of the principles and strategies that are commonly used to migrate any software environment apply here—they’re just being scoped at the tenant level.
+While this migration to a full stack silo model has lots of moving parts, the logic and path forward is relatively straightforward. The data movement is the biggest piece of this effort. Now, let’s add another wrinkle here. Let’s look at what it would mean to change tiers in an environment that uses a mixed mode deployment model where each microservice in our environment may have more granular implementations of silo and pool based on the tier of a given tenant.
+Consider what it might mean to migrate from a basic to premium tier in an environment that might look something like the model shown in
+Figure 5-11
+.
+Figure 5-11.
+Mixed mode tier migration
+I’ve made this a bit more convoluted to highlight some of the complexities that come into the picture when you’re migrating in a mixed mode deployment environment. If you look across these microservices, you’ll see that they have much more granular mappings to tiers. On the left, you’ll see services that are for our basic tier tenants. One interesting twist here is that the Order microservice is siloed for all tiers. In the middle, fulfillment supports pooled compute for both basic and premium tiers. However, it has pooled storage for the basic tier and siloed storage for premium tiers. Then, the premium tier tenant gets fully siloed compute and storage for the Product microservice.
+This very much mimics the patterns we looked at when we were examining the basics of the mixed mode deployment model. Now, though, we need to consider the impact of a tenant migrating from the basic to the premium tier. Let’s say, for example, Tenant 3 (T3) is moving to the premium tier. The steps here are less obvious. You must now think about how each service is applying the tiering model and figure out which new resources might be needed to make this transition.
+There would be no changes to the Order microservice to achieve this migration. For fulfillment, you’d need to migrate the storage from the shared model to the siloed storage model. And, finally, for the Product microservice, you’d need to provision new compute and storage for Tenant 3 and migrate the data from the pooled database to this new siloed Product footprint.
+Lots of the same challenges that we saw with the migration to a full stack silo deployment follow us to this mixed mode deployment environment. Movement of the data remains a challenge. However, you will have a more interesting web of changes that are influenced based on how you’ve mapped tiering to the various layers of your
+environment.
+The good news is that, like the full stack silo deployment migration, this migration can also lean on some of the tooling and mechanics that are connected to your onboarding experience. The complexities associated with migration often overlap with the nuances of your onboarding experience.
+For any flavor of tier migration that you consider, you’ll also have to consider how this migration could impact tenants that are currently using your system. You’ll want to be sure that the extraction of tenant data and state doesn’t have any adverse impact on existing workloads. If this migration is at all disruptive to your environment, it can undermine the overall stability and availability of your environment.
+While all the focus here has been migrating to a higher-level tier, your environment must also support a model where tenants can downgrade to a lower-level tier. In this mode, we’re essentially looking at a model that is basically the inverse of what was done for upgrading tiers. It might just be about updating configuration to reflect your new tier or it could be more about migrating your infrastructure and data to the new tier.
+If you’re moving from premium
+to the basic tier and this move has some parts of your system moving from siloed to pooled infrastructure, then your migration now will look at how to move compute and data into their pooled constructs.
+Conclusion
+For this chapter, I looked at the core parts of managing all the moving parts of a tenant. This included looking at the overall role that tenant management plays as a microservice within the control plane of your SaaS architecture, examining the data and state that is typically managed by this service. The goal was to highlight the role this service plays in your broader multi-tenant environment, providing the single home and source of truth for key tenant information that is used across all the moving parts of your SaaS architecture.
+As part of this topic, I also looked at how tenants are surfaced and managed through your admin console experience. The emphasis here was on outlining how this console connects to your Tenant Management service and is used by the administrators to manage, configure, and update your tenant information. Creating this centralized console for managing tenants often represents an essential component of your overall administration experience.
+The last bits of this chapter looked at managing your tenant’s lifecycle. This had us exploring the different events that can happen across the entire lifetime of your tenants, reviewing how your Tenant Management service would support key events that alter the state of a tenant. Some of these events are as simple as activating and deactivating tenants. Other events (like tier migration) often require a much more intensive effort to orchestrate these transitions.
+Now that we’ve looked at how tenants are introduced and managed, we have all the elements in place for representing and managing tenants. The next logical area to explore is tenant authentication and routing.
+Chapter 6
+will look at how tenants enter through the front door of our application and leverage the bits we’ve put in place in your control plane to authenticate users. The authentication and routing story will consider all the steps that are needed for a tenant to access your application, route to the appropriate resources, and inject tenant context into that experience. This will set up our ability to continue to push deeper into the underlying implementation of your SaaS application services.
+
+Chapter 6.
+Tenant Authentication and Routing
+At this stage, our focus on the control plane has been squarely on building a foundation that allows us to introduce multi-tenancy into our architecture. Onboarding, user management, and tenant management all allow us to configure, capture, and prepare our tenant for entry into a SaaS environment. Now it’s time to start thinking about how a tenant uses these constructs (and others) to enter the front door of our multi-tenant environment.
+It’s at this point where you authenticate a user that all the pieces of your onboarding and tenant management come together. Here you’ll see how the configuration information that was stored in tenant management can play a role in the flow and implementation of your authentication experience. We’ll also see how the work that was done to connect our users to tenants will yield the tenant context that becomes essential to the downstream services that are part of your multi-tenant architecture.
+For this chapter, I’ll begin by looking at the fundamentals of how you expose the entry point to your multi-tenant solution. There are multiple strategies that can be used to access a SaaS environment, some of which explicitly identify the tenant that is entering the system and others that rely on internal mechanisms to determine which tenant is accessing the system. Each of these have implications on how your tenant is authenticated and connected with the appropriate identity provider.
+We’ll also look at how your path through the front door influences the authentication model of your multi-tenant environment. As part of this, I’ll also examine how you might use different identity provider constructs to support various tenant authentication experiences. You’ll see how the identity strategies we discussed in
+Chapter 4
+will come into play as you begin to authenticate individual tenants.
+The last bit of the chapter will look at how this authentication experience projects into the downstream elements of your multi-tenant architecture. This includes
+examining
+how JWTs are injected into your application’s services and how the context of authentication can be used to route your tenant requests to specific elements of your multi-tenant environment. This routing context often ends up tightly connected to how you access your SaaS application.
+The basic goal is to go to the next level of bringing your SaaS environment to life, building on the foundation established in Chapters
+1
+through
+5
+. It’s here that we see how an actual tenant enters a SaaS environment and how the constructs we put in place allow us to authenticate tenants and acquire the context that’s needed to shape the rest of the downstream multi-tenant footprint of your SaaS architecture.
+Entering the Front Door
+Now that we have a sense of the scope of this authentication topic, let’s start our discovery at its most
+natural point—the front door. The core elements of your authentication always begin with determining how tenants will access your application. While these access patterns seem trivial, you’ll begin to see how the strategy you choose here goes beyond the URL that’s used to expose your application to tenants.
+There are multiple options available to you when thinking about how you might have tenants access your system. You may want the domain of your system, for example, to include a tenant name and rely on this domain as part of your tenant-mapping and routing strategy. Or you might just allow tenants to have their own unique domains based on branding or other considerations. In either case, the domain still typically ends up playing some role in identifying the tenant that is accessing your system. Some SaaS solutions, however, have no dependency on the domain, using a single domain for all tenants. In this approach, you’ll need the authentication flow of your environment to inject the tenant context into the system.
+The key is that—even as you’re selecting a path into your application—you’re making choices that can have a cascading impact across other dimensions of your SaaS architecture. This access strategy may even have impacts on the technologies and services that are used to implement specific elements of your solution.
+In the sections that follow, we’ll look at some of the common patterns that are used when selecting an access model for your SaaS environment. With each of these patterns, we’ll review some of the considerations that are associated with each approach.
+Access via a Tenant Domain
+One of the common ways
+that tenants enter the front door of your application is through a domain. More specifically, tenants can enter with a domain that includes information used to identify a tenant.
+Figure 6-1
+provides a conceptual view of how the context of this domain influences the downstream footprint of your multi-tenant architecture.
+Figure 6-1.
+A domain-driven access model
+Figure 6-1
+shows a range of different tenants that are accessing a SaaS environment using a domain. In this model, each tenant’s domain is configured during the onboarding process. Once the domain is configured, the URL is shared with the tenant as their entry point into your SaaS service.
+With this approach, all inbound tenant requests from these different domains are routed through what I’ve labeled as tenant mapping. This box represents a conceptual placeholder for the different technologies, infrastructure, and services that would be used to map a tenant’s domain to the appropriate backend services. This mapping service is usually needed to extract the incoming tenant context from the domain and use that context to resolve any mappings to dedicated tenant resources.
+There are at least two common places this mapping may be applied. The first of these is authentication. When the system is authenticating a tenant user, it may need to map an incoming authentication request to its corresponding identity construct. This applies primarily to tenant environments that don’t have a single, shared identity provider. In these cases, a separate identity provider may support your authentication or there may be distinct identity constructs within a single identity provider (groups, user pools, etc.) that are bound to individual tenants to provide specific features or experiences.
+In
+Figure 6-1
+you can see how this authentication mapping unfolds. In this example, the tenant accesses your system with a tenant-specific domain, then that domain goes
+through the Tenant Mapping service, which extracts the tenant information from the origin of the incoming request. This information is used to look up the tenant identity setting in tenant management, which is then used to authenticate the tenant user against the target identity provider or construct.
+The other area where tenant mapping is applied is related to the routing of application requests. In instances where your architecture is using one or more siloed tenant resources, your incoming tenant requests will need to be routed to each of these specific resources. Here, the mapping service must use the tenant context to identify that route that will be taken for a given request. We’ll cover this use case later in this
+chapter.
+While the technologies used to support the unique tenant domains can vary, the fundamentals are typically not all that different. How, where, and when it is applied will vary based on what you need to do with the context of this domain. It might be used to look up a tenant identifier, map your tenant user to an identity provider, configure routing, or perform any other operation that may need tenant context to process a request.
+It’s also worth noting that the domain name (or subdomain) represents a friendly, publicly visible name that you’ve exposed as the URL entry of a tenant. This name may change over the life of the tenant and, as such, is maintained entirely separate
+from the internal notion of a tenant identifier, which will not change over the life of the tenant.
+The subdomain-per-tenant model
+At this point, the fundamentals of the domain-per-tenant model should be clear. Of course, even though I’ve talked about domains generically, the reality is there are multiple ways to
+associate domains with tenants. In many SaaS environments, there’s a desire to use domains to identify tenants without requiring each tenant to have a completely unique domain. In this scenario, you might have a SaaS company (ABC Software, for example) that owns the
+abc-software.com
+domain, and they want to use that domain as part of the presence and branding of their SaaS experience. Their customers, in this example, also don’t see value in having their own domains.
+In this scenario, it’s very natural to use subdomains as a way to identify tenants without creating an entirely new domain for each tenant. So, with our
+abc-software.com
+example, you would prepend a friendly tenant name to the existing domain. The end result would yield domains like
+tenant1.abc-software.com
+and
+tenant2.abc-software.com
+. You’ve likely seen this pattern implemented across existing SaaS solutions that you consume today.
+This approach is often very appealing to SaaS providers, enabling them to provide a unique access point for each tenant without absorbing the complexity and overhead of creating a unique domain for each tenant.
+The vanity domain-per-tenant model
+The other option here is to use a vanity domain for each tenant. This approach is often used in scenarios
+where a tenant is presenting a branded experience to its customers. In fact, in these scenarios, the tenant’s users may have no awareness of the underlying SaaS system that they are running.
+To better understand this model, consider an example where a SaaS provider offers an ecommerce solution. With this offering, tenants use the SaaS environment to configure and host their own, privately branded stores. In this scenario, tenants would have their own unique domains that are used to access your multi-tenant
+environment.
+In most respects, this vanity domain model looks very much like the subdomain model that we outlined. It still uses the origin to extract the tenant name and then map it to tenant context for downstream consumption. It’s worth noting that this same model could be used as part of a white-labeling strategy where tenants are allowed to apply their own branding. For example, imagine an ecommerce SaaS platform where each store on the platform uses a vanity domain and applies its own brand to the entire experience.
+Onboarding with tenant domains
+When you use a domain to
+identify tenants, you have to consider how this will influence the design of your tenant onboarding model. Now, as each new tenant is created, you’ll need to configure the setup of these domains and create any mappings that will be needed to support a tenant’s entry into your environment.
+The subdomain-per-tenant model has a lighter weight impact on your onboarding flow. Here, your effort is primarily focused on setting up the various DNS configuration options that are part of your environment.
+Figure 6-2
+provides an example of some of the elements that could be configured as part of onboarding a new tenant in a subdomain-per-tenant model.
+I’ve outlined a specific AWS example that shows how you’ll need to configure the moving parts of your network routing to support the subdomain-per-tenant model. At the top of the diagram I have shown the configuration of the content delivery network (CDN) that will
+be processing our tenant requests. It uses Amazon’s CloudFront service. The table shown here illustrates how you’ll configure the CDN to support tenant subdomains. The first row in this CDN table includes the settings that are configured when you initially provision your baseline SaaS environment. In this example, the general domain was assigned the alternate name of
+app.sassco.com
+, where “saasco” represents the branded domain name of our fictitious SaaS company. Now, when a new tenant is onboarded to the system, you must add a new row to this CDN table. In this case, I’ve added one new tenant that gets configured as
+tenant1.sassco.com
+.
+Figure 6-2.
+Configuring tenant subdomains during onboarding
+In addition to configuring the CDN, we must also set up the DNS routing for this new tenant subdomain. The table at the bottom of
+Figure 6-2
+provides an example of how you might configure your DNS service. For this example, we’re looking at how this is achieved with the Amazon Route 53 service. The table shows two entries. The first row contains the baseline set of values that are populated when you first set up your environment. The second row gets populated when you onboard tenant1. This creates the A record that points the
+tenant1.saasco.com
+subdomain to the general domain of your SaaS environment.
+While many of the steps to make this work are mirrored in the vanity domain model, there is one key difference you’ll need to factor into your domain onboarding story. When a tenant requires a vanity domain, your onboarding process will need to support a way to bring that domain to life within your multi-tenant environment. If the domain exists and is being migrated to your environment, your onboarding flow will need to include the steps required to make this migration happen. However, there may also be instances where the tenant creates their domain as part of their onboarding process. As you can imagine, this would be a much more involved process. The complexity is often centered around the various steps required to validate and register a new domain. Choosing to support automation of this entire experience can represent a significant investment for some teams.
+While I used AWS services to illustrate the onboarding experience, the fundamentals of configuring this experience would likely be similar with other tools and services. The key is that you’ll need to consider how you will automate the configuration of these
+domain settings as part of onboarding new tenants.
+Access via a Single Domain
+So far, I’ve focused mostly on
+strategies that rely on domains to identify tenants that are entering the front door of your application. However, some SaaS
+providers—
+especially those using a B2C model—will use a single domain for all tenants. In these instances, all tenants will use the same domain to access your SaaS environment.
+Figure 6-3
+provides a conceptual view of an environment with a single
+domain.
+Figure 6-3.
+Single domain with a shared identity provider
+In this example, I have two tenants that are accessing my system via a single, shared domain (
+www.saasco.com
+). Now, as these tenants attempt to authenticate an existing tenant user, they are directed to the identity provider hosted within our control plane. Since this model uses a global identity construct to house all of our tenant users, it can authenticate all tenants against this single endpoint without any real challenges. Of course, having all of your users in a single identity provider construct will also mean that each user of your system can be associated with one and only one
+tenant.
+Where this gets more interesting is when your architecture supports more flavors of your authentication experience. If you recall, in
+Chapter 4
+I talked about how identity providers may offer different grouping constructs for users that allow you to have separate authentication policies for each tenant. If your identity provider supports these grouping constructs, this can enable you to offer authentication options for the different tiers of your solution.
+Figure 6-4
+provides an updated view of the single domain strategy that employs separate identity constructs for your tenant.
+Figure 6-4.
+Single domain with separate identity constructs
+This is mostly a mirror of the diagram in
+Figure 6-3
+. However, the one change is that we now have separate identity constructs for each of our two tenants. This is where things get a bit more complicated with the single domain model. Without a domain to identify tenants as they enter the environment, you have no context that will allow you to determine which identity construct should be used to authenticate your users. Each tenant request looks the same to your environment regardless of which tenant initiated the request.
+There are a few ways you might
+approach resolving tenant context for your authentication flow. One strategy is to use the domain of your user email address to associate the user with a given tenant. In this model, you’d presume that tenants coming from a specific domain/customer would be mapped to the tenant for that customer. This can work if you can presume that all tenants from a domain belong to a specific tenant. However, this does impose limits on your ability to support a broader range of users with various email domains. Another possibility here is to consider mapping individual user identifiers to specific tenants. The diagram in
+Figure 6-5
+provides a conceptual view of this approach.
+Figure 6-5.
+Authentication mapping based on tenant identifiers
+In this example, we inherit the same single domain model I’ve used throughout this section, using
+www.saasco.com
+as the single entry point for all tenants. I’ve also added two sample user identifiers that represent the different values used during the authentication experience. To be able to authenticate in this model, you’ll need to first resolve the user identifier to its corresponding tenant. This is represented with the table associated with the Tenant Management service, mapping individual users to tenants. In reality, this mapping is likely a mapping from the user to a tenant’s identity construct. Once you have that identity construct, you can authenticate the user against the target identity construct. This model still relies on having a one-to-one relationship between a user ID and a tenant. However, it does let you have separately
+configured identity policies for tenant tiers.
+The Man in the Middle Challenge
+In looking at the solution in
+Figure 6-5
+, you’ll notice that this strategy relies on a level of indirection to successfully map
+tenants to their identity providers. This does present some challenges if you’re trying to precisely conform to standard authentication models. To better understand this, let’s step back and consider a more traditional web application authentication implementation.
+Figure 6-6
+provides a conceptual view of a classic authentication experience that you may have implemented multiple times. This flow starts with a tenant user attempting to access your web application (step 1) is redirected to an identity provider to be authenticated (step 2). When the user successfully authenticates, the identity provider returns tokens that will provide identity and authorization information (step 3). The identity provider then directs you back to the web application as an authenticated user (step 4) before calling one or more downstream microservices with this authentication context (step 5).
+Figure 6-6.
+A classic web application authentication flow
+The beauty of this flow is that it is orchestrated entirely by the identity constructs of your environment. The path to the identity provider and back into your web application is mostly outside of the control of your code and conforms to the standard authentication flows that are supported by identity providers.
+Ideally, you’d be able to implement your SaaS solution without straying too far from this flow. At the same time, I’ve also talked about how different identity configurations and access patterns may rely on code that can map a tenant to its corresponding identity construct. These strategies often require the injection of additional mapping constructs that reside within the flow of your authentication experience.
+In
+Figure 6-5
+, for example, you saw an instance where the tenant management service was used to look up and map a user to an identity construct. This approach means that your authentication flow cannot go directly to the identity provider to process your authentication. Instead, it must first determine the target identity construct and then drive the redirection to the appropriate identity model.
+Any time you add this layer of indirection to your authentication flow, you’re essentially adding a point of scale and failure to the authentication model of your environment. While this may be exactly what you need to do, you want to be sure you consider the trade-offs associated
+with injecting
+yourself into the authentication flow.
+The Multi-Tenant Authentication Flow
+It should be clear at this point that there’s a strong connection between how you enter the front door
+of your application and how that influences the overall authentication experience of your multi-tenant architecture. Now, let’s assume you have a path into your environment that enables you to direct authentication requests to the appropriate identity provider construct. Assuming those bits are lined up, we can look more closely at the remaining steps in the authentication process.
+It’s important to note that this process is squarely focused on authenticating a tenant user and returning the SaaS identity that was described in
+Chapter 4
+. Much of the onboarding experience that was covered in that chapter was setting the stage for this moment of authentication, configuring our identity model with all the pieces needed to authenticate a user and return the tokens that will represent the tenant context that we’ll need for all the downstream elements of our multi-tenant implementation.
+Generally, the moving parts of this experience align with the OAuth and OIDC specifications that are implemented by most identity providers. Still, it’s helpful to see the end-to-end flow of this experience to give you a better sense of what’s happening. It also connects key dots in illustrating the injection of tenant context that’s been referenced across several dimensions of our multi-tenant architecture discussion.
+A Sample Authentication Flow
+While we’ve poked around elements of
+authentication concepts, let’s look at a sample flow to see all the moving parts in one end-to-end flow (shown in
+Figure 6-7
+).
+Figure 6-7.
+A sample multi-tenant authentication flow
+In this example, I have used a subdomain-per-tenant model as part of this authentication flow. Tenants that are authenticating into this environment enter via their assigned subdomain, in this case
+tenant1.saasco.com
+. The tenant user hits our web application (step 1) and our application determines that the user is not authenticated. Since the user is not authenticated, your web application will redirect your user to the application login experience where the user will enter their credentials. This is a bit different from the classic authentication flow in that we’ll rely on the web application to detect and direct the user to the login form.
+Now, before you can authenticate the user, you’ll need to determine the specific identity provider construct that is associated with this tenant. This is achieved by calling the Tenant Management service (step 2) and requesting the information for the target identity constructs that will be used to authenticate the user. The Tenant Management service will inspect the origin (subdomain) of the tenant, look up its mapping to the identity provider, and return this information to the web application (step 3). Now, you have everything you need to authenticate the tenant user. The next steps in this process follow the classic bits of an OAuth flow. First, we call the identity provider, passing along the tenant user credentials (step 4). The identity provider will then return a code (step 5) before exchanging this code for a JWT (step 6). Finally, now that you have the JWT with our tenant context, this token can be injected into the calls to our microservices (step 7).
+The tokens that come out of this process, as discussed in
+Chapter 4
+, are injected into the downstream services as bearer tokens where the authorization header of your HTTP request is set to be a “bearer” token and assigned the value of the access token that comes back from your authentication flow. Then, your downstream services can use this token to implement the authorization of your microservices and provide access to a request’s tenant context.
+Federated Authentication
+Where the federated authentication story gets more complicated is when we start to consider scenarios where your
+identity footprint might be more distributed. If your solution, for example, needs to authenticate against some externally hosted identity provider that’s outside of your control, this can add a layer of complexity to your overall multi-tenant authentication model.
+When you control all aspects of the identity experience, you can control the custom claims and policies through your identity provider. However, when a third party is authenticating your user in some federated model, it’s less clear how these essential moving parts of the multi-tenant identity experience can be supported. You can’t really require that third party to include the custom claims that provide tenant context. At the same time, our multi-tenant design relies heavily on its ability to issue JWTs that include this tenant context.
+The good news is that there are federated identity solutions that can fill in bits of the multi-tenant experience. With Amazon Cognito, for example, you can have custom claims configured within Cognito for users that will be authenticated from a third-party provider. In this model, when you authenticate against the federated provider, Cognito can seamlessly stitch its custom claims into the JWTs that are returned from this authentication. This gives you the ability to support a third-party provider while still retaining the ability to manage custom claims for each user.
+There are any number of different federated identity models that you may need to support in your SaaS environment. Each identity provider also tends to have its own unique approach to federating these users. Some may allow you to inject the custom claims and others may not. The key here is that if you’re federating to a third-party provider, you’ll have to determine which strategy you’ll be using to acquire tenant context. In some cases, this may require you to manipulate or inject JWTs to achieve the desired experience.
+No One-Size-Fits-All Authentication
+As you can see, there are many approaches to authenticating a user in a multi-tenant environment. This is
+part of the general challenge for SaaS solutions. The path into your application, the identity constructs you’re using, and other factors may require you to consider a variety of different approaches to connect the dots of your identity flow.
+The key is that this is rarely as simple as hitting an identity provider and following any one of the typical authentication flows that are outlined by various identity providers. Instead, you have to wrap your multi-tenant requirements around these identity flows to align them with the multi-tenant patterns that are implemented in your environment. In the end, you’re definitely conforming to the OAuth and OIDC specifications that are supported by identity providers, but your path into those flows is shaped by how tenants are mapped into the overall identity scheme of your multi-tenant environment.
+Routing Authenticated Tenants
+After you’ve made it through the
+front door of your application and you’re ready to invoke backend services, you still need to consider how tenant context can influence the routing of these requests. Now, you could argue that this is not part of authentication and, technically, you’d be correct. However, the context that comes out of the authentication process has a direct impact on the downstream routing story of your application. So, it seems natural to make routing part of this discussion. You’ll also see that, in some cases, your routing strategy might also influence the authentication model that you select.
+When I talk about routing here, I’m generally referring to how tenants are mapped to their corresponding resources on a request-by-request basis.
+Figure 6-8
+provides a conceptual view of the routing mental model.
+You’ll see that I have a tenant entering the front door of our SaaS environment and authenticating with any one of the models discussed earlier. Once you’ve authenticated, your application will begin consuming the microservices and functionality of your SaaS application. Now, if all of your application services are running in a pooled model, you can just make these calls directly. However, it would not be uncommon for you to have a more diverse architecture footprint for your application services, some of which are running in a siloed model and some of which are running in a pooled model.
+When you have a mix of tenant deployment models, you’ll now have to consider how you’ll route requests to the appropriate tenant resources. In
+Figure 6-8
+, I’ve shown a simple conceptual model where we have Tenants 1 and 2 running with siloed resources and the remaining tenants running with pooled resources. With this split of siloed and pooled resources, you’ll be required to introduce some notion of routing in your multi-tenant architecture to determine how this routing will be
+achieved.
+Figure 6-8.
+Tenant routing basics
+As you can imagine, the approach you take will vary based on the technology stack you’re using, the front door entry point of your application, and the deployment model of your application. Certainly, though, the approach you choose for users to enter and authenticate will have a significant impact on the options you’ll have available when you’re looking at routing strategies. A tenant-specific domain, for example, might be able to be combined with other networking tools/services to implement your routing strategy. As you’re thinking about the entry into your application, you should also be thinking about how it will align with the routing requirements of your SaaS environment.
+The routing model of your application also has implications for the onboarding experience of your SaaS solution. As each new tenant is onboarded to your system, you may need to update the configuration of your routing infrastructure to provision and configure the constructs that
+will be needed to route the workloads of this new
+tenant.
+Routing with Different Technology Stacks
+I mentioned that the technology stack you’re using can have an influence on the routing model of your environment. While there’s far too many permutations to cover all the possibilities, I thought I’d review a few examples of different
+multi-tenant
+technology stacks and look at how you might implement routing in these different
+models.
+For this discussion, I’m going to look at two of the more common SaaS technology models: serverless and containers. The sections that follow will examine some of the nuances associated with routing for each of these stacks to give you a better sense of some of the variables that come into play as part of developing a tenant-aware routing model.
+To get into the details of any routing strategy, I’ll have to discuss specific technologies. The tools and mechanisms available for serverless on AWS for example might look somewhat different when realized on Azure or GCP. The routing models for Kubernetes, however, are likely to be more similar (with caveats).
+Serverless Tenant Routing
+Let’s start by
+looking at how you might implement a routing strategy that uses serverless technology to implement its multi-tenant application. In a serverless environment, you will have a set of functions that are composed to create the various microservices that represent the functionality of your application.
+With AWS Lambda, these
+functions are typically accessed through an API Gateway. This gateway describes and exposes the HTTP entry points into your services, mapping requests to their corresponding functions. In this respect, you can view the API Gateway as an essential path through which all activity flows to your application services. In fact, as we look more at a detailed serverless SaaS implementation in
+Chapter 11
+, you’ll see how this gateway plays multiple roles in your overall multi-tenant architecture. For now, though, let’s just focus on how the gateway(s) are provisioned and configured to support the basic routing needs of your SaaS
+environment.
+Figure 6-9
+provides a conceptual view of a basic serverless SaaS environment constructed with AWS Lambda. Here, we have a web application that’s hosted in an Amazon S3 bucket. This application makes requests through the Amazon API Gateway that are then routed to the Lambda functions that are composed as part of the various microservices that are part of your application.
+Now, if the functions of our serverless application are all pooled, then the role of the gateway is pretty straightforward. All requests are simply directed to their target function without regard for tenant context. However, imagine a scenario where some or all of your microservices (and functions) are running in a siloed model. This is where you’ll need to evaluate the tenant context and route requests to the correct tenant functions.
+Figure 6-10
+provides an example of a scenario where we have a mix of siloed and pooled compute resources that require targeted routing.
+Figure 6-9.
+API Gateway routing in serverless environments
+Figure 6-10.
+Routing to tenant-specific gateways
+In
+Figure 6-10
+, I’ve opted for an API Gateway-per-tenant model where I
+provision and configure separate gateways for the different tiers of my application. I have two premium tier tenants (Tenants 1 and 2) that have siloed Lambda functions that implement their microservices. I also have basic tier tenants running in a pooled model where their functions are shared by all tenants. If you have a mixed mode deployment (some silo and some pool), then your routing will be a bit more contextual. Based on the nature of the request, you could be sending some traffic to a dedicated API Gateway URL and some traffic to a shared API Gateway URL.
+As each request is processed in this model, I need to use tenant context to identify the tenant and route these requests to the appropriate gateway URL. There are multiple ways you might achieve this mapping. If, for example, your tenants used a subdomain to access your system, you could use the origin of the HTTP request header to map the tenant to a specific gateway URL. In
+Figure 6-10
+, I presumed that I had a single domain for all tenants, which required the use of the Tenant Management service (in the top right of the diagram) to look up the API Gateway URL for each tenant.
+The downside of this particular model is that it requires the client to play a role in this mapping exercise. The client must acquire the URL from the Tenant Management service and apply that URL as part of making requests.
+There are certainly downsides that you’ll need to consider with this mapping model. Performing these mappings on every request may add overhead and latency that impacts the performance of your solution. Some address this by resolving this mapping on the client side, but it feels unnatural to distribute this problem to the client. The more typical approach here is to introduce a caching strategy at the mapping or gateway levels to hold recently mapped tenants. The key is to be sure that you’re factoring the performance impacts of this mapping into the overall strategy.
+Scale is also an area that deserves attention here. Having a gateway-per-tenant may not scale well in environments with a large number of tenants. This is where limiting the number of siloed tenant resources becomes an important piece of the puzzle. If you have a few premium tier tenants and the rest are basic, you’ll likely be fine. However, if the number of premium tier tenants is expected to grow substantially, you’ll
+want to reevaluate your options.
+Container Tenant Routing
+While the serverless routing example was more focused on mapping tenants to specific API Gateway entry points, this
+next strategy is more driven by the fundamental nature of how serverless applications are built and deployed with AWS Lambda. For contrast, let’s look at how you might implement tenant-aware routing in an environment where your application plane is primarily built with Kubernetes.
+Within a Kubernetes multi-tenant architecture, you have lots of native constructs that can be used to shape the routing footprint of your SaaS application. The list of options is pretty extensive, but, for now, I want to illustrate how you might use a service mesh to build out this routing experience. If you’re new to the idea of a service mesh, you can think of it as a Kubernetes platform mechanism that lets you configure/implement different security and observability aspects of your system (outside of your application). There are multiple service mesh implementations. For this solution, I’ve chosen to use Istio to implement our routing model.
+Figure 6-11
+provides a conceptual view of a multi-tenant Kubernetes environment that uses a service mesh to control the flow of both your authentication and routing to tenant environments.
+Figure 6-11.
+Routing tenant requests with a service mesh
+You’ll see that our tenants enter through the front door using the subdomain-per-tenant model described earlier in this chapter (step 1). Requests from your web application are, for this example, sent through a network load balancer that provides a durable endpoint that can be easily referenced from the web application (step 2). The request then passes through the network load balancer and arrives at the Istio ingress gateway that runs in its own namespace within your Kubernetes cluster. It’s this gateway that orchestrates and applies all the policies that are required to route to our identity providers as well as our application microservices.
+Let’s presume that, in this example, the tenant is not authenticated. In this scenario, the gateway will send the requisition off through an Envoy reverse proxy (step 4), which will use the incoming origin subdomain to route authentication requests to the tenant-specific OIDC proxy that is also running in a separate Kubernetes namespace. Each of these OIDC proxies forwards authentication requests along to the corresponding tenant identity construct. This could be separate identity providers. It could be separate grouping constructs within a provider.
+Once your tenant user has been authenticated, the gateway can send your request to the services of your application (step 5). In this example, you’ll see that I have two tenants running in separate Kubernetes namespaces. This means our gateway must examine the origin and route each request to the appropriate tenant namespace.
+While there are a lot of moving parts to this solution, to me it still feels a bit more graceful than those strategies that rely on your service’s lookup and map tenants. Here, we’re able to lean on the natural routing and proxy mechanisms of the gateway to redirect requests, moving much of the heavy lifting out of the code of our microservices. Generally, if you can offload these routing responsibilities to other bits of infrastructure that already manage routing, this often represents
+a cleaner, more manageable routing experience.
+Considering Scale
+The nuances of the authentication and routing mechanisms that I’ve covered here are clearly influenced
+by how/if you have siloed resources in your multi-tenant architecture. I discussed scenarios where you might have separate identity constructs for tenants. I also talked about how the siloed resources in your application plane can impact your routing model. While these are entirely valid strategies, you must also consider how the scale of your environment will shape your approach to authentication and routing. The more you introduce separate tenant constructs to support tenant-specific identity models or siloed deployment patterns, the more you must think about how effectively these will scale based on the number of tenants you have in your system. If you’re dealing with large numbers of tenants, some of the concepts may not align well with your cost, scale, or operational goals.
+Conclusion
+In this chapter, we continued our path into bringing up the foundational bits of our SaaS architecture, looking into how onboarded tenants enter the front door of a multi-tenant application. The goal was to examine the different considerations that are associated with getting a tenant authenticated, acquiring their tenant context, and injecting that tenant context into the downstream services of our environment.
+We explored some of the key elements that go into designing and shaping the authentication experience. This included looking at how something as simple as how the path into your SaaS environment influences the broader architectural footprint of your multi-tenant architecture. The use of subdomains, vanity domains, and a single shared domain all have implications on how you will identify tenants during your authentication flow. As we got further into the elements of authentication, we also saw how supporting different per-tenant identity constructs shaped the overall authentication flow of your environment.
+Once we got beyond the front door, we moved more into examining how the authentication context could be used as part of routing tenant requests. More specifically, we looked into how this routing was applied in different technology stacks. It was here that we got a better sense of the connection between authentication and the different deployment models and technology stacks employed by your system.
+Now that we have the foundational bits in place and we’re authenticated tenants, we can start to look into the landscape of multi-tenant microservices and see how this tenant context influences how we decompose and construct the services of our application. In the next chapter, we’ll look at how multi-tenancy influences your approach to designing and building microservices, getting more into the details of how you can realize the benefits of multi-tenancy while still limiting complexity for developers.
+
+Chapter 7.
+Building Multi-Tenant Services
+Much of our focus up to this point has been centered around building out all the foundational elements of our multi-tenant architecture. This meant digging into the control plane and figuring out how to put a core set of services in place that would allow us to introduce the notion of tenants into a SaaS environment. We looked at how tenants are onboarded, how their identity is established, how they are authenticated, and—most importantly—how all of this ends up injecting tenant context into the services of our application. This should have given you a healthy respect for the role that the control plane plays in a SaaS environment and illustrated just how critical it is to invest in creating a seamless strategy for introducing foundational tenant constructs into your multi-tenant architecture.
+Now, we can start to shift our attention to the application plane. It is here where we can start to think about how we will apply multi-tenancy to the design and implementation of the services that will bring our application to life. In this chapter, we will begin to look at how the nuances of multi-tenant workloads will influence the way we approach the design and decomposition of services. Isolation, noisy neighbor, data partitioning—these all represent new parameters that you’ll need to factor into the design of your services. You’ll see that multi-tenancy adds new wrinkles to the classic services design discussion, forcing you to take new approaches to the size, deployment, and footprint of your services.
+The introduction of tenancy also has a direct impact on how you implement your services. We’ll look closely at how and where multi-tenancy will weave its way into the code of your services, highlighting different strategies that can be used to prevent tenancy from adding complexity and/or bloat to the overall footprint of your services. I’ll explore a few sample service implementations and outline tools and strategies that can be used to push multi-tenant constructs into helpers and libraries that simplify the overall developer experience.
+The broader goal is to give you a better sense of the landscape of considerations that should be on your list when you’re starting to build out the multi-tenant services. Making this a priority from the outset can have a significant impact on the efficiency, complexity, and maintainability of your SaaS solution.
+Note
+Throughout this chapter, you’ll find that I have used the more generic term “services” when describing the components of your SaaS application. I intentionally avoided mapping these examples to any specific service implementation strategy. Yes, you could presume that this concept correlates to microservices. However, I didn’t want to presume that your solution used
+microservices.
+Designing Multi-Tenant Services
+Before we can talk about how we build multi-tenant services, we need to come up a level and look at the size, shape, and general decomposition strategies that you need to think about as you identify the different services that will be part of your system. The boundaries of your services and how you distribute load/responsibilities to those services adds a dimension of complexity and forethought in a multi-tenant
+model.
+Services in Classic Software Environments
+To better understand this dynamic,
+let’s start by looking at a classic application where the entire footprint of an application is installed, deployed, and managed separately.
+Figure 7-1
+provides a simplified example of how services land in one of these classic, installed software environments.
+You’ll see that services are entirely dedicated to individual customers. When you’re designing services for these environments, your focus is mostly on finding a good collection of services that can meet the scaling, performance, and fault tolerance needs of a single customer. Yes, there may be some variation in how customers use your system, but the general focus is often on creating an experience that is limited to the behaviors and profile of a single customer.
+This narrower focus makes it somewhat simpler to find the boundaries of your services. Much of the focus is often more on the single responsibility design principle where you attempt to ensure that you have decomposed the services in a way that ensures that each service has a clear, well-defined scope and functional role. The idea is that these services have one well-defined job.
+Figure 7-1.
+Services in a classic software environment
+Services in Pooled Multi-Tenant Environments
+Now, let’s look at a full stack pooled multi-tenant environment.
+Figure 7-2
+provides an example of a SaaS architecture that is supporting
+the needs of multiple tenants that are sharing their infrastructure resources in a pooled model.
+Figure 7-2.
+Services in a pooled multi-tenant environment
+On the surface, it may seem like all that has changed here is the number of tenants that are consuming these services. However, the fact that these tenants are all exercising these services at the same time as shared resources has significant implications for how you approach the size, decomposition, and footprint of each of these
+services.
+The first thing you’ll see is that, at the top of
+Figure 7-2
+, I’ve intentionally introduced tenants of varying sizes. This was done to illustrate the fact that there can be huge variation in how tenants put load on your system. One tenant may saturate part of your system. Another tenant may consume the entire surface of your solution but place minimal load on the environment. The permutations can be all over the
+map.
+On the left, I’ve also shown the onboarding of new tenants. This is here to convey the idea that new tenants may be introduced into your environment at any time. There is little you can do to anticipate the workload and profiles of these new tenants. I’ve also highlighted the fact these new, incoming tenants may belong to different tiers with different experience and performance expectations.
+Now step back and think about what we really have here. The services in this environment, which are shared by all of the tenants, must somehow anticipate all the scaling, performance, and consumption needs of each of the tenant personas. You’ll need to be hyper-focused on ensuring that these tenants are not creating noisy neighbor conditions where one tenant is impacting the experience of another tenant. These services will also need to dynamically scale based on what could be a fairly elusive set of parameters. The scaling strategy you use today may not align with how your services need to scale tomorrow (or in the next hour). SLAs, tiering profiles, compliance, and other considerations may also be in this equation.
+This is essentially where the benefits of shared infrastructure collide with the realities of supporting a constantly shifting landscape of customer consumption profiles. For some, this leads to overprovisioning of resources to account for shifting needs and load profiles, which is exactly counter to the efficiency and economies of scale goals that are associated with the SaaS business model.
+In some respects, this is all part of having a multi-tenant pooled architecture. Even if your services are overprovisioned, the collective value of sharing these resources is likely much higher than having dedicated, per-tenant infrastructure. The design of your services, however, can play a big role in giving you more tools and strategies for addressing the shifting needs of tenant workloads and profiles. Generally, our approach to designing services is focused on giving yourself more knobs
+and dials to address the diverse range of dynamics that your tenants are imposing on your
+environment.
+Extending Existing Best Practices
+The process of arriving at
+your multi-tenant services will still mirror many of the accepted methodologies and strategies that are typically used to identify candidate services. The theme is that, as part of applying those concepts, you’ll also want to add additional multi-tenant design considerations to the list of factors that shape your service design, blending foundational best practices with a collection of multi-tenant considerations (as shown in
+Figure 7-3
+).
+Figure 7-3.
+Blending service design methodologies
+Figure 7-3
+provides a clearer mental model of the approach that I’m advocating. Here you’ll see examples of some of the common service design methodologies that teams often use to identify the different candidate services. While these methodologies have clear value, they don’t always include discussion of the multi-tenant realities that must be factored into the design of multi-tenant services. Yes, I know I will end up with services that map to many of the logical entities and operations that are part of my domain. The challenge, though, is that the multi-tenant profile of my environment might end up leading me to introduce services and deployment patterns that wouldn’t naturally be uncovered if you’re just looking at domain objects, operations, and spheres of interaction.
+To acknowledge this, I’ve put SaaS as a placeholder at the center of
+Figure 7-3
+. The idea was that you’d take all the design considerations that come with multi-tenancy and overlay them with other methodologies, ensuring that these concepts are front and center as you are beginning to model your application’s services.
+To drive this point home, let’s dig into some of the common areas where multi-tenancy could have an influence on the design of your services.
+Addressing Noisy Neighbor
+Noisy neighbor is a concept that
+is not unique to multi-tenancy. Builders generally have to consider how and where users might impose load on your system that could saturate your system or degrade performance. While this is a general area of concern, you can imagine how the nature of multi-tenancy and shared infrastructure put more focus, weight, and complexity on the noisy neighbor problem. A noisy neighbor in a SaaS environment has the potential to bring your whole system down or, minimally, degrade the experience of the other tenants in your multi-tenant environment. So, as you sit down to design the services of your multi-tenant environment, you’ll want to be sure that you’re testing assumptions about how/if your services address potential noisy neighbor conditions.
+Noisy neighbor can show up in multiple forms in a multi-tenant environment. There may be specific operations in your environment that have high latency or consume resources in patterns that have a high potential to create bottlenecks. You may have areas where certain tenant personas are prone to saturating a particular set of services that are part of your system.
+The basic challenge is often all about scaling. Certainly, if a service can scale effectively enough to address the multitude of personas and workloads without overprovisioning or impacting other tenants, then you probably have a reasonable scope for your service. Our focus is on those scenarios where horizontal scale alone may not be effective or efficient enough to deal with the multi-tenant realities of your environment. Consider the sample service shown in
+Figure 7-4
+.
+Figure 7-4.
+A noisy neighbor bottleneck
+You’ll see that I’ve created a catalog management service that manages all the products in my ecommerce SaaS solution. This service exposes an API that includes a pretty basic set of operations that might be used to manage catalog data. However, if you look at the far left, I’ve also highlighted the operational profile of each of the service’s API entry points, using colors to convey their current status. You’ll notice most of the operations are healthy or healthy enough. However, the
+uploadThumbnail()
+operation appears to be suffering from some kind of performance issue that, in this case, is yielding a noisy neighbor condition.
+It turns out that this particular function happens to do some heavy lifting that is creating bottlenecks for this service. Callers are uploading images and triggering an image scaling mechanism to generate different sized thumbnails that are used in multiple contexts across the application. Left as is, your primary approach to solving for this might be to simply scale the service out, potentially overprovisioning, and hoping that this will limit any cascading impacts on your tenants. Essentially, you may be scaling this entire service when only one operation of the service needs better throughput. The better option might be to think about whether this operation could be extracted and moved to a separate service where it can scale more proportionately to tenant activity without absorbing the inefficiencies of scaling out the entire catalog management service to address your performance issues.
+The general mindset is that you’ll want to think differently about the scope of your service’s responsibility and consider how these services will scale to meet the varying loads of a multi-tenant environment. As you’re identifying your services, look for those areas that stand out as potential noisy neighbor candidates.
+Figure 7-5
+provides a conceptual view of the overall theme here.
+Figure 7-5.
+The noisy neighbor decomposition mindset
+I’ve just illustrated how a given service could be further decomposed into smaller services that give you more targeted scaling options that, ideally, would limit noisy neighbor conditions and limit overprovisioning. The Product service separates out a Thumbnail service to better distribute the load and the Order service breaks out a standalone Tax service. The core idea is that we must incorporate these noisy
+neighbor
+and scaling efficiency considerations into our service design, using this information to identify areas where a more granular decomposition strategy might yield a better result.
+It’s fair to ask if this approach is really unique to SaaS. The answer is no. As a rule of thumb, any environment should be looking at ways to better address performance and scale through more granular services. What’s different, though, is the diversity of tenant personas and workloads that end up requiring SaaS architects to be much more diligent about addressing these kinds of challenges. An inefficiently scaled, bottlenecked, or overprovisioned service is likely to show up more in a multi-tenant environment, which can have profound impacts on your tenants and the operational profile of your SaaS environment. So, while this is a good general approach, it deserves much greater focus and attention when you’re designing services for a multi-tenant environment.
+It’s worth noting that it’s fully expected that your noisy neighbor strategy is going to evolve over time. The services you pick on day one should be expected to morph as your system evolves and you have richer insights into how and where you’re observing
+noisy neighbor conditions. Start with the services that make sense, and then use the strategies outlined here based on the operational profile of your environment.
+Identifying Siloed Services
+In
+Chapter 3
+, we talked about different deployment models and how these models might require you to have some or all of a tenant’s resources
+deployed in a siloed (dedicated) model. On the surface, it may seem as though there’s no real connection between siloing resources and the design of your services. However, there can actually be a strong correlation here between the services you choose and how/when/if those services get deployed in a siloed experience.
+Whenever you choose to silo a service, you’re often doing so to support a specific system or tenant need. You might, for example, need to silo some service to support a compliance requirement that’s part of your domain. Tiering, performance, and isolation may also have some influence on which services that you opt to deploy in a siloed model.
+Of course, any time you’re siloing a resource, you’re making a compromise that can impact the operational, cost, deployment, and management complexity of your environment. So, if you are going to have siloed resources, it’s ideal to limit the number of services that need to be deployed in silos.
+Figure 7-6
+provides an example of how the isolation requirements of your environment might influence the footprint of your services.
+Figure 7-6.
+Designing services based on isolation needs
+This diagram includes two different approaches to designing an Order Management service that address all the order processing and fulfillment needs of your solution. On the left, you’ll see this service deployed in a pooled model that shares compute and storage for all tenants. Now, let’s presume that our tenants have expressed a concern about having this service running in a pooled model. Your first instinct might be to move this service to a fully siloed deployment model to ensure that each tenant would run a dedicated copy of this service. However, after probing further, you find that your tenants are actually only concerned about having dedicated compute and storage for the order processing portion of the service.
+Instead of fully siloing this service as is, you may be able to break the service down into one or more services to address the isolation needs of your customer. This is precisely what I’ve done in this example, breaking the original service into two separate services. Here, our new Order Processing service is deployed in a siloed model where each tenant gets access to a dedicated service, directly addressing our tenant’s isolation requirement. As part of this move, I also introduced a new Order Fulfillment service that continues to run in a pooled configuration.
+You can imagine how this same approach could be applied to any number of scenarios where a customer may require siloed resources. You might, for example, apply some variation of this same mindset for compliance, noisy neighbor, or general performance reasons, breaking up larger services to give yourself more granular control over what is siloed and what is not.
+This approach of picking what’s pooled and what’s siloed doesn’t have to be about breaking services into more services. It might just be about grouping services based on their need to be siloed.
+Figure 7-7
+provides a conceptual view of how you might align the boundaries of your services based on their silo versus pool requirements.
+Figure 7-7.
+Aligning services with silo/pool requirements
+For this scenario, my tenants have indicated that they need specific functionality to be deployed in a siloed model. In
+Figure 7-7
+, you’ll see that the Product, Order, and Cart services are all deployed in a siloed model where each tenant has a dedicated instance of these services. Then, on the righthand side, I have a set of services that are running in a pooled model.
+You could just view this purely through the lens of deployment and say some services are siloed and some are pooled, and that would be accurate. However, the idea is that you want to be as thoughtful as possible about which services land in the siloed side of this experience. So, if you’re designing services that you know are going to have to support this mix of silo and pool, you should be thinking about how you can decompose these services in a way that will allow you to land as much as you can in the pooled model.
+This siloing strategy is something you should make a core part of your service design mindset, identifying the use cases and requirements that might justify deploying a service in a siloed model. This list typically includes compliance, isolation, security, tiering, and performance. It’s also important to note that you may silo services entirely based on your own internal operational needs. For example, you may have some services that simply can’t meet the demands of tenants in a pooled model. In this case, you might opt to carve that piece of functionality out and deploy it in a siloed model purely based on the operational realities of your environment.
+In some instances, the siloed boundaries of your services may stand out early in your design process. In other instances, however, you may need to collect data and iterate some to arrive at a set of services that balance this siloed/pooled universe. For me, the main thing I’m trying to avoid is just moving services into a silo without challenging myself to see if there are more creative ways to decompose my service. Again, as I mentioned earlier, you may not discover these boundaries until after you’ve collected more operational insights from the working system.
+It’s important to note that this silo strategy should be adopted with caution. It’s not exactly operationally or cost efficient. So, you’ll want to be selective about how and when you consider this approach. For systems with a smaller population of tenants, this could be a good strategy. However, for systems with a larger pool of tenants, this
+would become challenging to scale and support.
+The Influence of Compute Technologies
+While it may be less obvious, there are also scenarios where the compute technology you’re using can have
+some influence on the footprint of your services. Containers, serverless, and other compute constructs can introduce their own set of considerations to your multi-tenant design. Suppose, for example, you are considering having some services that run in a serverless compute model and others that run in a container compute model. It turns out that the nature of these different compute models can play a direct role in defining the size, scope, and boundaries of your services. To better understand this, let’s look at
+Figure 7-8
+.
+Figure 7-8.
+Compute and service design
+In this example, I have included two mostly identical instances of an Order service. On the left, the service
+is running in a container compute model. Meanwhile, on the righthand side, this same service is running in a serverless model (in this case using AWS Lambda). I’ve highlighted the different operations that are part of this service and sized the box of each operation based on the load associated with these operations. In this case, it should be clear that the
+createOrder()
+operation is receiving the bulk of the requests. So much so that you might ask whether this service will be able to scale efficiently or whether it’s essentially going to scale based on this one operation—even though the other operations are not really being pushed.
+Now, when we look at the container-based deployment, we might consider how to refactor this service to improve the overall scaling efficiency of our environment. With containers, all of this functionality is packaged, scaled, and deployed collectively so that the container becomes our unit of scale.
+With the serverless model on the right, though, each of the operations that are deployed as part of our service represents a separate function that can be deployed, managed, and scaled independently. So, if
+createOrder()
+or any other operation is receiving a disproportionate level of load, that function will scale on its own. This represents one of the significant advantages of the serverless model where the scaling is more granular and becomes someone else’s problem to manage. The better news is that if the load profile shifts tomorrow and another operation starts taking all the load, there’s nothing I need to do to adjust the scaling policies or profile of my service. This makes it much easier to accommodate and optimize for the continually shifting workloads of multi-tenant environments.
+The key takeaway is that the compute model you’re using may have some influence on your service decomposition model. It’s not the primary factor, but it does add another wrinkle to your design
+mindset.
+The Influence of Storage Considerations
+When we’re designing services, we’re also often thinking about the scope and the nature of the data that
+will be accessed and managed by these services. Since each service is expected to encapsulate the data that it manages, you must consider how this data will be consumed. Splitting a service along the wrong data boundary could end up leading to extremely chatty services that are constantly in need of data that lives in the scope of some other service.
+These are all general considerations that are associated with designing any service. Now, as we look at multi-tenant services, we have some new factors to add to our design considerations. Our multi-tenant data can be stored in a siloed model where each tenant has its own dedicated storage structure, or it could be stored in a pooled model where tenants data is commingled within a shared storage construct. You may also need to think about how the different operations on your data will scale effectively when customers are competing for a shared storage resource. Imagine thousands of tenants all querying some relational database that has stored all of its tenant data in a shared table. Will these tenants saturate the compute of the storage technology? Will you end up creating another flavor of a noisy neighbor condition? These are all just examples of how the footprint of your storage might influence the scope and granularity of your services. In some cases, a more coarse-grained service might be your preferred model. In others, there may be compelling reasons to break your services into smaller bits to support different data profiles.
+In many respects, the storage needs of your service must also look at many of the factors that shaped the noisy neighbor and siloing discussion outlined earlier. With storage, we’re going inside the service and thinking about how multi-tenant requirements, tenant personas, and workloads might shape the footprint of your service. This is essentially a mirror of the compute considerations that we discussed earlier. Storage has its own compute and data footprint that must also address noisy neighbor, compliance, tiering, and isolation considerations.
+The key takeaway is that storage can and often does play a significant role in the decomposition of your services, so as you’re sitting down to identify your services and their scope and granularity, you’ll want to be sure to give storage the attention it deserves. In some instances, this will be straightforward, and in others the storage profile of your services may be the driving force that shapes a service’s design.
+Using Metrics to Analyze Your Design
+The design of your services will be continually evolving. New features, new tenants, new tiers, and
+new workloads will have your team continually evaluating the performance, scale, and efficiency of your multi-tenant architecture. Of course, in a multi-tenant environment, it can be more challenging to get a handle on whether the design of your services is delivering the experience you intend. You might be able to use some basic monitoring data to draw some high-level conclusions about how your system is behaving, but this data won’t typically allow you to evaluate the consumption and activity patterns of individual tenants and tiers. This makes it difficult to perform any kind of deeper analysis of the factors that are shaping the operational profile of your SaaS environment. Is the consumption profile of a particular tenant or tier impacting the scaling profile of a given service? Are basic tier tenants pushing your services in ways that are impacting your premium tier tenants? These are just examples of insights you really need to assess the efficacy of your service design.
+It’s only when you have these richer insights that you can really begin to evaluate whether the design of your services is successfully addressing the various factors that we’ve been exploring (noisy neighbor, tiering, performance, and so on). Getting these metrics means adding instrumentation to your services that will surface the data you need to analyze the operational profile of your services.
+Figure 7-9
+provides a conceptual illustration of this instrumentation model.
+Figure 7-9.
+Surfacing tenant-aware service metrics
+On the left is a sample service that includes instrumentation that publishes the data that is used to assess the performance, scale, and operational profile of your service. In the middle there are some examples of data that you might capture for a service. What you choose to instrument here will depend on the nature of the services and the nature of the data that would best characterize its activity. All the data that’s recorded will minimally include tenant context and tenant tier (if you’re using tiers).
+Finally, on the right is a placeholder for the aggregation and analysis of this data. It’s here that you’ll use the tool of your choice to analyze this metric data and evaluate the runtime profile of your services. We’ll dig into the whole area of multi-tenant operations and metrics in
+Chapter 12
+. The key is that in a multi-tenant environment, you really need to invest in capturing the metrics and analytics that can tell you how your design is performing. Without this data, you’ll have limited ability to examine how the variations
+in tenant workload and activity are exercising your architecture.
+One Theme, Many Lenses
+Across this entire discussion of services design, I focused on finding the granularity and deployment model that best addresses the compliance, isolation, storage model, noisy neighbor, tiering, and performance requirements of your environment. While each of these factors brings its own nuances to the services design discussion, you can also see that the strategies used to address these needs definitely overlap.
+There were two basic themes that were sprinkled throughout our design discussion. In some cases, your design strategies will focus on creating more granular services that can better respond to your multi-tenant scaling and performance needs. In other situations, you may look at using siloed deployments to create a profile that addresses your system’s requirements. The key is to add these possibilities to your design mindset and look for opportunities to support the realities of your multi-tenant workloads.
+Inside Multi-Tenant Services
+With this backdrop of multi-tenant service design in place, we can now start looking at what it actually
+means to build a multi-tenant service. As a rule of thumb, I tell teams that they should make every effort to limit a developer’s awareness of multi-tenancy when they are coding the business capabilities of their SaaS application. Our focus, then, is on the strategies and techniques you can introduce that will limit the overhead builders will absorb when they’re implementing multi-tenant services.
+To get a better sense of how multi-tenancy lands in your services, let’s start with a basic service that has no support for any notion of tenancy. The following code provides a snippet of an Order service that is responsible for fetching all orders matching a given status:
+def
+query_orders
+(
+self
+,
+status
+)
+:
+# get database client (DynamoDB)
+ddb
+=
+boto3
+.
+client
+(
+'
+dynamodb
+'
+)
+# query for orders with a specific status
+logger
+.
+info
+(
+"
+Querying orders with the status of
+%s
+"
+,
+status
+)
+try
+:
+response
+=
+ddb
+.
+query
+(
+TableName
+=
+"
+order_table
+"
+,
+KeyConditionExpression
+=
+Key
+(
+'
+status
+'
+)
+.
+eq
+(
+status
+)
+)
+except
+ClientError
+as
+err
+:
+logger
+.
+error
+(
+"
+Find order error, status:
+%s
+. Info:
+%s
+:
+%s
+"
+,
+status
+,
+err
+.
+response
+[
+'
+Error
+'
+]
+[
+'
+Code
+'
+]
+,
+err
+.
+response
+[
+'
+Error
+'
+]
+[
+'
+Message
+'
+]
+)
+raise
+else
+:
+return
+response
+[
+'
+Items
+'
+]
+For this service, I happened to choose an AWS NoSQL storage service (Amazon DynamoDB) to store my orders. I’ve coded this example in Python and Boto3, a library that’s used to integrate with AWS services. The order data will land in DynamoDB with a “status” key that will be used to access the orders in our system.
+Overall, the code represents a relatively vanilla service that essentially takes an incoming status as a parameter and queries a database for orders that match that status. You’ve likely seen or written some variation of this function at some point along the way.
+For our purposes, we’re more interested in what’s not here. Since this code is not running in a multi-tenant environment, there’s nothing in the code that has to concern itself with multi-tenancy. The logging data it emits, the data it’s accessing—none of it has to consider which tenant is actually invoking these operations.
+As a multi-tenant architect, it should be your goal to have this code remain as straightforward and familiar as it is here. You must find a way to introduce tenant context and support for multi-tenant constructs without adding bloat and overhead to the builder experience. The more you can move tenant context outside the view of builders, the more opportunities you will give yourself to centralize these strategies and policies
+for all of your services.
+Extracting Tenant Context
+Now we can start to look at how our
+service code will begin to morph as tenancy is injected into our code. Before we can even think about applying tenant context, we have to think about how that tenant context lands in our services. This starts by first looking back at the identity and authentication topics that were discussed in Chapters
+4
+and
+6
+, respectively. In these chapters, we looked at how tenant context was bound to an individual tenant user and injected as a JWT that flowed into the services of our solution. We can now get into what we do to leverage this token as it arrives in the context of our services.
+If you recall, the JWT gets embedded as a header within each HTTP request that is sent to
+your services. This token is passed as what is known as a “bearer token.” The term “bearer” maps to the idea that you are granting access to the bearer of this token. For your service, it indicates that you’re authorizing the system to perform an operation on behalf of the tenant associated with that bearer token.
+If you were to crack open one of these HTTP requests, you’d see the bearer token represented as part of the request’s authorization header. The request would resemble the following format:
+GET /api/orders HTTP/1.1
+Authorization: Bearer <JWT>
+You can see this is a basic GET request to the
+/api/orders
+URL with an authorization header that has the value of “Bearer” followed by the contents of your JWT. Let’s look at the code we need to add to our service to access the tenant context that’s embedded in this token. It’s important to note that this token is encoded and signed, so we’ll need to unpack it to get access to the claims that we’re interested in. The following example adds code to the prior example, introducing the steps needed to extract the tenant context from the incoming JWT:
+def
+query_orders
+(
+self
+,
+status
+):
+# get tenant context
+auth_header
+=
+request
+.
+headers
+.
+get
+(
+'Authorization'
+)
+token
+=
+auth_header
+.
+split
+(
+" "
+)
+if
+(
+token
+[
+0
+]
+!=
+"Bearer"
+)
+raise
+Exception
+(
+'No bearer token in request'
+)
+bearer_token
+=
+token
+[
+1
+]
+decoded_jwt
+=
+jwt
+.
+decode
+(
+bearer_token
+,
+"secret"
+,
+algorithms
+=
+[
+"HS256"
+])
+tenant_id
+=
+decoded_jwt
+[
+'tenantId'
+]
+tenant_tier
+=
+decoded_jwt
+[
+'tenantTier'
+]
+# query for orders with a specific status
+logger
+.
+info
+(
+"Finding orders with the status of
+%s
+"
+,
+status
+)
+...
+I’ve trimmed out the actual query execution code since it is, at the moment, unchanged. The code we want to focus is the snippet where I’m accessing and extracting the tenant context from the incoming request. This block of code first pulls the authorization header out of the overall HTTP request, setting the
+auth_header
+equal to
+"Bearer <JWT>"
+where the JWT represents your encoded token. The next bit of code performs the basic string operations needed to get the contents of the JWT copied into a separate string. This string is then decoded using a JWT library. The end result is that the decoded JWT ends up in the
+decoded_jwt
+variable. The last step is to acquire the tenant ID from the JWT’s custom claims. You might also be accessing other claims here (role, tier, etc.) based on the nature of your solution.
+In this particular example, I’m assuming that your service would own responsibility for decoding each token. However, there are other options. You could, for example, have an API gateway that would sit in front of all your services, processing each inbound request. This gateway could crack open these JWTs, access the tenant context, and inject that into each service. This could allow you to implement more interesting strategies to deal with the latency that comes with accessing tenant context on each request. This is just one of the alternate strategies you might
+consider. The key is that somewhere at the front of these requests, you’ll need code that can go through the motions of acquiring this tenant context for every request (whether it’s cached or extracted from the JWT each time).
+Once this code is executed—wherever it resides—your service will now have access to the tenant context it needs for other downstream operations. This processing of tenant context illustrates the payoff of the onboarding and authentication flows we discussed in earlier
+chapters, illustrating how services can begin to address multi-tenancy without calling other services or mechanisms to get their tenant context.
+Logging and Metrics with Tenant Context
+At this stage, our code now has access to tenant context. However, it’s not doing anything with that
+context. Let’s start by looking at one of the areas where you can apply context in your multi-tenant services: logging. Logging represents one of those foundational mechanisms every service is going to use, emitting messages that create an informational and debugging audit trail that is essential to troubleshooting and analyzing the activity in your system.
+Now, imagine using these logs in a SaaS environment where multiple tenants are exercising your service at the same time. By default, if you did nothing to your logs, they would contain a mixed collection of insights that had no correlation to any specific tenant. This would make it nearly impossible to piece together a view of the activity of any one tenant. If you’re on the operations team and you’re told that Tenant 1 is having issues that nobody else is reporting, you would have a very difficult time using your logs to identify the log messages and events that were contributing to that tenant’s specific problem. Even if you found an error message, it’s unlikely you’d be able to explicitly associate that error with a specific tenant.
+The good news is that now that we have tenant context at our fingertips, we can inject this context to our log messages. This will introduce the tenant context that will allow your operations team to analyze logs through the lens of individual tenants, tiers, and so on. Let’s look at what our code would look like with the addition of
+this tenant-aware logging:
+def
+query_orders
+(
+self
+,
+status
+):
+# get tenant context
+auth_header
+=
+request
+.
+headers
+.
+get
+(
+'Authorization'
+)
+token
+=
+auth_header
+.
+split
+(
+" "
+)
+if
+(
+token
+[
+0
+]
+!=
+"Bearer"
+)
+raise
+Exception
+(
+'No bearer token in request'
+)
+bearer_token
+=
+token
+[
+1
+]
+decoded_jwt
+=
+jwt
+.
+decode
+(
+bearer_token
+,
+"secret"
+,
+algorithms
+=
+[
+"HS256"
+])
+tenant_id
+=
+decoded_jwt
+[
+'tenantId'
+]
+tenant_tier
+=
+decoded_jwt
+[
+'tenantTier'
+]
+# query for orders with a specific status
+logger
+.
+info
+(
+"Tenant:
+%s
+, Tier:
+%s
+, Find orders with status
+%s
+"
+,
+tenant_id
+,
+tenant_tier
+,
+status
+);
+...
+I’ve just changed one of the logging messages that is part of the Order service. Our message simply prepends the tenant context to the front of our logging message. This context would be added to all of the logging messages within your services, introducing the data that equips teams with much richer insights into the specific behavior of their tenants. If you’re querying logs, you can now filter by a specific tenant’s context and assemble a more complete view of how individual tenants are interacting with your system. There’s no magic to this, but it’s one of those small changes
+that can have a huge impact on the operational profile of your environment.
+The same logging mindset
+should also be applied to the metrics instrumentation of your multi-tenant architecture. Yes, we want logs to build a forensic view of tenant activity, but we also need data used by the business to profile the consumption and activity of tenants that doesn’t quite fit into the operational profile of log messages.
+The mental model is that the metrics emitted from our services represent insights that are focused on providing the data that can be used to analyze and answer questions that shape your business, operational, and architecture strategy. Here you’re profiling how your service is influencing the tenant experience and tracking your ability to measure a range of key metrics that business and technical teams can use to evaluate the system’s efficacy, agility, efficiency, and so on. We’ll cover the use of these metrics more in
+Chapter 12
+. For now, though, we need to consider how the publishing of these metrics fits into the footprint of our multi-tenant services.
+Let go back to the Order service and add a metrics call just to provide a more concrete example of publishing a metric event:
+def
+query_orders
+(
+self
+,
+status
+):
+# get tenant context
+...
+tenant_id
+=
+decoded_jwt
+[
+'tenantId'
+]
+tenant_tier
+=
+decoded_jwt
+[
+'tenantTier'
+]
+# query for orders with a specific status
+logger
+.
+info
+(
+"Tenant:
+%s
+, Role:
+%s
+, Finding orders with status:
+%s
+"
+,
+tenant_id
+,
+tenant_role
+,
+status
+);
+try
+:
+start_time
+=
+time
+.
+time
+()
+response
+=
+ddb
+.
+query
+(
+TableName
+=
+"order_table"
+,
+KeyConditionExpression
+=
+Key
+(
+status
+)
+.
+eq
+(
+status
+))
+duration
+=
+(
+time
+.
+time
+()
+-
+start_time
+)
+message
+=
+{
+"tenantId"
+:
+tenant_id
+,
+"tier"
+:
+tenant_tier
+,
+"service"
+:
+"order"
+,
+"operation"
+:
+"query_orders"
+,
+"duration"
+:
+duration
+}
+firehose
+=
+boto3
+.
+client
+(
+'firehose'
+)
+firehose
+.
+put_record
+(
+DeliveryStreamName
+=
+"saas_metrics"
+,
+Record
+=
+message
+)
+except
+ClientError
+as
+err
+:
+logger
+.
+error
+(
+"Tenant:
+%s
+, Find order error, status:
+%s
+. Info:
+%s
+:
+%s
+"
+,
+tenant_id
+,
+status
+,
+err
+.
+response
+[
+'Error'
+][
+'Code'
+],
+err
+.
+response
+[
+'Error'
+][
+'Message'
+])
+raise
+else
+:
+return
+response
+[
+'Items'
+]
+For this example, I’ve added the recording of a metric to the Order service query. To keep it simple, I just added something to track the duration of the query. Then, I created a JSON object that included all the data about the tenant context and the operation being performed. Now I need to publish this metric to some service that can ingest and aggregate these metric events. For this example, I used an AWS streaming data pipeline (Amazon Kinesis Data Firehose) to ingest my metrics data, constructing the Firehose client and calling the
+put_record()
+method to send the metrics event into the service.
+Again, you can see that the instrumentation of metrics, on its own, doesn’t really represent a particularly complex process. The majority of the effort will go into determining what you want to capture and how you’ll introduce the code that publishes your metric data. The investment is small if it’s adopted widely by your teams, but the return can be substantial.
+The challenge of telling the metrics story is that there is no single, universal metrics approach that everyone should apply to their services. The value is clear, but the specifics are hard to nail down. This often needs to be driven by your own desire to identify the metrics that will add the most value for your business. At the same time, I will
+also say that some of the most effective SaaS companies are those that prioritize metrics and work to identify the insights that will best inform their ability to assess the internal and external experience of their systems.
+Accessing Data with Tenant Context
+Logging and metrics are relatively straightforward and are more focused on capturing insights about the activity of your services. Let’s shift to looking at how tenant context will
+influence how data is accessed for individual tenants.
+At the moment, the data returned by our Order service hasn’t really done anything to account for tenant context. In fact, without any further modification, this service would return the same data for every tenant that requested orders. This, of course, is not the intended behavior of our system. To address this, we need to apply the incoming tenant context to our query, limiting the view of orders to those that are associated with the calling tenant.
+The natural and simplest way to apply tenant context is to add the tenant to the parameters that are part of your search. We already have our tenant identifier and simply need to decide how to use this tenant identifier to access our data. You have multiple options here. Let’s presume, for the moment, that you have a pooled database model where your tenant data is commingled in the same table. When the data is pooled, we can simply add a
+TenantId
+key to our order table that will associate each order with a specific tenant. This tenant identifier will become the key of our table. This means that the status we were using will now become a secondary search parameter that returns all orders for a tenant that match the supplied status.
+The code to apply this tenant context to your query is pretty straightforward. In the following example, I’ve augmented the query portion of the service, using the tenant identifier as the key and the status as a filter:
+response
+=
+ddb
+.
+query
+(
+TableName
+=
+"order_table"
+,
+KeyConditionExpression
+=
+Key
+(
+'TenantId'
+)
+.
+eq
+(
+tenant_id
+),
+FilterExpression
+=
+Attr
+(
+'status'
+)
+.
+eq
+(
+status
+))
+This slight tweak to your database search is all that’s needed to ensure that the orders that are returned here are limited to just those that are associated with the current tenant.
+In this scenario, I started with the simplest of use cases. Where data access discussion gets more interesting is when we start thinking about the various combinations of storage strategies your service might need to support. Suppose, for example, your system offered different storage for different tiers as shown in
+Figure 7-10
+.
+Figure 7-10.
+Supporting tiered storage models
+In this scenario, our Order service is processing requests from basic and premium tier tenants. The compute is completely shared by these tenants. However, on the righthand side of
+Figure 7-10
+, you’ll see that the service employs different storage strategies for each of these tiers. The basic tier tenants are all stored in a single table that’s indexed by tenant ID (as was the case in our prior example). However, the premium tier tenants store their data in a siloed model where each tenant has its own dedicated storage. In this example, each of these dedicated tables are assigned a name that conveys their binding to a specific tenant.
+Now, with this new wrinkle in the mix, let’s think about what this means for the implementation of your service. Somewhere within the code of our service, you must have logic that examines the tier of each tenant to determine which table will be used to process their requests. And, depending on how their data is stored, you may need multiple paths of execution within your service to support identifying and interacting with the tenant’s order data.
+Let’s start with a brute force approach to this, knowing that we’ll need to refine to make this simpler. To make this work, we’ll essentially need to add some mapping operation to our query to resolve the name of the table that will be used (based on a tenant’s tier). I’ve revisited the query we had within our service above, adding a new
+getTenantOrderTable()
+function that examines a tenant’s tier and returns the name that will be used for a given tenant request. Here’s the snippets of code that add this functionality:
+response
+=
+ddb
+.
+query
+(
+TableName
+=
+getTenantOrderTable
+(
+tenant_id
+,
+tenant_tier
+),
+KeyConditionExpression
+=
+Key
+(
+'TenantId'
+)
+.
+eq
+(
+tenant_id
+),
+FilterExpression
+=
+Attr
+(
+'status'
+)
+.
+eq
+(
+status
+))
+# helper function to get generate tier-based table name
+def
+getTenantOrderTableName
+(
+tenant_id
+,
+tenant_tier
+):
+if
+tenant_tier
+==
+BASIC_TIER
+:
+table_name
+=
+"pooled_order_table"
+elif
+tenant_tier
+==
+PREMIUM_TIER
+:
+table_name
+=
+"order_table_"
++
+tenantId
+return
+table_name
+This approach, however, presumes that the tables for basic and premium tier tenants will be identical. For the most part, they would be the same; however, our pooled tenants rely on a
+TenantId
+key that is used to access the orders for individual tenants. This key has no value or meaning in the siloed tables. Many teams will keep this key in their siloed tables simply to avoid having to support additional one-off behavior. If you choose to remove this key from the siloed resources, you’ll need to have more specialized code to compose your interaction with the data to account for the presence or absence of this key.
+Naturally, the type of data that your service stores and the technologies it uses are going to vary significantly. The example we covered here represents just one of many ways that
+multi-tenant data might shape how you implement your service.
+Supporting Tenant Isolation
+The data access example we just covered relies on inserting tenant context into our query to scope the data to a given tenant. It’s easy to assume that, if we’re filtering these queries
+by tenant, then you’ve put all the measures in place to ensure that one tenant can’t access the data of another tenant. And, in theory, it’s not an unreasonable expectation. However, in multi-tenant environments—where tenant isolation is essential to the trust of your tenants—filtering data access by tenant isn’t really enough.
+It’s critical that we draw a clear line between the strategies that are used to partition and access data and the strategies that are used to enforce tenant isolation. How data is stored and accessed is what we would consider your “data partitioning” strategy, which is covered in depth in
+Chapter 8
+. How we protect resources (including data) from cross-tenant access is referred to as “tenant isolation,” which is covered in detail in
+Chapter 9
+. When we’re talking about isolating tenant resources, we’re talking about the measures that we use to surround the code within our services to ensure that developers don’t intentionally or unintentionally cross tenant boundaries. So, regardless of what tenant parameter might be in your query, for example, the tenant isolation policies that surround that query will prevent that code from accessing the resources of another tenant.
+This, of course, means that we need to introduce new constructs and mechanisms into the implementation of our services to apply tenant isolation strategies. The goal is to have your code somehow acquire an isolation context before it accesses any resource and use that context to scope your resource access to the current tenant. With this context applied, any attempt to interact with a resource will be constrained to just those resources that belong to the current tenant.
+Now, let’s look at how we can take this theory and turn it into something more concrete to give you a better idea of how this might land in your multi-tenant services. For this particular example where we’re accessing DynamoDB, we can achieve our isolation goals by configuring our session with a set of credentials that will scope data access based on tenant context. If you look back to the starting point for our Order service, you’ll see where the Boto3 client was initialized as the client library that would be used to access our order data. The initialization code is as follows:
+def
+query_orders
+(
+self
+,
+status
+):
+# get database client (DynamoDB)
+ddb
+=
+boto3
+.
+client
+(
+'dynamodb'
+)
+...
+This initialization of the Boto3 library used a broader, default set of credentials to initialize the client. In this state, your client is initialized with a much wider scope, allowing it to access any item in your order table. That means any query here could access data for any tenant, regardless of what tenant context was passed into our
+service.
+Our goal, then, is to scope down the access of this client for each request that is attempting to get orders, initializing the client with a scope that includes the context of the calling tenant. To achieve this, we’d need to change the way our client is initialized. The code that would apply this scope would resemble the following:
+def
+query_orders
+(
+self
+,
+status
+):
+# get database client (DynamoDB) with tenant scoped credentials
+sts
+=
+boto3
+.
+client
+(
+'sts'
+)
+# get credentials based on tenant scope policy
+tenant_credentials
+=
+sts
+.
+assume_role
+(
+RoleArn
+=
+os
+.
+environ
+.
+get
+(
+'IDENTITY_ROLE'
+),
+RoleSessionName
+=
+tenant_id
+,
+Policy
+=
+scoped_policy
+,
+DurationSeconds
+=
+1000
+)
+# get a scoped session using assumed role credentials
+tenant_scoped_session
+=
+boto3
+.
+Session
+(
+aws_access_key_id
+=
+tenant_credentials
+[
+'Credentials'
+][
+'AccessKeyId'
+],
+aws_secret_access_key
+=
+tenant_credentials
+[
+'Credentials'
+][
+'SecretAccessKey'
+],
+aws_session_token
+=
+tenant_credentials
+[
+'Credentials'
+][
+'SessionToken'
+]
+)
+# get database client with tenant scoped credentials
+ddb
+=
+tenant_scoped_session
+.
+client
+(
+'dynamodb'
+)
+...
+There are a few moving parts to this solution. First, note that our first block of code focuses on getting a narrower set of credentials that are scoped based on the current tenant identifier. In this particular example, we’re staying within the family of AWS services, relying on the AWS Security Token Service (STS) to facilitate
+this scoping exercise. With STS, I can define a policy that restricts access to my order table. We won’t dig into the details of this policy here, but just know that it essentially restricts access to just those items in the database that match a given tenant ID. So, when I call the
+assume_role()
+function and supply my policy and tenant identifier (extracted from the JWT), this service will return a set of credentials that will limit access to just those items that belong to the current tenant. These credentials are stored in the
+tenant_credentials
+variable.
+Once we have these credentials, we can declare and initialize a session with the specific credential values that were returned from our
+assume_role()
+call. Here you’ll see the typical credential values that are used by AWS services when accessing resources.
+All that remains now is to declare our DynamoDB client (as we did before). However, the client is now created using the
+tenant_scoped_session
+variable. This essentially tells Boto3 to initialize the client with the credential values that we set up in the prior steps. Now, when we invoke the query command using this client, it will inherit the scoping policies and apply these to any call made with this client.
+This mechanism creates a true tenant isolation experience, providing a tenant-scoped context for any call to the database. Now, no matter what value or configuration a developer puts into their query, the system will prevent the service from accessing data that’s not valid for the current tenant.
+This example should give you a better sense of how tenant isolation can influence the footprint of your multi-tenant services. Getting this right is essential to building a robust isolation story for your solution. The challenge, though, is that there are a number of factors that make it difficult to have a one-size-fits-all approach to isolation. The technology you’re using, the cloud you’re on, the services you’re consuming, the silo or pool footprint of your resources—each of these elements may all require a different strategy to describe and enforce tenant isolation within your service. The spirit and mindset of what we’ve done here is still valid for any service. It’s really in the implementation and realization of these concepts where you’ll run into significant variation.
+It’s also important to note that your services are likely to interact with a range of different types of resources. The isolation policies and approach we’ve covered are meant to be applied across any resource that might be managing or touching tenant-specific constructs. If you have queues, for example, those queues may require some form of isolation.
+Note
+As you look at these tenant isolation mechanisms, you must consider whether these constructs will undermine the scale and performance of our solution. Will this added overhead create bottlenecks in your experience? Is there something more you can do to make application
+of these policies more efficient (caching, etc.)? These are the kinds of questions you’ll want to ask yourself as you’re introducing these constructs.
+Hiding Away and Centralizing Multi-Tenant Details
+When I kicked off our discussion of building multi-tenant services, I put great emphasis on being able to
+introduce these constructs without bloating or adding complexity to your developer experience. My goal was to hide away and centralize many of the multi-tenant constructs and keep your service code focused squarely on implementing the business logic of your application.
+Up to this point, I really haven’t achieved this goal. In fact, if I were to put all the concepts we discussed into one final version of my Order service, it would likely have tripled in size and complexity. You can also imagine how having this code in each service would be inefficient, distributing common concepts and constructs to every service in my system. At a minimum, this would represent a bad bit of programming. It would also limit my ability to centrally manage my multi-tenant strategies and
+policies.
+This is where we put our basic builder skills to work and look for the natural opportunities to move these concepts out of our services and into libraries that can hide away much of the detail that we have been covering. There’s nothing uniquely multi-tenant to this approach. It’s more that, as a multi-tenant architect, I want to be sure I’m doing what I can to streamline the service developer’s experience.
+If you look back to our example, you can see where there is code that could easily be moved into helper libraries. Consider, for example, how the code that we added to acquire tenant context from the JWT could be moved into a separate function. The code would simply be lifted out of our service and turned into a function that resembled the following:
+def
+get_tenant_context
+(
+request
+):
+auth_header
+=
+request
+.
+headers
+.
+get
+(
+'Authorization'
+)
+token
+=
+auth_header
+.
+split
+(
+" "
+)
+if
+(
+token
+[
+0
+]
+!=
+"Bearer"
+)
+raise
+Exception
+(
+'No bearer token in request'
+)
+bearer_token
+=
+token
+[
+1
+]
+decoded_jwt
+=
+jwt
+.
+decode
+(
+bearer_token
+,
+"secret"
+,
+algorithms
+=
+[
+"HS256"
+])
+tenant_context
+=
+{
+"TenantId"
+:
+decoded_jwt
+[
+'tenantId'
+],
+"Tier"
+:
+decoded_jwt
+[
+'tenantTier'
+]
+}
+return
+tenant_context
+This new
+get_tenant_context()
+function takes an HTTP request and does all the work we described earlier to extract the JWT, decode it, and pull out the custom claims that have our tenant context. I tweaked the function some, putting all the custom claims into a JSON object. How and what you chose to return here will depend on what’s in your custom claims. You might have separate functions to get specific custom claims (
+get_tenant_id()
+, for example). This is more a matter of style and what works best for your particular environment.
+The key, though, is that this library now means that any service needed to extract tenant context can make a single call to this library and shrink the amount of code that lands in your services. It also allows you to alter JWT policies without having these changes cascade across your solution. Imagine choosing a different approach to encoding or signing your JWT. With this in a centralized function, you can now make these alterations outside the view of service developers.
+This same theme can also be applied to the logging, metrics, data access, and tenant isolation code that we covered earlier. Each one of these areas can be addressed through the introduction of libraries that standardize the handling of these multi-tenant concepts.
+With logging and metrics, the key is really just removing the added overhead of injecting tenant context every time you log a message or record a metric. Now you can simply share the request context with each of these calls and let some external function determine how to acquire tenant context and inject it into your message and events.
+Data access is one area that may be a bit less generic and may require helpers that are local to a specific service. If you recall, we discussed a use case in which our Order service might need to support a tier-based storage model where each tier might need to route its requests to a different order table. In this scenario, you might lean on the traditional data access library (DAL) or repository pattern to create a targeted construct that abstracts away the details of interacting with our service’s storage. Here, this DAL could encapsulate all the multi-tenant requirements, including applying isolation within that layer (completely outside the view of service developers).
+Now, let’s assume we moved all of this multi-tenant code into a library. The code of our service would be streamlined substantially, returning it to the version that resembles the copy that we had before multi-tenancy was introduced. The following code introduces a new function to get tenant context, introduces a logging wrapper that injects tenant context, adds a function to get a tenant-scoped database client, and employs an order DAL to hide away the details of mapping tiers to specific tables:
+def
+query_orders
+(
+request
+,
+status
+):
+# get tenant context from request
+tenant_context
+=
+get_tenant_context
+(
+request
+)
+# get scoped database client
+ddb
+=
+get_scoped_client
+(
+tenant_context
+,
+policy
+)
+# query for orders with a specific status
+log_helper
+.
+info
+(
+request
+,
+"Find order with the status of
+%s
+"
+,
+status
+)
+Try
+:
+response
+=
+get_orders
+(
+ddb
+,
+tenant_context
+,
+status
+)
+except
+ClientError
+as
+err
+:
+log_helper
+.
+error
+(
+request
+,
+"Find order error, status:
+%s
+. Info:
+%s
+:
+%s
+"
+,
+status
+,
+err
+.
+response
+[
+'Error'
+][
+'Code'
+],
+err
+.
+response
+[
+'Error'
+][
+'Message'
+])
+raise
+else
+:
+return
+response
+[
+'Items'
+]
+While there are lots of nuances in how this concept could end up getting applied in your services, this example gives you a sense of just how this approach can influence the implementation of your services. In many respects, this comes down to following fundamental
+programming best practices. The elegance here is less in the detail of what’s in these libraries and more about the value they bring to service builders.
+Interception Tools and Strategies
+At this point, you can see how simply moving these shared multi-tenant concepts into libraries makes sense. However, in addition to moving this code outside of your services, you should also consider the different technology and language constructs you can use to streamline your developer experience and centralize your multi-tenant strategies.
+The basic idea is that we want to look at how we might leverage the built-in capabilities of a given technology construct to support these horizontal multi-tenant needs, allowing you to introduce and configure multi-tenant operations and policies with minimal cooperation of your service builders.
+Consider, for example, our approach to
+tenant isolation. If my language and tools provide me with a mechanism that allows me to insert processing between my service and the resources I am accessing, this might enable me to enforce aspects of my isolation model completely outside the view of my services.
+The hard part of providing guidance here is that the list of possible strategies that enable this approach is quite long. Each language and its supporting frameworks, for example, will bring its own unique blend of options to this discussion. Also, the different technology stacks and cloud services that are part of your architecture may include their own constructs that can be applied in this scenario. How and where these constructs are applied will vary significantly based on the specifics of each of these different options. While it would be counterproductive to review the spectrum of possibilities, I do want to highlight a few sample strategies to give you a better sense of the different types of mechanisms that could fit with this mindset.
+Aspects
+Aspects are generally introduced as a language or framework construct. They allow you to weave cross-cutting
+mechanisms into your code that enable you to inject pre- and post-processing logic into the footprint of your services. This allows you to introduce global policies and strategies into your services that may align well with some of the multi-tenant
+mechanisms that are part of your environment.
+Figure 7-11
+provides a conceptual view of the aspects model.
+Figure 7-11.
+Using aspects to apply tenant context
+At the center of this diagram is the code of your service. Much of the development of your services has no awareness of the policies that surround it. With aspect-oriented programming, I can bolt extra handling logic into my service that will be executed as tenant requests enter and exit. This code is woven into my services with whatever aspect tooling or technology I’ve chosen.
+You can imagine how this could represent a great fit for handling, processing, and applying tenant contextual operations. For example, you could use an aspect to intercept each request that comes into your service, adding pre-processing that would extract the JWT from the HTTP header, decode it, and initialize the tenant context for the rest of your request. You could also consider implementing elements of your tenant isolation model, acquiring and injecting the tenant-scoped credentials that are needed to enforce your isolation policies.
+The key is that this becomes a standard mechanism for all of your services that is woven into them as part of a global strategy (instead of relying on developers to call the appropriate
+helper functions in their code).
+Sidecars
+If your multi-tenant architecture is built with Kubernetes, you may want to consider whether sidecars could
+be used to apply multi-tenant strategies to your services. A sidecar runs in a separate container within your Kubernetes environment and has the ability to sit between your service and other resources and services. The nice part of these sidecars is that they are entirely outside the view of your service. This allows you to apply any global multi-tenant policies in a way that may not require the cooperation of your service.
+Figure 7-12
+provides a conceptual view of the sidecar model.
+Figure 7-12.
+Using sidecars for horizontal concepts
+On the left of
+Figure 7-12
+, you’ll see my application service that has my business logic. And on the far right is some resource that my service will interact with. This could be another service, a database, or any number of different constructs. The key here is that the sidecar sits between me and that resource. This allows the sidecar to intercept and apply tenant context outside the view of my service, extracting context and applying any policies that are associated with my service and the resource it’s consuming. Being able to separately deploy and configure this sidecar allows me to create a much more robust multi-tenant enforcement story, allowing me to have greater control over my service’s interactions with other resources.
+Middleware
+Some development frameworks
+support the notion of middleware. The idea is that you can introduce code that sits between your inbound request and your target
+operation.
+This allows you to intercept and apply any global policies that would be applied across your service.
+This middleware mechanism is commonly used in the Node.js Express framework. The framework provides all the built-in constructs that are needed to implement many of the multi-tenant service strategies that we’ve covered here (tenant context, isolation, etc.).
+AWS Lambda Layers/Extensions
+I mentioned that different cloud providers and their services may include constructs that could be a good
+fit for realizing some of these cross-cutting multi-tenant strategies. I thought it would be worth highlighting one example here. If you’re building a serverless SaaS environment on AWS, you have the opportunity to use Lambda Layers or Lambda Extensions to move your shared libraries into a standalone
+mechanism.
+With Lambda Layers, you can essentially move all of your helpers into a shared library that is then deployed independently. Each of the Lambda functions that are part of your service can reference the code in this shared library, allowing them to access the different helper functions you have without having that code being part of each service. This allows you to manage, version, and deploy these globally shared constructs entirely separately. Now, when you want to update your isolation mechanism, for example, you could update the code in your Lambda Layer, deploy it, and have each of your services get updated with this new capability.
+Lambda Extensions, on the other hand, fit more into the aspect pattern that we discussed earlier, allowing you to associate custom code with the lifecycle of a Lambda function. For example, you could use a Lambda Extension to pre-process a request upon entry to a function of your service. The code for a Lambda Extension can also live within a Lambda Layer.
+Conclusion
+At this point, you should have a much better sense of what it means to design and build a multi-tenant service. In this chapter, we started by looking at how the needs of multi-tenant environments directly influences the shape, size, and footprint of the services that support the core functionality of your SaaS offering. This required us to examine the various factors that must be added to your mental model when identifying the boundaries of your services.
+Much of our design discussion was focused on the continually shifting workloads and consumption profiles of your tenants and how this influences your approach to picking the combinations of services that will allow you to best address these realities—especially in environments that have pooled resources. This led to a much deeper dive into the different ways that noisy neighbor possibilities might impact the design of your services, potentially driving new service decomposition strategies that can better address the tendencies of a given service or workload. We also looked at how you might apply siloing strategies across your system’s services to address targeted performance, experience, and tiering requirements.
+As part of looking at design, I also highlighted the importance and value of investing in metrics that can continually inform the design of your services. The key was to acknowledge that you should expect your design to evolve based on the operational insights that will come once it’s alive and running under real workloads. It’s only with solid multi-tenant metrics and insights that you can understand how your service design is meeting the current and emerging needs of your tenants.
+Once we had a grasp of the design considerations, we shifted our attention to looking inside our services to better understand how multi-tenant shapes the actual implementation of these services. The focus here was first on determining how and where multi-tenancy needs to land within the implementation of your service. I highlighted how your service would acquire tenant context and then apply it across logging, metrics, data access, and tenant isolation. A key point of emphasis here was on making every effort to ensure that the introduction of these multi-tenant strategies/policies would not come at the cost of adding complexity or bloat to your services. We looked at specific ways to address this goal, outlining different ways to move these multi-tenant constructs outside the view of developers and to a more centrally developed and managed model.
+Overall, the broader theme is that multi-tenancy can have a significant impact on both the design and implementation of your services. At the design level, it’s all about anticipating the dynamic, shifting, and elusive profile of your tenant consumption tendencies and multi-tenant requirements. Within the services, it’s more about focusing on thinking about how you can ensure that your services are implementing the core best practices without undermining the experience or productivity of your builders.
+Now that we have a sense of how multi-tenant is implemented in our services, we can start digging into the various strategies that are used to represent the data used by these services. While I’ve provided glimpses of how you might store data in multi-tenant environments, we mostly looked at this through the lens of other concepts. Now, in the next chapter, we’ll focus exclusively on the different approaches and considerations that are associated with representing, operating, and managing multi-tenant data. This will give you a more complete view of the different factors you should consider when working with multi-tenant data and highlight key points of inflection that will influence how/where you store the data that’s part of your multi-tenant environment.

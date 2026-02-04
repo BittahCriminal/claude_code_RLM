@@ -1,0 +1,6959 @@
+:
+struct
+alignas
+(
+std
+::hardware_destructive_interference_size)
+Element
+{
+int
+counter_{};
+};
+auto
+elements =
+std
+::
+vector
+<Element>(num_threads);
+The elements in the vector are now guaranteed to reside on separate cache lines.
+Summary
+In this chapter, you have seen how to create programs that can execute multiple threads concurrently. We also covered how to avoid data races by protecting critical sections with locks or by using atomics. You learned that C++20 comes with some useful synchronization primitives: latches, barriers, and semaphores. We then looked into execution order and the C++ memory model, which becomes important to understand when writing lock-free programs. You also discovered that immutable data structures are thread-safe. The chapter ended with some guidelines for improving performance in concurrent applications.
+The next two chapters are dedicated to a completely new C++20 feature called coroutines, which allows us to write asynchronous code in a sequential style.
+
+12
+Coroutines and Lazy Generators
+Computing has become a world of waiting, and we need support in our programming languages to be able to express
+wait
+. The general idea is to suspend (temporarily pause) the current flow and hand execution over to some other flow, whenever it reaches a point where we know that we might have to wait for something. This
+something
+that we need to wait for could be a network request, a click from a user, a database operation, or even a memory access that is taking too long for us to block at. Instead, we say in our code that we will wait, continue some other flow, and then come back when ready. Coroutines allow us to do that.
+In this chapter, we're mainly going to focus on coroutines added to C++20. You will learn what they are, how to use them, and their performance characteristics. But we will also spend some time looking at coroutines in a broader sense, since the concept is apparent in many other languages.
+C++ coroutines come with very little support from the standard library. Adding standard library support for coroutines is a high-priority feature for the C++23 release. In order to use coroutines effectively in our day-to-day code, we need to implement some general abstractions. This book will show you how to implement these abstractions for the purpose of learning C++ coroutines rather than providing you with production-ready code.
+It's also important to understand the various types of coroutines that exist, what coroutines can be used for, and what motivated C++ to add new language features to support coroutines.
+This chapter covers a lot of ground. The next chapter is also about coroutines but with a focus on asynchronous applications. In summary, this chapter will guide you through:
+General theory about coroutines, including the difference between stackful and stackless coroutines, and how they are transformed by the compiler and executed on a computer.
+An introduction to stackless coroutines in C++. The new language support for coroutines in C++20 using
+co_await
+,
+co_yield
+, and
+co_return
+will be discussed and demonstrated.
+The abstractions that are needed for using C++20 coroutines as generators.
+A few real-world examples that show the benefits in terms of readability and simplicity of using coroutines and how we can write composable components that will evaluate lazily by using coroutines.
+If you have been working with coroutines in other languages, you need to be prepared for two things before reading the rest of this chapter:
+Some content may feel basic to you. Although the details about how C++ coroutines work are far from trivial, the usage examples might feel trivial to you.
+Some terms we will use in this chapter (coroutines, generators, tasks, and so forth) might not align with your current view of what these are.
+On the other hand, if you are completely new to coroutines, parts of this chapter may very well look like magic and take some time to grasp. I will therefore begin by showing you a few examples of how C++ code can look when using coroutines.
+A few motivating examples
+Coroutines are one of those
+features, similar to lambda expressions, that offer a way to completely change the way we write and think about C++ code. The concept is very general and can be applied in many different ways. To give you a taste of how C++ can look when using coroutines, we will here look briefly at two examples.
+Yield-expressions can be used for implementing generators—objects that produce sequences of values lazily. In this example, we will use the keywords
+co_yield
+and
+co_return
+to control the flow:
+auto
+iota
+(int start) -> Generator<
+int
+> {
+for
+(
+int
+i = start; i <
+std
+::numeric_limits<
+int
+>::max(); ++i) {
+co_yield
+i;
+  }
+}
+auto
+take_until(Generator<
+int
+>& gen,
+int
+value) -> Generator<
+int
+>
+{
+for
+(
+auto
+v : gen) {
+if
+(v == value) {
+co_return
+;
+    }
+co_yield
+v;
+  }
+}
+int
+main
+()
+{
+auto
+i = iota(
+2
+);
+auto
+t = take_until(i,
+5
+);
+for
+(
+auto
+v : t) {
+// Pull values
+std
+::
+cout
+<< v <<
+", "
+;
+  }
+return
+0
+;
+}
+// Prints: 2, 3, 4
+In the preceding example,
+iota()
+and
+take_until()
+are coroutines.
+iota()
+generates a sequence of integers and
+take_until()
+yields values until it finds the specified value. The
+Generator
+template is a custom type that I will show you how to design and implement later on in this chapter.
+Building generators is one common
+use case for coroutines, another one is implementing asynchronous tasks. The next example will demonstrate how we can use the operator
+co_await
+to wait for something without blocking the currently executing thread:
+auto
+tcp_echo_server
+() -> Task<>
+{
+char
+data[
+1024
+];
+for
+(;;) {
+size_t
+n =
+co_await
+async_read(socket, buffer(data));
+co_await
+async_write
+(socket, buffer(data, n))
+;
+  }
+}
+Instead of blocking,
+co_await
+suspends the execution until it gets resumed and the asynchronous read and write functions have completed. The example presented here is incomplete because we don't know what
+Task
+,
+socket
+,
+buffer
+, and the asynchronous I/O functions are. But we will get there in the next chapter when focusing on asynchronous tasks.
+Don't worry if it is not clear how these examples work at this point—we will spend a lot of time delving into the details later on in this chapter. The examples are here to give you a hint about what coroutines allow us to do if you have never encountered them before.
+Before digging into C++20 coroutines, we
+need to discuss some terminology and common foundational ground to better understand the design and motivation for adding a rather complicated language feature to C++ in 2020.
+The coroutine abstraction
+We will now take a step back and talk about
+coroutines in general and not just focus on the coroutines added to C++20. This will give you a better understanding of why coroutines are useful but also what types of coroutines there are and how they differ. If you are already familiar with stackful and stackless coroutines and how they are executed, you can skip this section and jump right to the next section,
+Coroutines in C++
+.
+The coroutine abstraction has been around for more than 60 years and many languages have adopted some sort of coroutines into their syntax or standard libraries. This means that coroutines can denote slightly different things in different languages and environments. Since this is a book about C++, I will use the terminology used in the C++ standard.
+Coroutines are very similar to subroutines. In C++, we don't have anything explicitly called subroutines; instead, we write functions (free functions or member functions, for example) to create subroutines. I will use the
+terms
+ordinary functions
+and
+subroutines
+interchangeably.
+Subroutines and coroutines
+To understand the difference between coroutines and subroutines (ordinary functions), we will here focus on the most basic properties of subroutines and coroutines, namely, how to start, stop, pause, and resume them. A subroutine is started when some other part of our program calls it. When the subroutine returns back to the caller, the subroutine stops:
+auto
+subroutine
+()
+{
+// Sequence of statements ...
+return
+;
+// Stop and return control to caller
+}
+subroutine();
+// Call subroutine to start it
+// subroutine has finished
+The call chain of subroutines is strictly nested. In the diagram that follows, subroutine
+f()
+cannot return to
+main()
+until subroutine
+g()
+has returned:
+Figure 12.1: A chain of subroutine calls and returns
+Coroutines can also be started and stopped just like
+subroutines, but they can also be
+suspended
+(paused) and
+resumed
+. If you haven't worked with coroutines before, this may seem very strange at first. The point where a coroutine is suspended
+and resumed is called a
+suspend/resume point
+. Some suspend points are implicit whereas others are explicitly marked in the code in one way or another. The following pseudo code shows three explicit suspend/resume points marked using
+await
+and
+yield
+:
+// Pseudo code
+auto
+coroutine
+()
+{
+  value =
+10
+;  
+  await something;
+// Suspend/Resume point
+// ...
+yield value++;
+// Suspend/Resume point
+yield value++;
+// Suspend/Resume point
+// ...
+return
+;
+}
+auto
+res = coroutine();
+// Call
+res.resume();
+// Resume
+In C++, the explicit suspend points are marked using the keywords
+co_await
+and
+co_yield
+. The diagram that follows shows how a coroutine is invoked (called) from one subroutine and then later resumed from different parts of the code:
+Figure 12.2: An invocation of a coroutine can suspend and resume. The coroutine invocation maintains its internal state while being suspended.
+The states of local variables inside a
+coroutine are preserved while the coroutine is suspended. The states belong to a certain invocation of a coroutine. That is, they are not like static local variables, which are globally shared among all invocations of a function.
+To summarize, coroutines are subroutines that also can be suspended and resumed. Another way to look at it is to say that subroutines are a specialization of coroutines that cannot be suspended or resumed.
+From now on, I will be very strict when distinguishing between
+call
+and
+resume
+, and
+suspend
+and
+return
+. They mean completely different things. Calling a coroutine creates a new instance of a coroutine that can be suspended and resumed. Returning from a coroutine destroys the coroutine instance and it can no longer be resumed.
+To really understand how coroutines can help us write efficient programs, you need to be aware of some low-level details about how functions in C++ are usually transformed to machine code and then executed.
+Executing subroutines and coroutines on the CPU
+We have talked about memory
+hierarchies, caches, virtual memory, scheduling of threads, and other hardware and operating system concepts in this book. But we
+haven't really talked about how instructions are being executed on the CPU using CPU registers and the stack. These concepts are important to understand when comparing subroutines with various flavors of coroutines.
+CPU registers, instructions, and the stack
+This section will provide
+a very simplified model of a CPU for the purpose of understanding context switching, function
+calls, and a few more details regarding the
+call stack. When I say CPUs in this context, I refer to some CPUs that are similar to the x86 family of CPUs equipped with multiple general-purpose registers.
+A program contains a sequence of instructions that the CPU executes. The sequence of instructions is stored somewhere in the memory of the computer. The CPU keeps track of the address of the currently
+executing instruction in a register called a
+program counter
+. In that way, the CPU knows what instruction to execute next.
+The CPU contains a fixed number of registers. A register is similar to a variable with a predefined name that can store a value or a memory address. Registers are the fastest data storage available on a computer and sit closest to the CPU. When the CPU manipulates data, it uses the registers. Some of the registers have a special meaning to the CPU, whereas other registers can be used more freely by the currently executing program.
+Two very important registers that have a special meaning to the CPU are:
+Program counter
+(
+PC
+): The register that
+stores the memory address of the currently executing instruction. This value is automatically incremented whenever an
+instruction is executed. Sometimes it is also called an
+instruction pointer
+.
+Stack pointer
+(
+SP
+): It stores the address of the top
+of the currently used call stack. Allocating and deallocating stack memory is a matter of changing the value stored in this single register.
+Figure 12.3: A CPU with registers
+Assume that the registers are called
+R0
+,
+R1
+,
+R2
+, and
+R3
+as in the preceding diagram. A typical arithmetic instruction could then look like this:
+add 73, R1
+// Add 73 to the value stored in R1
+Data can also be copied
+between registers and memory:
+mov SP, R2
+// Copy the stack pointer address to R2
+mov R2, [R1]
+// Copy value of R2 to memory address stored in R1
+A set of instructions refers
+implicitly to the call stack. The CPU knows where the top of the
+call stack is through the stack pointer. Allocating memory on the stack is only a matter of updating the stack pointer. The value increases or decreases depending on whether the stack grows towards higher or lower addresses.
+The following instruction uses the stack:
+push R1
+// Push value of R1 to the top of the stack
+The push instruction copies the value in the register to the place in memory pointed at by the stack pointer
+and
+increments (or decrements) the stack pointer.
+We can also pop values from the stack by using the
+pop
+instruction, which also reads and updates the stack pointer:
+pop R2
+// Pop value from the stack into R2
+Whenever an instruction is executed, the CPU automatically increments the program counter. But the program counter can also be explicitly updated through instructions, for example, the
+jump
+instruction:
+jump R3
+// Set the program counter to the address in R3
+The CPU can operate in two modes: user mode or kernel mode. The CPU registers are used differently when running in user mode and kernel mode. When the CPU is executing in user mode, it runs with restricted privileges that cannot access hardware. The operating system
+provides system calls that run in kernel mode. A C++ library function such as
+std::puts()
+, which prints values to
+stdout
+, must therefore make a system call to complete its task, forcing the CPU to switch between user mode and kernel mode.
+Transitioning between user
+and kernel mode is expensive. To understand why, let's think about our schematic CPU again. The CPU operates efficiently by using its registers and
+therefore avoids spilling values onto the stack unnecessarily. But the CPU is a shared resource among all user processes and the operating system, and whenever we need to switch between tasks (for example, when entering kernel mode), the state of the processor, including all of its registers, needs to be saved in memory so that it can be resumed later on.
+Call and return
+Now that you have a basic
+understanding of how the CPU uses registers and the stack, we can discuss subroutine invocations. There are a lot of mechanisms involved
+when calling and returning from a subroutine that we might take for granted. Our compilers are doing an excellent job when they transform a C++ function to highly optimized machine code.
+The following list shows the aspects that need to be considered when calling, executing, and returning from a subroutine:
+Calling and returning (jumping between points in the code).
+Passing parameters—parameters can be passed through registers or on the stack, or both.
+Allocating storage for local variables on the stack.
+Returning a value—the value returned from a subroutine needs to be stored in a place where the caller can find it. Typically, this is a dedicated CPU register.
+Using registers without interfering with other functions—the registers that a subroutine uses need to be restored to the state they were in before the subroutine was called.
+The exact details about how function calls are carried out are specified by something called
+calling conventions
+. They provide a
+protocol for the caller/callee to agree on who is responsible for which parts. Calling conventions differ among CPU architectures and compilers and are one of the major parts that constitutes an
+application binary interface
+(
+ABI
+).
+When a function
+is being called, a
+call frame
+(or activation frame) for that function is being created. The call frame
+contains:
+The
+parameters
+passed to the function.
+The
+local variables
+of the function.
+A
+snapshot of the registers
+that we intend to use and therefore need to restore before returning.
+A
+return address
+that links back to
+the place in memory where the caller invoked the function from.
+An optional
+frame pointer
+that points back to the top of the caller's call frame. Frame pointers are useful for debuggers when inspecting the stack. We will not discuss frame pointers further in this book.
+Thanks to the strictly nested nature of
+subroutines, we can save the call frames of the subroutines on the stack to support nested calls very efficiently. A call frame stored on the stack is usually called a
+stack frame
+.
+The following diagram shows multiple call frames on a call stack and highlights the contents of a single call frame:
+Figure 12.4: A call stack with multiple call frames. The call frame on the right-hand side is a zoomed-in version of a single call frame.
+When a subroutine returns back to its caller, it uses the return address to know where to jump, restores the registers it has mutated, and pops (deallocates) the entire call frame off the stack. In this way, both the stack and the registers are restored to the states they were in before the
+call of the subroutine was invoked. However, there are two exceptions. Firstly, the program counter (PC) has moved to the instruction after the call. Secondly, a
+subroutine that returns a value back to its caller usually stores that value in a dedicated register where the caller knows where to find it.
+After understanding
+how a subroutine is executed by temporarily using the stack and then
+restoring the CPU registers before returning control back to its caller, we can now start to look at how it's possible to suspend and resume coroutines.
+Suspend and resume
+Consider the following pseudo code that defines a coroutine with multiple suspend/resume points:
+// Pseudo code
+auto
+coroutine
+()
+{
+auto
+x =
+0
+;
+  yield x++;
+// Suspend
+g();
+// Call some other function
+yield x++;
+// Suspend
+return
+;
+// Return
+}
+auto
+co = coroutine();
+// Call subroutine to start it
+// ...                 // Coroutine is suspended
+auto
+a = resume(co);
+// Resume coroutine to get
+auto
+b = resume(co);
+// next value
+When
+coroutine()
+suspends, we can no longer remove the call frame as we do when a subroutine returns back to its caller. Why? Because we need to keep the current value of the variable,
+x
+, and also remember
+where
+in the coroutine we should continue executing the next time the coroutine is resumed. This information is placed into something called a
+coroutine frame
+. The coroutine
+frame contains all the information that is needed in order to resume a paused coroutine. This raises several new questions, though:
+Where is the coroutine frame stored?
+How big is the coroutine frame?
+When a coroutine calls a subroutine, it needs a stack to manage the nested call frames. What happens if we try to resume from within a nested call frame? Then we would need to restore the entire stack when the coroutine resumes.
+What is the runtime overhead of calling and returning from a coroutine?
+What is the runtime overhead of suspending and resuming a coroutine?
+The short answer to these
+questions is that it depends on what type of coroutine we are discussing: stackless or stackful coroutines.
+Stackful coroutines have
+a separate side stack (similar to a thread) that contains the coroutine frame and the nested call frames. This makes it possible to suspend from nested call frames:
+Figure 12.5: Each call to a stackful coroutine creates a separate side stack with a unique stack pointer
+Suspending and resuming stackless coroutines
+Stackless coroutines need to store the coroutine frame somewhere else (typically on the heap) and then use the stack of the currently executing thread to store nested call frames.
+But this is not the entire truth. The caller is the one responsible for creating the call frame, saving the return address (current value of the program counter), and the parameters on the stack. The caller doesn't know that it is calling a coroutine that will suspend and resume. Therefore, the coroutine itself needs to create the coroutine frame and copy the parameters and registers from the call frame to the coroutine frame when it is called:
+Figure 12.6: A stackless coroutine has a separate coroutine frame (usually on the heap) that contains the state necessary for resuming the coroutine
+When a
+coroutine initially suspends, the stack frame for the coroutine is popped from
+the stack, but the coroutine frame continues to live on. A memory address (handle/pointer) to the coroutine frame is returned back to the caller:
+Figure 12.7: A suspended coroutine. The coroutine frame contains all the information required for resuming the coroutine.
+To resume a coroutine, the caller uses the handle it received earlier and calls a resume function and passes the coroutine handle as a parameter. The resume function uses the suspend/resume point stored in the coroutine frame to continue executing the coroutine. The call to the resume function is also an ordinary function call that will generate a stack frame as illustrated in the following diagram:
+Figure 12.8: Resuming a coroutine creates a new call frame for the resume call. The resume function uses the handle to the coroutine state to resume from the right suspend point.
+Finally, when a
+coroutine returns, it is usually suspended and eventually deallocated. The state of the stack is shown in the following diagram:
+Figure 12.9: The coroutine frame is deallocated when it returns
+An important consequence of not
+having a separate side stack per coroutine invocation is that when a stackless coroutine is suspended, it cannot have any nested call frames left on the stack. Remember, when the control is transferred back to the caller, the caller's call frame must be on the top of the stack.
+As a final note, it should also be mentioned that the memory needed for the coroutine frame could be allocated
+within
+the call frame of the caller under some circumstances. We will discuss that in more detail when looking at C++20 coroutines.
+Stackless versus stackful coroutines
+As stated in the previous section, stackless
+coroutines use the stack of the currently running thread to handle nested function calls. The effect of this is that a stackless coroutine can never suspend from a nested call frame.
+Stackful coroutines are
+sometimes called
+fibers
+, and in the programming language Go, they are called
+goroutines
+. Stackful coroutines remind us of threads, where each thread manages its own stack. There are two big differences between stackful coroutines (or fibers) and OS threads, though:
+OS threads are scheduled by the kernel and switching between two threads is a kernel mode operation.
+Most OSes switch OS threads
+preemptively
+(the thread is interrupted by the scheduler), whereas a switch between two fibers happens
+cooperatively
+. A running fiber keeps running until it passes control over to some manager that can then schedule another fiber.
+There is also a category of
+threads called
+user-level threads
+or
+green threads
+. These are lightweight threads
+that don't involve kernel mode switching (because they run in user mode and are therefore unknown to the kernel). Fibers are one example of user-level threads. But it is also possible for user-level threads to be scheduled preemptively by a user library or by a virtual machine. Java threads are one example of preemptive user-level threads.
+Stackless coroutines also allow us to write and compose multiple concurrently running tasks but without the need for an individual side stack per flow. Stackless coroutines and state machines are tightly related. It's possible to transform a state machine into a coroutine and vice versa. Why is this useful to know? Firstly, it gives you a better understanding of what stackless coroutines are. Secondly, if you are already good at identifying problems that can be solved using state machines, you can more easily see where coroutines might fit in as an appropriate solution. State machines are very general abstractions and can be applied to a great variety of problems. However, some areas where state machines are usually applied are parsing, gesture recognition, and I/O multiplexing, to mention a few. These are all areas where stackless coroutine can really shine both in terms of expressiveness and performance.
+Performance cost
+Coroutines are an
+abstraction that allow us to write
+lazy evaluated code and
+asynchronous programs in a clear and concise way. But there is a performance cost related to creating and destroying coroutines as well as suspending and resuming coroutines. When comparing the performance cost of stackless and stackful coroutines, two main aspects need to be addressed:
+memory footprint
+and
+context switching
+.
+Memory footprint
+Stackful coroutines need a
+separate call stack in order to handle suspension from within nested call frames. When calling a coroutine, we therefore need
+to dynamically allocate a chunk of memory for this new side stack. This immediately raises the question: how big a stack do we need to allocate? Unless we have some policy regarding how much stack a coroutine and its nested call frames can consume, we probably need to have a stack of approximately the same size as a normal call stack of a thread.
+Some implementations have experimented with a segmented stack, which would allow the stack to grow if necessary. Another alternative is to start with a small contiguous stack and then copy the stack to a bigger newly allocated memory region when needed (similar to how
+std::vector
+grows). The coroutine implementation in Go (goroutines) has switched from using a segmented stack to a dynamically growing contiguous stack.
+Stackless coroutines do not need to allocate memory for a separate side stack. Instead, they need a single allocation for storing each coroutine frame in order to support suspend and resume. This allocation happens when the coroutine is called (but not on suspend/resume). The call frame is deallocated when the coroutine returns.
+In summary, stackful coroutines demand a big initial memory allocation for the coroutine frame and the side stack, or need to support a growing stack. Stackless coroutines only need to allocate memory for the coroutine frame. The memory footprint of calling a coroutine can be summarized as follows:
+Stackless: Coroutine frame
+Stackful: Coroutine frame + call stack
+The next aspect of performance cost relates to suspending and resuming coroutines.
+Context switching
+Context switching
+can occur at different levels. In general, a context
+switch happens when we need the CPU to switch between two or many ongoing tasks. The task that is about to be paused needs to save the entire state of the CPU so that it can be restored at a later stage.
+Switching between different processes and OS threads are fairly expensive operations that involve system calls, requiring the CPU to enter kernel mode. Memory caches are invalidated and, for process switching, the tables that contain the mappings between the virtual memory and physical memory need to be replaced.
+Suspending and resuming
+coroutines is also a kind of context switch because we are switching between multiple concurrent flows. Switching between coroutines is substantially faster than switching between processes and OS threads, partly because it doesn't involve any system calls that require the CPU to run in kernel mode.
+However, there is still a difference
+when switching between stackful coroutines and switching between stackless coroutines. The relative runtime performance of the context switches of stackful versus stackless coroutines can depend on the call patterns. But, in general, a stackful coroutine has a more expensive context switch operation since it has more information to save and restore during suspend and resume compared to a stackless coroutine. Resuming a stackless coroutine is comparable to a normal function call.
+The stackless versus stackful
+debate has been going on in the C++ community for quite a few years now and I will do my best to stay away from the debate by concluding that they both have valid use cases—some use cases will favor stackful coroutines and other use cases will favor stackless coroutines.
+This section took a little detour for the purpose of you having a better understanding of how coroutines execute and perform. Let's have a short recap of what you have learned.
+What you have learned so far
+Coroutines are functions that can be suspended and resumed. An ordinary function does not have this ability, which makes it possible to remove the call frame of a function that returns. However, a coroutine that is suspended needs to keep the call frame alive to be able to restore the state of the coroutine once it gets resumed. Coroutines are more powerful than subroutines and involve more bookkeeping in the generated machine code. However, thanks to the close relationship between coroutines and ordinary functions, the compilers of today are very good at optimizing stackless coroutines.
+Stackful coroutines can be seen as non-preemptive user-level threads, whereas stackless coroutines offer a way to write state machines in a direct imperative fashion using the keywords
+await
+and
+yield
+to specify the suspend points.
+After this introduction to the general coroutine abstraction, it's now time to understand how stackless coroutines are implemented in C++.
+Coroutines in C++
+The coroutines added to
+C++20 are stackless coroutines. There are options to use stackful coroutines in C++ as well by using third-party libraries. The most well-known cross-platform library is Boost.Fiber. C++20 stackless coroutines introduce new language constructs, while Boost.Fiber is a library that can be used with C++11 and onward. We will not discuss stackful coroutines any further in this book but will instead focus on the stackless coroutines that have been standardized in C++20.
+The stackless coroutines in C++20 were designed with the following goals:
+Scalable in the sense
+that they add very little memory overhead. This makes it possible to have many more coroutines alive compared to the possible number of threads or stackful coroutines alive.
+Efficient context switching, which means that suspending and resuming a coroutine should be about as cheap as an ordinary function call.
+Highly flexible. C++ coroutines have more than 15 customization points, which gives application developers and library writers a lot of freedom to configure and shape coroutines as they like. Decisions about how coroutines are supposed to work can be determined by us developers rather than being hardcoded in a language specification. One example is whether a coroutine should be suspended directly after being called or continue executing to the first explicit suspend point. Such questions are usually hard-coded in other languages, but in C++ we can customize this behavior using customization points.
+Do not require C++ exceptions to handle errors. This means that you can use coroutines in environments where exceptions are turned off. Remember that coroutines are a low-level feature comparable to ordinary functions, which can be highly useful in embedded environments and systems with real-time requirements.
+With these goals in mind, it's probably not a surprise that C++ coroutines can be a bit complicated to grasp at first.
+What's included in standard C++ (and what's not)?
+Some C++ features are pure
+library features (such as the Ranges library) whereas other features are pure language features (such as type inference with the help of the
+auto
+keyword). However, some features require additions to both the core language and the standard library. C++ coroutines are one of those features; they introduce new keywords to the language, but also add new types to the standard library.
+On the language side, to recap, we have the following keywords related to coroutines:
+co_await
+: An operator that suspends the current coroutine
+co_yield
+: Returns a value to the caller and suspends the coroutine
+co_return
+: Completes the execution of a coroutine and can, optionally, return a value
+On the library side, there is a new
+<coroutine>
+header including the following:
+std::coroutine_handle
+: A template class that refers to the coroutine state, enabling the suspending and resuming of the coroutine
+std::suspend_never
+: A trivial awaitable type that never suspends
+std::suspend_always
+: A trivial awaitable type that always suspends
+std::coroutine_traits
+: Used to define the promise type of a coroutine
+The library types that comes with C++20 are the absolute minimum. For example, the infrastructure for communicating between the coroutine and the caller is not part of the C++ standard. Some of the types and functions that we need in order to use coroutines effectively in our application code have already been suggested in new C++ proposals, for example the template classes
+task
+and
+generator
+and the functions
+sync_wait()
+and
+when_all()
+. The library part of C++ coroutines will most likely be complemented in C++23.
+In this book, I will provide some simplified types for filling this gap instead of using a third-party library. By implementing those types, you will get a deep understanding of how C++ coroutines work. However, designing robust library components that can be used with coroutines is hard to get right without introducing lifetime issues. So, if you are planning to use coroutines in your current project, using a third-party library may be a better alternative to implementing them from scratch. At the time of writing, the
+CppCoro
+library is the de facto standard for these general-purpose primitives. The library was created by Lewis Baker
+and is available at
+https://github.com/lewissbaker/cppcoro
+.
+What makes a C++ function a coroutine?
+A C++ function is a
+coroutine if it contains any of the keywords
+co_await
+,
+co_yield
+, or
+co_return
+. In addition, the compiler puts special requirements on the return type of a coroutine. But, nevertheless, we need to inspect the definition (the body) and not only the declaration to know whether we are facing a coroutine or an ordinary function. This means that the caller of a coroutine doesn't need to know whether it calls a coroutine or an ordinary function.
+Compared to ordinary functions, a coroutine also has the following restrictions:
+A coroutine cannot use variadic arguments like
+f(const char*...)
+A coroutine cannot return
+auto
+or a concept type:
+auto f()
+A coroutine cannot be declared
+constexpr
+Constructors and destructors cannot be coroutines
+The
+main()
+function cannot be a coroutine
+Once the compiler has decided that a function is a coroutine, it associates the coroutine with a number of types for making the coroutine machinery work. The following diagram highlights the different components that are involved when a
+caller
+uses a
+coroutine
+:
+Figure 12.10: Relationship between a coroutine and its caller
+The caller and the coroutine are the actual functions we will normally implement in our application code.
+The
+Return Object
+is the type that the
+coroutine returns and is typically a general class template designed for some specific use case, for example,
+generators
+or
+asynchronous tasks
+. The
+caller
+interacts with the return object to resume the coroutine and to get values emitted from the coroutine. The return object usually delegates all its calls to the coroutine handle.
+The
+Coroutine Handle
+is a non-owning
+handle to the
+Coroutine State
+. Through the
+coroutine handle we can resume and destroy the coroutine state.
+The
+coroutine state
+is what I have
+previously referred to as the coroutine frame. It's an
+opaque object, which means that we don't know its size and we cannot access it in any other way than through the handle. The coroutine state stores everything necessary in order to resume the coroutine where it was last suspended. The coroutine state also
+contains the
+Promise
+.
+The promise object is what the coroutine itself communicates with indirectly through the keywords
+co_await
+,
+co_yield
+, and
+co_return
+. If values or errors are submitted from the coroutine, they will first reach the promise object. The promise object acts like a channel between the coroutine and the caller, but neither of them have direct access to the promise.
+Admittedly, this can look pretty dense at first sight. A complete but minimal example will help you understand the different parts a little better.
+A minimal but complete example
+Let's start with a minimal example for the
+purpose of understanding how coroutines work. Firstly, we implement a small
+coroutine
+that is suspended and resumed before it returns:
+auto
+coroutine
+() -> Resumable {
+// Initial suspend
+std
+::
+cout
+<<
+"3 "
+;
+co_await
+std
+::suspend_always{};
+// Suspend (explicit)
+std
+::
+cout
+<<
+"5 "
+;
+}
+// Final suspend then return
+Secondly, we create the
+caller
+of the coroutine. Pay attention to the output and the control flow of this program. Here it is:
+int
+main
+()
+{
+std
+::
+cout
+<<
+"1 "
+;
+auto
+resumable = coroutine();
+// Create coroutine state
+std
+::
+cout
+<<
+"2 "
+;
+  resumable.resume();
+// Resume
+std
+::
+cout
+<<
+"4 "
+;
+  resumable.resume();
+// Resume
+std
+::
+cout
+<<
+"6 "
+;
+}
+// Destroy coroutine state
+// Outputs: 1 2 3 4 5 6
+Thirdly, the return object of the coroutine,
+Resumable
+, needs to be defined:
+class
+Resumable
+{
+// The return object
+struct
+Promise
+{
+/*...*/
+};
+// Nested class, see below
+std
+::coroutine_handle<Promise> h_;
+explicit
+Resumable(
+std
+::coroutine_handle<Promise> h) : h_{h} {}
+public
+:
+using
+promise_type = Promise;
+Resumable(Resumable&& r) : h_{
+std
+::exchange(r.h_, {})} {}
+  ~Resumable() {
+if
+(h_) { h_.destroy(); } }
+bool
+resume
+() {
+if
+(!h_.done()) { h_.resume(); }
+return
+!h_.done();
+}
+};
+Finally, the promise type is implemented as a nested class inside the
+Resumable
+, like this:
+struct
+Promise
+{
+Resumable
+get_return_object
+()
+{
+using
+Handle =
+std
+::coroutine_handle<Promise>;
+return
+Resumable{Handle::from_promise(*
+this
+)};
+  }
+auto
+initial_suspend
+()
+{
+return
+std
+::suspend_always{}; }
+auto
+final_suspend
+()
+noexcept
+{
+return
+std
+::suspend_always{}; }
+void
+return_void
+()
+{}
+void
+unhandled_exception
+()
+{
+std
+::
+terminate
+(); }
+};
+This example is minimal, but
+walks through a lot of things that are worth paying attention to and need to be understood:
+The function
+coroutine()
+is a coroutine because it contains the explicit suspend/resume point using
+co_await
+The coroutine doesn't yield any values but still needs to return a type (the
+Resumable
+) with certain constraints so that the caller can resume the coroutine
+We are using an
+awaitable type
+called
+std::suspend_always
+The
+resume()
+function of the
+resumable
+object resumes the coroutine from the point it was suspended
+The
+Resumable
+is the owner of the coroutine state. When the
+Resumable
+object is destructed, it destroys the coroutine using the
+coroutine_handle
+The relationship between the caller, the
+coroutine, the coroutine handle, the promise, and the resumable is illustrated in the following diagram:
+Figure 12.11: Relationship between the functions/coroutines and objects involved in the resumable example
+Now it's time to look a little closer at each part. We'll begin with the
+Resumable
+type.
+The coroutine return object
+Our coroutine returns an
+object of type
+Resumable
+. This
+Resumable
+class is very simple. This is the object that the coroutine returns and which the caller can use in order to resume and destroy the coroutine. Here is the complete definition again for your convenience:
+class
+Resumable
+{
+// The return object
+struct
+Promise
+{
+/*...*/
+};
+// Nested class
+std
+::coroutine_handle<Promise> h_;
+explicit
+Resumable(
+std
+::coroutine_handle<Promise> h) : h_{h} {}
+public
+:
+using
+promise_type = Promise;
+Resumable(Resumable&& r) : h_{
+std
+::exchange(r.h_, {})} {}
+  ~Resumable() {
+if
+(h_) { h_.destroy(); } }
+bool
+resume
+() {
+if
+(!h_.done()) { h_.resume(); }
+return
+!h_.done();
+}
+};
+Resumable
+is a move-only type
+that is the owner of the coroutine handle (and therefore controls the lifetime of the coroutine). The move constructor ensures that the coroutine handle is cleared in the source object by using
+std::exchange()
+. When a
+Resumable
+object is destructed, it destroys the coroutine if it still owns it.
+The
+resume()
+member function delegates the resume call to the coroutine handle if the coroutine is still alive.
+Why do we need the member type alias
+promise_type = Promise
+inside
+Resumable
+? With each coroutine there is also an associated promise object. When the compiler sees a coroutine (by inspecting the body of a function), it needs to figure out the associated promise type. For that, the compiler uses the
+std::coroutine_traits<T>
+template, where
+T
+is the return type of your coroutine. You can provide a template specialization of
+std::coroutine_traits<T>
+or exploit the fact that the default implementation of
+std::coroutine_traits
+will look for a
+public
+member type or alias named
+promise_type
+in the return type
+T
+of the coroutine. In our case, the
+Resumable::promise_type
+is an alias for
+Promise
+.
+The promise type
+The promise type controls the
+behavior of the coroutine. Again, here is the full definition reproduced for convenience:
+struct
+Promise
+{
+auto
+get_return_object
+()
+{
+return
+Resumable{*
+this
+}; }
+auto
+initial_suspend
+()
+{
+return
+std
+::suspend_always{}; }
+auto
+final_suspend
+()
+noexcept
+{
+return
+std
+::suspend_always{}; }
+void
+return_void
+()
+{}
+void
+unhandled_exception
+()
+{
+std
+::
+terminate
+(); }
+};
+We should not call these functions directly; instead, the compiler inserts calls to the promise objects when it transforms a coroutine into machine code. If we don't provide these member functions, the compiler doesn't know how to generate code for us. You can think about the promise as a coroutine controller object that is responsible for:
+Producing the value
+returned from the invocation of the coroutine. This is handled by the function
+get_return_object()
+.
+Defining the behavior when the coroutine is created and before it gets destroyed by implementing the functions
+initial_suspend()
+and
+final_supsend()
+. In our
+Promise
+type, we say that the coroutine should be suspended at these points by returning
+std::suspend_always
+(see the next section).
+Customizing the behavior when the coroutine finally returns. If a coroutine uses a
+co_return
+with an expression that evaluates to a value of type
+T
+, the promise must define a member function named
+return_value(T)
+. Our coroutine returns no value, but the C++ standard requires us to provide the customization point called
+return_void()
+, which we leave empty here.
+Handling exceptions that are not handled inside the coroutine body. In the function
+unhandled_exception()
+, we simply call
+std::terminate()
+, but we will handle it more gracefully in later examples.
+There are some final pieces of the code that require some more attention, namely the
+co_await
+expression and awaitable types.
+Awaitable types
+We added one explicit suspend
+point in our code using
+co_await
+and passed it an instance of the awaitable type,
+std::suspend_always
+. The implementation of
+std::suspend_always
+looks something like this:
+struct
+std
+:
+:
+suspend_always
+{
+constexpr
+bool
+await_ready
+()
+const
+noexcept
+{
+return
+false
+; }
+constexpr
+void
+await_suspend
+(coroutine_handle<>)
+const
+noexcept
+{}
+constexpr
+void
+await_resume
+()
+const
+noexcept
+{}
+};
+std::suspend_always
+is called a trivial awaitable type because it will always make a coroutine suspend by saying that it is never ready. There is another trivial awaitable type that always reports that it is ready, called
+std::suspend_never
+:
+struct
+std
+:
+:
+suspend_never
+{
+constexpr
+bool
+await_ready
+()
+const
+noexcept
+{
+return
+true
+; }
+constexpr
+void
+await_suspend
+(coroutine_handle<>)
+const
+noexcept
+{}
+constexpr
+void
+await_resume
+()
+const
+noexcept
+{}
+};
+We could create our own
+awaitable types, which we will cover in the next chapter, but for now we can manage with those two trivial standard types.
+This completes the example. But we can do some more experimenting when we have the
+Promise
+and the
+Resumable
+types in place. Let's see what we can do with a started coroutine.
+Passing our coroutine around
+Once the
+Resumable
+object is created, we
+can pass it to other function and resume it from there. We can even pass the coroutine to another thread. The following example shows some of this flexibility:
+auto
+coroutine
+() -> Resumable
+{
+std
+::
+cout
+<<
+"c1 "
+;
+co_await
+std
+::suspend_always{};
+std
+::
+cout
+<<
+"c2 "
+;
+}
+auto
+coro_factory
+()
+{
+// Create and return a coroutine
+auto
+res = coroutine();
+return
+res;
+}
+int
+main
+()
+{
+auto
+r = coro_factory();
+  r.resume();
+// Resume from main
+auto
+t =
+std
+::jthread{[r =
+std
+::move(r)]()
+mutable
+{
+using
+namespace
+std
+::chrono_literals;
+std
+::this_thread::sleep_for(
+2
+s);
+    r.resume();
+// Resume from thread
+}};
+}
+The preceding example demonstrates that once we have called our coroutine and have got a handle to it, we can move it around just like any other moveable type. This ability to pass it to other threads is actually very
+useful in situations where we need to avoid the possible heap allocation of the coroutine state on a specific thread.
+Allocating the coroutine state
+The coroutine state, or the
+coroutine frame, is where the coroutine stores its state while it is suspended. The lifetime of the coroutine state starts when the coroutine is invoked by a call, and is destroyed when the coroutine executes a
+co_return
+statement (or the control flows off the end of the coroutine body), unless it was destroyed earlier through the coroutine handle.
+The coroutine state is normally allocated on the heap. A separate heap allocation is inserted by the compiler. In some cases, though, this separate heap allocation can be elided by inlining the coroutine state into the frame of the caller (which could be an ordinary stack frame or another coroutine frame). Unfortunately, there is never any guarantee of this elision of the heap allocation.
+For the compiler to be able to elide the heap allocation, the complete lifetime of the coroutine state must be strictly nested within the lifetime of the caller. In addition, the compiler needs to figure out the total size of the coroutine state and generally needs to have visibility of the body of the called coroutine so that parts of it can be inlined. Situations like virtual function calls, and calls to functions in other translation units or shared libraries, typically make this impossible. If the compiler is missing the information it needs, it will insert a heap allocation.
+The heap allocation of the coroutine state is performed using
+operator
+new
+. It is possible to provide a custom class-level
+operator new
+on the promise type, which will then be used instead of global
+operator new
+. It's therefore possible to check whether the heap allocation was elided or not. And if it wasn't, we can find out how much memory is needed for the coroutine state. Here is an example using the
+Promise
+type we defined earlier:
+struct
+Promise
+{
+/* Same as before ... */
+static
+void
+*
+operator
+new
+(
+std
+::
+size_t
+sz)
+{
+std
+::
+cout
+<<
+"custom new for size "
+<< sz <<
+'\n'
+;
+return
+::
+operator
+new
+(sz);
+  }
+static
+void
+operator
+delete
+(
+void
+* ptr)
+{
+std
+::
+cout
+<<
+"custom delete called\n"
+;
+    ::
+operator
+delete
+(ptr)
+;
+  }
+}
+Another trick to
+verify that the heap allocations are completely elided for all coroutines using some specific promise type would be to declare
+operator new
+and
+operator delete
+but leave out their definitions. If the compiler then inserts calls to these operators, the program will fail to link due to unresolved symbols.
+Avoiding dangling references
+The fact that a coroutine can
+be passed around in our code means that we need to be very careful about the lifetime of parameters we pass to a coroutine to avoid dangling references. The coroutine frame contains copies of the objects that normally live on the stack, such as local variables and parameters passed to the coroutine. If a coroutine accepts an argument by reference, the
+reference
+is copied, not the object. This means that we can easily end up with dangling references when following the usual guidelines for function parameters; that is, pass objects that are expensive to copy by reference to
+const
+.
+Passing parameters to coroutines
+The following
+coroutine uses a reference to a
+const std::string
+:
+auto
+coroutine
+(
+const
+std
+::
+string
+& str) -> Resumable {
+std
+::
+cout
+<< str;
+co_return
+;
+}
+Suppose we have a factory function that creates and returns the coroutine, like this:
+auto
+coro_factory
+()
+{
+auto
+str =
+std
+::
+string
+{
+"ABC"
+};
+auto
+res = coroutine(str);
+return
+res;
+}
+And finally, a
+main()
+function that uses the coroutine:
+int
+main
+()
+{
+auto
+coro = coro_factory();
+  coro.resume();
+}
+This code exhibits undefined behavior as the
+std::string
+object containing the string
+"ABC"
+is no longer alive when the
+coroutine tries to access it. Hopefully, this doesn't come as a surprise to you. This problem is similar to having a lambda capture a variable by reference, and then passing the lambda to some other code without keeping the referenced object alive. A similar example can be achieved when passing around a lambda capturing variables by reference:
+auto
+lambda_factory
+()
+{
+auto
+str =
+std
+::
+string
+{
+"ABC"
+};
+auto
+lambda = [&str]() {
+// Capture str by reference
+std
+::
+cout
+<< str;     
+  };
+return
+lambda;
+// Ops! str in lambda becomes
+}
+// a dangling reference
+int
+main
+()
+{
+auto
+f = lambda_factory();
+  f();
+// Undefined behavior
+}
+As you can see, the same problem can happen with lambdas. In
+Chapter 2
+,
+Essential C++ Techniques
+, I warned you about capturing references with lambdas, and it is usually better to avoid this by capturing by value instead.
+The solution to avoid dangling references with coroutines is similar: avoid passing parameters by reference when using coroutines. Instead, use pass by value, and the entire parameter object will be placed safely in the coroutine frame:
+auto
+coroutine
+(
+std
+::
+string
+str) -> Resumable {
+// OK, by value!
+std
+::
+cout
+<< str;
+co_return
+;
+}
+auto
+coro_factory
+()
+{
+auto
+str =
+std
+::
+string
+{
+"ABC"
+};
+auto
+res = coroutine(str);
+return
+res;
+}
+int
+main
+()
+{
+auto
+coro = coro_factory();
+  coro.resume();
+// OK!
+}
+Parameters are an
+important and common source of lifetime issues when using coroutines, but they are not the only source. Now we will explore some other pitfalls related to coroutines and dangling references.
+Member functions that are coroutines
+A member function can also
+be a coroutine. For example, there is nothing that stops us from using
+co_await
+inside a member function, as in the following example:
+struct
+Widget
+{
+auto
+coroutine
+() -> Resumable {
+// A member function
+std
+::
+cout
+<< i_++ <<
+" "
+;
+// Access data member
+co_await
+std
+::suspend_always{};
+std
+::
+cout
+<< i_++ <<
+" "
+;
+  }
+int
+i_{};
+};
+int
+main
+()
+{
+auto
+w = Widget{
+99
+};
+auto
+coro = w.coroutine();
+  coro.resume();
+  coro.resume();
+}
+// Prints: 99 100
+It's important to understand that it's the responsibility of the caller of
+coroutine()
+(in this case,
+main()
+) to ensure that the
+Widget
+object,
+w
+, is kept alive during the entire lifetime of the coroutine. The coroutine is accessing data members from the object it belongs to, but the
+Widget
+object itself is
+not
+kept alive by the coroutine. This can easily become a problem if we pass the coroutine to some other part of the program.
+Let's say we are using some coroutine factory function as demonstrated earlier, but instead return a member function coroutine:
+auto
+widget_coro_factory
+()
+{
+// Create and return a coroutine
+auto
+w = Widget{};
+auto
+coro = w.coroutine();
+return
+coro; 
+}
+// Object w destructs here
+int
+main
+()
+{
+auto
+r = widget_coro_factory();
+  r.resume();
+// Undefined behavior
+r.resume();                  
+}
+This code exhibits
+undefined behavior because we now have a dangling reference from the coroutine to the
+Widget
+object created and destructed in the
+widget_coro_factory()
+function. In other words, we end up with two objects with distinct lifetimes, whereas one of the objects references the other but without any explicit ownership.
+Lambdas that are coroutines
+Not only member
+functions can become coroutines. It's also possible to create coroutines using lambda expressions by inserting
+co_await
+,
+co_return
+, and/or
+co_yield
+in the body of a lambda.
+Coroutine lambdas can be a little extra tricky to deal with. One way to understand the most common lifetime issue with coroutine lambdas is to think about function objects. Recall from
+Chapter 2
+,
+Essential C++ Techniques
+, that a lambda expression is transformed into a function object by the compiler. The type of this object is a class with the call operator implemented. Now, let's say we use
+co_return
+inside the body of a lambda; it means that the call operator
+operator()()
+becomes a coroutine.
+Consider the following code using a lambda:
+auto
+lambda = [](
+int
+i) -> Resumable {
+std
+::
+cout
+<< i;
+co_return
+;
+// Make it a coroutine
+};
+auto
+coro = lambda(
+42
+);
+// Call, creates the coroutine frame
+coro.resume();
+// Outputs: 42
+The type that the lambda corresponds to looks something like this:
+struct
+LambdaType
+{
+auto
+operator
+()
+(
+int
+i)
+-> Resumable
+{
+// Member function
+std
+::
+cout
+<< i;
+// Body
+co_return
+;
+  }
+};
+auto
+lambda = LambdaType{};
+auto
+coro = lambda(
+42
+);
+coro.resume();
+The important thing to note here is that the actual coroutine is a
+member function
+, namely the call operator
+operator()()
+. The previous section already demonstrated the pitfalls of having coroutine member
+functions: we need to keep the object alive during the lifetime of the coroutine. In the preceding example, it means we need to keep the function object named
+lambda
+alive as long as the coroutine frame is alive.
+Some usages of lambdas make it really easy to accidentally destruct the function object before the coroutine frame is destroyed. For example, by using an
+immediately invoked lambda
+, we can easily get into trouble:
+auto
+coro = [i =
+0
+]()
+mutable
+-> Resumable {
+std
+::
+cout
+<< i++;
+co_await
+std
+::suspend_always{};
+std
+::
+cout
+<< i++;
+}();
+// Invoke lambda immediately
+coro.resume();
+// Undefined behavior! Function object
+coro.resume();
+// already destructed
+This code looks innocent; the lambda is not capturing anything by reference. However, the function object created by the lambda expression is a temporary object that will be destructed once it has been invoked and the coroutine captures a reference to it. When the coroutine is resumed, the program will likely crash or produce garbage.
+Again, a way to understand this better is to transform the lambda to an ordinary class with
+operator()
+defined:
+struct
+LambdaType
+{
+int
+i{
+0
+};
+auto
+operator
+()()
+-> Resumable
+{
+std
+::
+cout
+<< i++;
+co_await
+std
+::suspend_always{};
+std
+::
+cout
+<< i++;
+  }
+};
+auto
+coro = LambdaType{}();
+// Invoke operator() on temporary object
+coro.resume();
+// Ops! Undefined behavior
+Now you can see that this
+is very similar to the case where we had a member function that was a coroutine. The function object is not kept alive by the coroutine frame.
+Guidelines to prevent dangling references
+Unless you have good
+reasons for accepting arguments by reference, choose to accept arguments by value if you are writing a coroutine. The
+coroutine frame will then keep a full copy of the object you pass to it, and the object is guaranteed to live as long as the coroutine frame.
+If you are using lambdas or member functions that are coroutines, pay special attention to the lifetime of the object that the coroutine belongs to. Remember that the object (or function object) is
+not
+stored in the coroutine frame. It's the responsibility of the caller of the coroutine to keep it alive.
+Handling errors
+There are different ways to
+transfer errors from a coroutine back to the part of the code that called it or resumed it. We are not forced to use exceptions for signaling errors. Instead, we can customize error handling as we want.
+A coroutine can pass an error back to the client using the coroutine by either throwing an exception or returning an error code when the client gets a value back from the coroutine (when the coroutine yields or returns).
+If we are using exceptions and an exception is propagated out of the body of the coroutine, the function
+unhandled_exception()
+of the promise object is called. This call happens inside a catch block inserted by the compiler, so that it is possible to use
+std::current_exception()
+to get hold of the exception that was thrown. The result from
+std::current_exception()
+can then be stored in the coroutine as a
+std::exception_ptr
+and rethrown later on. You will
+see examples of this in the next chapter when using asynchronous coroutines.
+Customization points
+You have already seen many
+customization points, and I think a valid question is: why so many customization points?
+Generality
+: The customization points
+make it possible to use coroutines in various ways. There are very few assumptions about how to use the C++ coroutines. Library writers can customize the behavior of
+co_await
+,
+co_yield
+, and
+co_return
+.
+Efficiency
+: Some of the
+customization points are there for enabling possible optimizations depending on use cases. One example is
+await_ready()
+, which can return
+true
+to avoid an unnecessary suspension if a value is already computed.
+It should also be said that we are exposed to these customization points because the C++ standard doesn't provide any types (except for the
+std::coroutine_handle
+) to communicate with a coroutine. Once they are in place, we can reuse those types and not worry too much about some of those customization points. Nevertheless, knowing the customization points is valuable in order to fully understand how to use C++ coroutines efficiently.
+Generators
+A generator is a type of
+coroutine that yields values back to its caller. For example, at the beginning of this chapter, I demonstrated how the generator
+iota()
+yielded increasing integer values. By implementing a general-purpose generator type that can act as an iterator, we can simplify the work of implementing iterators that are compatible with range-based
+for
+-loops, standard library algorithms, and ranges. Once we have a generator template class in place, we can reuse it.
+So far in this book, you have mostly seen iterators in the context of accessing container elements and when using standard library algorithms. However, an iterator does not have to be tied to a container. It's possible to write iterators that produce values.
+Implementing a generator
+The generator we are about to implement is
+based on the generator from the CppCoro library. The generator template is intended to be used as a return type for coroutines that produces a sequence of values. It should be possible to use objects of this type together with a range-based
+for
+- loop and standard algorithms that accept iterators and ranges. To make this possible, we will implement three components:
+The
+Generator
+, which is the return object
+The
+Promise
+, which acts as the coroutine controller
+The
+Iterator
+, which is the interface between the client and the
+Promise
+These three types are tightly coupled and the relationships between them and the coroutine state are presented in the following diagram:
+Figure 12.12: The relationships between the Iterator, Generator, Promise, and the coroutine state
+The return object, in this case the
+Generator
+class, is tightly coupled with the
+Promise
+type; the
+Promise
+type is
+responsible for creating the
+Generator
+object, and the
+Generator
+type is responsible for exposing the correct
+promise_type
+to the compiler. Here is the implementation of
+Generator
+:
+template
+<
+typename
+T>
+class
+Generator
+{
+struct
+Promise
+{
+/* ... */
+};
+// See below
+struct
+Sentinel
+{
+};
+struct
+Iterator
+{
+/* ... */
+};
+// See below
+std
+::coroutine_handle<Promise> h_;
+explicit
+Generator
+(
+std
+::coroutine_handle<Promise> h)
+:
+h_
+{h}
+{}
+public
+:
+using
+promise_type = Promise;
+  Generator(Generator&& g) : h_(
+std
+::exchange(g.h_, {})) {}
+  ~Generator() {
+if
+(h_) { h_.destroy();  } }
+auto
+begin
+()
+{
+    h_.resume();
+return
+Iterator{h_};
+  }
+auto
+end
+()
+{
+return
+Sentinel{}; }
+};
+The implementation of
+Promise
+and
+Iterator
+will follow soon. The
+Generator
+is not that different from the
+Resumable
+class we defined earlier. The
+Generator
+is the return object of the coroutine and the owner of the
+std::coroutine_handle
+. The generator is a moveable type. When being
+moved, the coroutine handle is transferred to the newly constructed
+Generator
+object. When a generator that owns a coroutine handle is destructed, it destroys the coroutine state by calling
+destroy
+on the coroutine handle.
+The
+begin()
+and
+end()
+functions make it possible to use this generator in range-based
+for
+-loops and algorithms that accept ranges. The
+Sentinel
+type is empty—it's a dummy type—and the
+Sentinel
+instance is there to be able to pass something to the comparison operators of the
+Iterator
+class. The implementation of the
+Iterator
+looks like this:
+struct
+Iterator
+{
+using
+iterator_category =
+std
+::input_iterator_tag;
+using
+value_type = T;
+using
+difference_type =
+ptrdiff_t
+;
+using
+pointer = T*;
+using
+reference = T&;
+std
+::coroutine_handle<Promise> h_;
+// Data member
+Iterator&
+operator
+++() {
+    h_.resume();
+return
+*
+this
+;
+  }
+void
+operator
+++(
+int
+) { (
+void
+)
+operator
+++(); }
+  T
+operator
+*()
+const
+{
+return
+h_.promise().value_; }
+  T*
+operator
+->()
+const
+{
+return
+std
+::addressof(
+operator
+*()); }
+bool
+operator
+==(Sentinel)
+const
+{
+return
+h_.done(); }
+};
+The iterator needs to store the coroutine handle in a data member so that it can delegate the calls to the coroutine handle and the promise object:
+When the iterator is dereferenced, it returns the current value held by the promise
+When the iterator is incremented, it resumes the coroutine
+When the iterator is compared with the sentinel value, the iterator ignores the sentinel and delegates the call to the coroutine handle, which knows whether there are more elements to be generated
+Now there is only the
+Promise
+type left for
+us to implement. The complete definition of
+Promise
+looks like this:
+struct
+Promise
+{
+T value_;
+auto
+get_return_object
+()
+-> Generator
+{
+using
+Handle =
+std
+::coroutine_handle<Promise>;
+return
+Generator{Handle::from_promise(*
+this
+)};
+  }
+auto
+initial_suspend
+()
+{
+return
+std
+::suspend_always{}; }
+auto
+final_suspend
+()
+noexcept
+{
+return
+std
+::suspend_always{}; }
+void
+return_void
+()
+{}
+void
+unhandled_exception
+()
+{
+throw
+; }
+auto
+yield_value
+(T&& value)
+{
+    value_ =
+std
+::move(value);
+return
+std
+::suspend_always{};
+  }
+auto
+yield_value
+(
+const
+T& value)
+{
+    value_ = value;
+return
+std
+::suspend_always{};
+  }
+};
+The promise object for our generator is responsible for:
+Creating the
+Generator
+object
+Defining the behavior when the initial and final suspend points are reached
+Keeping track of the last value that was yielded from the coroutine
+Handling exceptions thrown by the coroutine body
+That's it! We now have all the pieces in place. A coroutine that returns some
+Generator<T>
+type can now yield values lazily using
+co_yield
+. The caller of the coroutine interacts with the
+Generator
+and
+Iterator
+objects to retrieve values. The interaction between the objects is illustrated next:
+Figure 12.13: The caller communicates with the Generator and Iterator objects to retrieve values from the coroutine
+Now, let's see how we can
+use the new
+Generator
+template and how it can simplify the implementation of various iterators.
+Using the Generator class
+This example is
+inspired from the talk
+C++ Coroutines: Under the covers
+, by Gor Nishanov at CppCon 2016 (
+https://sched.co/7nKt
+). It clearly demonstrates how we can benefit from the generator types we just implemented. Small composable generators can now be implemented like this:
+template
+<
+typename
+T>
+auto
+seq() -> Generator<T> {
+for
+(T i = {};; ++i) {
+co_yield
+i;
+  }
+}
+template
+<
+typename
+T>
+auto
+take_until
+(Generator<T>& gen, T value)
+-> Generator<T> {
+for
+(
+auto
+&& v : gen) {
+if
+(v == value) {
+co_return
+;
+    }
+co_yield
+v;
+  }
+}
+template
+<
+typename
+T>
+auto
+add
+(Generator<T>& gen, T adder) -> Generator<T> {
+for
+(
+auto
+&& v : gen) {
+co_yield
+v + adder;
+  }
+}
+A small usage example demonstrates that we can pass our generators to range-based
+for
+-loops:
+int
+main
+()
+{
+auto
+s = seq<
+int
+>();
+auto
+t = take_until<
+int
+>(s,
+10
+);
+auto
+a = add<
+int
+>(t,
+3
+);
+int
+sum =
+0
+;
+for
+(
+auto
+&& v : a) {
+      sum += v;
+  }
+return
+sum;
+// returns 75
+}
+The generators are lazily
+evaluated. No values are produced until the program reaches the
+for
+-loop, which pulls the values out from the chain of generators.
+Another interesting aspect of this program is that when I compile it using Clang 10 with optimizations turned on, the assembly code for the
+entire
+program looks like this:
+main:  # @main
+mov  eax, 75
+ret
+Amazing! The program simply defines a main function that returns the value
+75
+. In other words, the compiler optimizer has been able to completely evaluate the chain of generators at compile time and come up with the single value
+75
+.
+Our
+Generator
+class can also be used with range algorithms. In the following example we use the algorithm
+includes()
+to see if the sequence
+{5,6,7}
+is a subrange of the numbers produced by the generator:
+int
+main
+() {
+auto
+s = seq<
+int
+>();
+// Same as before
+auto
+t =
+take_until<
+int
+>(s,
+10
+);
+auto
+a = add<
+int
+>(t,
+3
+);
+const
+auto
+v =
+std
+::
+vector
+{
+5
+,
+6
+,
+7
+};
+auto
+is_subrange =
+std
+::ranges::includes(a, v);
+// True
+}
+With the
+Generator
+template implemented, we can reuse it for all sorts of generator functions. We have implemented a general and highly useful library component that application code can benefit from in a great many places when building lazy generators.
+Solving generator problems
+I will now present a small problem and we will try to solve it using different techniques for the purpose of understanding which programming idioms we can potentially replace with generators. We are about to write a small utility for generating linearly spaced sequences between a start value and a stop value.
+If you have been using MATLAB/Octave or Python NumPy, you might recognize this way of generating evenly (linearly) spaced numbers using a function called
+linspace()
+. It's a handy utility that can be used in various contexts with arbitrary ranges.
+We will call our generator
+lin_space()
+. Here is a usage example of generating five equally spaced values between
+2.0
+and
+3.0
+:
+for
+(
+auto
+v: lin_space(
+2.0f
+,
+3.0f
+,
+5
+)) {
+std
+::
+cout
+<< v <<
+", "
+;
+}
+// Prints: 2.0, 2.25, 2.5, 2.75, 3.0,
+When generating floating-point values, we have to be a little bit cautious because we cannot simply compute the size of each step (0.25 in the preceding example) and accumulate it, since the step size might not be possible to represent exactly using a floating-point data type. The possible rounding error will add up at each iteration and eventually we may end up with completely nonsensical values. What we instead need to do is to calculate a number between the start and stop value at a specific increment using linear interpolation.
+C++20 added a handy utility to
+<cmath>
+called
+std::lerp()
+, which computes the linear interpolation between two values with a specified amount. In our case, the amount will be a value between 0.0 and 1.0; an amount of 0 returns the
+start
+value and a value of 1.0 returns the
+stop
+value. Here are a few examples of using
+std::lerp()
+:
+auto
+start =
+-1.0
+;
+auto
+stop =
+1.0
+;
+std
+::lerp(start, stop,
+0.0
+);
+// -1.0
+std
+::lerp(start, stop,
+0.5
+);
+//  0.0
+std
+::lerp(start, stop,
+1.0
+);
+//  1.0
+The
+lin_space()
+functions we are about to write will all use the following small utility function template:
+template
+<
+typename
+T>
+auto
+lin_value
+(T start, T stop,
+size_t
+index,
+size_t
+n)
+{  
+  assert(n >
+1
+&& index < n);
+const
+auto
+amount =
+static_cast
+<T>(index) / (n -
+1
+);
+const
+auto
+v =
+std
+::lerp(start, stop, amount);
+// C++20
+return
+v;
+}
+The function returns a
+value in the linear sequence in the range [
+start
+,
+stop
+]. The
+index
+parameter is the current number in the sequence
+of the
+n
+total numbers we are about to generate.
+With the
+lin_value()
+helper in place, we can now easily implement the
+lin_space()
+generator. Before seeing a solution using a coroutine, we will examine other common techniques. The sections to follow will explore the following different approaches when implementing
+lin_space()
+:
+Eagerly generate and return all values
+Using a callback (lazy)
+Using a custom iterator (lazy)
+Using the Ranges library (lazy)
+Using coroutines with our
+Generator
+class (lazy)
+For each example, there will be a short reflection of the strengths and weaknesses of each approach.
+An eager linear range
+We'll begin by implementing a
+simple eager version that computes all the values in the range and returns a vector with all values:
+template
+<
+typename
+T>
+auto
+lin_space
+(T start, T stop,
+size_t
+n)
+{
+auto
+v =
+std
+::
+vector
+<T>{};
+for
+(
+auto
+i =
+0u
+; i < n; ++i)
+    v.push_back(lin_value(start, stop, i, n));
+return
+v;
+}
+Since this version returns a standard container, it's possible to use the return value with range-based
+for
+-loops and other standard algorithms:
+for
+(
+auto
+v : lin_space(
+2.0
+,
+3.0
+,
+5
+)) {
+std
+::
+cout
+<< v <<
+", "
+;
+}
+// Prints: 2, 2.25, 2.5, 2.75, 3,
+This version is straightforward, and fairly easy to read. The downside is that we need to allocate a vector and fill it with
+all
+values, although the caller is not necessarily interested in all values. This version also lacks composability as there is no way to filter out elements in the middle without first generating all values.
+Now let's try to implement a lazy version of the
+lin_space()
+generator.
+A lazy version using a callback
+In
+Chapter 10,
+Proxy Objects and Lazy Evaluation
+, we concluded that
+lazy evaluation can be accomplished by using callback functions. The lazy version we will implement will be based on passing a callback to
+lin_space()
+and invoking the callback function when emitting values:
+template
+<
+typename
+T,
+typename
+F>
+requires
+std
+::invocable<F&,
+const
+T&>
+// C++20
+void
+lin_space
+(T start, T stop,
+std
+::
+size_t
+n, F&& f)
+{
+for
+(
+auto
+i =
+0u
+; i < n; ++i) {
+const
+auto
+y = lin_value(start, stop, i, n);
+    f(y);
+  }
+}
+If we want to print the values produced by the generator, we can call this function like this:
+auto
+print = [](
+auto
+v) {
+std
+::
+cout
+<< v <<
+", "
+; };
+lin_space(
+-1.f
+,
+1.f
+,
+5
+, print);
+// Prints: -1, -0.5, 0, 0.5, 1,
+The iteration now take places within the
+lin_space()
+function. There is no way to cancel the generator, but with some changes we could have the callback function return a
+bool
+to indicate whether it wants more elements to be generated.
+This approach works but is
+not very elegant. The problem with this design becomes more apparent when trying to compose generators. If we wanted to add a filter that would select some special values, we would end up having nested callback functions.
+We will now move on to see how we can implement an iterator-based solution to our problem.
+An iterator implementation
+Another alternative is to implement a type that
+conforms to the range concept by exposing the
+begin()
+and
+end()
+iterators. The class template
+LinSpace
+, defined here, makes it possible to iterate over the linear range of values:
+template
+<
+typename
+T>
+struct
+LinSpace
+{
+LinSpace(T start, T stop,
+std
+::
+size_t
+n)
+      : begin_{start, stop,
+0
+, n}, end_{n} {}
+struct
+Iterator
+{
+using
+difference_type =
+void
+;
+using
+value_type = T;
+using
+reference = T;
+using
+pointer = T*;
+using
+iterator_category =
+std
+::forward_iterator_tag;
+void
+operator
+++() { ++i_; }
+    T
+operator
+*() {
+return
+lin_value(start_, stop_, i_, n_);}
+bool
+operator
+==(
+std
+::
+size_t
+i)
+const
+{
+return
+i_ == i; } 
+    T start_{};
+    T stop_{};
+std
+::
+size_t
+i_{};
+std
+::
+size_t
+n_{};
+  };
+auto
+begin
+()
+{
+return
+begin_; }
+auto
+end
+()
+{
+return
+end_; }
+private
+:
+  Iterator begin_{};
+std
+::
+size_t
+end_{};
+};
+template
+<
+typename
+T>
+auto
+lin_space
+(T start, T stop,
+std
+::
+size_t
+n)
+{
+return
+LinSpace{start, stop, n};
+}
+This implementation is
+very efficient. However, it is afflicted with a lot of boilerplate code and the small algorithm we are trying to encapsulate is now spread out into different parts: the
+LinSpace
+constructor implements the initial work of setting up the start and stop values, whereas the work needed for computing the values ends up in the member functions of the
+Iterator
+class. This makes the implementation of the algorithm harder to understand compared with the other versions we have looked at.
+A solution using the Ranges library
+Yet another alternative is to
+compose our algorithm using building blocks from the Ranges library (C++20), as shown here:
+template
+<
+typename
+T>
+auto
+lin_space
+(T start, T stop,
+std
+::
+size_t
+n)
+{
+return
+std
+::views::iota(
+std
+::
+size_t
+{
+0
+}, n) |
+std
+::views::transform([=](
+auto
+i) {
+return
+lin_value(start, stop, i, n);
+    });
+}
+Here we have the entire algorithm encapsulated inside a small function. We are using
+std::views::iota
+to generate the indexes for us. Converting an index to a linear value is a simple transformation that can be chained after the
+iota
+view.
+This version is efficient and composable. The object returned from
+lin_space()
+is a random-access range of type
+std::ranges::view
+, which can be iterated over using range-based
+for
+-loops or passed to other algorithms.
+Finally, it's time to use our
+Generator
+class to implement our algorithm as a coroutine.
+A solution using a coroutine
+After looking at
+no less than four versions of this very same problem, we have now reached the last solution. Here I will present a version that uses the general
+Generator
+class template implemented earlier:
+template
+<
+typename
+T>
+auto
+lin_space
+(T start, T stop,
+std
+::
+size_t
+n)
+-> Generator<T>
+{
+for
+(
+auto
+i =
+0u
+; i < n; ++i) {
+co_yield
+lin_value
+(start, stop, i, n)
+;
+   }
+ }
+It's compact, straightforward, and easy to understand. By using
+co_yield
+, we can write the code in such a way that it looks similar to the simple eager version, but without the need for collecting all the values in a container. It's possible to chain multiple generators based on coroutines, as you will see at the end of this chapter.
+This version is also compatible with range-based
+for
+-loops and standard algorithms. However, this version exposes an input range, so it's not possible to skip ahead arbitrary number of elements, which is possible with the version using the Ranges library.
+Conclusion
+Obviously, there is more than one way to do it. But why did I show all these approaches?
+Firstly, if you are new to coroutines, you will hopefully start to see the patterns where it can be advantageous to use coroutines.
+Secondly, the
+Generator
+template and the use of
+co_yield
+allows us to implement lazy generators in a very clear and concise way. This becomes obvious when we compare the solution with other versions.
+Lastly, some approaches might look very contrived for this example problem but are frequently being used in other contexts. C++ is by default an eager language, and many (myself included) have become accustomed to creating code similar to the eager version. The version using a callback might look very strange but is a commonly used pattern in asynchronous code, where coroutines can wrap or replace those callback-based APIs.
+The generator type we implemented is partly based on the synchronous generator template from the CppCoro library. CppCoro also provides an
+async_generator
+template, which makes it possible to use the
+co_await
+operator within the generator coroutine. I provided the
+Generator
+template in this chapter for the purpose of demonstrating how a generator can be implemented and how we can interact with coroutines. But if you plan to start using generators in your code, consider using a third-party library.
+A real-world example using generators
+Using coroutines for
+simplifying iterators really shines when the examples are a little bit more advanced. Using
+co_yield
+with the
+Generator
+class allows us to implement and combine small algorithms efficiently and without the need for boilerplate code to glue it all together. This next example will try to prove that.
+The problem
+We will here go through an example of how we can use our
+Generator
+class to implement a compression algorithm that can be used in search engines to compress the search index typically stored on disk. The example is thoroughly described in the book
+Introduction to Information Retrieval
+by Manning et al, which is freely available at
+https://nlp.stanford.edu/IR-book/
+. Here follows a brief background and a short description of the problem.
+Search engines use some variant of a
+data structure called an
+inverted index
+. It is like an index at the end of a book. Using the index, we can find all pages that contain the terms we are searching for.
+Now imagine that we have a database full of recipes and that we build an inverted index for this database. Parts of this index might look something like this:
+Figure 12.14: An inverted index with three terms and their corresponding lists of document references
+Each term is associated with a sorted list of document identifiers. (For example, the term
+apple
+is included in the recipes with IDs
+4
+,
+9
+,
+67
+, and
+89
+.) If we want to find recipes that contain both
+beans
+and
+chili
+, we can run a merge-like algorithm to find the intersection of the lists for
+beans
+and
+chili
+:
+Figure 12.15 Intersection of the document lists for the terms "beans" and "chili"
+Now imagine that we have a big database
+and we choose to represent the document identifier with a 32-bit integer. The lists of document identifiers can become very long for terms that appear in many documents and therefore we need to compress those lists. One possible way to do that is to use delta encoding combined with a variable byte encoding scheme.
+Delta encoding
+Since the lists are sorted, we
+could, instead of saving the document identifiers, store the
+gap
+between two adjacent elements. This technique is called
+delta encoding
+or
+gap encoding
+. The following diagram shows an example using document IDs and gaps:
+Figure 12.16: Gap encoding stores the gap between two adjacent elements in a list
+Gap encoding is well-suited for this type of data; frequently used terms will consequently have many small gaps. The really long lists will only contain very small gaps. After the lists have been gap encoded, we can use a variable byte encoding scheme to actually compress the lists by using fewer bytes for smaller gaps.
+But first, let's start implementing the gap encoding functionality. We will begin by writing two small coroutines that will do the gap encoding/decoding. The encoder transforms a sorted sequence of integers to a sequence of gaps:
+template
+<
+typename
+Range>
+auto
+gap_encode
+(Range& ids) -> Generator<
+int
+> {
+auto
+last_id =
+0
+;
+for
+(
+auto
+id : ids) {
+const
+auto
+gap = id - last_id;
+    last_id = id;
+co_yield
+gap;
+  }
+}
+By using
+co_yield
+, there is no need to
+eagerly pass a complete list of numbers and allocate a big output list of gaps. Instead, the coroutine lazily handles one number at a time. Note how the function
+gap_encode()
+contains everything that there is to know about how to convert document IDs to gaps. Implementing this as a traditional iterator would be possible, but this would have logic spread out in constructors and operators on iterators.
+We can build a small program to test our gap encoder:
+int
+main
+()
+{
+auto
+ids =
+std
+::
+vector
+{
+10
+,
+11
+,
+12
+,
+14
+};
+auto
+gaps = gap_encode();
+for
+(
+auto
+&& gap : gaps) {
+std
+::
+cout
+<< gap <<
+", "
+;
+  }
+}
+// Prints: 10, 1, 1, 2,
+The decoder does the opposite; it takes as input a range of gaps and transforms it to the list of ordered numbers:
+template
+<
+typename
+Range>
+auto
+gap_decode
+(Range& gaps) -> Generator<
+int
+> {
+auto
+last_id =
+0
+;
+for
+(
+auto
+gap : gaps) {
+const
+auto
+id = gap + last_id;
+co_yield
+id;
+    last_id = id;
+  }
+}
+By using gap encoding, we will on average, store much smaller numbers. But since we are still using
+int
+values for storing the small gaps, we haven't really gained anything if we save these gaps to disk. Unfortunately, we cannot just use a smaller fixed-size data type, because there is still a possibility that we will encounter a really big gap that would require a full 32-bit
+int
+. What we want is a way to store small gaps using fewer bits, as illustrated in the following diagram:
+Figure 12.17: Small numbers should use fewer bytes
+In order to make this list physically
+smaller, we can use
+variable byte encoding
+so that small gaps are encoded with fewer bytes than bigger gaps, as illustrated in the preceding diagram.
+Variable byte encoding
+Variable byte encoding is a very common
+compression technique. UTF-8
+and MIDI message are some of the well-known encodings that uses this technique. In order to use a variable number of bytes when encoding, we use 7-bits of each byte for the actual payload. The first bit of each byte
+represents a
+continuation bit
+. It is set to
+0
+if there are more bytes to read, or
+1
+for the last byte of the encoded number. The encoding scheme is exemplified in the following diagram:
+Figure 12.18: Using variable byte encoding, only one byte is required to store the decimal value 3 and two bytes for encoding the decimal value 1025
+Now we are ready to implement the variable byte encoding and decoding scheme. This is a little bit more complicated than delta encoding. The encoder should transform a number into a sequence of one or multiple bytes:
+auto
+vb_encode
+_num(
+int
+n) -> Generator<
+std
+::
+uint8_t
+> {
+for
+(
+auto
+cont =
+std
+::
+uint8_t
+{
+0
+}; cont ==
+0
+;) {
+auto
+b =
+static_cast
+<
+std
+::
+uint8_t
+>(n %
+128
+);
+    n = n /
+128
+;
+    cont = (n ==
+0
+) ?
+128
+:
+0
+;
+co_yield
+(b + cont);
+  }
+}
+The continuation bit, named
+cont
+in the code, is either 0 or 128, which corresponds to the bit sequence 10000000. The details in this
+example are not that important to understand, but to make the encoding easier, the bytes are generated in reverse order so that the least significant byte comes first. This is not a problem since we can handle that easily during the decoding.
+With the number encoder in place, it's easy to encode a sequence of numbers and transform them into a sequence of bytes:
+template
+<
+typename
+Range>
+auto
+vb_encode
+(Range& r) -> Generator<
+std
+::
+uint8_t
+> {
+for
+(
+auto
+n : r) {
+auto
+bytes = vb_encode_num(n);
+for
+(
+auto
+b : bytes) {
+co_yield
+b;
+    }
+  }
+}
+The decoder is probably the most complicated part. But again, it is fully encapsulated into one single function with a clean interface:
+template
+<
+typename
+Range>
+auto
+vb_decode
+(Range& bytes) -> Generator<
+int
+> {
+auto
+n =
+0
+;
+auto
+weight =
+1
+;
+for
+(
+auto
+b : bytes) {
+if
+(b <
+128
+) {
+// Check continuation bit
+n += b * weight;
+      weight *=
+128
+;
+    }
+else
+{
+// Process last byte and yield
+n += (b -
+128
+) * weight;
+co_yield
+n;
+      n =
+0
+;
+// Reset
+weight =
+1
+;
+// Reset
+}
+  }
+}
+As you can see, there is very little boilerplate code needed in this code. Each coroutine encapsulates all states and describes clearly how to process one piece at a time.
+The last piece we need is to combine the gap
+encoder with the variable byte encoder in order to compress our sorted list of document identifiers:
+template
+<
+typename
+Range>
+auto
+compress
+(Range& ids) -> Generator<
+int
+> {
+auto
+gaps = gap_encode(ids);
+auto
+bytes = vb_encode(gaps);
+for
+(
+auto
+b : bytes) {
+co_yield
+b;
+  }
+}
+Decompress is a simple chaining of
+vb_decode()
+followed by
+gap_decode()
+:
+template
+<
+typename
+Range>
+auto
+decompress
+(Range& bytes) -> Generator<
+int
+> {
+auto
+gaps = vb_decode(bytes);
+auto
+ids = gap_decode(gaps);
+for
+(
+auto
+id : ids) {
+co_yield
+id;
+  }
+}
+Since the
+Generator
+class exposes iterators, we can take this example even further and easily stream the values to and from disk using iostreams. (Although, a more realistic approach would be to use memory-mapped I/O for better performance.) Here are two small functions that writes and reads the compressed data to and from disk:
+template
+<
+typename
+Range>
+void
+write
+(
+const
+std
+::string&
+path, Range& bytes)
+{
+auto
+out =
+std
+::ofstream{
+path,
+std
+::ios::out |
+std
+::ofstream::binary}
+;
+std
+::ranges::copy(bytes.begin(), bytes.end(),
+std
+::ostreambuf_iterator<
+char
+>(out));
+}
+auto
+read
+(
+std
+::
+string
+path) -> Generator<
+std
+::
+uint8_t
+> {
+auto
+in =
+std
+::ifstream {
+path,
+std
+::ios::in |
+std
+::ofstream::binary}
+;
+auto
+it =
+std
+::istreambuf_iterator<
+char
+>{in};
+const
+auto
+end =
+std
+::istreambuf_iterator<
+char
+>{};
+for
+(; it != end; ++it) {
+co_yield
+*it;
+  }
+}
+A small test program will wrap this
+example up:
+int
+main
+()
+{
+  {
+auto
+documents =
+std
+::
+vector
+{
+367
+,
+438
+,
+439
+,
+440
+};
+auto
+bytes = compress(documents);
+    write(
+"values.bin"
+, bytes);
+  }
+  {
+auto
+bytes = read(
+"values.bin"
+);
+auto
+documents = decompress(bytes);
+for
+(
+auto
+doc : documents) {
+std
+::
+cout
+<< doc <<
+", "
+;
+    }
+  }
+}
+// Prints: 367, 438, 439, 440,
+This example aims to show that we can divide lazy programs into small encapsulated coroutines. The low overhead of C++ coroutines makes them suitable for building efficient generators. The
+Generator
+we implemented initially is a fully reusable class that helps us with minimizing the amount of boilerplate code in examples like this.
+This ends the section about
+generators. We will now move on to discuss some general performance considerations when using coroutines.
+Performance
+Each time a coroutine is created (when it is first called) a coroutine frame is allocated to hold the coroutine state. The frame can be allocated on the heap, or on the stack in some circumstances. However, there are no guarantees to completely avoid the heap allocation. If you are in a situation where heap allocations are forbidden (for example, in a real-time context) the coroutine can be created and immediately suspended in a different thread, and then passed to the part of the program that needs to actually
+use the coroutine. Suspend and resume are guaranteed to not allocate any memory and have a cost comparable with an ordinary function call.
+At the time of writing this book, compilers have experimental support for coroutines. Small experiments have shown promising results related to performance, showing that coroutines are friendly to the optimizer. However, I will not provide you with any benchmarks of coroutines in this book. Instead, I have shown you how stackless coroutines are evaluated and how it's possible for coroutines to be implemented with minimal overheads.
+The generator example demonstrated that coroutines can potentially be very friendly to the compiler. The chain of generators we wrote in that example was completely evaluated at runtime. In practice, this is a very good property of C++ coroutines. They allow us to write code that is easy for both compilers and human beings to understand. C++ coroutines usually produce clean code that is easy to optimize.
+Coroutines that execute
+on the same thread can share state without using any locking primitives and can therefore avoid the performance overhead incurred by synchronizing multiple threads. This will be demonstrated in the next chapter.
+Summary
+In this chapter, you have seen how to use C++ coroutines for building generators using the keywords
+co_yield
+and
+co_return
+. To better understand how C++ stackless coroutines differ from stackful coroutines, we compared the two and also looked at the customization points that C++ coroutines offer. This gave you a deep understanding of how flexible C++ coroutines are, as well as how they can be used to achieve efficiency. Stackless coroutines are closely related to state machines. By rewriting a traditionally implemented state machine into code that uses coroutines, we explored this relationship and you saw how well compilers can transform and optimize our coroutines to machine language.
+In the next chapter, we will continue to discuss coroutines by focusing on asynchronous programming and will deepen your understanding of the
+co_await
+keyword.
+
+13
+Asynchronous Programming with Coroutines
+The generator class implemented in the previous chapter helped us to use coroutines for building lazily evaluated sequences. C++ coroutines can also be used for asynchronous programming by having a coroutine represent an asynchronous computation or an
+asynchronous task
+. Although asynchronous programming is the most important driver for having coroutines in C++, there is no support for asynchronous tasks based on coroutines in the standard library. If you want to use coroutines for asynchronous programming, I recommend you find and use a library that complements C++20 coroutines. I've already recommended CppCoro (
+https://github.com/lewissbaker/cppcoro
+), which at the time of writing seems like the most promising alternative. It's also possible to use asynchronous coroutines with the well-established library Boost.Asio, as you will see later on in this chapter.
+This chapter will show that asynchronous programming is possible using coroutines and that there are libraries available to complement C++20 coroutines. More specifically, we will focus on:
+The
+co_await
+keyword and awaitable types
+The implementation of a rudimentary task type—a type that can be returned from coroutines that perform some asynchronous work
+Boost.Asio to exemplify asynchronous programming using coroutines
+Before moving on, it should also be said that there are no performance-related topics in this chapter and very few guidelines and best practices are presented. Instead, this chapter serves more as an introduction to the novel feature of asynchronous coroutines in C++. We'll begin this introduction by exploring awaitable types and
+co_await
+statements.
+Awaitable types revisited
+We already talked a bit about awaitable types
+in the previous chapter. But now we need to get a little bit more specific about what
+co_await
+does and what an awaitable type is. The keyword
+co_await
+is a unary operator, meaning that it takes a single argument. The argument we pass to
+co_await
+needs to fulfill some requirements that we will explore in this section.
+When we say
+co_await
+in our code, we express that we are
+waiting
+for something that may or may not be ready for us. If it's not ready,
+co_await
+suspends the currently executing coroutine and returns control back to its caller. When the asynchronous task has completed, it should transfer the control back to the coroutine originally waiting for the task to finish. From here on, I will typically refer to the awaiting function as the
+continuation
+.
+Now consider the following expression:
+co_await
+X{};
+For this code to compile,
+X
+needs to be an awaitable type. So far we have only used the trivial awaitable types:
+std::suspend_always
+and
+std::suspend_never
+. Any type that directly implements the three member functions listed next, or alternatively defines
+operator co_wait()
+to produce an object with these member functions, is an awaitable type:
+await_ready()
+returns a
+bool
+that indicates whether the result is ready (
+true
+) or whether it is necessary to suspend the current coroutine and wait for the result to become ready.
+await_suspend(coroutine_handle)
+– If
+await_ready()
+returned
+false
+, this function will be called with a handle to the coroutine that executed
+co_await
+. This function gives us an opportunity to start asynchronous work and subscribe for a notification that will trigger when the task has finished and thereafter resume the coroutine.
+await_resume()
+is the function responsible for unpacking the result (or error) back to the coroutine. If an error has occurred during the work initiated by
+await_suspend()
+, this function could rethrow the caught error or return an error code. The result of the entire
+co_await
+expression is whatever
+await_resume()
+returns.
+To demonstrate the use of
+operator co_await()
+, here is a snippet inspired by a section from the C++20 standard that defines
+operator co_await
+for a time interval:
+using namespace
+std
+::chrono;
+template
+<
+class
+Rep
+,
+class
+Period
+>
+auto
+operator
+co_await
+(
+duration
+<Rep, Period>
+d
+) {
+struct
+Awaitable
+{
+system_clock::duration d_;
+    Awaitable(system_clock::duration d) : d_(d) {}
+bool
+await_ready
+()
+const
+{
+return
+d_.count() <=
+0
+; }
+void
+await_suspend
+(
+std
+::coroutine_handle<> h)
+{
+/* ... */
+}
+void
+await_resume
+()
+{}
+  };
+return
+Awaitable{d};
+}
+With this overload in place, we can
+now pass a time interval to the
+co_await
+operator, as follows:
+std
+::
+cout
+<<
+"just about to go to sleep...\n"
+;
+co_await
+10ms
+;
+// Calls operator co_await()
+std
+::
+cout
+<<
+"resumed\n"
+;
+The example is not complete but gives you a hint about how to use the unary operator
+co_await
+. As you may have noticed, the three
+await_*()
+functions are not called directly by us; instead, they are invoked by code inserted by the compiler. Another example will clarify the transformations made by the compiler. Assume that the compiler stumbles upon the following statement in our code:
+auto
+result =
+co_await
+expr;
+Then the compiler will (very) roughly transform the code into something like this:
+// Pseudo code
+auto
+&& a = expr;
+// Evaluate expr, a is the awaitable
+if
+(!a.await_ready()) {
+// Not ready, wait for result
+a.await_suspend(h);
+// Handle to current coroutine
+// Suspend/resume happens here
+}
+auto
+result = a.await_resume();
+The
+await_ready()
+function is first called to check whether a suspension is needed. If so,
+await_suspend()
+is called with a handle to the coroutine that will be suspended (the coroutine with the
+co_await
+statement). Finally, the result of the awaitable is requested and assigned to the
+result
+variable.
+The implicit suspend points
+As
+you have seen in numerous examples, a coroutine defines
+explicit
+suspend points
+by using
+co_await
+and
+co_yield
+. Each coroutine also has two
+implicit
+suspend points:
+The
+initial suspend point
+, which
+occurs at the initial invocation of a coroutine before the coroutine body is executed
+The
+final suspend point
+, which
+occurs after the coroutine body has been executed and before the coroutine is destroyed
+The promise type defines the behavior of these two points by implementing
+initial_suspend()
+and
+final_suspend()
+. Both functions return awaitable objects. Typically, we pass
+std::suspend_always
+from the
+initial_suspend()
+function so that the coroutine is started lazily rather than eagerly.
+The final suspend point plays an important role for asynchronous tasks, because it makes it possible for us to tweak the behavior of
+co_await
+. Normally, a coroutine that has been
+co_await:
+ed should resume the awaiting coroutine at the final suspend point.
+Next, let's get a better understanding of how the three awaitable functions are meant to be used and how they cooperate with the
+co_await
+operator.
+Implementing a rudimentary task type
+The
+task type we are about to implement is a type that can be returned from coroutines that represent asynchronous tasks. The task is something that a caller can wait for using
+co_await
+. The goal is to be able to write asynchronous application code that looks like this:
+auto
+image =
+co_await
+load(
+"image.jpg"
+);
+auto
+thumbnail =
+co_await
+resize(image,
+100
+,
+100
+);
+co_await
+save
+(thumbnail,
+"thumbnail.jpg"
+)
+;
+The standard library already provides a type that allows a function to return an object that a caller can use for waiting on a result to be computed, namely
+std::future
+. We could potentially wrap
+std::future
+into something that would conform to the awaitable interface. However,
+std::future
+does not support continuations, which means that whenever we try to get the value from a
+std::future
+, we block the current thread. In other words, there is no way to compose asynchronous operations without blocking when using
+std::future
+.
+Another alternative would be to use
+std::experimental::future
+or a future type from the Boost library, which supports continuations. But these future types allocate heap memory and include synchronization primitives that are not needed in the use cases set out for our tasks. Instead, we will create a new type with minimum overhead with the responsibilities to:
+Forward return values and exceptions to the caller
+Resume the caller waiting for the result
+A coroutine task type has been proposed (see P1056R0 at
+http://www7.open-std.org/JTC1/SC22/WG21/docs/papers/2018/p1056r0.html
+), and the proposal gives us a good hint
+about what components we need. The implementation that follows is based on work presented by Gor Nishanov and source code shared by Lewis Baker, which is available in the CppCoro library.
+Here is the implementation of the class template for representing an asynchronous task:
+template
+<
+typename
+T>
+class
+[[
+nodiscard
+]]
+Task
+{
+struct
+Promise
+{
+/* ... */
+};
+// See below
+std
+::coroutine_handle<Promise> h_;
+explicit
+Task
+(Promise & p)
+noexcept
+: h_
+{
+std
+::coroutine_handle<Promise>::from_promise(p)} {}
+public
+:
+using
+promise_type = Promise;
+  Task(Task&& t)
+noexcept
+: h_{
+std
+::exchange(t.h_, {})} {}
+  ~Task() {
+if
+(h_) h_.destroy(); }
+// Awaitable interface
+bool
+await_ready
+()
+{
+return
+false
+; }
+auto
+await_suspend
+(
+std
+::coroutine_handle<> c)
+{
+    h_.promise().continuation_ = c;
+return
+h_;
+  }
+auto
+await_resume
+()
+-> T
+{
+auto
+& result = h_.promise().result_;
+if
+(result.index() ==
+1
+) {
+return
+std
+::get<
+1
+>(
+std
+::move(result));
+    }
+else
+{
+std
+::rethrow_exception(
+std
+::get<
+2
+>(
+std
+::move(result)));
+    }
+  }
+};
+An explanation of each part will follow in the subsequent sections, but first we need the implementation of the promise type that uses a
+std::variant
+to hold a value or an error. The promise also keeps a reference to the coroutine waiting for the task to complete
+using the
+continuation_
+data member:
+struct
+Promise
+{
+std
+::variant<
+std
+::monostate, T,
+std
+::exception_ptr> result_;
+std
+::coroutine_handle<> continuation_;
+// A waiting coroutine
+auto
+get_return_object
+()
+noexcept
+{
+return
+Task{*
+this
+}; }
+void
+return_value
+(T value)
+{ 
+    result_.
+template
+emplace<
+1
+>(
+std
+::move(value)); 
+  }
+void
+unhandled_exception
+()
+noexcept
+{
+    result_.
+template
+emplace<
+2
+>(
+std
+::current_exception());
+  }
+auto
+initial_suspend
+()
+{
+return
+std
+::suspend_always{}; }
+auto
+final_suspend
+()
+noexcept
+{
+struct
+Awaitable
+{
+bool
+await_ready
+()
+noexcept
+{
+return
+false
+; }
+auto
+await_suspend
+(
+std
+::coroutine_handle<Promise> h)
+noexcept
+{
+return
+h.promise().continuation_;
+      }
+void
+await_resume
+()
+noexcept
+{}
+    };
+return
+Awaitable{};
+  }
+};
+It's important to distinguish between the two coroutine handles we are using: the handle identifying the
+current coroutine
+and the handle identifying the
+continuation
+.
+Note that this implementation doesn't support
+Task<void>
+due to limitations of
+std::variant
+, and also the limitation that we can't have both
+return_value()
+and
+return_void()
+on the same promise type. Not supporting
+Task<void>
+is unfortunate since not all asynchronous tasks necessarily return values. We will overcome this limitation in a while by providing a template specialization for
+Task<void>
+.
+Since we implemented a few coroutine return types in the previous chapter (
+Resumable
+and
+Generator
+), you will already be familiar with the requirements of a type that can be returned from a coroutine. Here, we will focus on the things that
+are new to you, such as exception handling and the ability to resume the caller currently waiting for us. Let's start looking at how
+Task
+and
+Promise
+handle return values and exceptions.
+Handling return values and exceptions
+An asynchronous task
+can complete by returning (a value or
+void
+) or by throwing an exception. The
+value and the error need to be handed over to the caller, which has been waiting for the task to complete. As usual, this is the responsibility of the promise object.
+The
+Promise
+class uses a
+std::variant
+to store the result of three possible outcomes:
+No value at all (the
+std::monostate
+). We use this in our variant to make it default-constructible, but without requiring the other two types to be default-constructible.
+A return value of type
+T
+, where
+T
+is the template argument of
+Task
+.
+A
+std::exception_ptr
+, which is a handle to an exception that was thrown earlier.
+The exception is captured by using the
+std::current_exception()
+function inside the function
+Promise::unhandled_exception()
+. By storing a
+std::exception_ptr
+, we can later rethrow this exception in another context. This is also the mechanism used when exceptions are passed between threads.
+A coroutine that uses
+co_return value;
+must have a promise type that implements
+return_value()
+. However, coroutines that use
+co_return;
+, or run off the body without returning a value, must have a promise type that implements
+return_void()
+. Implementing a promise type that contains both
+return_void()
+and
+return_value()
+generates a compilation error.
+Resuming an awaiting coroutine
+When the
+asynchronous task has completed, it should transfer the control back to the coroutine waiting for the task to finish. To be able to resume this continuation, the
+Task
+object needs the
+coroutine_handle
+to the continuation coroutine. This handle was passed to the
+Task
+object's
+await_suspend()
+function, and conveniently we made sure to save that handle into the promise object:
+class
+Task
+{
+// ...
+auto
+await_suspend
+(
+std
+::coroutine_handle<> c)
+{
+    h_.promise().continuation_ = c;
+// Save handle
+return
+h_;
+  }
+// ...
+The
+final_suspend()
+function is responsible for suspending at the final suspend point of this coroutine and
+transferring execution to the awaiting coroutine. This is the relevant part of the
+Promise
+reproduced for your convenience:
+auto
+Promise::final_suspend
+()
+noexcept
+{
+struct
+Awaitable
+{
+bool
+await_ready
+()
+noexcept
+{
+return
+false
+; }
+// Suspend
+auto
+await_suspend
+(
+std
+::coroutine_handle<Promise> h)
+noexcept
+{
+return
+h.promise().continuation_;
+// Transfer control to
+}
+// the waiting coroutine
+void
+await_resume
+()
+noexcept
+{}
+  };
+return
+Awaitable{};
+}
+To begin with, returning
+false
+from
+await_ready()
+will leave the coroutine suspended at the final suspend point. The reason we do this is so that the promise is still alive and available for the continuation to have a chance to pull the result out from this promise.
+Next, let's have a look at the
+await_suspend()
+function. This is the place where we want to resume the continuation. We could potentially call
+resume()
+directly on the
+continuation_
+handle and wait for it to finish, like this:
+// ...
+auto
+await_suspend
+(
+std
+::coroutine_handle<Promise> h)
+noexcept
+{
+  h.promise().resume();
+// Not recommended
+}
+// ...
+However, that would run the risk of creating a long chain of nested call frames on the stack, which eventually could result in a stack overflow. Let's see how this could happen with a short example using two coroutines,
+a()
+and
+b()
+:
+auto
+a
+()
+-> Task<
+int
+>
+{
+co_return
+42
+; }
+auto
+b
+()
+-> Task<
+int
+>
+{
+// The continuation
+auto
+sum =
+0
+;
+for
+(
+auto
+i =
+0
+; i <
+1'000'000
+; ++i) {
+    sum +=
+co_await
+a();
+  }
+co_return
+sum;
+}
+If the
+Promise
+object
+associated with coroutine
+a()
+directly called
+resume()
+on the handle to coroutine
+b()
+, a new call frame to resume
+b()
+would be created on the stack on top of the call frame for
+a()
+. This process would be repeated over and over again in the loop, creating new nested call frames on the stack for each iteration. This call sequence when two functions call each other is a form of recursion, sometimes called mutual recursion:
+Figure 13.1: Coroutine b() calls coroutine a(), which resumes b(), which calls a(), which resumes b(), and so on
+Even though there is only one coroutine frame created for
+b()
+, each call to
+resume()
+that resumes coroutine
+b()
+creates a new frame on the stack. The solution to avoid this problem is
+called
+symmetric transfer
+. Instead of resuming the continuation directly from the coroutine that is about to finish, the task object instead returns the
+coroutine_handle
+identifying the continuation from
+await_suspend()
+:
+// ...
+auto
+await_suspend
+(
+std
+::coroutine_handle<Promise> h)
+noexcept
+{
+return
+h.promise().continuation_;
+// Symmetric transfer
+}
+// ...
+An
+optimization called
+tail call optimization
+is then guaranteed to happen by the compiler. In our case, this means that the compiler will be able to transfer control directly to the continuation without creating a new nested call frame.
+We will not spend more time on the
+details of symmetric transfer and tail calls, but an excellent and more in-depth explanation of these topics can be found in the article
+C++ Coroutines: Understanding Symmetric Transfer
+by Lewis Baker, available at
+https://lewissbaker.github.io/2020/05/11/understanding_symmetric_transfer
+.
+As mentioned earlier, our
+Task
+template has the limitation of not handling a template parameter of type
+void
+. Now it's time to fix that.
+Supporting void tasks
+To overcome the limitations
+addressed earlier regarding the inability to handle tasks that do not produce any values, we need a template specialization for
+Task<void>
+. It is spelled out here for completeness, but it does not add many new insights beyond the general
+Task
+template defined earlier:
+template
+<>
+class
+[[
+nodiscard
+]]
+Task
+<void> {
+struct
+Promise
+{
+std
+::exception_ptr e_;
+// No std::variant, only exception
+std
+::coroutine_handle<> continuation_;
+auto
+get_return_object
+()
+noexcept
+{
+return
+Task{*
+this
+}; }
+void
+return_void() {}
+// Instead of return_value()
+void
+unhandled_exception
+()
+noexcept
+{ 
+      e_ =
+std
+::current_exception(); 
+    }
+auto
+initial_suspend
+()
+{
+return
+std
+::suspend_always{}; }
+auto
+final_suspend
+()
+noexcept
+{
+struct
+Awaitable
+{
+bool
+await_ready
+()
+noexcept
+{
+return
+false
+; }
+auto
+await_suspend
+(
+std
+::coroutine_handle<Promise> h)
+noexcept
+{
+return
+h.promise().continuation_;
+        }
+void
+await_resume
+()
+noexcept
+{}
+      };
+return
+Awaitable{};
+    }
+  };
+std
+::coroutine_handle<Promise> h_;
+explicit
+Task
+(Promise& p)
+noexcept
+: h_
+{
+std
+::coroutine_handle<Promise>::from_promise(p)} {}
+public
+:
+using
+promise_type = Promise;
+ 
+  Task(Task&& t)
+noexcept
+: h_{
+std
+::exchange(t.h_, {})} {}
+  ~Task() {
+if
+(h_) h_.destroy(); }
+// Awaitable interface
+bool
+await_ready
+()
+{
+return
+false
+; }
+auto
+await_suspend
+(
+std
+::coroutine_handle<> c)
+{
+    h_.promise().continuation_ = c;
+return
+h_;
+  }
+void
+await_resume
+()
+{
+if
+(h_.promise().e_)
+std
+::rethrow_exception(h_.promise().e_);
+  }
+};
+The promise
+type in this template specialization only keeps a reference to a potentially unhandled exception. And instead of having
+return_value()
+defined, the promise contains the member function
+return_void()
+.
+We can now represent tasks that return values or
+void
+. But there is still some work to be done before we can actually build a standalone program to test our
+Task
+type.
+Synchronously waiting for a task to complete
+An
+important aspect of the
+Task
+type is that whatever invokes a coroutine that returns a
+Task
+must
+co_await
+on it, and is therefore also a coroutine. This creates a chain of coroutines (continuations). For example, assume we have a coroutine like this:
+Task<
+void
+>
+async_func
+()
+{
+// A coroutine
+co_await
+some_func
+()
+;
+}
+Then, it's not possible to use it in the following way:
+void
+f
+()
+{
+co_await
+async_func
+()
+;
+// Error: A coroutine can't return void
+}
+Once we call an asynchronous function that returns a
+Task
+, we need to
+co_await
+on it, or nothing will happen. This is also the reason why we declare
+Task
+to be
+nodiscard
+: so that it generates a compilation warning if the return value is ignored, like this:
+void
+g
+()
+{        
+  async_func();
+// Warning: Does nothing
+}
+The forced chaining of coroutines has the interesting effect that we finally get to the
+main()
+function of
+the program, which the C++ standard says is not allowed to be a coroutine. This needs to be addressed somehow, and the proposed solution is to provide at least one function that synchronously waits on the asynchronous chains to complete. For example, the CppCoro library includes the function
+sync_wait()
+, which has this effect of breaking the chain of coroutines, which makes it possible for an ordinary function to use coroutines.
+Unfortunately, implementing
+sync_wait()
+is rather complicated, but in order to at least make it possible to compile and test our
+Task
+type, I will here provide a simplified version based on the Standard C++ Proposal P1171R0,
+https://wg21.link/P1171R0
+. Our goal here is to be able to write a test program like this:
+auto
+some_async_func
+()
+-> Task<
+int
+>
+{
+/* ... */
+}
+int
+main
+()
+{
+auto
+result = sync_wait(some_async_func());
+return
+result;
+}
+With the aim of testing and running asynchronous tasks, let's continue with the implementation of
+sync_wait()
+.
+Implementing sync_wait()
+sync_wait()
+internally
+uses a custom task class specifically designed for our purpose, called
+SyncWaitTask
+. Its definition will be revealed in a while, but first let's have a look at the definition of the function template
+sync_wait()
+:
+template
+<
+typename
+T>
+using
+Result =
+decltype
+(
+std
+::declval<T&>().await_resume());
+template
+<
+typename
+T>
+Result<T>
+sync_wait
+(T&& task)
+{
+if
+constexpr
+(
+std
+::is_void_v<Result<T>>)
+{
+struct
+Empty
+{
+};
+auto
+coro = [&]() -> detail::SyncWaitTask<Empty> {
+co_await
+std
+::forward<T>(task);
+co_yield
+Empty{};
+      assert(
+false
+);
+    };
+    coro().get();
+  }
+else
+{
+auto
+coro = [&]() -> detail::SyncWaitTask<Result<T>> {
+co_yield
+co_await
+std
+::forward<T>(task);
+// This coroutine will be destroyed before it
+// has a chance to return.
+assert(
+false
+);
+    };
+return
+coro().get();
+  }
+}
+First, in order to specify the type that the task is returning, we use a combination of
+decltype
+and
+declval
+. The rather cumbersome
+using-e
+xpression gives us the type returned by
+T::await_resume()
+, where
+T
+is the type of the task passed to
+sync_wait()
+.
+Inside
+sync_wait()
+we distinguish between tasks that return values and tasks that return
+void
+. We make a distinction here to avoid the need for implementing a template specialization of
+SyncWaitTask
+to handle both
+void
+and non-void types. Both cases are handled similarly by introducing an empty
+struct
+, which can be provided as the template argument to
+SyncWaitTask
+for handling
+void
+tasks.
+In the case where an actual
+value is returned, a lambda expression is used to define a coroutine that will
+co_await
+on the result and then finally yield its value. It's important to note that the coroutine might resume from
+co_await
+on another thread, which requires us to use a synchronization primitive in the implementation of
+SyncWaitTask
+.
+Calling
+get()
+on the coroutine lambda resumes the coroutine until it yields a value. The implementation of
+SyncWaitTask
+guarantees that the coroutine lambda will never have a chance to resume again after the
+co_yield
+statement.
+We used
+co_yield
+extensively in the previous chapter, but without mentioning its relationship to
+co_await
+; namely that the following
+co_yield
+expression:
+co_yield
+some_value;
+is transformed by the compiler into:
+co_await
+promise.yield_value(some_value);
+where
+promise
+is the promise object associated with the currently executing coroutine. Knowing this is helpful when trying to understand the control flow between
+sync_wait()
+and the
+SyncWaitTask
+class.
+Implementing SyncWaitTask
+Now we are ready
+to inspect the
+SyncWaitTask
+, which is a type intended only to be used as a helper for
+sync_wait()
+. For that reason, we add it under a namespace called
+detail
+to make it clear that this class is an implementation detail:
+namespace
+detail {
+// Implementation detail
+template
+<
+typename
+T>
+class
+SyncWaitTask
+{
+// A helper class only used by sync_wait()
+struct
+Promise
+{
+/* ... */
+};
+// See below
+std
+::coroutine_handle<Promise> h_;
+explicit
+SyncWaitTask
+(Promise& p)
+noexcept
+: h_
+{
+std
+::coroutine_handle<Promise>::from_promise(p)} {}
+public
+:
+using
+promise_type = Promise;
+  
+  SyncWaitTask(SyncWaitTask&& t)
+noexcept
+: h_{
+std
+::exchange(t.h_, {})} {}
+  ~SyncWaitTask() {
+if
+(h_) h_.destroy();}
+// Called from sync_wait(). Will block and retrieve the
+// value or error from the task passed to sync_wait()
+T&&
+get
+()
+{
+auto
+& p = h_.promise();
+    h_.resume();
+    p.semaphore_.acquire();
+// Block until signal
+if
+(p.error_)
+std
+::rethrow_exception(p.error_);
+return
+static_cast
+<T&&>(*p.value_);
+  }
+// No awaitable interface, this class will not be co_await:ed
+};
+}
+// namespace detail
+The most interesting
+part to pay attention to is the function
+get()
+and its blocking call to
+acquire()
+on a semaphore owned by the promise object. This is what makes this task type synchronously wait for a result to be ready for us. The promise type that owns the binary semaphore looks like this:
+struct
+Promise
+{
+T* value_{
+nullptr
+};
+std
+::exception_ptr error_;
+std
+::binary_semaphore semaphore_;
+SyncWaitTask
+get_return_object
+()
+noexcept
+{
+return
+SyncWaitTask{*
+this
+}; 
+  }
+void
+unhandled_exception
+()
+noexcept
+{ 
+    error_ =
+std
+::current_exception(); 
+  }
+auto
+yield_value
+(T&& x)
+noexcept
+{
+// Result has arrived
+value_ =
+std
+::addressof(x);
+return
+final_suspend();
+  }
+auto
+initial_suspend
+()
+noexcept
+{
+return
+std
+::suspend_always{}; 
+  }
+auto
+final_suspend
+()
+noexcept
+{
+struct
+Awaitable
+{
+bool
+await_ready
+()
+noexcept
+{
+return
+false
+; }
+void
+await_suspend
+(
+std
+::coroutine_handle<Promise> h)
+noexcept
+{
+        h.promise().semaphore_.release();
+// Signal!
+}
+void
+await_resume
+()
+noexcept
+{}
+    };
+return
+Awaitable{};
+  }
+void
+return_void
+()
+noexcept
+{ assert(
+false
+); }
+};
+There's a lot of boilerplate code here that we have already talked about. But pay special attention to
+yield_value()
+and
+final_suspend()
+, which is the interesting part of this class. Recall that the
+coroutine lambda inside
+sync_wait()
+yielded the return value like this:
+// ...
+auto
+coro = [&]() -> detail::SyncWaitTask<Result<T>> {
+co_yield
+co_await
+std
+::forward<T>(task);
+// ...
+So, once the value is yielded, we end up in
+yield_value()
+of the promise object. And the fact that
+yield_value()
+can return an awaitable type gives us the opportunity to customize the behavior of the
+co_yield
+keyword. In this case,
+yield_value()
+returns an awaitable that will signal through the binary semaphore that a value from the original
+Task
+object has been produced.
+The semaphore is signaled inside
+await_suspend()
+. We cannot signal earlier than that because the other end of the code waiting for the signal will eventually destroy the coroutine. Destroying a coroutine must only happen if the coroutine is in a suspended state.
+The blocking call to
+semaphore_
+.
+acquire()
+from within
+SyncWaitTask::get()
+will return on the signal, and finally the computed value will be handed over to the client that called
+sync_wait()
+.
+Testing asynchronous tasks with sync_wait()
+Finally, a
+small asynchronous test program using
+Task
+and
+sync_wait()
+can be
+constructed like this:
+auto
+height
+() -> Task<
+int
+>
+{
+co_return
+20
+; }
+// Dummy coroutines
+auto
+width
+() -> Task<
+int
+>
+{
+co_return
+30
+; }
+auto
+area
+() -> Task<
+int
+>
+{
+co_return
+co_await
+height
+()
+*
+co_await
+width
+()
+; 
+}
+int
+main
+()
+{
+auto
+a = area();
+int
+value = sync_wait(a);
+std
+::
+cout
+<< value;
+// Outputs: 600
+}
+We have implemented the absolute minimum infrastructure for using asynchronous tasks with C++ coroutines. More infrastructure is needed, though, in order to use coroutines for asynchronous programming effectively. This is a big difference from the generator (presented in the previous chapter), which required a fairly small amount of groundwork before we could really benefit from it. To get a little bit closer to the real world, we will, in the following sections, explore some examples using Boost.Asio. The first thing we will do is to try to wrap a callback-based API inside an API compatible with C++ coroutines.
+Wrapping a callback-based API
+There are many asynchronous
+APIs based on callbacks. Typically, an asynchronous function takes a callback function provided by the caller. The asynchronous function returns immediately and then eventually invokes the callback (completion handler) when the asynchronous function has a computed value or is done waiting for something.
+To show you what an asynchronous callback-based API can look like, we will take a peek at a Boost library for asynchronous I/O named
+Boost.Asio
+. There is a lot to learn about Boost.Asio that won't be covered here; I will only describe the absolute minimum of the Boost code and instead focus on the parts directly related to C++ coroutines.
+To make the code fit the pages of the book, the examples assume that the following namespace alias has been defined whenever we use code from Boost.Asio:
+namespace
+asio = boost::asio;
+Here is a complete example of using Boost.Asio for delaying a function call but without blocking the current thread. This asynchronous example runs in a single thread:
+#
+include
+<boost/asio.hpp>
+#
+include
+<chrono>
+#
+include
+<iostream>
+using
+namespace
+std
+::chrono;
+namespace
+asio = boost::asio;
+int
+main
+()
+{
+auto
+ctx = asio::io_context{};
+auto
+timer = asio::system_timer{ctx};
+  timer.expires_from_now(
+1000ms
+);
+  timer.async_wait([](
+auto
+error) {
+// Callback
+// Ignore errors..
+std
+::
+cout
+<<
+"Hello from delayed callback\n"
+; 
+  });
+std
+::
+cout
+<<
+"Hello from main\n"
+;
+  ctx.run();
+}
+Compiling and running this program will generate the following output:
+Hello from main
+Hello from delayed callback
+When using
+Boost.Asio, we always need to create an
+io_context
+object that runs an event processing loop. The call to
+async_wait()
+is asynchronous; it returns immediately back to
+main()
+and invokes the callback (the lambda) when the timer expires.
+The timer example does not use coroutines but instead a callback API to provide asynchronicity. Boost.Asio is also compatible with C++20 coroutines, which I will demonstrate later on. But on our path to explore awaitable types, we will take a detour and instead assume that we need to provide a coroutine-based API that returns awaitable types on top of the callback-based API of Boost.Asio. In that way, we can use a
+co_await
+expression to call and wait (but without blocking the current thread) for the asynchronous task to complete. Instead of using a callback, we would like to be able to write something like this:
+std
+::
+cout
+<<
+"Hello! "
+;
+co_await
+async_sleep
+(ctx,
+100ms
+)
+;
+std
+::
+cout
+<<
+"Delayed output\n"
+;
+Let's see how we can implement the function
+async_sleep()
+so that it can be used with
+co_await
+. The pattern we will follow is to have
+async_sleep()
+return an awaitable object that will implement the three required functions:
+await_ready()
+,
+await_suspend()
+, and
+await_resume()
+. An explanation of the code will follow after it:
+template
+<
+typename
+R,
+typename
+P>
+auto
+async_sleep
+(asio::io_context& ctx,
+std
+::chrono::duration<R, P> d)
+{
+struct
+Awaitable
+{
+asio::system_timer t_;
+std
+::chrono::duration<R, P> d_;
+    boost::system::error_code ec_{};
+bool
+await_ready
+()
+{
+return
+d_.count() <=
+0
+; }
+void
+await_suspend
+(
+std
+::coroutine_handle<> h)
+{
+      t_.expires_from_now(d_);
+      t_.async_wait([
+this
+, h](
+auto
+ec)
+mutable
+{
+this
+->ec_ = ec;
+        h.resume();
+      });
+    }
+void
+await_resume
+()
+{
+if
+(ec_)
+throw
+boost::system::system_error(ec_);
+    }
+  };
+return
+Awaitable{asio::system_timer{ctx}, d};
+}
+Once again, we
+are creating a custom awaitable type that does all the necessary work:
+await_ready()
+will return
+false
+unless the timer has already reached zero.
+await_suspend()
+starts the asynchronous operation and passes a callback that will be called when the timer has expired or produced an error. The callback saves the error code (if any) and resumes the suspended coroutine.
+await_resume()
+has no result to unpack because the asynchronous function we are wrapping,
+boost::asio::timer::async_wait()
+, does not return any value except an optional error code.
+Before we can actually test
+async_sleep()
+in a standalone program, we need some way to start the
+io_context
+run loop and break the chain of coroutines, as we did when testing the
+Task
+type previously. We will do that in a rather hacky way here by implementing two functions,
+run_task()
+and
+run_task_impl()
+, and a naive coroutine return type called
+Detached
+that ignores error handling and can be discarded by the caller:
+// This code is here just to get our example up and running
+struct
+Detached
+{
+struct
+promise_type
+{
+auto
+get_return_object
+()
+{
+return
+Detached{}; }
+auto
+initial_suspend
+()
+{
+return
+std
+::suspend_never{}; }
+auto
+final_suspend
+()
+noexcept
+{
+return
+std
+::suspend_never{};}
+void
+unhandled_exception
+()
+{
+std
+::
+terminate
+(); }
+// Ignore
+void
+return_void
+()
+{}
+  };
+};
+Detached
+run_task_impl
+(asio::io_context& ctx, Task<
+void
+>&& t)
+{
+auto
+wg = asio::executor_work_guard{ctx.get_executor()};
+co_await
+t;
+}
+void
+run_task
+(asio::io_context& ctx, Task<
+void
+>&& t)
+{
+  run_task_impl(ctx,
+std
+::move(t));
+  ctx.run();
+}
+The
+Detached
+type
+makes the coroutine start immediately and runs the coroutine detached from the caller. The
+executor_work_guard
+prevents the
+run()
+call from returning until the coroutine
+run_task_impl()
+has completed.
+Starting operations and detaching them should typically be avoided. It's similar to detached threads or allocated memory without any references. However, the purpose of this example is to demonstrate what we can use awaitable types for and how we can write asynchronous programs and run them single-threaded.
+Everything is in place; the wrapper called
+async_sleep()
+returns a
+Task
+and a function
+run_task()
+, which can be used to execute a task. It's time to write a small coroutine to test the new code
+we implemented:
+auto
+test_sleep
+(asio::io_context& ctx) -> Task<
+void
+>
+{
+std
+::
+cout
+<<
+"Hello!  "
+;
+co_await
+async_sleep
+(ctx,
+100
+ms)
+;
+std
+::
+cout
+<<
+"Delayed output\n"
+;
+}
+int
+main
+()
+{
+auto
+ctx = asio::io_context{};
+auto
+task = test_sleep(ctx);
+  run_task(ctx,
+std
+::move(task));  
+};
+Executing this program will generate the following output:
+Hello! Delayed output
+You have seen how a callback-based API can be wrapped in a function that can be used by
+co_await
+and therefore allows us to use coroutines instead of callbacks for asynchronous programming. This program also provided a typical example of how the functions in the
+awaitable type can be used. However, as mentioned earlier, it turns out that recent versions of Boost, starting with 1.70, already provide an interface that is compatible with C++20 coroutines. In the next section, we will use this new coroutine API when building a tiny TCP server.
+A concurrent server using Boost.Asio
+This section will demonstrate how to write concurrent programs that have multiple threads of execution but only use a single OS thread. We are about to implement a rudimentary concurrent single-threaded TCP server that can handle multiple clients. There are no networking capabilities in the C++ standard library, but fortunately Boost.Asio provides us with a platform-agnostic interface for handling socket communication.
+Instead of wrapping the callback-based Boost.Asio API, I will demonstrate how to use the
+boost::asio::awaitable
+class for the purpose of showing a more realistic example of how asynchronous application programming using coroutines can look. The class template
+boost::asio::awaitable
+corresponds to the
+Task
+template we created earlier; it's used as a return type for coroutines that represent asynchronous computations.
+Implementing the server
+The
+server is very simple; once a client connects, it starts updating a numeric counter and writes back the value whenever it is updated. This time we will follow the code from top to bottom, starting with the
+main()
+function:
+#
+include
+<boost/asio.hpp>
+#
+include
+<boost/asio/awaitable.hpp>
+#
+include
+<boost/asio/use_awaitable.hpp>
+using
+namespace
+std
+::chrono;
+namespace
+asio = boost::asio;
+using
+boost::asio::ip::tcp;
+int
+main
+()
+{
+auto
+server = [] {
+auto
+endpoint = tcp::endpoint{tcp::v4(),
+37259
+};
+auto
+awaitable = listen(endpoint);
+return
+awaitable;
+  };
+auto
+ctx = asio::io_context{};
+  asio::co_spawn(ctx, server, asio::detached);
+  ctx.run();
+// Run event loop from main thread
+}
+The mandatory
+io_context
+runs the event processing loop. It's possible to invoke
+run()
+from multiple threads as well, if we want our server to execute multiple OS threads. In our case we only use one thread but with multiple concurrent flows. The function
+boost::asio::co_spawn()
+starts a detached concurrent flow. The server is implemented using a lambda; it defines a TCP endpoint (with port 37259) and starts listening for incoming client connections on the endpoint.
+The coroutine
+listen()
+is fairly simple and looks like this:
+auto
+listen
+(tcp::endpoint endpoint)
+-> asio::awaitable<
+void
+>
+{
+auto
+ex =
+co_await
+asio::this_coro::executor;
+auto
+a = tcp::acceptor{ex, endpoint};
+while
+(
+true
+) {
+auto
+socket =
+co_await
+a.async_accept(asio::use_awaitable);
+auto
+session = [s =
+std
+::move(socket)]()
+mutable
+{
+auto
+awaitable = serve_client(
+std
+::move(s));
+return
+awaitable;
+    };
+    asio::co_spawn(ex,
+std
+::move(session), asio::detached);
+  }
+}
+The executor is the object responsible for actually executing our asynchronous functions. An executor may represent a thread pool or a single system thread, for example. We will most likely see some form of executors in upcoming versions of C++ to give us programmers more control and flexibility over when and where our code executes (including GPUs).
+Next, the
+coroutine runs an infinite loop and waits for TCP clients to connect. The first
+co_await
+expression returns a socket when a new client successfully connects to our server. The socket object is then moved to the coroutine
+serve_client()
+, which will serve the newly connected client until the client disconnects.
+The main application logic of the server happens in the coroutine that handles each client. Here is how it looks:
+auto
+serve_client
+(tcp::socket socket) -> asio::awaitable<
+void
+>
+{
+std
+::
+cout
+<<
+"New client connected\n"
+;
+auto
+ex =
+co_await
+asio::this_coro::executor;
+auto
+timer = asio::system_timer{ex};
+auto
+counter =
+0
+;
+while
+(
+true
+) {
+try
+{
+auto
+s =
+std
+::to_string(counter) +
+"\n"
+;
+auto
+buf = asio::buffer(s.data(), s.size());
+auto
+n =
+co_await
+async_write(socket, buf, asio::use_awaitable);
+std
+::
+cout
+<<
+"Wrote "
+<< n <<
+" byte(s)\n"
+;
+      ++counter;
+      timer.expires_from_now(
+100ms
+);
+co_await
+timer.async_wait(asio::use_awaitable);
+    }
+catch
+(...) {
+// Error or client disconnected
+break
+;
+    }
+  }
+}
+Each coroutine
+invocation serves one unique client during the entire client session; it runs until the client disconnects from the server. The coroutine updates a counter at regular intervals (every 100 ms) and writes the value asynchronously back to the client using
+async_write()
+. Note how we can write the function
+serve_client()
+in a linear fashion although it invokes two asynchronous operations:
+async_write()
+and
+async_wait()
+.
+Running and connecting to the server
+Once we have started
+this server, we can connect clients on port
+37259. To try this out, I'm using a tool called
+nc
+(netcat), which can be used for communicating over TCP and UDP. Here is an example of a short session where a client connects to the server running on localhost:
+[client] $ nc localhost 37259              
+0
+1
+2
+3
+We can start multiple clients and they will all be served by a dedicated
+serve_client()
+coroutine invocation and have their own copy of the incrementing counter variable, as shown in the screenshot below:
+Figure 13.2: A running server with two connected clients
+Another way to create
+an application serving multiple sessions concurrently would be to create one thread for each new client that connects. However, the memory overhead of threads would set the limit of the number of sessions substantially lower compared to this model using coroutines.
+The coroutines in this
+example are all executed on the same thread, which makes the locking of shared resources unnecessary. Imagine we had a global counter that each session updated. If we used multiple threads, the access to the global counter would need some kind of synchronization (using a mutex or an atomic data type). This is not necessary for coroutines that execute on the same thread. In other words, coroutines that execute on the same thread can share state without using any locking primitives.
+What we have achieved with the server (and what we haven't)
+The example application using Boost.Asio demonstrates that coroutines can be used for asynchronous programming. Instead of implementing continuations with nested callbacks, we can write code in a linear fashion using
+co_await
+statements. However, this example is minimal and avoids some really important aspects of asynchronous programming, such as:
+Asynchronous read and write operations. The server only writes data to its clients and ignores the challenge of synchronizing read and write operations.
+Canceling asynchronous tasks and graceful shutdown. The server runs in an infinite loop, completely ignoring the challenge of a clean shutdown.
+Error handling and exception safety when using multiple
+co_await
+statements.
+These topics are immensely important but are out of scope for this book. I already mentioned that detached operations are best avoided. Creating detached tasks using
+boost::asio::co_spawn()
+, as shown in the example, should be done with utmost caution. A fairly new programming paradigm for avoiding detached work is called
+structured concurrency
+. It aims
+to solve exception safety and the cancellation of multiple asynchronous tasks by encapsulating concurrency into general and reusable algorithms such as
+when_all()
+and
+stop_when()
+. The key idea is to never allow some child task to exceed the lifetime of its parent. This makes it possible to pass local variables by reference to asynchronous child operations safely and with better performance. Strictly nested lifetimes of concurrent tasks also make the code easier to reason about.
+Another important aspect is that asynchronous tasks should always be lazy (immediately suspended), so that continuations can be attached before any exceptions can be thrown. This is also a requirement if you want to be able to cancel a task in a safe manner.
+There will most likely be a lot of talks, libraries, and articles related to this important subject in the years to come. Two talks from CppCon 2019 addressed this topic:
+A Unifying Abstraction for Async in C++
+, Eric Neibler and D. S. Hollman,
+https://sched.co/SfrC
+Structured Concurrency: Writing Safer Concurrent Code with Coroutines and Algorithms
+, Lewis Baker,
+https://sched.co/SfsU
+Summary
+In this chapter, you've seen how to use C++ coroutines for writing asynchronous tasks. To be able to implement the infrastructure in the form of a
+Task
+type and a
+sync_wait()
+function, you needed to fully understand the concept of awaitable types and how they can be used to customize the behavior of coroutines in C++.
+By using Boost.Asio, we could build a truly minimal but fully functional concurrent server application executing on a single thread while handling multiple client sessions.
+Lastly, I briefly introduced a methodology called structured concurrency and gave some directions for where you can find more information about this topic.
+In the next chapter, we will move on to explore parallel algorithms, which are a way to speed up concurrent programs by utilizing multiple cores.
+
+14
+Parallel Algorithms
+The previous chapters have focused on how to introduce concurrency and asynchrony in our programs by using threads and coroutines. This chapter focuses on parallel execution of independent tasks, which is related to but distinct from concurrency.
+In earlier chapters, I stressed that I prefer standard library algorithms over handcrafted
+for
+-loops. In this chapter, you will see some great advantages of using standard library algorithms with the execution policies introduced with C++17.
+This chapter is not going to go in depth into theories of parallelizing algorithms or parallel programming in general, as these subjects are far too complex to cover in a single chapter. Also, there are a multitude of books on this subject. Instead, this chapter is going to take a more practical approach and demonstrate how to extend a current C++ code base to utilize parallelism while preserving the readability of the code base. In other words, we do not want the parallelism to get in the way of readability; rather, we want the parallelism to be abstracted away so that parallelizing the code is only a matter of changing a parameter to an algorithm.
+In this chapter, you will learn:
+Various techniques for implementing parallel algorithms
+How to evaluate the performance of parallel algorithms
+How to adapt a code base to use the parallel extensions of the standard library algorithms
+Parallel programming is a complicated topic, so before starting, you need to understand the motivation for introducing parallelism in the first place.
+The importance of parallelism
+From a programmer's perspective, it would be very convenient if the computer hardware of today was a 100 GHz single core CPU rather than a 3 GHz multi-core CPU; we wouldn't need to
+care about parallelism. Unfortunately, making single-core CPUs faster and faster has hit a physical limit. So, as the evolution of computer hardware is going in the direction of multi-core CPUs and programmable GPUs, programmers have to use efficient parallel patterns in order to make the most of the hardware.
+Parallel algorithms allow us to optimize our programs by executing multiple individual tasks or subtasks at the exact same time on a multi-core CPU or GPU.
+Parallel algorithms
+As mentioned in
+Chapter 11
+,
+Concurrency
+, the terms
+concurrency
+and
+parallelism
+can be a little hard to distinguish from each other. As a reminder, a program is said to run concurrently if it has multiple individual control flows running during overlapping time periods. On the
+other hand, a parallel program executes multiple tasks or subtasks simultaneously (at the exact same time), which requires hardware with multiple cores. We use parallel algorithms to optimize latency or throughput. It makes no sense to parallelize algorithms if we don't have hardware that can execute multiple tasks simultaneously to achieve better performance. A few simple formulas will now follow to help you understand what factors need to be considered when evaluating parallel algorithms.
+Evaluating parallel algorithms
+In this chapter,
+speedup
+is defined as the
+ratio between a sequential and a parallel version of an algorithm, as follows:
+T
+1
+is the time it takes to solve a problem using a sequential algorithm executing at one core, and
+T
+n
+is the time it takes to solve the same problem using
+n
+cores.
+Time
+refers to wall-clock time (not CPU time).
+A parallel algorithm is usually more complicated and requires more computational resources (CPU time, for example) compared to its sequential equivalent. The benefits of the parallel version come from the ability to spread the algorithm onto several processing units.
+With that in mind, it's also notable that not all algorithms gain the same performance boost when run in parallel. The
+efficiency
+of a parallel algorithm can be computed by the following formula:
+In this formula,
+n
+is the number of cores executing the algorithm. Since
+T
+1
+/
+T
+n
+denote the speedup, the efficiency can also be expressed as
+Speedup
+/
+n
+.
+If the efficiency is
+1.0
+, the algorithm parallelizes perfectly. For example, it means that we achieve an 8x speedup when executing a parallel algorithm on a computer with eight cores. In practice, though, there are a multitude of parameters that limit parallel execution, such as creating threads, memory bandwidth, and context switches, as mentioned in
+Chapter 11
+,
+Concurrency.
+So, typically, the efficiency is well below 1.0.
+The efficiency of a
+parallel algorithm depends on how independently each chunk of work can be processed. For example,
+std::transform()
+is trivial to parallelize in the sense that each element is processed completely independently of every other. This will be demonstrated later in this chapter.
+The efficiency also depends on the problem size and the number of cores. For example, a parallel algorithm may perform very poorly on small data sets due to the overhead incurred by the added complexity of a parallel algorithm. Likewise, executing a program on a great many cores might hit other bottlenecks in the computer such as memory bandwidth. We say that a parallel algorithm scales if the efficiency stays constant when we change the number of cores and/or the size of the input.
+It's also important to keep in mind that not all parts of a program can be parallelized. This fact limits the theoretical maximum speedup of a program even if we had an unlimited number of cores. We can compute the maximum possible speedup by using
+Amdahl's law
+, which was introduced in
+Chapter 3
+,
+Analyzing and Measuring Performance
+.
+Amdahl's law revisited
+Here, we will apply Amdahl's law to parallel programs. It works like this: the total running time of a
+program can be split into two distinct parts or
+fractions
+:
+F
+seq
+is the fraction of the program that can only be executed
+sequentially
+F
+par
+is the fraction of the program that can be executed in
+parallel
+Since these two fractions together make up the entire program, it means that
+F
+seq
+= 1 -
+F
+par
+. Now, Amdahl's law tells us that the
+maximum speedup
+of a program executing on
+n
+cores is:
+To visualize the effect of this law, the following image shows the execution time of a program with the sequential fraction at the bottom and the parallel fraction on the top. Increasing the number of cores only affects the parallel fraction, which sets a limit on the maximum speedup:
+Figure 14.1: Amdahl's law defines the maximum speedup; in this case it is 2x
+In the figure above, the sequential part accounts for 50% of the execution time when running on a single CPU. Therefore, the maximum speedup we can achieve by adding more cores when executing such a program is 2x.
+To give you some idea of how parallel algorithms can be implemented, we will now go through a few
+examples. We will begin with
+std::transform()
+because it is relatively easy to split into multiple independent parts.
+Implementing parallel std::transform()
+Although algorithmically
+std::transform()
+is easy to implement, in practice, implementing even a
+rudimentary parallel version is more complex than it might appear at first sight.
+The algorithm
+std::transform()
+calls a function for each element in a sequence, and stores the result in another sequence. A possible implementation of a sequential version of
+std::transform()
+may look something like this:
+template
+<
+class
+SrcIt,
+class
+DstIt,
+class
+Func>
+auto
+transform
+(SrcIt first, SrcIt last, DstIt dst, Func func) {
+while
+(first != last) {
+      *dst++ = func(*first++);
+  }
+}
+The standard library version also returns the
+dst
+iterator, but we will ignore that in our examples. To understand the challenges with a parallel version of
+std::transform()
+, let's begin with a naive approach.
+Naive implementation
+A naive
+parallel implementation of
+std::transform()
+would probably look something like this:
+Divide the elements into chunks corresponding to the number of cores in the computer
+Process each chunk in a separate task
+Wait for all tasks to finish
+Using
+std::thread::hardware_concurrency()
+to determine the number of supported hardware threads, a possible implementation could look like this:
+template
+<
+typename
+SrcIt,
+typename
+DstIt,
+typename
+Func>
+auto
+par_transform_naive
+(SrcIt first, SrcIt last, DstIt dst, Func f)
+{
+auto
+n =
+static_cast
+<
+size_t
+>(
+std
+::distance(first, last));
+auto
+n_cores =
+size_t
+{
+std
+::thread::hardware_concurrency()};
+auto
+n_tasks =
+std
+::max(n_cores,
+size_t
+{
+1
+});
+auto
+chunk_sz = (n + n_tasks -
+1
+) / n_tasks;
+auto
+futures =
+std
+::
+vector
+<
+std
+::
+future
+<
+void
+>>{};
+// Process each chunk on a separate
+for
+(
+auto
+i =
+0u
+l; i < n_tasks; ++i) {
+auto
+start = chunk_sz * i;
+if
+(start < n) {
+auto
+stop =
+std
+::min(chunk_sz * (i +
+1
+), n);
+auto
+fut =
+std
+::async(
+std
+::launch::async,
+         [first, dst, start, stop, f]() {
+std
+::transform(first + start, first + stop, dst + start, f);
+      });
+      futures.emplace_back(
+std
+::move(fut));
+    }
+  }
+// Wait for each task to finish
+for
+(
+auto
+&& fut : futures) {
+    fut.wait();
+  }
+}
+Note that
+hardware_concurrency()
+might return
+0
+if it, for some reason, is undetermined, and therefore is clamped to be at least one.
+A subtle difference between
+std::transform()
+and our parallel version is that they put different
+requirements on the iterators.
+std::transform()
+can operate on input and output iterators such as
+std::istream_iterator<>
+bound to
+std::cin
+. This is not possible with
+par_transform_naive()
+since the iterators are copied and used from multiple tasks. As you will see, there are no parallel algorithms presented in this chapter that can operate on input and output iterators. Instead, the parallel algorithms at least require forward iterators that allow multi-pass traversal.
+Performance evaluation
+Continuing the
+naive implementation, let's measure its performance with a simple performance evaluation compared to the sequential version of
+std::transform()
+executing at a single CPU core.
+In this test we will measure the time (clock on the wall) and the total time spent on the CPUs when varying the input size of the data.
+We will set up this benchmark using Google Benchmark, which was introduced in
+Chapter 3
+,
+Analyzing and Measuring Performance
+. To avoid duplicating code, we'll implement a function that will set up a test fixture for our benchmark. The fixture needs a source range with some example values, a destination range for the result, and a transform function:
+auto
+setup_fixture
+(
+int
+n)
+{
+auto
+src =
+std
+::
+vector
+<
+float
+>(n);
+std
+::iota(src.begin(), src.end(),
+1.0f
+);
+// Values from 1.0 to n
+auto
+dst =
+std
+::
+vector
+<
+float
+>(src.size());
+auto
+transform_function = [](
+float
+v) {
+auto
+sum = v;
+for
+(
+auto
+i =
+0
+; i <
+500
+; ++i) {
+      sum += (i * i * i * sum);
+    }
+return
+sum;
+  };
+return
+std
+::tuple{src, dst, transform_function};
+}
+Now
+we have our fixture set up, it's time to implement the actual benchmark. There will be two versions: one for the sequential
+std::transform()
+and one for our parallel version,
+par_transform_naive()
+:
+void
+bm_sequential
+(benchmark::State& state)
+{
+auto
+[src, dst, f] = setup_fixture(state.range(
+0
+));
+for
+(
+auto
+_ : state) {
+std
+::transform(src.begin(), src.end(), dst.begin(), f);
+  }
+}
+void
+bm_parallel
+(benchmark::State& state)
+{
+auto
+[src, dst, f] = setup_fixture(state.range(
+0
+));
+for
+(
+auto
+_ : state) {
+    par_transform_naive(src.begin(), src.end(), dst.begin(), f);
+  }
+}
+Only the code within the
+for
+-loops will be measured. By using
+state.range(0)
+for input size, we can generate different values by appending a range of values to each benchmark. In fact, we need to specify a couple of arguments for each benchmark, so we create a helper function that applies all the settings we need:
+void
+CustomArguments
+(benchmark::internal::Benchmark* b)
+{
+  b->Arg(
+50
+)->Arg(
+10'000
+)->Arg(
+1'000'000
+)
+// Input size
+->MeasureProcessCPUTime()
+// Measure all threads
+->UseRealTime()
+// Clock on the wall
+->Unit(benchmark::kMillisecond);
+// Use ms
+}
+A few things to note about the custom arguments:
+We pass the values 50, 10,000, and 1,000,000 as arguments to the benchmark. They are used as the input size when creating the vectors in the
+setup_fixture()
+function. These values are accessed using
+state.range(0)
+in the test functions.
+By
+default, Google Benchmark only measures CPU time on the main thread. But since we are interested in the total amount of CPU time on all threads, we use
+MeasureProcessCPUTime()
+.
+Google Benchmark decides how many times each test needs to be repeated until a statistically stable result has been achieved. We want the library to use the clock-on-the-wall time for this rather than CPU time, and therefore we apply the setting
+UseRealTime()
+.
+That's almost it. Finally, register the benchmarks and call main:
+BENCHMARK(bm_sequential)->Apply(CustomArguments);
+BENCHMARK(bm_parallel)->Apply(CustomArguments);
+BENCHMARK_MAIN();
+After compiling this code with optimizations turned on (using gcc with -O3), I executed this benchmark on a laptop using eight cores. The following table shows the results when using 50 elements:
+Algorithm
+CPU
+Time
+Speedup
+std::transform()
+0.02 ms
+0.02 ms
+0.25x
+par_transform_naive()
+0.17 ms
+0.08 ms
+CPU
+is the total time spent on the CPU.
+Time
+is the wall-clock time, which is what we are most interested in.
+Speedup
+is the relative speedup when comparing the elapsed time of the sequential version with the parallel version (0.02/0.08 in this case).
+Clearly, the sequential version outperforms the parallel algorithm for this small data set with only 50 elements. With 10,000 elements we really start to see the benefits of parallelization though:
+Algorithm
+CPU
+Time
+Speedup
+std::transform()
+0.89 ms
+0.89 ms
+4.5x
+par_transform_naive()
+1.95 ms
+0.20 ms
+Finally, using 1,000,000 elements gives us even higher efficiency, as can be seen in the following table:
+Algorithm
+CPU
+Time
+Speedup
+std::transform()
+9071 ms
+9092 ms
+7.3x
+par_transform_naive()
+9782 ms
+1245 ms
+The
+efficiency of the parallel algorithm in this last run is really high. It was executed on eight cores, so the efficiency is 7.3x/8 = 0.925. The results presented here (both the absolute execution time and the relative speedup) should not be relied upon too much. Among other things, the results depend on the computer architecture, the OS scheduler, and how much other work is currently running on the machine when performing the test. Nevertheless, the benchmarking results confirm a few important points discussed earlier:
+For small data sets, the sequential version
+std::transform()
+is much faster than the parallel version because of the overhead incurred by creating threads etc.
+The parallel version always uses more computational resources (CPU time) compared to
+std::transform()
+.
+For large data sets, the parallel version outperforms the sequential version when measuring wall-clock time. The speedup is over 7x when running on a machine with eight cores.
+One reason for the high efficiency of our algorithm (at least on large data sets) is that the computational cost is evenly distributed, and each subtask is highly independent. This is not always the case, though.
+Shortcomings of the naive implementation
+The naive implementation might do a good job if each chunk of work has the same computational
+cost and the algorithm executes in an environment where no other application utilizes the hardware. However, this is rarely the case; rather, we want a good general-purpose parallel implementation that is both efficient and scalable.
+The following illustrations show the problems we want to avoid. If the computational cost is not equivalent for each chunk, the implementation is limited to the chunk that takes the most time:
+Figure 14.2: Possible scenarios where computation time is not proportional to chunk size
+If the application and/or the operating system has other processes to handle, the operation will not process all chunks in parallel:
+Figure 14.3: Possible scenarios where computation time is proportional to chunk size
+As you can see in
+Figure 14.3
+, splitting the operation into smaller chunks makes the parallelization adjust to the current condition, avoiding single tasks that stall the whole operation.
+Also note that the naive implementation was unsuccessful for small data sets. There are many ways to adjust the naive implementation to perform better. For instance, we could create more
+tasks and smaller tasks by multiplying the number of cores by some factor greater than 1. Or, to avoid significant overhead on small data sets, we could let the chunk size decide the number of tasks to create etc.
+You now have the knowledge of how to implement and evaluate a simple parallel algorithm. We will not do any fine-tuning of the naive implementation; instead, I will show a different useful technique to use when implementing parallel algorithms.
+Divide and conquer
+An algorithm technique for dividing a problem into smaller subproblems is called
+divide and conquer
+. We will
+here implement another version of a parallel transform algorithm using divide and conquer. It works as follows: if the input range is smaller than a specified threshold, the range is processed; otherwise, the range is split into two parts:
+The first part is processed on a newly branched task
+The other part is recursively processed at the calling thread
+The following illustration shows how the divide and conquer algorithm would recursively transform a range using the following data and parameters:
+Range size: 16
+Source range contains floats from 1.0 to 16.0
+Chunk size: 4
+Transformation function:
+[](auto x) { return x*x; }
+Figure 14.4: A range is divided recursively for parallel processing. The source array contains float values from 1.0 to 8.0. The destination array contains the transformed values.
+In
+Figure 14.4
+, you
+can see that the main task spawns two asynchronous tasks (
+task 1
+and
+task 2
+) and finally transforms the last chunk in the range.
+Task 1
+spawns
+task 3
+and then transforms the remaining elements containing values 5.0, 6.0, 7.0, and 8.0. Let's head over to the implementation.
+Implementation
+Implementation-wise, it's quite a small bit of code. The incoming range is recursively split
+into two chunks; the first chunk is invoked as a new task, and the second chunk is recursively processed on the same task:
+template
+<
+typename
+SrcIt,
+typename
+DstIt,
+typename
+Func>
+auto
+par_transform
+(SrcIt first, SrcIt last, DstIt dst,
+                   Func func,
+size_t
+chunk_sz)
+{
+const
+auto
+n =
+static_cast
+<
+size_t
+>(
+std
+::distance(first, last));
+if
+(n <= chunk_sz) {
+std
+::transform(first, last, dst, func);
+return
+;
+  }
+const
+auto
+src_middle =
+std
+::next(first, n /
+2
+);
+// Branch of first part to another task
+auto
+future
+=
+std
+::async(
+std
+::launch::async, [=, &func] {
+    par_transform(first, src_middle, dst, func, chunk_sz);
+  });
+// Recursively handle the second part
+const
+auto
+dst_middle =
+std
+::next(dst, n /
+2
+);
+  par_transform(src_middle, last, dst_middle, func, chunk_sz);
+future
+.wait(); 
+}
+Combining recursion with multithreading like this can take a while to get your head around. In the following examples, you will see that this pattern can be used when implementing more complicated algorithms as well. But first, let's see how it performs.
+Performance evaluation
+To evaluate our new version, we will modify the benchmark fixture by updating the transform function
+with a version that takes more time depending on the input value. The range of input values will be increased by filling the range using
+std::iota()
+. Doing this means the algorithms need to process jobs of different sizes. Here is the new
+setup_fixture()
+function:
+auto
+setup_fixture
+(
+int
+n)
+{
+auto
+src =
+std
+::
+vector
+<
+float
+>(n);
+std
+::iota(src.begin(), src.end(),
+1.0f
+);
+// From 1.0 to n
+auto
+dst =
+std
+::
+vector
+<
+float
+>(src.size());
+auto
+transform_function = [](
+float
+v) {
+auto
+sum = v;
+auto
+n = v /
+20'000
+;
+// The larger v is,
+for
+(
+auto
+i =
+0
+; i < n; ++i) {
+// the more to compute
+sum += (i * i * i * sum);
+    }
+return
+sum;
+  };
+return
+std
+::tuple{src, dst, transform_function};
+}
+We can now try to find an optimal chunk size to be used by the divide-and-conquer algorithm by using an increasing parameter for the chunk size. It would also be interesting
+to see how our divide-and-conquer algorithm performs compared to the naive version on this new fixture, which needs to process jobs of different sizes. Here is the full code:
+// Divide and conquer version
+void
+bm_parallel
+(benchmark::State& state)
+{
+auto
+[src, dst, f] = setup_fixture(
+10'000'000
+);
+auto
+n = state.range(
+0
+);
+// Chunk size is parameterized
+for
+(
+auto
+_ : state) {
+    par_transform(src.begin(), src.end(), dst.begin(), f, n);
+  }
+}
+// Naive version
+void
+bm_parallel_naive
+(benchmark::State& state)
+{
+auto
+[src, dst, f] = setup_fixture(
+10'000'000
+);
+for
+(
+auto
+_ : state) {
+    par_transform_naive(src.begin(), src.end(), dst.begin(), f);
+  }
+}
+void
+CustomArguments
+(benchmark::internal::Benchmark* b)
+{
+  b->MeasureProcessCPUTime()
+    ->UseRealTime()
+    ->Unit(benchmark::kMillisecond);
+}
+BENCHMARK(bm_parallel)->Apply(CustomArguments)
+  ->RangeMultiplier(
+10
+)
+// Chunk size goes from
+->Range(
+1000
+,
+10'000'000
+);
+// 1k to 10M
+BENCHMARK(bm_parallel_naive)->Apply(CustomArguments);
+BENCHMARK_MAIN();
+The following diagram reveals the results I achieved when running the tests on macOS using an Intel Core i7 CPU with eight cores:
+Figure 14.5: Comparison between our naive algorithm and the divide-and-conquer algorithm using different chunk sizes
+The best
+efficiency was achieved when using chunk sizes of around 10,000 elements, which creates 1,000 tasks. With larger chunks, the performance is bottlenecked in the time it takes to process the final chunks, whereas too small chunks result in too much overhead in creating and invoking tasks compared to the computation.
+A takeaway from this example is that the performance penalty of scheduling 1,000 smaller tasks rather than a few big ones isn't a problem here. It would be possible to restrict the number of threads using a thread pool, but
+std::async()
+seems to work fairly well in this scenario. A generic implementation would opt for using a fairly large number of tasks rather than trying to match the exact number of cores.
+Finding optimal values for chunk size and the number of tasks is a real problem when implementing parallel algorithms. As you can see, it depends on many variables and also whether
+you optimize for latency or throughput. The best way to gain insights is to measure in the environment that your algorithms are supposed to run.
+Now that you have learned how to implement a parallel transform algorithm using divide and conquer, let's see how the same technique can be applied to other problems.
+Implementing parallel std::count_if()
+A nice thing with divide and conquer is that it can be applied to many problems. We can easily use the
+same technique to implement a parallel version of
+std::count_if()
+, with the difference being that we need to accumulate the returned value, like this:
+template
+<
+typename
+It,
+typename
+Pred>
+auto
+par_count_if
+(It first, It last, Pred pred,
+size_t
+chunk_sz)
+{
+auto
+n =
+static_cast
+<
+size_t
+>(
+std
+::distance(first, last));
+if
+(n <= chunk_sz)
+return
+std
+::count_if(first, last, pred);
+auto
+middle =
+std
+::next(first, n/
+2
+);
+auto
+fut =
+std
+::async(
+std
+::launch::async, [=, &pred] {
+return
+par_count_if(first, middle, pred, chunk_sz); 
+  });
+auto
+num = par_count_if(middle, last, pred, chunk_sz);
+return
+num + fut.get(); 
+}
+As you can see, the only difference here is that we need to sum the result at the end of the function. If you want to have the chunk size depend on the number of cores, you can easily wrap the
+par_count_if()
+in an outer function:
+template
+<
+typename
+It,
+typename
+Pred>
+auto
+par_count_if
+(It first, It last, Pred pred)
+{
+auto
+n =
+static_cast
+<
+size_t
+>(
+std
+::distance(first, last));
+auto
+n_cores =
+size_t
+{
+std
+::thread::hardware_concurrency()};
+auto
+chunk_sz =
+std
+::max(n / n_cores *
+32
+,
+size_t
+{
+1000
+});
+return
+par_count_if(first, last, pred, chunk_sz);
+}
+The magic number 32 here is a somewhat arbitrary factor that will give us more chunks and smaller chunks
+if we are given a large input range. As usual, we would need to measure the performance to come up with a good constant here. Let's now move on and try to tackle a more complicated parallel algorithm.
+Implementing parallel std::copy_if()
+We've had a look at
+std::transform()
+and
+std::count_if()
+, which are quite easy to implement both
+sequentially and in parallel. If we take another algorithm that is easily implemented sequentially,
+std::copy_if()
+, things get a lot harder to perform in parallel.
+Sequentially, implementing
+std::copy_if()
+is as easy as this:
+template
+<
+typename
+SrcIt,
+typename
+DstIt,
+typename
+Pred>
+auto
+copy_if
+(SrcIt first, SrcIt last, DstIt dst, Pred pred)
+{
+for
+(
+auto
+it = first; it != last; ++it) {
+if
+(pred(*it)) { 
+      *dst = *it; 
+      ++dst;
+    }
+  }
+return
+dst;
+}
+To demonstrate how it can be used, consider the following example where we have a range that contains a sequence of integers and we want to copy only the odd integers into another range:
+const
+auto
+src = {
+1
+,
+2
+,
+3
+,
+4
+};
+auto
+dst =
+std
+::
+vector
+<
+int
+>(src.size(),
+-1
+);
+auto
+new_end =
+std
+::copy_if(src.begin(), src.end(), dst.begin(), 
+                            [](
+int
+v) {
+return
+(v %
+2
+) ==
+1
+; });
+// dst is {1, 3, -1, -1}
+dst.erase(new_end, dst.end());
+// dst is now {1, 3}
+Now, if we want to make a parallel version of
+copy_if()
+, we immediately run into problems as we cannot write to the destination iterator concurrently. Here is a failed attempt with undefined behavior, since both tasks will write to the same position in the destination range:
+// Warning: Undefined behavior
+template
+<
+typename
+SrcIt,
+typename
+DstIt,
+typename
+Func>
+auto
+par_copy_if
+(SrcIt first, SrcIt last, DstIt dst, Func func)
+{
+auto
+n =
+std
+::distance(first, last);
+auto
+middle =
+std
+::next(first, n /
+2
+);
+auto
+fut0 =
+std
+::async([=]() {
+return
+std
+::copy_if(first, middle,
+dst
+, func); });
+auto
+fut1 =
+std
+::async([=]() {
+return
+std
+::copy_if(middle, last,
+dst
+, func); });
+auto
+dst0 = fut0.get();
+auto
+dst1 = fut1.get();
+return
+*
+std
+::max(dst0, dst1);
+// Just to return something...
+}
+We now have two
+simple approaches: either we synchronize the index we write to (by using an atomic/lock-free variable), or we split the algorithm into two parts. We will explore both approaches next.
+Approach 1: Use a synchronized write position
+The first approach
+we might consider is to synchronize the write position by using an atomic
+size_t
+and the
+fetch_add()
+member function, as you learned about in
+Chapter 11
+,
+Concurrency
+. Whenever a thread tries to write a new element, it fetches the current index and adds one atomically; thus, each value is written to a unique index.
+In our code, we will split the algorithm into two functions: an inner function and an outer function. The atomic write index will be defined in the outer function, whereas the main part of the algorithm will be implemented in the inner function.
+Inner function
+The inner
+function requires an atomic
+size_t
+that synchronizes the write positions. As the algorithm is recursive, it cannot store the atomic
+size_t
+itself; it requires an outer function to invoke the algorithm:
+template
+<
+typename
+SrcIt,
+typename
+DstIt,
+typename
+Pred>
+void
+inner_par_copy_if_sync
+(SrcIt first, SrcIt last, DstIt dst,
+std
+::
+atomic_size_t
+& dst_idx,
+Pred pred,
+size_t
+chunk_sz)
+{
+const
+auto
+n = static_cast<
+size_t
+>(
+std
+::distance(first, last));
+if
+(n <= chunk_sz) {
+std
+::for_each(first, last, [&](
+const
+auto
+& v) {
+if
+(pred(v)) {
+auto
+write_idx = dst_idx.fetch_add(
+1
+);
+*
+std
+::next(dst, write_idx) = v;
+}
+    });
+return
+;
+  }
+auto
+middle =
+std
+::next(first, n /
+2
+);
+auto
+future
+=
+std
+::async([first, middle, dst, chunk_sz, &pred, &dst_idx] {
+inner_par_copy_if_sync(first, middle
+, dst, dst_idx, pred, chunk_sz);
+  });
+inner_par_copy_if_sync(middle, last
+, dst, dst_idx, pred, chunk_sz);
+future
+.wait();
+}
+This is still a divide-and-conquer algorithm and hopefully you will start to see the pattern we are using. The atomic update of the write index
+dst_idx
+ensures that multiple threads never write to the same index in the destination sequence.
+Outer function
+The outer
+function, called from the client code, is simply a placeholder for the atomic
+size_t
+, which is initialized to zero. The function then initializes the inner function, which parallelizes the code further:
+template
+<
+typename
+SrcIt,
+typename
+DstIt,
+typename
+Pred>
+auto
+par_copy_if_sync
+(SrcIt first,SrcIt last,DstIt dst,
+Pred p,
+size_t
+chunk_sz)
+{
+auto
+dst_write_idx =
+std
+::
+atomic_size_t
+{
+0
+};
+  inner_par_copy_if_sync(first, last, dst, dst_write_idx, p, chunk_sz);
+return
+std
+::next(dst, dst_write_idx);
+}
+Once the inner function returns, we can use
+dst_write_idx
+to compute the end iterator of the destination
+range. Let's now have a look at the other approach to solve the same problem.
+Approach 2: Split the algorithm into two parts
+The second approach is to split the algorithm into two parts. First, the conditional copying is performed in parallel chunks, and then the resulting sparse range is squeezed to a continuous range.
+Part one – Copy elements in parallel into the destination range
+The first part copies the
+elements in chunks, resulting in the sparse destination array illustrated in
+Figure 14.6
+. Each chunk is conditionally copied in parallel, and the resulting range iterators are stored in
+std::future
+objects for later retrieval:
+Figure 14.6: The sparse destination range after the first step of the conditional copying
+The following code implements the first half of the algorithm:
+template
+<typename
+SrcIt,
+typename
+DstIt,
+typename
+Pred>
+auto
+par_copy_if_split
+(SrcIt first, SrcIt last, DstIt dst, 
+                       Pred pred,
+size_t
+chunk_sz) -> DstIt {
+auto
+n =
+static_cast
+<
+size_t
+>(
+std
+::distance(first, last));
+auto
+futures =
+std
+::
+vector
+<
+std
+::
+future
+<
+std
+::
+pair
+<DstIt, DstIt>>>{};
+  futures.reserve(n / chunk_sz);
+for
+(
+auto
+i =
+size_t
+{
+0
+}; i < n; i += chunk_sz) {
+const auto
+stop_idx =
+std
+::min(i + chunk_sz, n);
+auto
+future
+=
+std
+::async([=, &pred] {
+auto
+dst_first = dst + i;
+auto
+dst_last =
+s
+td
+::copy_if(first+i, first+stop_idx,                                   dst_first, pred);
+return
+std
+::
+make_pair
+(dst_first, dst_last);
+    });
+    futures.emplace_back(
+std
+::move(
+future
+));
+  }
+// To be continued ...
+We have now
+copied the elements (that should be copied) into the sparse destination range. It's time to fill the gaps by moving the elements to the left in the range.
+Part two – Move the sparse range sequentially into a continuous range
+When the sparse
+range is created, it is merged using the resulting value from each
+std::future
+. The merge is performed sequentially as the parts overlap:
+// ...continued from above...
+// Part #2: Perform merge of resulting sparse range sequentially
+auto
+new_end = futures.front().get().second;
+for
+(
+auto
+it =
+std
+::next(futures.begin()); it != futures.end(); ++it)  {
+auto
+chunk_rng = it->get(); 
+    new_end =
+std
+::move(chunk_rng.first, chunk_rng.second, new_end);
+  }
+return
+new_end; 
+}
+// end of par_copy_if_split
+This second part of the algorithm that moves all the subranges to the beginning of the range is illustrated in the following image:
+Figure 14.7: Merging a sparse range into a continuous range
+With two
+algorithms solving the same problem, it's time to see how they measure up.
+Performance evaluation
+The performance
+boost from using this parallelized version of
+copy_if()
+is heavily dependent on how expensive the predicate is. Therefore, we use two different predicates in our benchmark with different computational costs. Here is the
+inexpensive
+predicate:
+auto
+is_odd = [](
+unsigned
+v) {
+return
+(v %
+2
+) ==
+1
+; 
+};
+The more
+expensive
+predicate checks whether its argument is a prime number:
+auto
+is_prime = [](
+unsigned
+v) {
+if
+(v <
+2
+)
+return
+false
+;
+if
+(v ==
+2
+)
+return
+true
+;
+if
+(v %
+2
+==
+0
+)
+return
+false
+;
+for
+(
+auto
+i =
+3u
+; (i * i) <= v; i+=
+2
+) {
+if
+((v % i) ==
+0
+) {
+return
+false
+; 
+     }
+  }
+return
+true
+;
+};
+Note, this is not a particularly optimal way to implement
+is_prime()
+, and is only used here for the purposes of the benchmark.
+The benchmarking code is not spelled out here but is included in the accompanying source code. Three
+algorithms are compared:
+std::copy_if()
+,
+par_copy_if_split()
+, and
+par_copy_if_sync()
+. The following graph shows the results as measured using an Intel Core i7 CPU. The parallel algorithms use a chunk size of 100,000 in this benchmark.
+Figure 14.8: Conditional copy strategies versus computation time
+The most obvious observation when measuring the performance is how ridiculously slow the synchronized version
+par_copy_if_sync()
+is when using the inexpensive
+is_odd()
+predicate. The disastrous performance is actually not due to the atomic write index; rather, it is because the cache mechanism of the hardware is trashed due to several threads writing to the same cache line (as you learned about in
+Chapter 7
+,
+Memory Management
+).
+So, with this knowledge, we understand now why
+par_copy_if_split()
+performs better. On the inexpensive predicate,
+is_odd()
+,
+par_copy_if_split()
+is about 2x faster than
+std::copy_if()
+, but with the expensive
+is_prime()
+, the efficiency increases to almost 5x. The increased efficiency is a result of spending most of the computations in the first part of the algorithm, which executes in parallel.
+You should now have a
+grasp of some techniques that can be used for parallelizing an algorithm. These new insights will help you understand the requirements and expectations when using parallel algorithms from the standard library.
+Parallel standard library algorithms
+As of C++17, the standard library has been extended with parallel versions of most, but not all, algorithms. Changing
+your algorithms to allow for parallel execution is simply a matter of adding a parameter that tells the algorithm which parallel execution policy to use.
+As stressed earlier in this book, if your code base is based upon standard library algorithms, or at least if you have the habit of writing C++ by using algorithms, you will get an instant performance boost almost for free by adding an execution policy where suitable:
+auto
+v =
+std
+::
+vector
+<
+std
+::
+string
+>{
+"woody"
+,
+"steely"
+,
+"loopy"
+,
+"upside_down"
+};
+// Parallel sort
+std
+::sort(
+std
+::execution::par
+, v.begin(), v.end());
+Once you specify an execution policy, you are in the realm of parallel algorithms, which have some notable differences compared to their original sequential versions. Firstly, the minimum iterator category requirements change from input iterators to forward iterators. Secondly, exceptions thrown by your code (from copy constructors or function objects passed to the algorithm) never reach you. Instead, the algorithm is required to call
+std::terminate()
+. Thirdly, the complexity guarantees (both time and memory) of the algorithm might be relaxed because of the added complexity of parallel implementations.
+When using a parallel version of the standard library algorithms, you specify an execution policy that
+states how an algorithm is allowed to parallelize the execution. An implementation may decide to execute the algorithm sequentially, though. If you compare the efficiency and scalability of parallel algorithms in different standard library implementations, you can expect to see big differences.
+Execution policies
+An
+execution policy
+informs an algorithm if and how the execution can be parallelized. There are four default
+execution policies included in the parallel extensions of the standard library. Compilers and third-party libraries can extend these policies for certain hardware and conditions. For example, it's already possible to use the parallel power of the modern graphics card from standard library algorithms using vendor-specific policies.
+The execution policies are defined in the header
+<execution>
+and reside in the namespace
+std::execution
+. There are currently four distinct tag types, one for each execution policy. The types cannot be instantiated by you; instead, there is one predefined object per type. For instance, the parallel execution policy has a type called
+std::execution::parallel_policy
+and the predefined instance of this type is named
+std::execution::par
+. The reason there is one
+type
+per policy (rather than one type with multiple predefined instances) is so that the policies you provide can be distinguished at compile time by the library.
+Sequenced policy
+The sequenced execution policy,
+std::execution::seq
+, makes the algorithm execute sequentially with no
+parallelism, similar to how the algorithms without the extra execution policy argument would run. However, whenever you specify an execution policy, it means that you are using a version of the algorithm with relaxed complexity guarantees and stricter iterator requirements; it also assumes that the code you provide doesn't throw exceptions, or the algorithm will call
+std::terminate()
+.
+Parallel policy
+The parallel execution policy,
+std::execution::par
+, can be considered the standard execution policy for parallel algorithms. The code you provide to the algorithm needs to be thread safe. A way
+to understand this requirement is to think about the loop body in the sequential version of the algorithm you are about to use. For example, think about the sequential version of
+copy_if()
+, which we spelled out like this earlier in the chapter:
+template
+<
+typename
+SrcIt,
+typename
+DstIt,
+typename
+Pred>
+auto
+copy_if
+(SrcIt first, SrcIt last, DstIt dst, Pred pred)
+{
+for
+(
+auto
+it = first; it != last; ++it) 
+  {
+// Start of loop body
+if
+(pred(*it)) {
+// Call predicate
+*dst = *it;
+// Copy construct
+++dst;
+    }
+  }
+// End of loop body
+return
+dst;
+}
+In this algorithm, the code inside the loop body will call the predicate you provided and invoke the copy assignment operator on the elements in the range. If you pass
+std::execution::par
+to
+copy_if()
+, it is your responsibility to guarantee that these parts are thread safe and can safely be executed in parallel.
+Let's look at an example where we provide unsafe code and then see what we can do about it. Assume we have a vector of strings:
+auto
+v =
+std
+::
+vector
+<
+std
+::
+string
+>{
+"Ada"
+,
+"APL"
+/* ... */
+};
+If we want to compute the total size of all strings in the vector using a parallel algorithm, an inadequate way to do this would be to use
+std::for_each()
+, like this:
+auto
+tot_size =
+size_t
+{
+0
+};
+std
+::for_each(
+std
+::execution::par, v.begin(), v.end(),
+              [&](
+const
+auto
+& s) { 
+  tot_size += s.size();
+// Undefined behavior, data race!
+});
+Since the body of the function object is not thread safe (as it updates a shared variable from multiple threads), this code exhibits undefined behavior. We could, of course, protect the
+tot_size
+variable with a
+std::mutex
+, but that would defeat the whole purpose of executing this code in parallel, since the mutex would only allow one thread at a time to enter the body. Using an
+std::atomic
+data type would be another option, but that could also degrade the efficiency.
+The solution here is to
+not
+use
+std::for_each()
+for this problem at all. Instead, we can use
+std::transform_reduce()
+or
+std::reduce()
+, which are tailor-made for this kind of job. Here is how you would do it using
+std::reduce()
+:
+auto
+tot_size =
+std
+::reduce(
+std
+::execution::par, v.begin(), v.end(),
+size_t
+{
+0
+}, [](
+auto
+i,
+const
+auto
+& s) {
+return
+i + s.size();
+// OK! Thread safe
+});
+By getting rid of the mutable reference inside the lambda, the body of the lambda is now thread safe. The
+const
+reference to the
+std::string
+objects is fine, because it never mutates any
+string objects and therefore doesn't introduce any data races.
+Normally, the code you pass to an algorithm is thread safe unless your function objects capture objects by reference or have other side effects such as writing to files.
+Unsequenced policy
+The unsequenced policy was added in C++20. It tells the algorithm that the loop is allowed to be
+vectorized using, for example, SIMD instructions. In practice, this means that you cannot use any synchronization primitives in the code you pass to the algorithm, since this could result in deadlocks.
+To understand how a deadlock can occur, we will get back to the previous inadequate example when counting the total size of all strings in a vector. Assume that, instead of using
+std::reduce()
+, we protect the
+tot_size
+variable by adding a mutex, like this:
+auto
+v =
+std
+::
+vector
+<
+std
+::
+string
+>{
+"Ada"
+,
+"APL"
+/* ... */
+};
+auto
+tot_size =
+size_t
+{
+0
+};
+auto
+mut =
+std
+::mutex{};
+std
+::for_each(
+std
+::execution::par, v.begin(), v.end(),
+              [&](
+const
+auto
+& s) {
+auto
+lock =
+std
+::scoped_lock{mut};
+// Lock
+tot_size += s.size(); 
+  }
+// Unlock
+);
+This code is now safe to execute using
+std::execution::par
+, but it is very inefficient. If we were to change the execution policy to
+std::execution::unseq
+, the result would not only be an inefficient program but also a program that runs the risk of deadlocking!
+The unsequenced execution policy tells the algorithm that it may reorder the instruction of our code in a way that is normally not allowed by the optimizing compiler.
+For the algorithm to benefit from vectorization, it needs to read multiple values from the input range, and then apply SIMD instructions to multiple values at once. Let's analyze what two iterations in the loop of
+for_each()
+could look like, with and without reorderings. Here are two loop iterations without any reorderings:
+{
+// Iteration 1
+const
+auto
+& s = *it++;
+  mut.lock();
+  tot_size += s.size();
+  mut.unlock();
+}
+{
+// Iteration 2
+const
+auto
+& s = *it++;
+  mut.lock();
+  tot_size += s.size();
+  mut.unlock();
+}
+The algorithm is
+allowed to merge these two iterations in the following way:
+{
+// Iteration 1 & 2 merged
+const
+auto
+& s1 = *it++;
+const
+auto
+& s2 = *it++;
+  mut.lock();
+  mut.lock();
+// Deadlock!
+tot_size += s1.size();
+// Replace these operations
+tot_size += s2.size();
+// with vectorized instructions
+mut.unlock();
+  mut.unlock();
+}
+Trying to execute this code on the same thread will deadlock because we are trying to lock the very same mutex twice consecutively. In other words, when using the
+std::execution::unseq
+policy, you must make sure that the code you provide to the algorithm doesn't acquire any locks.
+Note that the optimizing compiler is free to vectorize your code anytime. However, in those cases, it's up to the compiler to guarantee that the vectorization doesn't change the meaning of the
+program, just like any other optimizations that the compiler and hardware are allowed to perform. The difference here, when explicitly providing the
+std::execute::unseq
+policy to an algorithm, is that
+you
+guarantee that the code you provide is safe to vectorize.
+Parallel unsequenced policy
+The parallel unsequenced policy,
+std::execution::par_unseq
+, executes the algorithm in parallel like the
+parallel policy, with the addition that it may also vectorize the loop.
+Apart from the four standard execution policies, standard library vendors can provide you with additional policies with custom behavior and put other constraints on the input. For example, the Intel Parallel STL library defines four custom execution policies that only accept random access iterators.
+Exception handling
+If you provide one of the four standard execution policies to an algorithm, your code must not throw
+exceptions, or the algorithm will call
+std::terminate()
+. This is a big difference from the normal single-threaded algorithms, which always propagate exceptions back to the caller:
+auto
+v = {
+1
+,
+2
+,
+3
+,
+4
+};
+auto
+f = [](
+auto
+) {
+throw
+std
+::exception{}; };
+try
+{
+std
+::for_each(v.begin(), v.end(), f);
+}
+catch
+(...) {
+std
+::
+cout
+<<
+"Exception caught\n"
+;
+}
+Running the same code with an execution policy results in a call to
+std::terminate()
+:
+try
+{
+std
+::for_each(
+std
+::execution::seq, v.begin(), v.end(), f);
+}
+catch
+(...) {
+// The thrown std:::exception never reaches us.
+// Instead, std::terminate() has been called
+}
+You might think that this means the parallel algorithms are declared
+noexcept
+, but that's not the case. Many parallel algorithms need to allocate memory, and therefore the standard parallel algorithms themselves are allowed to throw
+std::bad_alloc
+.
+It should also be said that execution policies provided by other libraries may handle exceptions in a different way.
+Now, we will
+move on to discuss some of the algorithms that were added and modified when the parallel algorithms were first introduced in C++17.
+Additions and changes to parallel algorithms
+Most
+algorithms in the standard library are available as parallel versions straight out the box. However, there are some noteworthy exceptions,
+including
+std::accumulate()
+and
+std::for_each()
+, as their original specifications required in-order execution.
+std::accumulate() and std::reduce()
+The
+std::accumulate()
+algorithm
+cannot be parallelized as it must be executed in the order of the elements, which is not possible to parallelize. Instead, a new
+algorithm called
+std::reduce()
+has been added, which works just like
+std::accumulate()
+with the exception that it is executed unordered.
+With commutative operations, their results are the same, as the order of accumulation doesn't matter. In other words, given a range of integers:
+const
+auto
+r = {
+1
+,
+2
+,
+3
+,
+4
+};
+accumulating them by addition or multiplication:
+auto
+sum =
+std
+::accumulate(r.begin(), r.end(),
+0
+,
+std
+::plus<
+int
+>{});
+auto
+product =
+std
+::accumulate(r.begin(), r.end(),
+1
+,
+std
+::multiplies<
+int
+>{});
+would yield the same result as invoking
+std::reduce()
+instead of
+std::accumulate()
+, as both the addition and multiplication of integers are commutative. For example:
+But, if the operation is not commutative, the result is
+non-deterministic
+since it depends on the order of the arguments. For example, if we were to accumulate a list of strings as follows:
+auto
+v =
+std
+::
+vector
+<
+std
+::
+string
+>{
+"A"
+,
+"B"
+,
+"C"
+};
+auto
+acc =
+std
+::accumulate(v.begin(), v.end(),
+std
+::
+string
+{});
+std
+::
+cout
+<< acc <<
+'\n'
+;
+// Prints "ABC"
+this code will always produce the string
+"ABC"
+. But, by using
+std::reduce()
+, the characters in the
+resulting string could be in any order because string concatenation is not commutative. In other words, the string
+"A" + "B"
+is not
+equal to
+"B" + "A"
+. Therefore, the following code using
+std::reduce()
+might produce different results:
+auto
+red =
+std
+::reduce(v.begin(), v.end(),
+std
+::
+string
+{});
+std
+::
+cout
+<< red <<
+'\n'
+;
+// Possible output: "CBA" or "ACB" etc
+An interesting point related to performance is that floating-point math is not commutative. By using
+std::reduce()
+on floating-point values, the results may vary, but it also means that
+std::reduce()
+is potentially much faster than
+std::accumulate()
+. This is because
+std::reduce()
+is allowed to reorder operations and utilize SIMD instructions in a way that
+std::accumulate()
+isn't allowed to do when using strict floating-point math.
+std::transform_reduce()
+As an addition to
+the standard library algorithms,
+std::transform_reduce()
+has also been added to the
+<numeric>
+header. It does exactly what it says: it transforms a range of elements as
+std::transform()
+and then applies a function object. This accumulates them out of order, like
+std::reduce()
+:
+auto
+v =
+std
+::
+vector
+<
+std
+::
+string
+>{
+"Ada"
+,
+"Bash"
+,
+"C++"
+};
+auto
+num_chars =
+std
+::transform_reduce( 
+  v.begin(), v.end(),
+size_t
+{
+0
+}, 
+  [](
+size_t
+a,
+size_t
+b) {
+return
+a + b; },
+// Reduce
+[](
+const
+std
+::
+string
+& s) {
+return
+s.size(); }
+// Transform
+);
+// num_chars is 10
+Both
+std::reduce()
+and
+std::transform_reduce()
+were added to C++17 when parallel algorithms were introduced. Another necessary change was to adjust the return type of
+std::for_each()
+.
+std::for_each()
+A somewhat
+rarely used property of
+std::for_each()
+is that it returns the function object passed into it. This makes it possible to use
+std::for_each()
+to accumulate values inside a stateful function object. The following examples demonstrate a possible use case:
+struct
+Func
+{
+void
+operator
+()(
+const
+std
+::
+string
+& s)
+{
+    res_ += s;
+  };
+std
+::
+string
+res_{};
+// State
+};
+auto
+v =
+std
+::
+vector
+<
+std
+::
+string
+>{
+"A"
+,
+"B"
+,
+"C"
+};
+auto
+s =
+std
+::for_each(v.begin(), v.end(), Func{}).res_;
+// s is "ABC"
+This usage is similar to what we can achieve using
+std::accumulate()
+and therefore also exhibits the same problem when trying to parallelize it: executing the function object out of order would yield non-deterministic results as the invocation order is undefined. Consequently, the parallel version of
+std::for_each()
+simply returns
+void
+.
+Parallelizing an index-based for-loop
+Even though I
+recommend using algorithms, sometimes a raw, index-based
+for
+-loop is required for a specific task. The standard library algorithms provide an equivalent of a range-based
+for
+-loop by including the algorithm
+std::for_each()
+in the library.
+However, there is no algorithm equivalent of an index-based
+for
+-loop. In other words, we cannot easily parallelize code like this by simply adding a parallel policy to it:
+auto
+v =
+std
+::
+vector
+<
+std
+::
+string
+>{
+"A"
+,
+"B"
+,
+"C"
+};
+for
+(
+auto
+i =
+0u
+; i < v.size(); ++i) { 
+  v[i] +=
+std
+::to_string(i+
+1
+); 
+}
+// v is now { "A1", "B2", "C3" }
+But let's see how we can build one by combining algorithms. As you will have already concluded, implementing
+parallel algorithms is complicated. But in this case, we will build a
+parallel_for()
+algorithm using
+std::for_each()
+as a building block, thus leaving the complex parallelism to
+std::for_each()
+.
+Combining std::for_each() with std::views::iota()
+An index-based
+for
+-loop
+based on a standard library algorithm can be created by combining
+std::for_each()
+with
+std::views::iota()
+from the ranges library (see
+Chapter 6
+,
+Ranges and Views
+). This is how it would look:
+auto
+v =
+std
+::
+vector
+<
+std
+::
+string
+>{
+"A"
+,
+"B"
+,
+"C"
+};
+auto
+r =
+std
+::views::iota(
+size_t
+{
+0
+}, v.size());
+std
+::for_each(r.begin(), r.end(), [&v](
+size_t
+i) { 
+  v[i] +=
+std
+::to_string(i +
+1
+); 
+});
+// v is now { "A1", "B2", "C3" }
+This can then be further parallelized by using the parallel execution policy:
+std
+::for_each(
+std
+::execution::par, r.begin(), r.end(), [&v](
+size_t
+i) { 
+  v[i] +=
+std
+::to_string(i +
+1
+); 
+});
+As stated earlier, we have to be very careful when passing references to a lambda that will be invoked from multiple threads like this. By only accessing vector elements via the unique index
+i
+, we avoid introducing data races when mutating the strings in the vector.
+Simplifying construction via a wrapper
+In order
+to iterate the indices with a neat syntax, the previous code is wrapped into a utility function named
+parallel_for()
+, as shown here:
+template
+<
+typename
+Policy,
+typename
+Index,
+typename
+F>
+auto
+parallel_for
+(Policy&& p, Index first, Index last, F f)
+{
+auto
+r =
+std
+::views::iota(first, last);
+std
+::for_each(p, r.begin(), r.end(),
+std
+::move(f));
+}
+The
+parallel_for()
+function template can then be used directly like this:
+auto
+v =
+std
+::
+vector
+<
+std
+::
+string
+>{
+"A"
+,
+"B"
+,
+"C"
+};
+parallel_for(
+std
+::execution::par,
+size_t
+{
+0
+}, v.size(),
+              [&](
+size_t
+i) { v[i] +=
+std
+::to_string(i +
+1
+); });
+As the
+parallel_for()
+is built upon
+std::for_each()
+, it accepts any policy that
+std::for_each()
+accepts.
+We will wrap this
+chapter up with a short introductory overview of GPUs and how they can be used for parallel programming, now and in the future.
+Executing algorithms on the GPU
+Graphics
+processing units
+(
+GPUs
+) were originally designed and used for processing points and pixels for computer graphics rendering. Briefly, what
+the GPUs did was retrieve buffers of pixel data or vertex data, perform a simple operation on each buffer individually, and store the result in a new buffer (to eventually be displayed).
+Here are some examples of simple, independent operations that could be executed on the GPU at an early stage:
+Transform a point from world coordinates to screen coordinates
+Perform a lighting calculation at a specific point (by lighting calculation, I am referring to calculating the color of a specific pixel in an image)
+As these operations could be performed in parallel, the GPUs were designed for executing small operations in parallel. Later on, these graphics operations became programmable, although the programs were written in terms of computer graphics (that is, the memory reads were done in terms of reading colors from a texture, and the result was always written as a
+color to a texture). These programs are called
+shaders
+.
+Over time, more shader-type programs were introduced, and shaders gained more and more low-level options, such as reading and writing raw values from buffers instead of color values from textures.
+Technically, a CPU commonly consists of a few general-purpose cached cores, whereas a GPU consists of a huge number of highly specialized cores. This means that parallel algorithms that scale well are highly suitable to execute on a GPU.
+GPUs have their own memory and before an algorithm can execute on the GPU, the CPU needs to allocate memory in the GPU memory and copy data from main memory to GPU memory. The next thing that happens is that the CPU launches a routine (also called a kernel) on the GPU. Finally, the CPU copies data back from the GPU memory into the main memory, making it accessible for "normal" code executing on the CPU. The overhead incurred by copying data back and forth between the CPU and the GPU is one of the reasons why GPUs are more suitable for batch processing tasks where throughput is more important than latency.
+There are several
+libraries and abstraction layers available today that make GPU programming accessible from C++, but standard C++ offers nearly nothing in this area. However, the
+parallel execution policies
+std::execution::par
+and
+std::execution::par_unseq
+allow compilers to move the execution of standard algorithms from the CPU to the GPU. One example of this is NVC++, the NVIDIA HPC compiler. It can be configured to compile standard C++ algorithms for execution on NVIDIA GPUs.
+If you want to learn more about the current status of C++ and GPU programming, I highly recommend the talk
+GPU Programming with modern C++
+by Michael Wong (
+https://accu.org/video/spring-2019-day-3/wong/
+) from the ACCU 2019 conference.
+Summary
+In this chapter, you have learned about the complexity of handcrafting an algorithm to execute in parallel. You also now know how to analyze, measure, and tune the efficiency of parallel algorithms. The insights you gained while learning about parallel algorithms will have deepened your understanding of the requirements and the behaviors of the parallel algorithms found in the C++ standard library. C++ comes with four standard execution policies, which can be extended by compiler vendors. This opens up the door for utilizing the GPU for standard algorithms. The next C++ standard, C++23, will most likely add increased support for parallel programming on the GPU.
+You have now reached the end of the book. Congratulations! Performance is an important aspect of code quality. But too often, performance comes at the expense of other quality aspects, such as readability, maintainability, and correctness. Mastering the art of writing efficient and clean code requires practical training. My hope is that you have learned things from this book that you can incorporate into your day-to-day life while creating stunning software.
+Solving performance problems usually comes down to a willingness to investigate things further. More often than not, it requires understanding the hardware and underlying OS well enough to be able to draw conclusions from measurement data. This book has scratched the surface in these areas when I've felt it necessary. After writing about C++20 features in this second edition, I'm now looking forward to starting to use these features in my profession as a software developer. As I've mentioned previously, a lot of the code presented in this book is only partially supported by the compilers today. I will keep updating the GitHub repository and adding information about compiler support. Best of luck!
+Share your experience
+Thank you for taking the time to read this book. If you enjoyed this book, help others to find it. Leave a review at
+https://www.amazon.com/dp/1839216549
+.
+
+Other Books You May Enjoy
+If you enjoyed this book, you may be interested in these other books by Packt:
+Modern C++ Programming Cookbook - Second Edition
+Marius Bancila
+ISBN: 978-1-80020-898-8
+Understand the new C++20 language and library features and the problems they solve
+Become skilled at using the standard support for threading and concurrency for daily tasks
+Leverage the standard library and work with containers, algorithms, and iterators
+Solve text searching and replacement problems using regular expressions
+Work with different types of strings and learn the various aspects of compilation
+Take advantage of the file system library to work with files and directories
+Implement various useful patterns and idioms
+Explore the widely used testing frameworks for C++
+Extreme C
+Kamran Amini
+ISBN: 978-1-78934-362-5
+Build advanced C knowledge on strong foundations, rooted in first principles
+Understand memory structures and compilation pipeline and how they work, and how to make most out of them
+Apply object-oriented design principles to your procedural C code
+Write low-level code that’s close to the hardware and squeezes maximum performance out of a computer system
+Master concurrency, multithreading, multi-processing, and integration with other languages
+Unit Testing and debugging, build systems, and inter-process communication for C programming

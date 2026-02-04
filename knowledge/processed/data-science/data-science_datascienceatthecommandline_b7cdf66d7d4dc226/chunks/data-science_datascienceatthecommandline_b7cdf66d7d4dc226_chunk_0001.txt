@@ -1,0 +1,8534 @@
+inspired by Pico
+, version 5.4, 2020,
+https://nano-editor.org
+.
+5
+Brian Fox and Chet Ramey,
+bash
+– GNU Bourne-Again SHell
+, version 5.0.17, 2019,
+https://www.gnu.org/software/bash
+.
+6
+David MacKenzie and Jim Meyering,
+chmod
+– Change File Mode Bits
+, version 8.30, 2018,
+https://www.gnu.org/software/coreutils
+.
+7
+The Python Software Foundation,
+python
+– an Interpreted, Interactive, Object-Oriented Programming Language
+, version 3.8.5, 2021,
+https://www.python.org
+.
+8
+Richard Mlynarik, David MacKenzie, and Assaf Gordon,
+env
+– Run a Program in a Modified Environment
+, version 8.32, 2020,
+https://www.gnu.org/software/coreutils
+.
+9
+The R Foundation for Statistical Computing,
+R – a Language and Environment for Statistical Computing
+, version 4.0.4, 2021,
+https://www.r-project.org
+.
+10
+Jacob Perkins,
+Python Text Processing with NLTK 2.0 Cookbook
+(Birmingham, UK: Packt, 2010).
+11
+Wes McKinney,
+Python for Data Analysis
+(O’Reilly, 2017).
+12
+This code is adapted from a
+Python script by Joel Grus
+.
+
+Chapter 5.
+Scrubbing Data
+Two chapters ago, in the first step of the OSEMN model for data science, we looked at
+obtaining
+data from a variety of sources.
+This chapter is all about the second step:
+scrubbing
+data.
+You see, it’s quite rare that you can move directly from obtaining data to
+exploring
+or even
+modeling
+the data.
+There’s a plethora of reasons why your data first needs some cleaning, or scrubbing.
+For starters, the data might not be in the desired format.
+For example, you may have obtained some JSON data from an API, but you need it to be in CSV format to create a visualization.
+Other common formats include plain text, HTML, and XML.
+Most command-line tools work with only one or two formats, so it’s important that you’re able to convert data from one format to another.
+Once the data is in the desired format, there could still be issues like missing values, inconsistencies, weird characters, or unnecessary parts.
+You can fix these by applying filters, replacing values, and combining multiple files.
+The command line is especially well suited for these kind of transformations, because there are many specialized tools available, most of which can handle large amounts of data.
+In this chapter I’ll discuss classic tools such as
+grep
+and
+awk
+,
+1
+and newer tools such as
+jq
+and
+pup
+.
+Sometimes you can use the same command-line tool to perform several operations or multiple tools to perform the same operation.
+This chapter is structured more like a cookbook in that it focuses on the problems or recipes rather than diving deeply into the command-line tools themselves.
+Overview
+In this chapter, you’ll learn how to:
+Convert data from one format to another
+Apply SQL queries directly to CSV
+Filter lines
+Extract and replace values
+Split, merge, and extract columns
+Combine multiple files
+This chapter starts with the following files:
+$
+cd
+/data/ch05
+$
+l
+total 200K
+-rw-r--r-- 1 dst dst 164K Jun 29 14:28 alice.txt
+-rw-r--r-- 1 dst dst 4.5K Jun 29 14:28 iris.csv
+-rw-r--r-- 1 dst dst  179 Jun 29 14:28 irismeta.csv
+-rw-r--r-- 1 dst dst  160 Jun 29 14:28 names-comma.csv
+-rw-r--r-- 1 dst dst  129 Jun 29 14:28 names.csv
+-rw-r--r-- 1 dst dst 7.8K Jun 29 14:28 tips.csv
+-rw-r--r-- 1 dst dst 5.1K Jun 29 14:28 users.json
+The instructions for getting these files are in
+Chapter 2
+.
+Any other files are either downloaded or generated using command-line tools.
+Before I dive into the actual transformations, I’d like to demonstrate their ubiquity when working at the command line.
+Transformations, Transformations Everywhere
+In
+Chapter 1
+I mentioned that, in practice, the steps of the OSEMN model will rarely be followed linearly.
+In this vein, although scrubbing is the second step of the OSEMN model, I want you to know that it’s not
+just
+the obtained data that needs scrubbing.
+The transformations that you’ll learn
+in this chapter can be useful at any part of your pipeline and at any step of the OSEMN model.
+Generally, if one command-line tool generates output that can be used immediately by the next tool, you can chain the two tools together by using the pipe operator (
+|
+).
+Otherwise, a transformation first needs to be applied to the data by inserting an intermediate tool into the pipeline.
+Let me walk you through an example to make this more concrete.
+Imagine that you have obtained the first one hundred items of a Fizz Buzz sequence (
+“Processing Streaming Data from Standard Input”
+) and that you’d like to visualize how often the words
+fizz
+,
+buzz
+, and
+fizzbuzz
+appear using a bar chart.
+Don’t worry if this example uses tools that you might not be familiar with yet; they’ll all be covered in more detail later.
+First you obtain the data by generating the sequence and write it to
+fb.seq
+:
+$
+seq
+100 |
+>
+/data/ch04/fizzbuzz.py
+|
+>
+tee
+fb.seq |
+trim
+1
+2
+fizz
+4
+buzz
+fizz
+7
+8
+fizz
+buzz
+… with 90 more lines
+The custom tool
+fizzbuzz.py
+comes from
+Chapter 4
+.
+Then you use
+grep
+to keep
+the lines that match the pattern
+fizz
+or
+buzz
+and count how often each word appears using
+sort
+and
+uniq
+:
+$
+grep
+-E
+"fizz|buzz"
+fb.seq
+|
+>
+sort
+|
+uniq
+-c |
+sort
+-nr
+>
+fb.cnt
+$
+bat
+-A
+fb.cnt
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+fb.cnt
+───────┼────────────────────────────────────────────────────────────────────────
+1   │
+·····
+27
+·
+fizz
+␊
+2   │
+·····
+14
+·
+buzz
+␊
+3   │
+······
+6
+·
+fizzbuzz
+␊
+───────┴────────────────────────────────────────────────────────────────────────
+This regular expression also matches
+fizzbuzz
+.
+Using
+sort
+and
+uniq
+like
+this is a common way to count lines and sort them in descending order. It’s the
+-c
+option that adds the counts.
+Note that
+sort
+is used twice: first because
+uniq
+assumes its input data to be sorted, and second to sort the counts numerically.
+In a way, this is an intermediate transformation, albeit a subtle one.
+The next step would be to
+visualize the counts using
+rush
+.
+2
+However, since
+rush
+expects the input data to be in CSV format, this requires an initial, less subtle transformation.
+awk
+can add a
+header, flip the two fields, and insert commas in a single incantation:
+$
+<
+fb.cnt
+awk
+'BEGIN { print "value,count" } { print $2","$1 }'
+>
+fb.csv
+$
+bat
+fb.csv
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+fb.csv
+───────┼────────────────────────────────────────────────────────────────────────
+1   │
+value,count
+2   │
+fizz,
+27
+3   │
+buzz,
+14
+4   │
+fizzbuzz,
+6
+───────┴────────────────────────────────────────────────────────────────────────
+$
+csvlook
+fb.csv
+│ value    │ count │
+├──────────┼───────┤
+│ fizz     │    27 │
+│ buzz     │    14 │
+│ fizzbuzz │     6 │
+Now you’re ready to use
+rush
+to create a bar chart; see
+Figure 5-1
+for the result (I’ll cover this syntax of
+rush
+in detail in
+Chapter 7
+):
+$
+rush
+plot -x value -y count --geom col --height 2
+fb.csv
+>
+fb.png
+$
+display
+fb.png
+Figure 5-1.
+Counting fizz, buzz, and fizzbuzz
+Although this example is a bit contrived, it reveals a pattern that is common when working at the command line.
+The key tools, such as the ones that obtain data, create a visualization, or train a model, often require intermediate transformations in order to be chained into a pipeline.
+In that sense, writing a pipeline is like solving a puzzle, where the key pieces often require helper pieces to fit.
+Now that you’ve seen the importance of scrubbing data, you’re ready to learn about some actual transformations.
+Plain Text
+Formally speaking,
+plain text
+refers to a
+sequence of human-readable characters and, optionally, some specific types of control characters such as tabs and newlines.
+3
+Examples are logs, ebooks, emails, and source code.
+Plain text has many advantages over binary data, including the following:
+4
+It can be opened, edited, and saved using any text editor.
+It’s self-describing and independent of the application that created it.
+It will outlive other forms of data, because no additional knowledge or applications are required to process it.
+Most importantly, the Unix philosophy considers plain text to be the universal interface between command-line tools.
+5
+This means that most tools accept plain text as input and produce plain text as output.
+That’s reason enough for me to start with plain text.
+The other formats that I discuss in this chapter—CSV, JSON, XML, and HTML—are indeed also plain text.
+For now, I assume that the plain text has no clear tabular structure (like CSV does) or nested structure (like JSON, XML, and HTML do).
+Later in this chapter, I’ll introduce some tools that are specifically designed for working with these formats.
+Filtering Lines
+The first scrubbing operation is filtering lines.
+This means that each line from the input data will be evaluated on whether it will be kept or discarded.
+Based on location
+The most straightforward
+way to filter lines is based on their location.
+This may be useful when you want to inspect, say, the top 10 lines of a file, or when you extract a specific row from the output of another command-line tool.
+To illustrate how to filter based on location, let’s create a file that contains 10 lines:
+$
+seq
+-f
+"Line %g"
+10 |
+tee
+lines
+Line 1
+Line 2
+Line 3
+Line 4
+Line 5
+Line 6
+Line 7
+Line 8
+Line 9
+Line 10
+You can print the first three
+lines using either
+head
+,
+sed
+,
+6
+or
+awk
+:
+$
+<
+lines
+head
+-n 3
+Line 1
+Line 2
+Line 3
+$
+<
+lines
+sed
+-n
+'1,3p'
+Line 1
+Line 2
+Line 3
+$
+<
+lines
+awk
+'NR <= 3'
+Line 1
+Line 2
+Line 3
+In
+awk
+,
+NR
+refers to the total number of input records seen so far.
+Similarly, you can print the last three
+lines using
+tail
+:
+7
+$
+<
+lines
+tail
+-n 3
+Line 8
+Line 9
+Line 10
+You can also you use
+sed
+and
+awk
+for this, but
+tail
+is much faster.
+Removing the first three lines goes as follows:
+$
+<
+lines
+tail
+-n +4
+Line 4
+Line 5
+Line 6
+Line 7
+Line 8
+Line 9
+Line 10
+$
+<
+lines
+sed
+'1,3d'
+Line 4
+Line 5
+Line 6
+Line 7
+Line 8
+Line 9
+Line 10
+$
+<
+lines
+sed
+-n
+'1,3!p'
+Line 4
+Line 5
+Line 6
+Line 7
+Line 8
+Line 9
+Line 10
+Notice that with
+tail
+you have to specify the number of lines you want to remove plus one.
+Think of it as the line from which you want to start printing.
+Removing the last three lines can be done with
+head
+:
+$
+<
+lines
+head
+-n -3
+Line 1
+Line 2
+Line 3
+Line 4
+Line 5
+Line 6
+Line 7
+You can print specific lines using either
+sed
+,
+awk
+, or a combination of
+head
+and
+tail
+.
+Here I print lines 4, 5, and 6:
+$
+<
+lines
+sed
+-n
+'4,6p'
+Line 4
+Line 5
+Line 6
+$
+<
+lines
+awk
+'(NR>=4) && (NR<=6)'
+Line 4
+Line 5
+Line 6
+$
+<
+lines
+head
+-n 6 |
+tail
+-n 3
+Line 4
+Line 5
+Line 6
+You can print odd
+lines with
+sed
+by specifying a start and a step, or with
+awk
+by using the modulo operator:
+$
+<
+lines
+sed
+-n
+'1~2p'
+Line 1
+Line 3
+Line 5
+Line 7
+Line 9
+$
+<
+lines
+awk
+'NR%2'
+Line 1
+Line 3
+Line 5
+Line 7
+Line 9
+Printing even lines works in a similar manner:
+$
+<
+lines
+sed
+-n
+'0~2p'
+Line 2
+Line 4
+Line 6
+Line 8
+Line 10
+$
+<
+lines
+awk
+'(NR+1)%2'
+Line 2
+Line 4
+Line 6
+Line 8
+Line 10
+Note
+Many of these examples start with the less-than sign (
+<
+) followed by the filename.
+I do this because it allows me to read the pipeline from left to right.
+Please know that this is my own preference.
+You can also use
+cat
+to pipe the contents of a file.
+Additionally, many command-line tools
+accept the filename as an argument.
+Based on a pattern
+Sometimes you want to keep or
+discard lines based on their contents.
+With
+grep
+, the canonical command-line tool for filtering lines, you can print every line that matches a certain pattern or regular expression.
+For example, to extract all the chapter headings from
+Alice’s Adventures in Wonderland
+:
+$
+<
+alice.txt
+grep
+-i chapter
+CHAPTER I. Down the Rabbit-Hole
+CHAPTER II. The Pool of Tears
+CHAPTER III. A Caucus-Race and a Long Tale
+CHAPTER IV. The Rabbit Sends in a Little Bill
+CHAPTER V. Advice from a Caterpillar
+CHAPTER VI. Pig and Pepper
+CHAPTER VII. A Mad Tea-Party
+CHAPTER VIII. The Queen's Croquet-Ground
+CHAPTER IX. The Mock Turtle's Story
+CHAPTER X. The Lobster Quadrille
+CHAPTER XI. Who Stole the Tarts?
+CHAPTER XII. Alice's Evidence
+The
+-i
+option specifies that the matching should be case insensitive.
+You can also specify a regular expression.
+For example, if you wanted to print only the headings that start with
+The
+:
+$
+<
+alice.txt
+grep
+-E
+'^CHAPTER (.*)\. The'
+CHAPTER II. The Pool of Tears
+CHAPTER IV. The Rabbit Sends in a Little Bill
+CHAPTER VIII. The Queen's Croquet-Ground
+CHAPTER IX. The Mock Turtle's Story
+CHAPTER X. The Lobster Quadrille
+Note that you have to specify the
+-E
+option to enable regular expressions.
+Otherwise,
+grep
+interprets the pattern as a literal string, which most likely results in no matches at all:
+$
+<
+alice.txt
+grep
+'^CHAPTER (.*)\. The'
+With the
+-v
+option, you invert the matches, so that
+grep
+prints the lines that
+don’t
+match the pattern.
+The regular expression below matches lines that contain white space only.
+So with the inverse, and using
+wc -l
+, you can
+count the number of non-empty lines:
+$
+<
+alice.txt
+grep
+-Ev
+'^\s$'
+|
+wc
+-l
+2790
+Based on randomness
+When you’re in the process of
+formulating your data pipeline and you have a lot of data, debugging your pipeline can be cumbersome.
+In that case, generating a smaller sample from the data might be useful.
+This is where
+sample
+⁠
+8
+comes in handy.
+The main purpose of
+sample
+is
+to get a subset of the data by outputting only a certain percentage of the input on a line-by-line basis:
+$
+seq
+-f
+"Line %g"
+1000 |
+sample
+-r 1%
+Line 50
+Line 159
+Line 173
+Line 682
+Line 882
+Line 921
+Line 986
+Here, every input line has a 1% chance of being printed.
+This percentage can also be specified as a fraction (namely
+1/100
+) or as a probability (namely
+0.01
+).
+sample
+has two other purposes that can be useful when you’re debugging your pipeline.
+First, it’s possible to add some delay to the output.
+This comes in handy when the input is a constant stream (for example, the Wikipedia stream we saw in
+Chapter 3
+), and the data comes in too fast for you to see what’s going on.
+Second, you can put a timer on
+sample
+so that you don’t have to kill the ongoing process manually.
+For example, to add a one-second delay between each line being printed and to run for only five seconds, you would type:
+$
+seq
+-f
+"Line %g"
+1000 |
+sample
+-r 1% -d 1000 -s 5 |
+ts
+Jun 29 14:28:50 Line 28
+Jun 29 14:28:51 Line 262
+Jun 29 14:28:52 Line 324
+Jun 29 14:28:53 Line 546
+Jun 29 14:28:54 Line 589
+Jun 29 14:28:55 Line 613
+Jun 29 14:28:56 Line 629
+The tool
+ts
+⁠
+9
+adds a timestamp in
+front of each line.
+To prevent unnecessary computation, try to put
+sample
+as early as possible in your pipeline.
+In fact, this argument holds for any command-line tool that reduces data, like
+head
+and
+tail
+.
+Once you’re confident your pipeline
+works, you take the tool out of the pipeline.
+Extracting Values
+To extract the actual chapter
+headings from our earlier example, you can take a simple approach by piping the output of
+grep
+to
+cut
+:
+10
+$
+grep
+-i chapter
+alice.txt
+|
+cut
+-d
+' '
+-f 3-
+Down the Rabbit-Hole
+The Pool of Tears
+A Caucus-Race and a Long Tale
+The Rabbit Sends in a Little Bill
+Advice from a Caterpillar
+Pig and Pepper
+A Mad Tea-Party
+The Queen's Croquet-Ground
+The Mock Turtle's Story
+The Lobster Quadrille
+Who Stole the Tarts?
+Alice's Evidence
+Here, each line that’s
+passed to
+cut
+is being split on spaces into fields, and then the third field to the last field is being printed.
+The total number of fields can be different per input line.
+With
+sed
+you can accomplish the same task in a much more complex manner:
+$
+sed
+-rn
+'s/^CHAPTER ([IVXLCDM]{1,})\. (.*)$/\2/p'
+alice.txt
+|
+trim
+3
+Down the Rabbit-Hole
+The Pool of Tears
+A Caucus-Race and a Long Tale
+… with 9 more lines
+This approach uses a regular expression and a back reference.
+Here,
+sed
+also takes over the work done by
+grep
+.
+I recommend using such a complicated approach only when a simpler one would not work—for example, if
+chapter
+was ever part of the text itself and not just used to indicate the start of a new chapter.
+Of course, there are many levels of complexity that would have worked around this, but this is intended to illustrate an extremely strict approach.
+In practice, the challenge is to come up with a pipeline that strikes a good balance between complexity and flexibility.
+It’s worth noting that
+cut
+can also split on characters’ positions.
+This is useful for when you want to extract (or remove) the same set of characters per input line:
+$
+grep
+-i chapter
+alice.txt
+|
+cut
+-c 9-
+I. Down the Rabbit-Hole
+II. The Pool of Tears
+III. A Caucus-Race and a Long Tale
+IV. The Rabbit Sends in a Little Bill
+V. Advice from a Caterpillar
+VI. Pig and Pepper
+VII. A Mad Tea-Party
+VIII. The Queen's Croquet-Ground
+IX. The Mock Turtle's Story
+X. The Lobster Quadrille
+XI. Who Stole the Tarts?
+XII. Alice's Evidence
+grep
+has a great feature that
+outputs every match onto a separate line using the
+-o
+option:
+$
+<
+alice.txt
+grep
+-oE
+'\w{2,}'
+|
+trim
+Project
+Gutenberg
+Alice
+Adventures
+in
+Wonderland
+by
+Lewis
+Carroll
+This
+… with 28615 more lines
+But what if you wanted to create a
+dataset of all the words that start with an
+a
+and end with an
+e
+?
+Well, of course there’s a pipeline for that too:
+$
+<
+alice.txt
+tr
+'[:upper:]'
+'[:lower:]'
+|
+>
+grep
+-oE
+'\w{2,}'
+|
+>
+grep
+-E
+'^a.*e$'
+|
+>
+sort
+|
+uniq
+|
+sort
+-nr |
+trim
+available
+ate
+assistance
+askance
+arise
+argue
+are
+archive
+applicable
+apple
+… with 25 more lines
+I use
+tr
+here to make the text lowercase. We’ll have a closer look at
+tr
+in the next section.
+The two
+grep
+commands might have been combined into one, but in this case I
+decided
+it would be easier to reuse and adapt the previous pipeline.
+There’s no shame in being pragmatic to
+get the job done!
+Replacing and Deleting Values
+You can use the command-line tool
+tr
+, which
+stands for
+translate
+, to replace or delete individual characters.
+For example, spaces can be replaced by underscores as follows:
+$
+echo
+'hello world!'
+|
+tr
+' '
+'_'
+hello_world!
+If more than one character needs to be replaced, then you can combine those requests:
+$
+echo
+'hello world!'
+|
+tr
+' !'
+'_?'
+hello_world?
+tr
+can also be used to delete
+individual characters by specifying the argument
+-d
+:
+$
+echo
+'hello world!'
+|
+tr
+-d
+' !'
+helloworld
+$
+echo
+'hello world!'
+|
+tr
+-d -c
+'[a-z]'
+helloworld
+%
+In this case, these two commands accomplish the same thing.
+The second command, however, uses two additional features: it specifies a
+range
+of characters (all lowercase letters) using the square brackets and the dash (
+[-]
+), and the
+-c
+option indicates that the complement of that should be used.
+In other words, this command keeps only lowercase letters.
+You can even use
+tr
+to convert text to uppercase:
+$
+echo
+'hello world!'
+|
+tr
+'[a-z]'
+'[A-Z]'
+HELLO WORLD!
+$
+echo
+'hello world!'
+|
+tr
+'[:lower:]'
+'[:upper:]'
+HELLO WORLD!
+However, if you need to translate non-ASCII characters, then
+tr
+may not work because it operates on single-byte characters only. In those cases, you should use
+sed
+instead:
+$
+echo
+'hello world!'
+|
+tr
+'[a-z]'
+'[A-Z]'
+HELLO WORLD!
+$
+echo
+'hallo wêreld!'
+|
+tr
+'[a-z]'
+'[A-Z]'
+HALLO WêRELD!
+$
+echo
+'hallo wêreld!'
+|
+tr
+'[:lower:]'
+'[:upper:]'
+HALLO WêRELD!
+$
+echo
+'hallo wêreld!'
+|
+sed
+'s/[[:lower:]]*/\U&/g'
+HALLO WÊRELD!
+$
+echo
+'helló világ'
+|
+tr
+'[:lower:]'
+'[:upper:]'
+HELLó VILáG
+$
+echo
+'helló világ'
+|
+sed
+'s/[[:lower:]]*/\U&/g'
+HELLÓ VILÁG
+If you need to operate on
+more than individual characters, then you may find
+sed
+useful.
+You’ve already seen an example of
+sed
+being used to extract the chapter headings from
+alice.txt
+.
+Extracting, deleting, and replacing are actually all the same operation in
+sed
+.
+You just specify different
+regular expressions.
+For example, to change a word, remove repeated spaces, and remove leading spaces:
+$
+echo
+' hello     world!'
+|
+>
+sed
+-re
+'s/hello/bye/'
+|
+>
+sed
+-re
+'s/\s+/ /g'
+|
+>
+sed
+-re
+'s/\s+//'
+bye world!
+Replace
+hello
+with
+bye
+.
+Replace any whitespace with one space. The flag
+g
+stands for
+global
+, meaning that the same substitution can be applied more than once on the same line.
+This removes leading spaces only because I didn’t specify the flag
+g
+here.
+Again, just as with the
+grep
+example earlier,
+these three
+sed
+commands can be combined into one:
+$
+echo
+' hello     world!'
+|
+>
+sed
+-re
+'s/hello/bye/;s/\s+/ /g;s/\s+//'
+bye world!
+But tell me—what do you find
+easier to read?
+CSV
+The command-line tools such as
+tr
+and
+grep
+that I’ve used to scrub plain text cannot always be applied to CSV.
+The reason is that these command-line tools have no notion of headers, bodies, and columns.
+Bodies and Headers and Columns, Oh My!
+What if you want to
+filter lines using
+grep
+but always include the header in the output?
+Or what if you want to uppercase the values of only a specific column using
+tr
+and leave the other columns untouched?
+There are multistep workarounds for this, but they are very cumbersome.
+I have something better.
+I’d like to introduce you to
+three command-line tools, aptly named
+body
+,
+11
+header
+,
+12
+and
+cols
+,
+13
+that will enable you to leverage ordinary command-line tools for CSV.
+Let’s start with the first tool,
+body
+.
+With
+body
+you can apply any
+command-line tool to the body of a CSV file—that is, to everything excluding the header.
+For example:
+$
+echo
+-e
+"value\n7\n2\n5\n3"
+|
+body
+sort -n
+value
+2
+3
+5
+7
+body
+assumes that the header of the CSV file spans only one row.
+It works like this:
+Take one line from standard input and store it as a variable named
+$header
+.
+Print out the header.
+Execute all the command-line arguments passed to
+body
+on the remaining data in standard input.
+Here’s another example.
+Imagine that you want to count the lines of the following CSV file:
+$
+seq
+5 |
+header
+-a count
+count
+1
+2
+3
+4
+5
+With
+wc -l
+, you can count the number of all lines:
+$
+seq
+5 |
+header
+-a count |
+wc
+-l
+6
+If you want to consider only the lines in the body (i.e., everything except the header), you add
+body
+:
+$
+seq
+5 |
+header
+-a count |
+body
+wc -l
+count
+5
+Note that the header is not used and is also printed again in the output.
+The second command-line
+tool,
+header
+, allows you to manipulate the header of a CSV file.
+If no arguments are provided, the header of the CSV file is printed:
+$
+<
+tips.csv
+header
+bill,tip,sex,smoker,day,time,size
+This is the same as
+head -n 1
+.
+If the header spans more than one row, which is not recommended, you can specify
+-n 2
+.
+You can also add a header to a CSV file:
+$
+seq
+5 |
+header
+-a count
+count
+1
+2
+3
+4
+5
+This is equivalent to
+echo "count" | cat - <(seq 5)
+.
+Deleting a header is done with the
+-d
+option:
+$
+<
+iris.csv
+header
+-d |
+trim
+5.1,3.5,1.4,0.2,Iris-setosa
+4.9,3.0,1.4,0.2,Iris-setosa
+4.7,3.2,1.3,0.2,Iris-setosa
+4.6,3.1,1.5,0.2,Iris-setosa
+5.0,3.6,1.4,0.2,Iris-setosa
+5.4,3.9,1.7,0.4,Iris-setosa
+4.6,3.4,1.4,0.3,Iris-setosa
+5.0,3.4,1.5,0.2,Iris-setosa
+4.4,2.9,1.4,0.2,Iris-setosa
+4.9,3.1,1.5,0.1,Iris-setosa
+… with 140 more lines
+This is similar to
+tail -n +2
+, but it’s a bit easier to remember.
+Replacing a header—which basically is deleting a header and then adding a new one if you look at the preceding source code—is accomplished by specifying the
+-r
+option. Here, we combine it with
+body
+:
+$
+seq
+5 |
+header
+-a line |
+body
+wc -l |
+header
+-r count
+count
+5
+And last but not least, you can apply a command to just the header, similar to what the
+body
+command-line tool does to the body.
+For example:
+$
+seq
+5 |
+header
+-a line |
+header
+-e
+"tr '[a-z]' '[A-Z]'"
+LINE
+1
+2
+3
+4
+5
+The third command-line tool
+is called
+cols
+, and it allows you to apply a certain command to only a subset of the columns.
+For example, if you wanted to uppercase the values in the
+day
+column in the Tips dataset without affecting the other columns
+and the header, you would use
+cols
+in combination with
+body
+, as follows:
+$
+<
+tips.csv
+cols
+-c day body
+"tr '[a-z]' '[A-Z]'"
+|
+head
+-n 5 |
+csvlook
+│        day │  bill │  tip │ sex    │ smoker │ time   │ size │
+├────────────┼───────┼──────┼────────┼────────┼────────┼──────┤
+│ 0001-01-07 │ 16.99 │ 1.01 │ Female │  False │ Dinner │    2 │
+│ 0001-01-07 │ 10.34 │ 1.66 │ Male   │  False │ Dinner │    3 │
+│ 0001-01-07 │ 21.01 │ 3.50 │ Male   │  False │ Dinner │    3 │
+│ 0001-01-07 │ 23.68 │ 3.31 │ Male   │  False │ Dinner │    2 │
+Please note that passing multiple command-line tools and arguments as commands to
+header -e
+,
+body
+, and
+cols
+can lead to tricky quoting citations.
+If you ever run into such problems, it’s best to create a separate command-line tool for this and pass it as command.
+In conclusion, while it is generally preferable to use command-line tools that are made specifically for CSV data,
+body
+,
+header
+, and
+cols
+also allow you to apply the classic command-line tools
+to CSV files if needed.
+Performing SQL Queries on CSV
+In case the command-line tools mentioned
+in this chapter do not provide enough flexibility, there is another approach to scrubbing your data from the command line.
+The tool
+csvsql
+⁠
+14
+allows you to execute SQL queries directly on CSV files.
+SQL is a powerful language for defining operations for scrubbing data; it’s a very different approach from using individual command-line tools.
+Note
+If your data originally comes from a relational database, then, if possible, try to execute SQL queries on that database and subsequently extract the data as CSV. As I discussed in
+Chapter 3
+, you can use the command-line tool
+sql2csv
+for this. When you first export data from the database to a CSV file and then apply SQL, not only is it slower, but there is also a possibility that the column types will not be correctly inferred from the CSV data.
+In the following scrubbing tasks, I’ll include several solutions that involve
+csvsql
+. A basic command is this:
+$
+seq
+5 |
+header
+-a val |
+csvsql
+--query
+"SELECT SUM(val) AS sum FROM stdin"
+sum
+15.0
+If you pass standard input to
+csvsql
+, then the table is named
+stdin
+.
+The types of the column are automatically inferred from the data.
+As you’ll see later in
+“Combining Multiple CSV Files”
+, you can also specify multiple CSV files.
+Please keep in mind that
+csvsql
+employs the SQLite dialect of SQL, which has some subtle differences with respect to the SQL standard.
+While SQL is generally more verbose than the other solutions, it is also much more flexible.
+If you already know how to tackle a scrubbing problem
+with SQL, then why not use it when you’re at the command line?
+Extracting and Reordering Columns
+Columns can be extracted
+and reordered using the command-line tool
+csvcut
+.
+15
+For example, to keep only the columns in the Iris dataset that contain numerical values
+and
+reorder the middle two columns:
+$
+<
+iris.csv
+csvcut
+-c sepal_length,petal_length,sepal_width,petal_width |
+csvlo
+ok
+│ sepal_length │ petal_length │ sepal_width │ petal_width │
+├──────────────┼──────────────┼─────────────┼─────────────┤
+│          5.1 │          1.4 │         3.5 │         0.2 │
+│          4.9 │          1.4 │         3.0 │         0.2 │
+│          4.7 │          1.3 │         3.2 │         0.2 │
+│          4.6 │          1.5 │         3.1 │         0.2 │
+│          5.0 │          1.4 │         3.6 │         0.2 │
+│          5.4 │          1.7 │         3.9 │         0.4 │
+│          4.6 │          1.4 │         3.4 │         0.3 │
+│          5.0 │          1.5 │         3.4 │         0.2 │
+… with 142 more lines
+Alternatively, you can specify the columns you want to leave out with the
+-C
+option, which stands for
+complement
+:
+$
+<
+iris.csv
+csvcut
+-C species |
+csvlook
+│ sepal_length │ sepal_width │ petal_length │ petal_width │
+├──────────────┼─────────────┼──────────────┼─────────────┤
+│          5.1 │         3.5 │          1.4 │         0.2 │
+│          4.9 │         3.0 │          1.4 │         0.2 │
+│          4.7 │         3.2 │          1.3 │         0.2 │
+│          4.6 │         3.1 │          1.5 │         0.2 │
+│          5.0 │         3.6 │          1.4 │         0.2 │
+│          5.4 │         3.9 │          1.7 │         0.4 │
+│          4.6 │         3.4 │          1.4 │         0.3 │
+│          5.0 │         3.4 │          1.5 │         0.2 │
+… with 142 more lines
+Here, the included columns are kept in the same order.
+Instead of the column names, you can specify the indices of the columns, which start at 1.
+This allows you to, for example, select only the odd columns (should you ever need to do that!):
+$
+echo
+'a,b,c,d,e,f,g,h,i\n1,2,3,4,5,6,7,8,9'
+|
+>
+csvcut
+-c
+$(
+seq
+1 2 9 |
+paste
+-sd,
+)
+a,c,e,g,i
+1,3,5,7,9
+If you’re certain that there are
+no commas in any of the values, then you can also use
+cut
+to extract columns.
+Be aware that
+cut
+does not reorder columns, as the following command demonstrates:
+$
+echo
+'a,b,c,d,e,f,g,h,i\n1,2,3,4,5,6,7,8,9'
+|
+cut
+-d, -f 5,1,3
+a,c,e
+1,3,5
+As you can see, the order in which you specify the columns does not matter with the
+-f
+option; with
+cut
+, the columns will always appear in their original order.
+For completeness, let’s also take a look at the SQL approach for extracting and reordering the
+numerical columns of the Iris dataset:
+$
+<
+iris.csv
+csvsql
+--query
+"SELECT sepal_length, petal_length, "
+\
+>
+"sepal_width, petal_width FROM stdi
+n
+" |
+head
+-n 5 |
+csvlook
+│ sepal_length │ petal_length │ sepal_width │ petal_width │
+├──────────────┼──────────────┼─────────────┼─────────────┤
+│          5.1 │          1.4 │         3.5 │         0.2 │
+│          4.9 │          1.4 │         3.0 │         0.2 │
+│          4.7 │          1.3 │         3.2 │         0.2 │
+│          4.6 │          1.5 │         3.1 │         0.2 │
+Filtering Rows
+Filtering rows in a CSV file
+differs from filtering lines in a plain-text file in that you may want to base this filtering only on values in a certain column.
+Filtering on location is essentially the same, but you have to take into account that the first line of a CSV file is usually the header.
+Remember that you can always use the
+body
+command-line tool if you want to keep the header:
+$
+seq
+5 |
+sed
+-n
+'3,5p'
+3
+4
+5
+$
+seq
+5 |
+header
+-a count |
+body
+sed -n
+'3,5p'
+count
+3
+4
+5
+When it comes down to filtering on a
+certain pattern within a certain column, you can use either
+csvgrep
+,
+16
+awk
+, or, of course,
+csvsql
+.
+For example, to exclude all the lunch and dinner bills for which the party size was smaller than five people:
+$
+csvgrep
+-c size -i -r
+"[1-4]"
+tips.csv
+bill,tip,sex,smoker,day,time,size
+29.8,4.2,Female,No,Thur,Lunch,6
+34.3,6.7,Male,No,Thur,Lunch,6
+41.19,5.0,Male,No,Thur,Lunch,5
+27.05,5.0,Female,No,Thur,Lunch,6
+29.85,5.14,Female,No,Sun,Dinner,5
+48.17,5.0,Male,No,Sun,Dinner,6
+20.69,5.0,Male,No,Sun,Dinner,5
+30.46,2.0,Male,Yes,Sun,Dinner,5
+28.15,3.0,Male,Yes,Sat,Dinner,5
+Both
+awk
+and
+csvsql
+can also do numerical comparisons.
+For example, to get all the restaurant bills above $40 on a Saturday or a Sunday:
+$
+<
+tips.csv
+awk
+-F,
+'NR==1 || ($1 > 40.0) && ($5 ~ /^S/)'
+bill,tip,sex,smoker,day,time,size
+48.27,6.73,Male,No,Sat,Dinner,4
+44.3,2.5,Female,Yes,Sat,Dinner,3
+48.17,5.0,Male,No,Sun,Dinner,6
+50.81,10.0,Male,Yes,Sat,Dinner,3
+45.35,3.5,Male,Yes,Sun,Dinner,3
+40.55,3.0,Male,Yes,Sun,Dinner,2
+48.33,9.0,Male,No,Sat,Dinner,4
+The
+csvsql
+solution is more verbose, but it’s also more robust, as it uses the names of the columns instead of their indexes:
+$
+csvsql
+--query
+"SELECT * FROM tips WHERE bill > 40 AND day LIKE 'S%'"
+tips.csv
+bill,tip,sex,smoker,day,time,size
+48.27,6.73,Male,0,Sat,Dinner,4.0
+44.3,2.5,Female,1,Sat,Dinner,3.0
+48.17,5.0,Male,0,Sun,Dinner,6.0
+50.81,10.0,Male,1,Sat,Dinner,3.0
+45.35,3.5,Male,1,Sun,Dinner,3.0
+40.55,3.0,Male,1,Sun,Dinner,2.0
+48.33,9.0,Male,0,Sat,Dinner,4.0
+Note that the flexibility of the
+WHERE
+clause in an SQL query cannot be easily matched with other command-line tools, because SQL can operate on dates and sets and form complex
+combinations of clauses.
+Merging Columns
+Merging columns is useful
+when the values of interest are spread over multiple columns.
+This may happen with dates (where year, month, and day could be separate columns) or names (where the first name and last name are separate columns).
+Let’s consider the second situation.
+The input CSV is a list of composers.
+Imagine that your task is to combine the first name and the last name into a full name.
+I’ll present four different approaches
+for this task:
+sed
+,
+awk
+,
+cols
++
+tr
+, and
+csvsql
+.
+Let’s have a look at the input CSV:
+$
+csvlook
+-I
+names.csv
+│ id │ last_name │ first_name │ born │
+├────┼───────────┼────────────┼──────┤
+│ 1  │ Williams  │ John       │ 1932 │
+│ 2  │ Elfman    │ Danny      │ 1953 │
+│ 3  │ Horner    │ James      │ 1953 │
+│ 4  │ Shore     │ Howard     │ 1946 │
+│ 5  │ Zimmer    │ Hans       │ 1957 │
+The first approach,
+sed
+, uses two statements.
+The first is to replace the header, and the second is a regular expression with back references applied to the second row onward:
+$
+<
+names.csv
+sed
+-re
+'1s/.*/id,full_name,born/g;2,$s/(.*),(.*),(.*),(.*)/\1,\3
+\2,\4/g'
+|
+>
+csvlook
+-I
+│ id │ full_name     │ born │
+├────┼───────────────┼──────┤
+│ 1  │ John Williams │ 1932 │
+│ 2  │ Danny Elfman  │ 1953 │
+│ 3  │ James Horner  │ 1953 │
+│ 4  │ Howard Shore  │ 1946 │
+│ 5  │ Hans Zimmer   │ 1957 │
+The
+awk
+approach looks as follows:
+$
+<
+names.csv
+awk
+-F,
+'BEGIN{OFS=","; print "id,full_name,born"} {if(NR > 1) {pr
+int $1,$3" "$2,$4}}'
+|
+>
+csvlook
+-I
+│ id │ full_name     │ born │
+├────┼───────────────┼──────┤
+│ 1  │ John Williams │ 1932 │
+│ 2  │ Danny Elfman  │ 1953 │
+│ 3  │ James Horner  │ 1953 │
+│ 4  │ Howard Shore  │ 1946 │
+│ 5  │ Hans Zimmer   │ 1957 │
+Here is the
+cols
+approach in
+combination with
+tr
+:
+$
+<
+names.csv
+|
+>
+cols
+-c first_name,last_name tr \",\" \" \" |
+>
+header
+-r full_name,id,born |
+>
+csvcut
+-c id,full_name,born |
+>
+csvlook
+-I
+│ id │ full_name     │ born │
+├────┼───────────────┼──────┤
+│ 1  │ John Williams │ 1932 │
+│ 2  │ Danny Elfman  │ 1953 │
+│ 3  │ James Horner  │ 1953 │
+│ 4  │ Howard Shore  │ 1946 │
+│ 5  │ Hans Zimmer   │ 1957 │
+Please note that
+csvsql
+employs SQLite as
+the database to execute the query and that
+||
+stands for concatenation:
+$
+<
+names.csv
+csvsql
+--query
+"SELECT id, first_name || ' ' || last_name "
+\
+>
+"AS full_name, born FROM stdi
+n
+" | csv
+look -I
+│ id  │ full_name     │ born   │
+├─────┼───────────────┼────────┤
+│ 1.0 │ John Williams │ 1932.0 │
+│ 2.0 │ Danny Elfman  │ 1953.0 │
+│ 3.0 │ James Horner  │ 1953.0 │
+│ 4.0 │ Howard Shore  │ 1946.0 │
+│ 5.0 │ Hans Zimmer   │ 1957.0 │
+What if
+last_name
+could potentially contain a comma? Let’s have a look at the raw input CSV for clarity’s sake:
+$
+cat
+names-comma.csv
+id,last_name,first_name,born
+1,Williams,John,1932
+2,Elfman,Danny,1953
+3,Horner,James,1953
+4,Shore,Howard,1946
+5,Zimmer,Hans,1957
+6,"Beethoven, van",Ludwig,1770
+Well, it appears that the first three approaches fail, all in different ways. Only
+csvsql
+is able to combine
+first_name
+and
+full_name
+:
+$
+<
+names-comma.csv
+sed
+-re
+'1s/.*/id,full_name,born/g;2,$s/(.*),(.*),(.*),(.*)/
+\1,\3 \2,\4/g'
+|
+tail
+-n 1
+6,"Beethoven,Ludwig  van",1770
+$
+<
+names-comma.csv
+awk
+-F,
+'BEGIN{OFS=","; print "id,full_name,born"} {if(NR >
+1) {print $1,$3" "$2,$4}}'
+|
+tail
+-n 1
+6, van" "Beethoven,Ludwig
+$
+<
+names-comma.csv
+cols
+-c first_name,last_name tr \",\" \" \" |
+>
+header
+-r full_name,id,born |
+csvcut
+-c id,full_name,born |
+tail
+-n 1
+6,"Ludwig ""Beethoven  van""",1770
+$
+<
+names-comma.csv
+csvsql
+--query
+"SELECT id, first_name || ' ' || last_name AS
+full_name, born FROM stdin"
+|
+tail
+-n 1
+6.0,"Ludwig Beethoven, van",1770.0
+$
+<
+names-comma.csv
+rush
+run -t
+'unite(df, full_name, first_name, last_name, sep
+= " ")'
+- |
+tail
+-n 1
+6,"Ludwig Beethoven, van",1770
+Wait a minute! What’s that last command? Is that R? Well, as a matter of fact, it is.
+It’s R code evaluated through the command-line tool
+rush
+. All that I can say at this moment is that this approach also succeeds at merging the two columns.
+I’ll discuss this nifty command-line
+tool later.
+Combining Multiple CSV Files
+If you start out with multiple CSV files,
+it’s often a good idea to combine them. When the CSV files have the same columns, you can concatenate them horizontally. When the CSV files have different column names but are still related, you can often join them.
+Concatenate horizontally
+Let’s say you have three CSV files that
+you want to put side by side. We use
+tee
+⁠
+17
+to save the result of
+csvcut
+in the middle of the pipeline:
+$
+<
+tips.csv
+csvcut
+-c bill,tip |
+tee
+bills.csv |
+head
+-n 3 |
+csvlook
+│  bill │  tip │
+├───────┼──────┤
+│ 16.99 │ 1.01 │
+│ 10.34 │ 1.66 │
+$
+<
+tips.csv
+csvcut
+-c day,time |
+tee
+datetime.csv |
+>
+head
+-n 3 |
+csvlook
+-I
+│ day │ time   │
+├─────┼────────┤
+│ Sun │ Dinner │
+│ Sun │ Dinner │
+$
+<
+tips.csv
+csvcut
+-c sex,smoker,size |
+tee
+customers.csv |
+>
+head
+-n 3 |
+csvlook
+│ sex    │ smoker │ size │
+├────────┼────────┼──────┤
+│ Female │  False │    2 │
+│ Male   │  False │    3 │
+Assuming that the rows
+line up, you can
+paste
+the files together:
+$
+paste
+-d, {bills,customers,datetime}.csv |
+head
+-n 3 |
+csvlook
+-I
+│ bill  │ tip  │ sex    │ smoker │ size │ day │ time   │
+├───────┼──────┼────────┼────────┼──────┼─────┼────────┤
+│ 16.99 │ 1.01 │ Female │ No     │ 2    │ Sun │ Dinner │
+│ 10.34 │ 1.66 │ Male   │ No     │ 3    │ Sun │ Dinner │
+Here the command-line argument
+-d
+instructs
+paste
+to use a comma as the
+delimiter
+.
+Joining
+Sometimes data cannot be combined
+by vertical or horizontal concatenation.
+In some cases, especially in relational databases, the data is spread over multiple tables (or files) to minimize redundancy.
+Imagine you wanted to extend the Iris dataset with more information about the three types of iris flowers, namely the USDA identifiers.
+It so happens that I have a separate CSV file with these identifiers:
+$
+csvlook
+irismeta.csv
+│ species         │ wikipedia_url                                │ usda_id │
+├─────────────────┼──────────────────────────────────────────────┼─────────┤
+│ Iris-versicolor │ http://en.wikipedia.org/wiki/Iris_versicolor │ IRVE2   │
+│ Iris-virginica  │ http://en.wikipedia.org/wiki/Iris_virginica  │ IRVI    │
+│ Iris-setosa     │                                              │ IRSE    │
+What this dataset and the Iris
+dataset have in common is the
+species
+column.
+You can use
+csvjoin
+⁠
+18
+to join the two datasets:
+$
+csvjoin
+-c species
+iris.csv
+irismeta.csv
+|
+csvcut
+-c sepal_length,sepal_width,
+species,usda_id |
+sed
+-n
+'1p;49,54p'
+|
+csvlook
+│ sepal_length │ sepal_width │ species         │ usda_id │
+├──────────────┼─────────────┼─────────────────┼─────────┤
+│          4.6 │         3.2 │ Iris-setosa     │ IRSE    │
+│          5.3 │         3.7 │ Iris-setosa     │ IRSE    │
+│          5.0 │         3.3 │ Iris-setosa     │ IRSE    │
+│          7.0 │         3.2 │ Iris-versicolor │ IRVE2   │
+│          6.4 │         3.2 │ Iris-versicolor │ IRVE2   │
+│          6.9 │         3.1 │ Iris-versicolor │ IRVE2   │
+Of course, you can also opt for the SQL approach using
+csvsql
+, which is, as per usual, a bit longer (but potentially
+much more flexible):
+$
+csvsql
+--query
+'SELECT i.sepal_length, i.sepal_width, i.species, m.usda_id FRO
+M iris i JOIN irismeta m ON (i.species = m.species)'
+iris.csv
+irismeta.csv
+|
+sed
+-n
+'1p;49,54p'
+|
+csvlook
+│ sepal_length │ sepal_width │ species         │ usda_id │
+├──────────────┼─────────────┼─────────────────┼─────────┤
+│          4.6 │         3.2 │ Iris-setosa     │ IRSE    │
+│          5.3 │         3.7 │ Iris-setosa     │ IRSE    │
+│          5.0 │         3.3 │ Iris-setosa     │ IRSE    │
+│          7.0 │         3.2 │ Iris-versicolor │ IRVE2   │
+│          6.4 │         3.2 │ Iris-versicolor │ IRVE2   │
+│          6.9 │         3.1 │ Iris-versicolor │ IRVE2   │
+Working with XML/HTML and JSON
+In this section, I’m going to
+demonstrate a couple of command-line tools that can convert data from one format to another.
+There are two reasons to convert data.
+First, oftentimes the data needs to be in tabular form, just like a database table or a spreadsheet, because many visualization and machine learning algorithms depend on it.
+CSV is inherently in tabular form, but JSON and HTML/XML data can have a deeply nested structure.
+Second, many command-line tools, especially the classic ones such as
+cut
+and
+grep
+, operate on plain text.
+This is because text is regarded as a universal interface between command-line tools.
+Moreover, the other formats are younger. Each of these formats can be treated as plain text, allowing us to apply such command-line tools to the other formats as well.
+Sometimes you can get away with applying the classic tools to structured data.
+For example, by treating the following JSON data as plain text, you can change the attribute
+gender
+to
+sex
+using
+sed
+:
+$
+sed
+-e
+'s/"gender":/"sex":/g'
+users.json
+|
+jq
+|
+trim
+{
+"results": [
+{
+"sex": "male",
+"name": {
+"title": "mr",
+"first": "leevi",
+"last": "kivisto"
+},
+"location": {
+… with 260 more lines
+Like many other command-line tools,
+sed
+does not make use of the structure of the data.
+Better to either use a tool that
+makes use of the structure of the data (such as
+jq
+, which I’ll discuss in a moment) or to first convert the data to a tabular format such as CSV and then apply the appropriate command-line tool.
+I’m going to demonstrate converting XML/HTML and JSON to CSV through a real-world use case.
+The command-line tools that I’ll be using
+here are
+curl
+,
+pup
+,
+xml2json
+,
+19
+jq
+, and
+json2csv
+.
+20
+Wikpedia holds a wealth of information. Much of this information is ordered in tables, which can be regarded as datasets.
+For example,
+this page
+contains a list of countries and territories together with their border lengths and surface areas and the ratio between the two.
+Let’s imagine that you’re interested in analyzing this data. In this section, I’ll walk you through all the necessary steps and their corresponding commands. I won’t go into every little detail, so it could be that you won’t understand everything right away. Don’t worry—I’m confident that you’ll get the gist of it. Remember that the purpose of this section is to demonstrate the command line. All tools and concepts used in this section (and more) will be explained in the subsequent chapters.
+The dataset that you’re interested in is embedded in HTML.
+Your goal is to end up with a representation of this dataset that you can work with.
+The very first step is to
+download the HTML using
+curl
+:
+$
+curl
+-sL
+'http://en.wikipedia.org/wiki/List_of_countries_and_territories_by_bo
+rder/area_ratio'
+>
+wiki.html
+The HTML is saved to a file named
+wiki.html
+.
+Let’s see what the first 10 lines look like:
+$
+<
+wiki.html
+trim
+<!DOCTYPE html>
+<html class="client-nojs" lang="en" dir="ltr">
+<head>
+<meta charset="UTF-8"/>
+<title>List of countries and territories by border/area ratio - Wikipedia</titl…
+<script>document.documentElement.className="client-js";RLCONF={"wgBreakFrames":…
+"Lists of countries by geography","Lists by area","Border-related lists"],"wgPa…
+!1,"wgGELinkRecommendationsFrontendEnabled":!1,"wgWikibaseItemId":"Q6613807"};R…
+"ext.navigationTiming","ext.uls.compactlinks","ext.uls.interface","ext.cx.event…
+<script>(RLQ=window.RLQ||[]).push(function(){mw.loader.implement("user.options@…
+… with 3038 more lines
+That seems to be in order.
+Now image that you’ve been able to determine that the root HTML element that you’re interested in is a
+<table>
+with the class
+wikitable
+.
+This allows you to look at the part you’re interested in using
+grep
+(the
+-A
+option specifies the number of lines you want to print after the matching line):
+$
+grep
+wikitable -A 21
+wiki.html
+<table class="wikitable sortable">
+<tbody><tr>
+<th>Rank</th>
+<th>Country or territory</th>
+<th>Total length of land borders (km)</th>
+<th>Total surface area (km<sup>2</sup>)</th>
+<th>Border/area ratio (km/km<sup>2</sup>)
+</th></tr>
+<tr>
+<td>1
+</td>
+<td>Vatican City
+</td>
+<td>3.2
+</td>
+<td>0.44
+</td>
+<td>7.2727273
+</td></tr>
+<tr>
+<td>2
+</td>
+You now actually see the countries
+and their values.
+The next step is to extract the necessary elements from the HTML file.
+For this you can use
+pup
+:
+$
+<
+wiki.html
+pup
+'table.wikitable tbody'
+|
+tee
+table.html |
+trim
+<tbody>
+<tr>
+<th>
+Rank
+</th>
+<th>
+Country or territory
+</th>
+<th>
+Total length of land borders (km)
+… with 4199 more lines
+The expression passed to
+pup
+is a CSS selector.
+The syntax is usually used to style web pages, but you can also use it to select certain elements from HTML.
+In this case, you want to select the
+tbody
+of the
+table
+that has the
+wikitable
+class.
+Up next is
+xml2json
+, which
+converts XML (and HTML) to JSON:
+$
+<
+table.html
+xml2json
+>
+table.json
+$
+jq
+.
+table.json
+|
+trim
+20
+{
+"tbody": {
+"tr": [
+{
+"th": [
+{
+"$t": "Rank"
+},
+{
+"$t": "Country or territory"
+},
+{
+"$t": "Total length of land borders (km)"
+},
+{
+"$t": [
+"Total surface area (km",
+")"
+],
+"sup": {
+… with 4691 more lines
+The reason you convert the HTML to JSON is because there is a very powerful tool called
+jq
+that operates on JSON data.
+The following command extracts certain parts of the JSON data and reshapes it into a form that you can work with:
+$
+<
+table.json
+jq
+-r
+'.tbody.tr[1:][] | [.td[]["$t"]] | @csv'
+|
+header
+-a rank,c
+ountry,border,surface,ratio
+>
+countries.csv
+The data
+is now in a form that you can work with.
+Those were quite a few steps to get from a Wikipedia page to a CSV dataset.
+However, when you combine all of the preceding commands into one, you see that it’s actually really concise and expressive:
+$
+csvlook
+--max-column-width 28
+countries.csv
+│ rank │ country                      │    border │       surface │  ratio │
+├──────┼──────────────────────────────┼───────────┼───────────────┼────────┤
+│    1 │ Vatican City                 │      3.20 │          0.44 │ 7.273… │
+│    2 │ Monaco                       │      4.40 │          2.00 │ 2.200… │
+│    3 │ San Marino                   │     39.00 │         61.00 │ 0.639… │
+│    4 │ Liechtenstein                │     76.00 │        160.00 │ 0.465… │
+│    5 │ Sint Maarten  (Netherlands)  │     10.20 │         34.00 │ 0.300… │
+│    6 │ Andorra                      │    120.30 │        468.00 │ 0.257… │
+│    7 │ Gibraltar  (United Kingdom)  │      1.20 │          6.00 │ 0.200… │
+│    8 │ Saint Martin (France)        │     10.20 │         54.00 │ 0.189… │
+… with 238 more lines
+That concludes the demonstration of converting XML/HTML to JSON to CSV.
+While
+jq
+can perform many more operations, and while there exist specialized tools to work with XML data, in my experience, converting the data to CSV format as quickly as possible tends to work well.
+This way, you can spend more time becoming proficient at using generic command-line tools rather than very
+specific tools.
+Summary
+In this chapter we’ve looked at cleaning or scrubbing data.
+As you’ve seen, there is no single tool that can magically get rid of all the messiness of data; you’ll often need to combine different tools to get the desired result.
+Keep in mind that classic command-line tools such as
+cut
+and
+sort
+can’t interpret structured data.
+Luckily, there are tools that convert one data format, such as JSON and XML, into another data format, such as CSV.
+In the next chapter, which is again an intermezzo chapter, I’m going to show you how you can manage your project using
+make
+.
+You’re free to skip
+Chapter 6
+if you can’t wait to start exploring and visualizing your data in
+Chapter 7
+.
+For Further Exploration
+I wish I could’ve explained more about
+awk
+. It’s such a powerful tool and programming language. I highly recommend that you take the time to learn it. Two good resources for that are the book
+sed & awk
+by Dale Doherty and Arnold Robbins (O’Reilly) and the online
+GNU Awk User’s Guide
+.
+In this chapter I have used regular expressions in a couple of places. A tutorial about them is unfortunately beyond the scope of this book. Because regular expressions can be used in many different tools, I recommend that you learn about them. A good book for this is
+Regular Expressions Cookbook
+by Jan Goyvaerts and Steven Levithan (O’Reilly).
+1
+Mike D. Brennan and Thomas E. Dickey,
+awk
+– Pattern Scanning and Text Processing Language
+, version 1.3.4, 2019,
+https://invisible-island.net/mawk
+.
+2
+Jeroen Janssens,
+rush
+– R One-Liners from the Shell
+, version 0.1, 2021,
+https://github.com/jeroenjanssens/rush
+.
+3
+The Linux Information Project, “Plain Text Definition,” last updated February 9, 2007,
+http://www.linfo.org/plain_text.html
+.
+4
+Andrew Hunt and David Thomas,
+The Pragmatic Programmer
+(Reading, MA: Addison-Wesley, 1999).
+5
+Raymond,
+The Art of Unix Programming
+.
+6
+Jay Fenlason et al.,
+sed
+– Stream Editor for Filtering and Transforming Text
+, version 4.7, 2018,
+https://www.gnu.org/software/sed
+.
+7
+Paul Rubin et al.,
+tail
+– Output the Last Part of Files
+, version 8.30, 2019,
+https://www.gnu.org/software/coreutils
+.
+8
+Jeroen Janssens,
+sample
+– Filter Lines from Standard Input According to Some Probability, with a Given Delay, and for a Certain Duration
+, version 0.2.4, 2021,
+https://github.com/jeroenjanssens/sample
+.
+9
+Joey Hess,
+ts
+– Timestamp Input
+, version 0.65, 2021,
+https://joeyh.name/code/moreutils
+.
+10
+David M. Ihnat, David MacKenzie, and Jim Meyering,
+cut
+– Remove Sections from Each Line of Files
+, version 8.30, 2019,
+https://www.gnu.org/software/coreutils
+.
+11
+Jeroen Janssens,
+body
+– Apply Command to All but the First Line
+, version 0.1, 2021,
+https://github.com/jeroenjanssens/dsutils
+.
+12
+Jeroen Janssens,
+header
+– Add, Replace, and Delete Header Lines
+, version 0.1, 2021,
+https://github.com/jeroenjanssens/dsutils
+.
+13
+Jeroen Janssens,
+cols
+– Apply Command to Subset of Columns
+, version 0.1, 2021,
+https://github.com/jeroenjanssens/dsutils
+.
+14
+Christopher Groskopf,
+csvsql
+– Execute SQL Statements on CSV Files
+, version 1.0.5, 2020,
+https://csvkit.rtfd.org
+.
+15
+Christopher Groskopf,
+csvcut
+– Filter and Truncate CSV Files
+, version 1.0.5, 2020,
+https://csvkit.rtfd.org
+.
+16
+Christopher Groskopf,
+csvgrep
+– Search CSV Files
+, version 1.0.5, 2020,
+https://csvkit.rtfd.org
+.
+17
+Mike Parker, Richard M. Stallman, and David MacKenzie,
+tee
+– Read from Standard Input and Write to Standard Output and Files
+, version 8.30, 2019,
+https://www.gnu.org/software/coreutils
+.
+18
+Christopher Groskopf,
+csvjoin
+– Execute a SQL-Like Join to Merge CSV Files on a Specified Column or Columns
+, version 1.0.5, 2020,
+https://csvkit.rtfd.org
+.
+19
+François Parmentier,
+xml2json
+– Convert an XML Input to a JSON Output, Using
+xml-mapping
+, version 0.0.3, 2016,
+https://github.com/parmentf/xml2json
+.
+20
+Jehiah Czebotar,
+json2csv
+– Convert JSON to CSV
+, version 1.2.1, 2019,
+https://github.com/jehiah/json2csv
+.
+
+Chapter 6.
+Project Management with Make
+I hope that by now you have come to appreciate that the command line is a very convenient environment for working with data.
+You may have noticed that, as a consequence of working with the command line, we:
+Invoke many different commands
+Work from various directories
+Develop our own command-line tools
+Obtain and generate many (intermediate) files
+Since this is an exploratory process, our workflow tends to be rather chaotic, which makes it difficult to keep track of what we’ve done.
+It’s important that our steps can be reproduced, both by us and by others.
+When you continue with a project from some time ago, chances are that you have forgotten which commands you ran, from which directory, on which files, with which parameters, and in which order.
+Imagine the challenges of sharing your project with a collaborator.
+You can recover some commands by digging through the output of the
+history
+command, but this is, of course, not a reliable approach.
+A somewhat better approach would be to save your commands to a shell script.
+At least this allows you and your collaborators to reproduce the project.
+A shell script is, however, also suboptimal, for several reasons:
+It is difficult to read and to maintain.
+Dependencies between steps are unclear.
+Every step gets executed every time, which is inefficient and is also sometimes undesirable.
+This is where
+make
+really
+shines.
+make
+⁠
+1
+is a command-line tool that allows you to:
+Formalize your data workflow steps in terms of input and output dependencies
+Run specific steps of your workflow
+Use inline code
+Store and retrieve data from external sources
+Note
+In the first edition, this chapter used
+drake
+⁠
+2
+instead of
+make
+.
+drake
+was supposed to be a successor to
+make
+with additional features for working with data.
+Unfortunately,
+drake
+was abandoned by its creators in 2016 with too many unresolved bugs.
+That’s why I’ve decided to use
+make
+instead.
+An important and related
+topic is
+version control
+, which allows you to track changes to your project, back up your project to a server, collaborate with others, and retrieve earlier versions of your project when things go wrong.
+A popular command-line tool
+for doing version control is
+git
+.
+It’s often used in combination with
+GitHub, an online service for distributed version control.
+Many open source projects, including
+this book
+, are hosted on GitHub.
+The topic of version control is beyond the scope of this book, but I highly recommend that you look into this, especially once you start collaborating with others.
+At the end of this chapter I recommend a few resources for learning more.
+Overview
+Managing your data workflow with
+make
+is the main topic of this chapter.
+As such, you’ll learn about:
+Defining your workflow with a
+Makefile
+Thinking about your workflow in terms of input and output dependencies
+Running tasks and building targets
+This chapter starts with the following files:
+$
+cd
+/data/ch06
+$
+l
+total 28K
+-rw-r--r-- 1 dst dst  37 Jun 29 14:29 Makefile.test
+-rw-r--r-- 1 dst dst  16 Jun 29 14:29 numbers.make
+-rw-r--r-- 1 dst dst  26 Jun 29 14:29 numbers-write.make
+-rw-r--r-- 1 dst dst  21 Jun 29 14:29 numbers-write-var.make
+-rw-r--r-- 1 dst dst 432 Jun 29 14:29 starwars.make
+-rw-r--r-- 1 dst dst 263 Jun 29 14:29 tasks.make
+-rw-r--r-- 1 dst dst  27 Jun 29 14:29 template.make
+The instructions for getting
+these files are in
+Chapter 2
+.
+Any other files are either downloaded or generated using command-line tools.
+Introducing Make
+make
+organizes command execution
+around data and its dependencies.
+Your data processing steps are formalized in a separate text file (a workflow).
+Each step may have inputs and outputs.
+make
+automatically resolves their dependencies and determines which commands need to be run and in which order.
+This means that when you have, say, an SQL query that takes 10 minutes, it only has to be executed when the result is missing or when the query has changed afterward.
+Also, if you want to (re)run a specific step,
+make
+reruns only the steps on which that step depends.
+This can save you a lot of time.
+Having a formalized workflow allows you to easily pick up your project after a few weeks and to collaborate with others. I strongly advise you to have one, even when you think something will be a one-off project, because you never know when you might need to run certain steps again or reuse them in another project.
+Running Tasks
+By default,
+make
+searches for a
+configuration file called
+Makefile
+in the current directory.
+It can also be named
+makefile
+(lowercase), but I
+recommend calling your file
+Makefile
+because it’s more common and because it appears at the top of a directory listing that way.
+Normally, you would have only one configuration file per project.
+Because this chapter discusses many different ones, I have given each of them a different
+filename with the
+.make
+extension.
+Let’s start with the following
+Makefile
+:
+$
+bat
+-A
+numbers.make
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+numbers.make
+───────┼────────────────────────────────────────────────────────────────────────
+1   │ numbers:
+␊
+2   │
+├──────┤
+seq
+·
+7
+␊
+───────┴────────────────────────────────────────────────────────────────────────
+This
+Makefile
+contains one
+target
+called
+numbers
+.
+A target is like a task.
+It’s usually the name of a
+file you’d like to create, but it can also be more generic than that.
+The line
+below,
+seq 7
+, is known as a
+rule
+.
+Think of a rule as a recipe; it
+consists of one or more commands that specify how the target should be built.
+The whitespace in front of
+the rule is a single tab character.
+make
+is picky when it comes to whitespace.
+Be aware that
+some editors insert spaces when you press the Tab key, known as a “soft tab,” which will cause
+make
+to produce an error.
+The following code illustrates this by expanding the tab to eight spaces:
+$
+<
+numbers.make
+expand
+>
+spaces.make
+$
+bat
+-A
+spaces.make
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+spaces.make
+───────┼────────────────────────────────────────────────────────────────────────
+1   │ numbers:
+␊
+2   │
+········
+seq
+·
+7
+␊
+───────┴────────────────────────────────────────────────────────────────────────
+$
+make
+-f
+spaces.make
+spaces.make:2: *** missing separator (did you mean TAB instead of 8 spaces?).  S
+top.
+$
+rm
+spaces.make
+I need to add the
+-f
+option (short for the
+--makefile
+option) because the configuration file isn’t called
+Makefile
+, which is the default.
+One of the more helpful error messages you’ll find at the command line!
+From now on, I’ll rename the appropriate file
+Makefile
+because that matches real-world use more closely.
+So if I just run
+make
+:
+$
+cp
+numbers.make
+Makefile
+$
+make
+seq 7
+1
+2
+3
+4
+5
+6
+7
+then we see that
+make
+first prints the rule itself (
+seq 7
+) and then prints the output generated by the rule.
+This process is
+known as
+building
+a target.
+If you don’t specify the name of a target, then
+make
+will build the first target specified in the
+Makefile
+.
+In practice, though, you’ll most often specify the target you want to build:
+$
+make
+numbers
+seq 7
+1
+2
+3
+4
+5
+6
+7
+Note
+make
+was originally created to
+ease the compilation of source code, which explains some of the terminology such as
+target
+,
+rule
+, and
+building
+.
+In this case, we’re not actually building anything—that is, we’re not creating any new files.
+make
+will happily
+build
+our target
+numbers
+again, because it’s not finding a file called
+numbers
+.
+I’ll go into this in the next section.
+Sometimes it’s useful to have a target that builds regardless of whether a file with the same name exists.
+Think of tasks that you need to perform as part of a project.
+It’s good practice to declare those targets as phony by using a special target called
+.PHONY
+at the top of your
+Makefile
+, followed by the names of the phony targets.
+Here’s an example
+Makefile
+that illustrates
+the use of phony targets:
+$
+bat
+tasks.make
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+tasks.make
+───────┼────────────────────────────────────────────────────────────────────────
+1   │
+.PHONY
+:
+clean publish docker-run
+2   │
+3   │
+clean
+:
+4   │         rm book/2e/book.md book/2e/render
+*
+.rds
+5   │
+6   │
+publish
+:
+7   │         (
+cd
+www
+&&
+hugo)
+&&
+netlify deploy --prod --dir www/public
+8   │
+9   │
+docker-run
+:
+10   │         docker run -it --rm -v
+$$(
+pwd
+)
+/book/2e/data:/data -p 8000:8000
+│ datasciencetoolbox/dsatcl2e:latest
+───────┴────────────────────────────────────────────────────────────────────────
+Note the extra dollar sign in front of
+$(pwd)
+. This is needed because
+make
+uses a single dollar
+sign to refer to various special variables, which I’ll explain later.
+This is taken from a
+Makefile
+I’ve used while working on this book.
+You could say that I’m using
+make
+as a glorified task runner.
+Although this isn’t the primary purpose of
+make
+, it still provides a lot of value, because I don’t need to remember or look up what incantation I used.
+Instead, I type
+make publish
+, and the latest version of the book is published.
+It’s perfectly fine to put long-running
+commands in a
+Makefile
+.
+And
+make
+can do much more for us!
+Building, for Real
+Let’s modify our
+Makefile
+so that the
+output of the rule is written to a file called
+numbers
+:
+$
+cp
+numbers-write.make
+Makefile
+$
+bat
+Makefile
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+Makefile
+───────┼────────────────────────────────────────────────────────────────────────
+1   │
+numbers
+:
+2   │         seq 7
+>
+numbers
+───────┴────────────────────────────────────────────────────────────────────────
+$
+make
+numbers
+seq 7 > numbers
+$
+bat
+numbers
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+numbers
+───────┼────────────────────────────────────────────────────────────────────────
+1   │ 1
+2   │ 2
+3   │ 3
+4   │ 4
+5   │ 5
+6   │ 6
+7   │ 7
+───────┴────────────────────────────────────────────────────────────────────────
+Now we can say that
+make
+is actually building something.
+What’s more, if we run it again, we see that
+make
+reports that the target
+numbers
+is up-to-date:
+$
+make
+numbers
+make: 'numbers' is up to date.
+There’s no need to rebuild the target
+numbers
+because the file
+numbers
+already exists.
+That’s great, because
+make
+is saving us time by not repeating work.
+In
+make
+, it’s all about files.
+But keep in mind that
+make
+only cares about the
+name
+of the target.
+It does not check whether a file of the same name actually gets created by the rule.
+If we were to write to a file called
+nummers
+, which is Dutch for “numbers,” and the target was still called
+numbers
+, then
+make
+would always build this target. Vice versa, if the file
+numbers
+was created by some other process, whether automated or manual, then
+make
+would still consider that target up-to-date.
+We can avoid some
+repetition by using the automatic variable
+$@
+, which gets expanded to the name of the target:
+$
+cp
+numbers-write-var.make
+Makefile
+$
+bat
+Makefile
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+Makefile
+───────┼────────────────────────────────────────────────────────────────────────
+1   │
+numbers
+:
+2   │         seq 7
+>
+$@
+───────┴────────────────────────────────────────────────────────────────────────
+Let’s verify that this works by removing the file
+numbers
+and calling
+make
+again:
+$
+rm
+numbers
+$
+make
+numbers
+seq 7 > numbers
+$
+bat
+numbers
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+numbers
+───────┼────────────────────────────────────────────────────────────────────────
+1   │ 1
+2   │ 2
+3   │ 3
+4   │ 4
+5   │ 5
+6   │ 6
+7   │ 7
+───────┴────────────────────────────────────────────────────────────────────────
+Another
+reason for
+make
+to rebuild a target is its dependencies, so let’s discuss that next.
+Adding Dependencies
+So far, we’ve looked at
+targets that exist in isolation.
+In a typical data science workflow, many steps depend on other steps.
+In order to properly talk about dependencies in a
+Makefile
+, let’s consider two tasks that work with a dataset about
+Star Wars
+characters
+.
+Here’s an excerpt from that dataset:
+$
+curl
+-sL
+'https://raw.githubusercontent.com/tidyverse/dplyr/master/data-raw/st
+arwars.csv'
+|
+>
+xsv
+select name,height,mass,homeworld,species |
+>
+csvlook
+│ name                  │ height │    mass │ homeworld      │ species        │
+├───────────────────────┼────────┼─────────┼────────────────┼────────────────┤
+│ Luke Skywalker        │    172 │    77.0 │ Tatooine       │ Human          │
+│ C-3PO                 │    167 │    75.0 │ Tatooine       │ Droid          │
+│ R2-D2                 │     96 │    32.0 │ Naboo          │ Droid          │
+│ Darth Vader           │    202 │   136.0 │ Tatooine       │ Human          │
+│ Leia Organa           │    150 │    49.0 │ Alderaan       │ Human          │
+│ Owen Lars             │    178 │   120.0 │ Tatooine       │ Human          │
+│ Beru Whitesun lars    │    165 │    75.0 │ Tatooine       │ Human          │
+│ R5-D4                 │     97 │    32.0 │ Tatooine       │ Droid          │
+… with 79 more lines
+The first task computes the 10 tallest humans:
+$
+curl
+-sL
+'https://raw.githubusercontent.com/tidyverse/dplyr/master/data-raw/st
+arwars.csv'
+|
+>
+grep
+Human |
+>
+cut
+-d, -f 1,2 |
+>
+sort
+-t, -k2 -nr |
+>
+head
+Darth Vader,202
+Qui-Gon Jinn,193
+Dooku,193
+Bail Prestor Organa,191
+Raymus Antilles,188
+Mace Windu,188
+Anakin Skywalker,188
+Gregar Typho,185
+Jango Fett,183
+Cliegg Lars,183
+Only keep lines that contain the pattern
+Human
+.
+Extract the first two columns.
+Sort the lines by the second column in reverse numeric order.
+By default,
+head
+prints the first 10 lines. You can override this with the
+-n
+option.
+The second task creates a box plot showing
+the distribution of heights per species (see
+Figure 6-1
+):
+$
+curl
+-sL
+'https://raw.githubusercontent.com/tidyverse/dplyr/master/data-raw/st
+arwars.csv'
+|
+>
+rush
+plot --x height --y species --geom boxplot
+>
+heights.png
+$
+display
+heights.png
+Figure 6-1.
+Distribution of heights per species in Star Wars
+Let’s put these two tasks into a
+Makefile
+.
+Instead of doing this incrementally, I’d first like to show what a complete
+Makefile
+looks like and then explain all of
+the syntax step by step:
+$
+cp
+starwars.make
+Makefile
+$
+bat
+Makefile
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+Makefile
+───────┼────────────────────────────────────────────────────────────────────────
+1   │ SHELL
+:=
+bash
+2   │
+.ONESHELL
+:
+3   │ .SHELLFLAGS
+:=
+-eu -o pipefail -c
+4   │
+5   │
+URL = "https
+:
+//raw.githubusercontent.com/tidyverse/dplyr/master/data-ra
+│
+w/starwars.csv"
+6   │
+7   │
+.PHONY
+:
+all top10
+8   │
+9   │
+all
+:
+top10 heights.png
+10   │
+11   │
+data
+:
+12   │         mkdir $@
+13   │
+14   │
+data/starwars.csv
+:
+data
+15   │         curl -sL
+$(
+URL
+)
+>
+$@
+16   │
+17   │
+top10
+:
+data/starwars.csv
+18   │         grep Human $<
+|
+19   │         cut -d, -f 1,2
+|
+20   │         sort -t, -k2 -nr
+|
+21   │         head
+22   │
+23   │
+heights.png
+:
+data/starwars.csv
+24   │
+<
+$< rush plot --x height --y species --geom boxplot
+>
+$@
+───────┴────────────────────────────────────────────────────────────────────────
+Now let’s go through this
+Makefile
+step by step.
+The first three lines are there to change some default settings related to
+make
+itself:
+All rules are executed
+in a shell, which, by default, is
+sh
+. With the
+SHELL
+variable, we can change this to another shell, like
+bash
+. This way, we can use everything that Bash has to offer, such as
+for
+loops.
+By default, every line in a rule
+is sent separately to the shell. With the special target
+.ONESHELL
+, we can override this so that the rule for the target
+top10
+works.
+The
+.SHELLFLAGS
+line
+makes Bash more strict, which is considered a
+best practice
+. For example, because of this, the pipeline in the rule for the target
+top10
+now stops as soon as there is an error.
+We define a custom variable called
+URL
+.
+Even though this is
+used only once, I find it helpful to put information like this near the beginning of the file so that you can easily make changes to these kinds of settings.
+With the special target
+.PHONY
+, we can
+indicate which targets are not represented by files. In our case, that holds true for the targets
+all
+and
+top10
+. These targets will now be executed regardless of whether the directory contains files with the same name.
+There are five targets:
+all
+,
+data
+,
+data/starwars.csv
+,
+top10
+, and
+heights.png
+.
+Figure 6-2
+provides an overview of these targets and the dependencies between them.
+Figure 6-2.
+Dependencies between targets
+Let’s discuss each target in turn:
+The target
+all
+has two
+dependencies but no rule. This is like a shortcut to execute one or more targets in the order in which they are specified—in this case,
+top10
+and
+heights.png
+. The target
+all
+appears as the first target in the
+Makefile
+, which means that if we run
+make
+, this target will be built.
+The target
+data
+creates
+the directory
+data
+. Earlier I said that
+make
+is all about files. Well, it’s also about directories. This target will be executed only if the directory
+data
+doesn’t yet exist.
+The target
+data/starwars.csv
+depends
+on the target
+data
+. If there’s no
+data
+directory, it will first be created. Once all dependencies are satisfied, the rule will be executed, which involves downloading a file and saving it to a file with the same name as the target.
+The target
+top10
+is marked as
+phony, so it will always be built if specified. It depends on the
+data/starwars.csv
+target. It makes use of a special variable,
+$<
+, which expands to the name of the first prerequisite, namely
+data/starwars.csv
+.
+The target
+heights.png
+,
+like the target
+top10
+, depends on
+data/starwars.csv
+and makes use of both automatic variables we’ve seen in this chapter. See the
+online documentation
+if you’d like to learn about other automatic variables.
+Last but not least, let’s verify that this
+Makefile
+works:
+$
+make
+mkdir data
+curl -sL "https://raw.githubusercontent.com/tidyverse/dplyr/master/data-raw/star
+wars.csv" > data/starwars.csv
+grep Human data/starwars.csv |
+cut -d, -f 1,2 |
+sort -t, -k2 -nr |
+head
+Darth Vader,202
+Qui-Gon Jinn,193
+Dooku,193
+Bail Prestor Organa,191
+Raymus Antilles,188
+Mace Windu,188
+Anakin Skywalker,188
+Gregar Typho,185
+Jango Fett,183
+Cliegg Lars,183
+< data/starwars.csv rush plot --x height --y species --geom boxplot > heights.pn
+g
+No surprises here. Because we didn’t specify any target, the
+all
+target will be built, which in turn causes both the
+top10
+and
+heights.png
+targets to be built. The output of the former is printed to standard output, and the latter creates the file
+heights.png
+. The
+data
+directory is created only once, just like the CSV file is downloaded only once.
+There’s nothing more fun than just playing with your data and forgetting everything else.
+But you have to trust me when I say that it’s worthwhile to keep a record of what you have done using a
+Makefile
+.
+Not only will it make your life easier (pun intended), but you will also start thinking about your data workflow in terms of steps.
+Just as with your own command-line toolbox, which you expand over time, the same holds for
+make
+workflows.
+The more steps you have defined, the easier it gets to keep doing it, because very often you can reuse certain steps.
+I hope that you will
+get used to
+make
+, and that it will make your life easier.
+Summary
+One of the beauties of the command line is that it allows you to play with your data.
+You can easily execute different commands and process different datafiles.
+It is a very interactive and iterative process.
+After a while, it is easy to forget which steps you have taken to get the desired result.
+It’s therefore very important to document your steps every once in a while.
+This way, if you or one of your colleagues picks up your project after some time, the same result can be produced again by executing the same steps.
+In this chapter I’ve shown you that just putting every command in one Bash script is suboptimal.
+Instead, I propose that you use
+make
+as a command-line tool to manage your data workflow.
+The next chapter covers the third step of the OSEMN model for data science: exploring data.
+For Further Exploration
+The book
+Managing Projects with GNU Make
+by Robert Mecklenburg (O’Reilly) and the online
+GNU Make Manual
+provide a comprehensive and advanced overview of
+make
+.
+There are plenty of other workflow managers besides
+make
+. Although they differ in syntax and features, they all use concepts such as targets, rules, and dependencies. Examples include
+Luigi
+,
+Apache Airflow
+, and
+Nextflow
+.
+To learn more about version control, and about
+git
+and GitHub in particular, I recommend the book
+Pro Git
+by Scott Chacon and Ben Straub (Apress); it’s
+available for free
+. The
+online GitHub documentation
+is also a great starting point.
+1
+Stuart I. Feldman,
+make
+– A Program for Maintaining Computer Programs
+, version 4.3, 2020,
+https://www.gnu.org/software/make
+.
+2
+Factual,
+drake
+– Data Workflow Tool, like a “Make for Data,”
+version 1.0.3, 2016,
+https://github.com/Factual/drake
+.
+
+Chapter 7.
+Exploring Data
+After all that hard work (unless you already had clean data lying around), it’s time for some fun.
+Now that you have obtained and scrubbed your data, you can continue with the third step of the OSEMN model, which is to explore your data.
+Exploring is the step where you familiarize yourself with the data.
+Being familiar with the data is essential when you want to extract any value from it.
+For example, knowing what kind of features the data has means you know which features are worth further exploration and which ones you can use to answer any questions that you have.
+Exploring your data can be done from three perspectives.
+The first perspective is to inspect the data and its properties.
+Here, you want to find out things like what the raw data looks like, how many data points the dataset has, and which features the dataset has.
+The second is to compute descriptive statistics. This perspective is useful for learning more about the individual features.
+The output is often brief and textual and can therefore be printed on the command line.
+The third perspective is to create visualizations of the data. From this perspective you can gain insight into how multiple features interact. I’ll discuss a way of creating visualizations that can be printed on the command line. However, visualizations are best suited for display on a GUI. An advantage of data visualizations over descriptive statistics is that the former are more flexible and can convey much more information.
+Overview
+In this chapter, you’ll learn how to:
+Inspect the data and its properties
+Compute descriptive statistics
+Create data visualizations inside and outside the command line
+This chapter starts with the following files:
+$
+cd
+/data/ch07
+$
+l
+total 104K
+-rw-r--r-- 1 dst dst  125 Jun 29 14:30 datatypes.csv
+-rw-r--r-- 1 dst dst 7.8K Jun 29 14:30 tips.csv
+-rw-r--r-- 1 dst dst  83K Jun 29 14:30 venture.csv
+-rw-r--r-- 1 dst dst 4.6K Jun 29 14:30 venture-wide.csv
+The instructions for getting these files are in
+Chapter 2
+.
+Any other files are either downloaded or generated using command-line tools.
+Inspecting Data and Its Properties
+In this section I’ll demonstrate
+how to inspect your dataset and its properties. Because the upcoming visualization and modeling techniques expect the data to be in a rectangular shape, I’ll assume that the data is in CSV format. You can use the techniques described in
+Chapter 5
+to convert your data to CSV if necessary.
+For simplicity’s sake, I’ll also assume that your data has a header.
+In the first subsection, I’ll show you a way to determine whether that’s the case.
+Once you know you have a header, you can continue answering the following questions:
+How many data points and features does the dataset have?
+What does the raw data look like?
+What kind of features does the dataset have?
+Can some of these features be treated as categorical?
+Header or Not, Here I Come
+You can check whether your file
+has a header by printing the first few lines using
+head
+:
+$
+head
+-n 5
+venture.csv
+FREQ,TIME_FORMAT,TIME_PERIOD,EXPEND,UNIT,GEO,OBS_STATUS,OBS_VALUE,FREQ_DESC,TIME
+_FORMAT_DESC,TIME_PERIOD_DESC,OBS_STATUS_DESC,EXPEND_DESC,UNIT_DESC,GEO_DESC
+A,P1Y,2015,INV_VEN,PC_GDP,CZ,,0.002,Annual,Annual,Year 2015,No data,"Venture cap
+ital investment (seed, start-up and later stage) ",Percentage of GDP,Czechia
+A,P1Y,2007,INV_VEN,PC_GDP,DE,,0.034,Annual,Annual,Year 2007,No data,"Venture cap
+ital investment (seed, start-up and later stage) ",Percentage of GDP,Germany
+A,P1Y,2008,INV_VEN,PC_GDP,DE,,0.039,Annual,Annual,Year 2008,No data,"Venture cap
+ital investment (seed, start-up and later stage) ",Percentage of GDP,Germany
+A,P1Y,2009,INV_VEN,PC_GDP,DE,,0.029,Annual,Annual,Year 2009,No data,"Venture cap
+ital investment (seed, start-up and later stage) ",Percentage of GDP,Germany
+If the lines wrap around, add
+line numbers using
+nl
+:
+$
+head
+-n 3
+venture.csv
+|
+nl
+1  FREQ,TIME_FORMAT,TIME_PERIOD,EXPEND,UNIT,GEO,OBS_STATUS,OBS_VALUE,FREQ_D
+ESC,TIME_FORMAT_DESC,TIME_PERIOD_DESC,OBS_STATUS_DESC,EXPEND_DESC,UNIT_DESC,GEO_
+DESC
+2  A,P1Y,2015,INV_VEN,PC_GDP,CZ,,0.002,Annual,Annual,Year 2015,No data,"Ven
+ture capital investment (seed, start-up and later stage) ",Percentage of GDP,Cze
+chia
+3  A,P1Y,2007,INV_VEN,PC_GDP,DE,,0.034,Annual,Annual,Year 2007,No data,"Ven
+ture capital investment (seed, start-up and later stage) ",Percentage of GDP,Ger
+many
+Alternatively, you
+can use
+trim
+:
+$
+<
+venture.csv
+trim
+5
+FREQ,TIME_FORMAT,TIME_PERIOD,EXPEND,UNIT,GEO,OBS_STATUS,OBS_VALUE,FREQ_DESC,TIM…
+A,P1Y,2015,INV_VEN,PC_GDP,CZ,,0.002,Annual,Annual,Year 2015,No data,"Venture ca…
+A,P1Y,2007,INV_VEN,PC_GDP,DE,,0.034,Annual,Annual,Year 2007,No data,"Venture ca…
+A,P1Y,2008,INV_VEN,PC_GDP,DE,,0.039,Annual,Annual,Year 2008,No data,"Venture ca…
+A,P1Y,2009,INV_VEN,PC_GDP,DE,,0.029,Annual,Annual,Year 2009,No data,"Venture ca…
+… with 536 more lines
+In this case, it’s clear that the first line is a header because it contains only uppercase names, and subsequent lines contain numbers.
+This is quite a subjective process, and it’s up to you to decide whether the first line is a header or is already the first data point.
+When the dataset contains no header, you’re best off using the
+header
+tool (discussed in
+Chapter 5
+) to
+correct that.
+Inspect All the Data
+If you want to inspect the raw
+data at your own pace, then it’s probably not a good idea to use
+cat
+, because then all the data will be printed in one go.
+I recommend using
+less
+,
+1
+which allows you to interactively inspect your data in the command line.
+You can prevent long lines (as with
+venture.csv
+) from wrapping by specifying the
+-S
+option:
+$
+less
+-S
+venture.csv
+FREQ,TIME_FORMAT,TIME_PERIOD,EXPEND,UNIT,GEO,OBS_STATUS,OBS_VALUE,FREQ_DESC,TIM
+>
+A,P1Y,2015,INV_VEN,PC_GDP,CZ,,0.002,Annual,Annual,Year 2015,No data,"Venture ca
+>
+A,P1Y,2007,INV_VEN,PC_GDP,DE,,0.034,Annual,Annual,Year 2007,No data,"Venture ca
+>
+A,P1Y,2008,INV_VEN,PC_GDP,DE,,0.039,Annual,Annual,Year 2008,No data,"Venture ca
+>
+A,P1Y,2009,INV_VEN,PC_GDP,DE,,0.029,Annual,Annual,Year 2009,No data,"Venture ca
+>
+A,P1Y,2010,INV_VEN,PC_GDP,DE,,0.029,Annual,Annual,Year 2010,No data,"Venture ca
+>
+A,P1Y,2011,INV_VEN,PC_GDP,DE,,0.029,Annual,Annual,Year 2011,No data,"Venture ca
+>
+A,P1Y,2012,INV_VEN,PC_GDP,DE,,0.021,Annual,Annual,Year 2012,No data,"Venture ca
+>
+A,P1Y,2013,INV_VEN,PC_GDP,DE,,0.023,Annual,Annual,Year 2013,No data,"Venture ca
+>
+A,P1Y,2014,INV_VEN,PC_GDP,DE,,0.021,Annual,Annual,Year 2014,No data,"Venture ca
+>
+A,P1Y,2015,INV_VEN,PC_GDP,DE,,0.025,Annual,Annual,Year 2015,No data,"Venture ca
+>
+A,P1Y,2007,INV_VEN,PC_GDP,DK,,0.092,Annual,Annual,Year 2007,No data,"Venture ca
+>
+A,P1Y,2008,INV_VEN,PC_GDP,DK,,0.074,Annual,Annual,Year 2008,No data,"Venture ca
+>
+A,P1Y,2009,INV_VEN,PC_GDP,DK,,0.051,Annual,Annual,Year 2009,No data,"Venture ca
+>
+A,P1Y,2010,INV_VEN,PC_GDP,DK,,0.059,Annual,Annual,Year 2010,No data,"Venture ca
+>
+:
+The greater-than signs on the right indicate that you can scroll horizontally.
+You can scroll up and down by pressing the up and down arrow keys.
+Press the space bar to scroll down an entire screen.
+Scrolling horizontally is done by pressing the left and right arrow keys.
+Press g and G to go to the start and the end of the file, respectively.
+Quitting
+less
+is done by pressing q.
+The manual page lists all the available key
+bindings
+.
+One advantage of
+less
+is that it does not load the entire file into memory, which means it’s fast even for viewing large files.
+Feature Names and Data Types
+The column (or feature)
+names may indicate the meaning of the feature.
+You can use the following
+head
+and
+tr
+combo for this:
+$
+<
+venture.csv
+head
+-n 1 |
+tr
+,
+'\n'
+FREQ
+TIME_FORMAT
+TIME_PERIOD
+EXPEND
+UNIT
+GEO
+OBS_STATUS
+OBS_VALUE
+FREQ_DESC
+TIME_FORMAT_DESC
+TIME_PERIOD_DESC
+OBS_STATUS_DESC
+EXPEND_DESC
+UNIT_DESC
+GEO_DESC
+This basic command assumes that the file is
+delimited by commas.
+A more robust approach is to use
+csvcut
+:
+$
+csvcut
+-n
+venture.csv
+1: FREQ
+2: TIME_FORMAT
+3: TIME_PERIOD
+4: EXPEND
+5: UNIT
+6: GEO
+7: OBS_STATUS
+8: OBS_VALUE
+9: FREQ_DESC
+10: TIME_FORMAT_DESC
+11: TIME_PERIOD_DESC
+12: OBS_STATUS_DESC
+13: EXPEND_DESC
+14: UNIT_DESC
+15: GEO_DESC
+You can go a step further
+than just printing the column names.
+Besides the names of the columns, it would be very useful to know what type of values each column contains, such as a string of characters, a numerical value, or a date.
+Assume that you have the following toy dataset:
+$
+bat
+-A
+datatypes.csv
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+datatypes.csv
+───────┼────────────────────────────────────────────────────────────────────────
+1   │ a,b,c,d,e,f
+␊
+2   │ 1,0.0,FALSE,"""Yes!""",2011-11-11
+·
+11:00,2012-09-08
+␊
+3   │ 42,3.1415,TRUE,"OK,
+·
+good",2014-09-15,12/6/70
+␊
+4   │ 66,,False,2198,,
+␊
+───────┴────────────────────────────────────────────────────────────────────────
+Which
+csvlook
+interprets as
+follows:
+$
+csvlook
+datatypes.csv
+│  a │      b │     c │ d        │                   e │          f │
+├────┼────────┼───────┼──────────┼─────────────────────┼────────────┤
+│  1 │ 0.000… │ False │ "Yes!"   │ 2011-11-11 11:00:00 │ 2012-09-08 │
+│ 42 │ 3.142… │  True │ OK, good │ 2014-09-15 00:00:00 │ 1970-12-06 │
+│ 66 │        │ False │ 2198     │                     │            │
+I have already used
+csvsql
+in
+Chapter 5
+to execute SQL queries directly on CSV data.
+When no command-line arguments are passed, it generates the SQL statement that would be needed if you were to insert this data into an actual database.
+You can also use the output to inspect what the inferred column types are.
+If a column has the
+NOT NULL
+string printed after the data type, then that column contains no missing values:
+$
+csvsql
+datatypes.csv
+CREATE TABLE datatypes (
+a DECIMAL NOT NULL,
+b DECIMAL,
+c BOOLEAN NOT NULL,
+d VARCHAR NOT NULL,
+e TIMESTAMP,
+f DATE
+);
+This output is especially useful when you use other
+tools within the
+csvkit
+suite, such as
+csvgrep
+,
+csvsort
+, and
+csvsql
+.
+For
+venture.csv
+, the columns are
+inferred as follows:
+$
+csvsql
+venture.csv
+CREATE TABLE venture (
+"FREQ" VARCHAR NOT NULL,
+"TIME_FORMAT" VARCHAR NOT NULL,
+"TIME_PERIOD" DECIMAL NOT NULL,
+"EXPEND" VARCHAR NOT NULL,
+"UNIT" VARCHAR NOT NULL,
+"GEO" VARCHAR NOT NULL,
+"OBS_STATUS" BOOLEAN,
+"OBS_VALUE" DECIMAL NOT NULL,
+"FREQ_DESC" VARCHAR NOT NULL,
+"TIME_FORMAT_DESC" VARCHAR NOT NULL,
+"TIME_PERIOD_DESC" VARCHAR NOT NULL,
+"OBS_STATUS_DESC" VARCHAR NOT NULL,
+"EXPEND_DESC" VARCHAR NOT NULL,
+"UNIT_DESC" VARCHAR NOT NULL,
+"GEO_DESC" VARCHAR NOT NULL
+);
+Unique Identifiers, Continuous Variables, and Factors
+Knowing the data type of each
+feature is not enough.
+It’s also essential to know what each feature represents.
+Having knowledge about the domain is very useful here, but we may also get some context by looking at the data itself.
+Both a string and an integer could be a unique identifier or could represent a category.
+In the latter case, this could be used to assign a color to your visualization.
+But if an integer denotes, say, a postal code, then it doesn’t make sense to compute the
+average
+.
+To determine whether a feature should
+be treated as a unique identifier or a categorical variable, you could count the number of unique values for a specific column:
+$
+wc
+-l
+tips.csv
+245 tips.csv
+$
+<
+tips.csv
+csvcut
+-c day |
+header
+-d |
+sort
+|
+uniq
+|
+wc
+-l
+4
+You can use
+csvstat
+,
+2
+which is part of
+csvkit
+, to get the number of unique values for each column:
+$
+csvstat
+tips.csv
+--unique
+1. bill: 229
+2. tip: 123
+3. sex: 2
+4. smoker: 2
+5. day: 4
+6. time: 2
+7. size: 6
+$
+csvstat
+venture.csv
+--unique
+1. FREQ: 1
+2. TIME_FORMAT: 1
+3. TIME_PERIOD: 9
+4. EXPEND: 1
+5. UNIT: 3
+6. GEO: 20
+7. OBS_STATUS: 1
+8. OBS_VALUE: 286
+9. FREQ_DESC: 1
+10. TIME_FORMAT_DESC: 1
+11. TIME_PERIOD_DESC: 9
+12. OBS_STATUS_DESC: 1
+13. EXPEND_DESC: 1
+14. UNIT_DESC: 3
+15. GEO_DESC: 20
+If there’s only one unique value (such as with
+OBS_STATUS
+), then there’s a chance that you can discard that column because it doesn’t provide any value.
+If you wanted to automatically discard all such columns, then you could use the following pipeline:
+$
+<
+venture.csv
+csvcut
+-C
+$(
+>
+csvstat
+venture.csv
+--unique |
+>
+grep
+': 1$'
+|
+>
+cut
+-d. -f 1 |
+>
+tr
+-d
+' '
+|
+>
+paste
+-sd,
+>
+)
+|
+trim
+TIME_PERIOD,UNIT,GEO,OBS_VALUE,TIME_PERIOD_DESC,UNIT_DESC,GEO_DESC
+2015,PC_GDP,CZ,0.002,Year 2015,Percentage of GDP,Czechia
+2007,PC_GDP,DE,0.034,Year 2007,Percentage of GDP,Germany
+2008,PC_GDP,DE,0.039,Year 2008,Percentage of GDP,Germany
+2009,PC_GDP,DE,0.029,Year 2009,Percentage of GDP,Germany
+2010,PC_GDP,DE,0.029,Year 2010,Percentage of GDP,Germany
+2011,PC_GDP,DE,0.029,Year 2011,Percentage of GDP,Germany
+2012,PC_GDP,DE,0.021,Year 2012,Percentage of GDP,Germany
+2013,PC_GDP,DE,0.023,Year 2013,Percentage of GDP,Germany
+2014,PC_GDP,DE,0.021,Year 2014,Percentage of GDP,Germany
+… with 531 more lines
+The
+-C
+option deselects columns given their locations (or names), which is provided with command substitution.
+Obtain the number of unique values for each column in
+venture.csv
+.
+Keep only the columns that contain one unique value.
+Extract the column location.
+Trim any white space.
+Put all column locations on one comma-separated line.
+Show only the first 10 lines.
+Having said that, I’m going to keep those columns for now.
+Generally speaking, if the number of unique values is low compared to the total number of rows, then that feature might be treated as a categorical one (such as
+GEO
+in the case of
+venture.csv
+).
+If the number is equal to the number of rows, it
+might be a unique identifier, but it might also be a numerical value.
+There’s only one way to find out: we need to go deeper.
+Computing Descriptive Statistics
+In this section, we’re going to use
+csvstat
+and
+rush
+to compute various descriptive
+statistics.
+Column Statistics
+The command-line tool
+csvstat
+gives a
+lot of information. For each feature (column), it shows:
+The data type
+Whether it has any missing values (nulls)
+The number of unique values
+Various descriptive statistics (minimum, maximum, sum, mean, standard deviation, and median) for those features for which it is appropriate
+Invoke
+csvstat
+as follows:
+$
+csvstat
+venture.csv
+|
+trim
+32
+1. "FREQ"
+Type of data:          Text
+Contains null values:  False
+Unique values:         1
+Longest value:         1 characters
+Most common values:    A (540x)
+2. "TIME_FORMAT"
+Type of data:          Text
+Contains null values:  False
+Unique values:         1
+Longest value:         3 characters
+Most common values:    P1Y (540x)
+3. "TIME_PERIOD"
+Type of data:          Number
+Contains null values:  False
+Unique values:         9
+Smallest value:        2,007
+Largest value:         2,015
+Sum:                   1,085,940
+Mean:                  2,011
+Median:                2,011
+StDev:                 2.584
+Most common values:    2,015 (60x)
+2,007 (60x)
+2,008 (60x)
+2,009 (60x)
+2,010 (60x)
+… with 122 more lines
+I’m showing only the first 32 lines because this produces a lot of output. You might want to pipe this through
+less
+.
+If you’re only interested in a specific statistic, you can also use one of the following options:
+--max
+(maximum)
+--min
+(minimum)
+--sum
+(sum)
+--mean
+(mean)
+--median
+(median)
+--stdev
+(standard deviation)
+--nulls
+(whether a column contains nulls)
+--unique
+(unique values)
+--freq
+(frequent values)
+--len
+(maximum value length)
+For example:
+$
+csvstat
+venture.csv
+--freq |
+trim
+1. FREQ: { "A": 540 }
+2. TIME_FORMAT: { "P1Y": 540 }
+3. TIME_PERIOD: { "2015": 60, "2007": 60, "2008": 60, "2009": 60, "2010": 60 }
+4. EXPEND: { "INV_VEN": 540 }
+5. UNIT: { "PC_GDP": 180, "NR_COMP": 180, "MIO_EUR": 180 }
+6. GEO: { "CZ": 27, "DE": 27, "DK": 27, "EL": 27, "ES": 27 }
+7. OBS_STATUS: { "None": 540 }
+8. OBS_VALUE: { "0": 28, "1": 19, "2": 14, "0.002": 10, "0.034": 7 }
+9. FREQ_DESC: { "Annual": 540 }
+10. TIME_FORMAT_DESC: { "Annual": 540 }
+… with 5 more lines
+You can select a subset of features with the
+-c
+option, which accepts both integers and column names:
+$
+csvstat
+venture.csv
+-c 3,GEO
+3. "TIME_PERIOD"
+Type of data:          Number
+Contains null values:  False
+Unique values:         9
+Smallest value:        2,007
+Largest value:         2,015
+Sum:                   1,085,940
+Mean:                  2,011
+Median:                2,011
+StDev:                 2.584
+Most common values:    2,015 (60x)
+2,007 (60x)
+2,008 (60x)
+2,009 (60x)
+2,010 (60x)
+6. "GEO"
+Type of data:          Text
+Contains null values:  False
+Unique values:         20
+Longest value:         2 characters
+Most common values:    CZ (27x)
+DE (27x)
+DK (27x)
+EL (27x)
+ES (27x)
+Row count: 540
+Tip
+Keep in mind that
+csvstat
+, just like
+csvsql
+, employs heuristics to determine the data type and therefore may not always get it right.
+I encourage you to always do a manual inspection, as discussed in the previous subsection.
+Moreover, even though the type may be a string or an integer, that doesn’t say anything about how it should be used.
+As a nice extra,
+csvstat
+outputs, at the very end, the number of data points (rows).
+Newlines and commas inside values are handled correctly.
+To see only that last line, you can use
+tail
+.
+Alternatively, you can use
+xsv
+, which
+returns only the actual number of rows:
+$
+csvstat
+venture.csv
+|
+tail
+-n 1
+Row count: 540
+$
+xsv
+count
+venture.csv
+540
+Note that using either of these two options is different from using
+wc -l
+, which counts the number of
+newlines (and therefore also counts the header).
+R One-Liners on the Shell
+In this section I’d like
+to discuss the command-line tool
+rush
+, which enables you to leverage the statistical programming environment
+R
+⁠
+3
+directly from the command line.
+Before I explain what
+rush
+does and why it exists, let’s talk a bit about
+R
+itself.
+R
+is a very powerful statistical software package for doing data science.
+It’s an interpreted programming language, has an extensive collection of packages, and offers its own REPL,
+which, similar to the command line, allows you to play with your data.
+Note that once you start
+R
+, you’re in an interactive session that is separated from the Unix command line.
+Imagine that you have a CSV file called
+tips.csv
+, and you would like compute the tip percentage and save the result.
+To accomplish this in
+R
+, you would first run
+R
+:
+$
+R
+--quiet
+>
+I use the
+--quiet
+option here to suppress the rather long startup message.
+And then run the following code:
+> library(tidyverse)
+──
+Attaching packages
+─────────────────────────────────────── tidyverse 1.3.0 ──
+✔
+ggplot2
+3.3.3
+✔
+purrr
+0.3.4
+✔
+tibble
+3.0.6
+✔
+dplyr
+1.0.4
+✔
+tidyr
+1.1.2
+✔
+stringr
+1.4.0
+✔
+readr
+1.4.0
+✔
+forcats
+0.5.1
+──
+Conflicts
+────────────────────────────────────────── tidyverse_conflicts() ──
+✖
+dplyr
+::
+filter()
+masks
+stats
+::filter()
+✖
+dplyr
+::
+lag()
+masks
+stats
+::lag()
+> df <- read_csv("tips.csv")
+──
+Column specification
+────────────────────────────────────────────────────────
+cols(
+bill =
+col_double()
+,
+tip =
+col_double()
+,
+sex =
+col_character()
+,
+smoker =
+col_character()
+,
+day =
+col_character()
+,
+time =
+col_character()
+,
+size =
+col_double()
+)
+> df <- mutate(df, percent = tip / bill * 100)
+> write_csv(df, "percent.csv")
+> q("no")
+$
+Load any required packages.
+Read in the CSV file and assign it to a variable.
+Compute the new column
+percent
+.
+Save the result to disk.
+Exit
+R
+.
+Afterward, you can continue with the saved file
+percent.csv
+on the command line:
+$
+<
+percent.csv
+trim
+5
+bill,tip,sex,smoker,day,time,size,percent
+16.99,1.01,Female,No,Sun,Dinner,2,5.9446733372572105
+10.34,1.66,Male,No,Sun,Dinner,3,16.054158607350097
+21.01,3.5,Male,No,Sun,Dinner,3,16.658733936220845
+23.68,3.31,Male,No,Sun,Dinner,2,13.97804054054054
+… with 240 more lines
+Note that only the third line is associated with what you specifically want to accomplish.
+The other lines are necessary boilerplate.
+Typing in this boilerplate in order to accomplish something simple is cumbersome and breaks your workflow.
+Sometimes, you want to do only one or two things at a time to your data.
+Wouldn’t it be great if you could harness the power of
+R
+and use it from the command line?
+This is where
+rush
+comes in.
+Let’s perform the same task as before, but now using
+rush
+:
+$
+rm
+percent.csv
+$
+rush
+run -t
+'mutate(df, percent = tip / bill * 100)'
+tips.csv
+>
+percent.csv
+$
+<
+percent.csv
+trim
+5
+bill,tip,sex,smoker,day,time,size,percent
+16.99,1.01,Female,No,Sun,Dinner,2,5.9446733372572105
+10.34,1.66,Male,No,Sun,Dinner,3,16.054158607350097
+21.01,3.5,Male,No,Sun,Dinner,3,16.658733936220845
+23.68,3.31,Male,No,Sun,Dinner,2,13.97804054054054
+… with 240 more lines
+These small one-liners are
+possible because
+rush
+takes care of all the boilerplate.
+In this case, I’m using the
+run
+subcommand. There’s also the
+plot
+subcommand, which I’ll use in the next section to produce data visualizations quickly.
+If you’re passing in any input data, then by default,
+rush
+assumes that it’s in CSV format with a header and a comma as the delimiter.
+Moreover, the column names are sanitized so that they are easier to work with.
+You can override these defaults using the
+--no-header
+(or
+-H
+),
+--delimiter
+(or
+-d
+), and
+--no-clean-names
+(or
+-C
+) options, respectively.
+The help gives a good overview of the
+available options for the
+run
+subcommand:
+$
+rush
+run --help
+rush: Run an R expression
+Usage:
+rush run [options] <expression> [--] [<file>...]
+Reading options:
+-d, --delimiter <str>    Delimiter [default: ,].
+-C, --no-clean-names     No clean names.
+-H, --no-header          No header.
+Setup options:
+-l, --library <name>     Libraries to load.
+-t, --tidyverse          Enter the Tidyverse.
+Saving options:
+--dpi <str|int>      Plot resolution [default: 300].
+--height <int>       Plot height.
+-o, --output <str>       Output file.
+--units <str>        Plot size units [default: in].
+-w, --width <int>        Plot width.
+General options:
+-n, --dry-run            Only print generated script.
+-h, --help               Show this help.
+-q, --quiet              Be quiet.
+--seed <int>         Seed random number generator.
+-v, --verbose            Be verbose.
+--version            Show version.
+Under the hood,
+rush
+generates an
+R
+script and subsequently executes it.
+You can view this generated script by specifying the
+--dry-run
+(or
+-n
+) option:
+$
+rush
+run -n --tidyverse
+'mutate(df, percent = tip / bill * 100)'
+tips.csv
+#!/usr/bin/env Rscript
+library
+(
+tidyverse
+)
+library
+(
+glue
+)
+df
+<-
+janitor::
+clean_names
+(
+readr::
+read_delim
+(
+"tips.csv"
+, delim =
+","
+, col_names
+=
+TRUE)
+)
+mutate
+(
+df, percent = tip
+/
+bill
+*
+100
+)
+This generated script:
+Writes out the shebang (
+#!
+; see
+Chapter 4
+) needed for running an
+R
+script from the command line
+Imports the tidyverse and glue packages
+Loads
+tips.csv
+as a data frame, cleans the column names, and assigns it to a variable
+df
+Runs the specified expression
+Prints the result to standard output
+You could redirect this generated script to a file and easily turn it into a new command-line tool because of the shebang.
+The output of
+rush
+doesn’t have to be in CSV format per se. Here, I compute the mean tip percent, the maximum party size, the unique values of the
+time
+column, and the correlation between the
+bill
+and the
+tip
+. Finally, I extract an entire column (but show only the first 10 values):
+$
+<
+percent.csv
+rush
+run
+'mean(df$percent)'
+-
+16.0802581722505
+$
+<
+percent.csv
+rush
+run
+'max(df$size)'
+-
+6
+$
+<
+percent.csv
+rush
+run
+'unique(df$time)'
+-
+Dinner
+Lunch
+$
+<
+percent.csv
+rush
+run
+'cor(df$bill, df$tip)'
+-
+0.675734109211365
+$
+<
+percent.csv
+rush
+run
+'df$tip'
+- |
+trim
+1.01
+1.66
+3.5
+3.31
+3.61
+4.71
+2
+3.12
+1.96
+3.23
+… with 234 more lines
+That last dash means that
+rush
+should read from standard input.
+So now if you want to do one or two things to your dataset with
+R
+, you can specify it as a one-liner and keep on working on the command line.
+All the knowledge that you
+already have about
+R
+can now be used from the command line. With
+rush
+, you can even create sophisticated visualizations, as I’ll show you in the next section.
+Creating Visualizations
+In this section, I’m going to show you how to create data visualizations at the command line.
+Using
+rush plot
+, I’ll be creating bar charts, scatter plots, and box plots.
+Before we dive in, though, I’d first like to explain how you can display your
+visualizations
+.
+Displaying Images from the Command Line
+Let’s take the image
+tips.png
+as an example.
+Figure 7-1
+is a data
+visualization that was created using
+rush
+and the
+tips.csv
+dataset.
+(I’ll explain the
+rush
+syntax in a moment.)
+I used the
+display
+tool to insert the image
+in the book, but if you run
+display
+you’ll find that it doesn’t
+work.
+That’s because displaying images from the command line is actually quite tricky.
+Figure 7-1.
+Displaying this image yourself can be tricky
+Depending on your setup, there are different options available for displaying images.
+I know of four options, each with its own advantages and disadvantages:
+(1) as a textual representation,
+(2) as an inline image,
+(3) using an image viewer, and
+(4) using a browser.
+Let’s go through them quickly.
+Option 1 is to display the image inside the
+terminal, as shown at the top of
+Figure 7-2
+.
+Figure 7-2.
+Displaying an image in the terminal via ASCII characters and ANSI escape sequences (top) and via the iTerm2 Inline Images Protocol (bottom)
+This output is generated by
+rush
+when the standard output is not redirected to a file.
+It’s based on ASCII characters and ANSI escape sequences, so it’s available in every terminal.
+Depending on how you’re reading this book, the output you get when you run the following code may or may not match the screenshot in
+Figure 7-2
+:
+$
+rush
+plot --x bill --y tip --color size --facets
+'~day'
+tips.csv
+Fri
+Sat
+10.0
+*
+#
+7.5
+*
+#
+*
+5.0
+#
+*
+###
+*
+#
+#
+#
+###
+##
+##
+###
+#
+#
+*
+##
+##
++
+*
+**
+#
+2.5
+#
+%
+###
+%
+#########
+*
+#
+*
+##
+#
+#
+t
+size
+i
+Sun
+Thur
+6
+p
+10.0
+1
+7.5
+=
+*
+**
+*
+#
+*
+5.0
+##
+#
++
+#*#
++
+*
+*
+#
+=
+#
+#*
+=
+=
+#
++
+*
+2.5
+####
+##
+#
+#
+#
+*
+###
+#
+#
+##
+#
+###
+#*
+#
+#
+#
+##
+#
+#
+*
+*
+#
++
+######
+#
+10
+20
+30
+40
+50
+10
+20
+30
+40
+50
+bill
+If you see only ASCII characters, that means the medium on which you’re reading this book doesn’t support the ANSI escape sequences responsible for the colors.
+Fortunately, if you run the preceding command yourself, it will look just like the
+screenshot
+.
+Option 2, as seen at the bottom of
+Figure 7-2
+, also displays images inside the terminal.
+This is the iTerm2 terminal,
+which is only available for macOS and uses the
+Inline Images Protocol
+through a small script (which I have named
+display
+).
+This script is not included with the Docker image, but you can easily install it:
+$
+curl
+-s
+"https://iterm2.com/utilities/imgcat"
+>
+display &&
+chmod
+u+x display
+If you’re not using iTerm2 on macOS, there
+might be other options available to display images inline.
+Please consult your favorite search engine.
+Option 3 is to manually open
+the image (
+tips.csv
+in this example) in an image viewer.
+Figure 7-3
+shows, on the left, the file explorer (Finder) and image viewer (Preview) on macOS.
+Figure 7-3.
+Displaying an image externally via a file explorer and an image viewer (left) and via a web server and a browser (right)
+When you’re working locally, this option always works.
+When you’re working inside a Docker container, you can only access the generated image from your OS when you’ve mapped a local directory using the
+-v
+option.
+See
+Chapter 2
+for instructions on how to do this.
+An advantage of this option is that most image viewers automatically update the display when the image has changed, which
+allows for quick iterations as you fine-tune your visualization.
+Option 4 is to open the image in a browser.
+The right side of
+Figure 7-3
+is a screenshot of Firefox showing
+http://localhost:8000/tips.png
+.
+You can use
+any browser for this, but you need two other prerequisites for it to work.
+First, you need to have made a port (port 8000 in this example) accessible on the Docker container using the
+-p
+option.
+(Again, see
+Chapter 2
+for instructions on how to do this.)
+Second, you need to start a web server.
+For this, the Docker
+container has a small tool called
+servewd
+,
+4
+which serves the current working directory using Python:
+$
+bat
+$(
+which
+servewd
+)
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+/usr/bin/dsutils/servewd
+───────┼────────────────────────────────────────────────────────────────────────
+1   │
+#!/usr/bin/env bash
+2   │ ARGS
+=
+"$@"
+3   │ python3 -m http.server ${ARGS}
+2
+>
+/dev/null
+&
+───────┴────────────────────────────────────────────────────────────────────────
+You only need to run
+servewd
+once from a directory (
+/data/
+, for example), and it will happily run in the background.
+Once you’ve plotted something, you can visit
+localhost:8000
+in your browser and access the contents of that directory and all of its subdirectories.
+The default port is 8000, but you can change this by specifying it as an argument to
+servewd
+:
+$
+servewd
+9999
+>
+display
+Just make sure that this port is accessible.
+Because
+servewd
+runs in the background, you need to stop it as follows:
+$
+pkill
+-f http.server
+Option 4 can also work on a remote machine.
+Now that we’ve covered four options
+for displaying images, let’s move on to actually creating some.
+Plotting in a Rush
+When it comes to creating
+data visualizations, there’s a plethora of options.
+Personally, I’m a staunch proponent
+of ggplot2, which is a visualization package for
+R
+.
+The underlying grammar of graphics is accompanied by a consistent API that allows you to quickly and iteratively create different types of beautiful data visualizations while rarely having to consult the documentation—a welcoming set of properties when exploring data.
+We’re not really in a rush, but we also don’t want to fiddle too much with any single visualization.
+Moreover, we’d like to stay at the command line as much as possible.
+Luckily, we still have
+rush
+, which allows us to use ggplot2 from the command line.
+The data visualization in
+Figure 7-1
+could have been created as follows:
+$
+rush
+run --library ggplot2
+'ggplot(df, aes(x = bill, y = tip, color = size)) +
+geom_point() + facet_wrap(~day)'
+tips.csv
+>
+tips.png
+However, as you may have noticed, I have used a very different command to create
+tips.png
+:
+$
+rush
+plot --x bill --y tip --color size --facets
+'~day'
+tips.csv
+>
+tips.png
+While the syntax of ggplot2 is
+relatively concise, especially considering the flexibility it offers, there’s a shortcut to create basic plots quickly.
+This shortcut is available through the
+plot
+subcommand of
+rush
+, and it allows you to create beautiful
+basic plots without needing to learn R and the grammar of graphics.
+Under the hood,
+rush plot
+uses the
+function
+qplot
+from the ggplot2 package.
+Here’s the first part of
+qplot
+’s documentation:
+$
+R
+-q -e
+'?ggplot2::qplot'
+|
+trim
+14
+> ?ggplot2::qplot
+qplot                 package:ggplot2                  R Documentation
+Quick plot
+Description:
+‘qplot()’ is a shortcut designed to be familiar if you're used to
+base ‘plot()’. It's a convenient wrapper for creating a number of
+different types of plots using a consistent calling scheme. It's
+great for allowing you to produce plots quickly, but I highly
+recommend learning ‘ggplot()’ as it makes it easier to create
+complex graphics.
+… with 108 more lines
+I agree with this advice; once you’re done reading this book, you’ll find it worthwhile to learn ggplot2, especially if you want to upgrade any exploratory data visualizations into ones that are suitable for communication.
+For now, while we’re at the command line, let’s take that shortcut.
+As
+Figure 7-2
+already showed,
+rush plot
+can create both
+graphical visualizations (consisting of pixels) and textual visualizations (consisting of ASCII characters and ANSI escape sequences) with the same syntax.
+When
+rush
+detects that its output has been piped to another command such as
+display
+, or redirected to a file such as
+tips.png
+, it will produce a graphical visualization; otherwise, it will produce a textual visualization.
+Let’s take a moment to read
+through the plotting and saving options of
+rush plot
+:
+$
+rush
+plot --help
+rush: Quick plot
+Usage:
+rush plot [options] [--] [<file>|-]
+Reading options:
+-d, --delimiter <str>    Delimiter [default: ,].
+-C, --no-clean-names     No clean names.
+-H, --no-header          No header.
+Setup options:
+-l, --library <name>     Libraries to load.
+-t, --tidyverse          Enter the Tidyverse.
+Plotting options:
+--aes <key=value>    Additional aesthetics.
+-a, --alpha <name>       Alpha column.
+-c, --color <name>       Color column.
+--facets <formula>   Facet specification.
+-f, --fill <name>        Fill column.
+-g, --geom <geom>        Geometry [default: auto].
+--group <name>       Group column.
+--log <x|y|xy>       Variables to log transform.
+--margins            Display marginal facets.
+--post <code>        Code to run after plotting.
+--pre <code>         Code to run before plotting.
+--shape <name>       Shape column.
+--size <name>        Size column.
+--title <str>        Plot title.
+-x, --x <name>           X column.
+--xlab <str>         X axis label.
+-y, --y <name>           Y column.
+--ylab <str>         Y axis label.
+-z, --z <name>           Z column.
+Saving options:
+--dpi <str|int>      Plot resolution [default: 300].
+--height <int>       Plot height.
+-o, --output <str>       Output file.
+--units <str>        Plot size units [default: in].
+-w, --width <int>        Plot width.
+General options:
+-n, --dry-run            Only print generated script.
+-h, --help               Show this help.
+-q, --quiet              Be quiet.
+--seed <int>         Seed random number generator.
+-v, --verbose            Be verbose.
+--version            Show version.
+The most important options are the
+plotting options that take a
+<name>
+as an argument.
+For example, the
+--x
+option allows you to specify which column should be used to determine where
+things
+should be placed along the x-axis.
+The same holds for the
+--y
+option.
+The
+--color
+and
+--fill
+options are used to specify which column you want to use for coloring.
+You can probably guess what the
+--size
+and
+--alpha
+options are about.
+Other common options are explained throughout the sections as I create various visualizations.
+Note that for each visualization, I first show its textual representation (ASCII and ANSI characters) and then its
+visual representation
+(pixels)
+.
+Creating Bar Charts
+Bar charts are especially useful for displaying the value counts of a categorical
+feature.
+Here’s a textual visualization of the
+time
+feature in the
+tips.csv
+dataset:
+$
+rush
+plot --x time
+tips.csv
+********************************
+********************************
+150
+********************************
+********************************
+********************************
+********************************
+100
+********************************
+********************************
+********************************
+********************************
+********************************
+********************************
+50
+********************************
+********************************
+********************************
+********************************
+********************************
+********************************
+********************************
+********************************
+0
+********************************
+********************************
+Dinner
+Lunch
+time
+Figure 7-4
+shows the graphical visualization, which is created by
+rush plot
+when the output is redirected to a file:
+$
+rush
+plot --x time
+tips.csv
+>
+plot-bar.png
+$
+display
+plot-bar.png
+Figure 7-4.
+A bar chart
+The conclusion we can draw from this bar chart is straightforward: there are more than twice as many data
+points for dinner than lunch.
+Creating Histograms
+The counts of a continuous
+variable can be visualized with a histogram.
+Here, I have used the
+time
+feature to set the fill color.
+As a result,
+rush plot
+conveniently creates a
+stacked histogram:
+$
+rush
+plot --x tip --fill time
+tips.csv
+===
+===
+===
+40
+===
+===
+===
+===
+===
+===
+30
+===
+===
+===
+===
+t
+ime
+=====
+===
+D
+inner
+20
+==
++++
+===
+=====
+L
+unch
+==
++++
+====
+=====
+===
++
+==
++++
+====
+=====
+===
+===
+10
++++++
+==========
+===
+===
+====
++++++++++
+=
++++
+====
++++
+==
+=====
+==
++++++++++++++++++
+==
++++++
+=
++++
+======
+======
+0
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+2.5
+5.0
+7.5
+10.0
+tip
+Tip
+Allow me to demonstrate two syntax shortcuts
+that you may find useful.
+The two exclamation marks (
+!!
+) get replaced with the previous command.
+The exclamation mark and dollar sign (
+!$
+) get replaced by the last part of the previous command, which is the filename
+plot-histogram.png
+.
+As you can see, the updated commands are first printed by the Z shell so you know exactly what it executes.
+These two shortcuts can save a lot of typing, but they’re not easy to remember.
+Figure 7-5
+shows the graphical visualization:
+$
+!!
+>
+plot-histogram.png
+rush plot --x tip --fill time tips.csv > plot-histogram.png
+$
+display
+!$
+display plot-histogram.png
+This histogram reveals that most tips are around $2.50.
+Because the dinner and lunch groups are stacked on top of each other and show absolute counts, it’s difficult to compare them.
+Perhaps a density plot
+can help with this.
+Figure 7-5.
+A histogram
+Creating Density Plots
+A density plot is useful for
+visualizing the distribution of a continuous variable.
+rush plot
+uses heuristics to determine the appropriate geometry, but you can override this with the
+--geom
+option:
+$
+rush
+plot --x tip --fill time --geom density
+tips.csv
+0.5
+@@@
+@@
++
+@@
+0.4
+@
++++
+@@
+@@
+++++
+@
+@
++++++
+@@
+@@
+0.3
+@
+++++++
+@@@@
+=
+@@
+@
+++++++++
+@@
+===
+@@
+t
+ime
+@
++++++++++
+@@
+====
+@
+D
+inner
+0.2
+@
++++++++++++
+@@@
+===
+@@
+L
+unch
+@
++++++++++++++
+@@@
+==
+@@
+@
+@
+++++++++++++++++
+@@@@@@@
+0.1
+@@
++++++++++++++++++++++
+@@@@@@@
+++++++++++++++++++++++++++
+@
+++
+@@@@
+++++++++++++++++++++++++++++++++
+@@@@@@@@@@@
+0.0
+++++++++++++++++++++++++++++++++++++++++++
+@@@@@@@@@@@@@@@@@@@@@@
+2.5
+5.0
+7.5
+10.0
+tip
+In this case, the textual representation really shows its limitations when compared to the visual
+representation in
+Figure 7-6
+:
+$
+rush
+plot --x tip --fill time --geom density
+tips.csv
+>
+plot-density.png
+$
+display
+plot-density.png
+Figure 7-6.
+A density plot
+Happy Little Accidents
+You’ve already seen three types of visualizations.
+In ggplot2, these correspond to
+the functions
+geom_bar
+,
+geom_histogram
+, and
+geom_density
+.
+geom
+is short for
+geometry
+and dictates what is actually being plotted.
+This
+cheat sheet for ggplot2
+provides a good overview of the available geometry types.
+Which geometry types you can use depends on the columns that you specify (and their types).
+Not every combination makes sense.
+Take this line plot, for example:
+$
+rush
+plot --x tip --y bill --color size --size day --geom path
+tips.csv
+50
+#
+*
+*
+#
+####
+#
+==
+#
+***
+****#####
+#
+###
+=
+**
++
+#
+***
+*****####
+40
+#
+##
+**
+#
+###***
++
+======
+*****###
+#*#
+###
+******###
++
+#
+**
+======
+****###
+day
+################
+#
+##
+*****
+##
+*
++
+*##*****
+####
+=
+#
+F
+ri
+b
+30
+#
+*
++++
+#
+####
+#
+##
+**
+##
+==
+****
++
+****
+####
+#
+#
+#
+S
+at
+i
+#
+#
+**
+*##
+++
+#
+###
+**
+#
+===
+*
+%
+=====
+####
+*
+##
+**#
+S
+un
+l
+#
+#
+##
+####
+***
+#
+=
+####
+==
+##########
+**
+T
+hur
+l
+20
+#
+#
+########
+**
+##
+#
+##
+****
+#####
+++
+####
+##
+##
+*
+#####
+###*#
+#####
+#
+*
+size
+#########
+##
+###########
+##
+*
+5
+10
+###########
+####
+##
+*
+%%
+##
+##
+#
+%
+2.5
+5.0
+7.5
+10.0
+tip
+This happy little accident becomes clearer in the visual representation in
+Figure 7-7
+:
+$
+rush
+plot --x tip --y bill --color size --size day --geom path
+tips.csv
+>
+plot
+-accident.png
+$
+display
+plot-accident.png
+Figure 7-7.
+A happy little accident
+The rows in
+tips.csv
+are independent observations, whereas drawing a line between the data points assumes that they are connected.
+It’s better to visualize the relationship between the
+tip
+and the
+bill
+with a scatter plot.
+Creating Scatter Plots
+A scatter plot, where the
+geometry is a point, happens to be the default when specifying two continuous features:
+$
+rush
+plot --x bill --y tip --color time
+tips.csv
+10.0
+=
+=
+7.5
+=
+=
+=
++
+=
+t
++
+=
+=
+time
+i
+=
+=
+=
+==
++
+D
+inner
+p
+5.0
+=
+=
+=
++
+=
++
+=
+=
++
++
+=
+L
+unch
+=
+=
+=
++
+==
++++
+=
+=
+=
++
+=
++
+=
+=
++
+=
+=
+++
+=
+========
+=
+=
+=
+=
+==
+=====
++
+=====
++
+=
+++
+===
+=
+==
+=
+=
+2.5
+++
+=
+++++
+=
++
+=
++
+====
+==
+===
+=
+=
+==
+=
++
+===
++
++
+==
+=
+++
+=
+=
+=
+=
+=
+=
+=
+10
+20
+30
+40
+50
+bill
+Note that the color of each point is specified with the
+--color
+option (and not with the
+--fill
+option).
+See
+Figure 7-8
+for the visual representation:
+$
+rush
+plot --x bill --y tip --color time
+tips.csv
+>
+plot-scatter.png
+$
+display
+plot-scatter.png
+From this scatter plot we may conclude that there’s a relationship between the amount of the bill and the tip.
+Perhaps it’s useful to examine
+this data from a higher level by creating trend lines.
+Figure 7-8.
+A scatter plot
+Creating Trend Lines
+If you override the
+default geometry with
+smooth
+, you can visualize trend lines.
+These are useful for seeing the bigger picture:
+$
+rush
+plot --x bill --y tip --color time --geom smooth
+tips.csv
+==
+====
+7.5
+===
+===
+==
+===
+===
+=========
+===
+======
+=======
++++++++++
+=
+=====
+t
+5.0
+====
++++++++++
+==========
+t
+ime
+i
+====
+++++++
+======
+===
+========
+D
+inner
+p
+===
++++++++
+====
+=
+========
+L
+unch
+==
+==
++++++++
+=====
+=
+2.5
+==============
+++++
+====
+======
+++++++++
+===
+==========
+=====
+0.0
+==
+10
+20
+30
+40
+50
+bill
+rush plot
+cannot handle transparency, so a visual representation (see
+Figure 7-9
+) is much better in this case:
+$
+rush
+plot --x bill --y tip --color time --geom smooth
+tips.csv
+>
+plot-trend.pn
+g
+$
+display
+plot-trend.png
+Figure 7-9.
+Trend lines
+If you’d like to visualize the original points along with the trend lines, then you’ll need to write ggplot2 code
+with
+rush run
+(see
+Figure 7-10
+):
+$
+rush
+run --library ggplot2
+'ggplot(df, aes(x = bill, y = tip, color = time)) +
+geom_point() + geom_smooth()'
+tips.csv
+>
+plot-trend-points.png
+$
+display
+plot-trend-points.png
+Figure 7-10.
+Trend lines and original points combined
+Creating Box Plots
+A box plot visualizes, for
+one or more features, a five-number summary: the minimum, the maximum, the sample median, and the first and third quartiles.
+In this case, we need to convert the
+size
+feature to a
+categorical one using the
+factor()
+function; otherwise, all values of the
+bill
+feature will be lumped together:
+$
+rush
+plot --x
+'factor(size)'
+--y bill --geom boxplot
+tips.csv
+50
+%
+%
+%
+%
+%
+%
+%
+40
+%
+%
+%
+%
+%
+%%%%%%%%%%
+%%%%%%%%%%
+%
+%
+%
+%
+%%%%%%%%%%
+b
+30
+%
+%
+%
+%%%%%%%%%%
+%%%%%%%%%%
+i
+%
+%%%%%%%%%%%
+%%%%%%%%%%
+l
+%
+%
+%
+%%%%%%%%%%
+l
+20
+%%%%%%%%%%
+%%%%%%%%%%%
+%
+%
+%%%%%%%%%%
+%%%%%%%%%%%
+%%%%%%%%%%
+%
+10
+%%%%%%%%%%
+%
+%%%%%%%%%%
+1
+2
+3
+4
+5
+6
+factor(size)
+While the textual representation is not too bad, the visual one is much clearer (see
+Figure 7-11
+):
+$
+rush
+plot --x
+'factor(size)'
+--y bill --geom boxplot
+tips.csv
+>
+plot-boxplot.p
+ng
+$
+display
+plot-boxplot.png
+Figure 7-11.
+A box plot
+Unsurprisingly, this box plot
+shows that, on average, a larger party size leads to a higher bill.
+Adding Labels
+The default labels are
+based on column names (or specifications).
+In the previous image, the label
+factor(size)
+should be improved.
+Using the
+--xlab
+and
+--ylab
+options, you can override the labels of the x- and y-axes.
+A title can be added with the
+--title
+option.
+Here’s a violin plot (a mash-up of a box plot and a density plot) demonstrating this (see also
+Figure 7-12
+):
+$
+rush
+plot --x
+'factor(size)'
+--y bill --geom violin --title
+'Distribution of b
+ill amount per party size'
+--xlab
+'Party size'
+--ylab
+'Bill (USD)'
+tips.csv
+Distribution
+of
+bill
+amount
+per
+party
+size
+50
+%
+%
+%%
+%%
+%
+%%
+%%
+40
+%
+%
+%%%
+%%%%%%
+%%
+B
+%
+%
+%
+%
+%
+%%%%
+i
+%
+%%%
+%
+%
+%%%%%%%%%%%%
+%
+%%
+l
+30
+%%
+%
+%
+%
+%%
+%%%%%
+%%%%%%
+%%%%%
+l
+%%%
+%
+%
+%
+%
+%%
+%%
+%
+%%
+%%
+%
+%
+%%%%%%
+(
+20
+%%
+%%
+%
+%
+%%%%
+U
+%
+%%
+%%
+%%
+S
+10
+%%%%%%%%%%%%
+%%%
+%%
+%%%
+D
+%%%%%
+%%%%%
+%%%
+)
+%%%%%%
+1
+2
+3
+4
+5
+6
+Party
+size
+$
+rush
+plot --x
+'factor(size)'
+--y bill --geom violin --title
+'Distribution of b
+ill amount per party size'
+--xlab
+'Party size'
+--ylab
+'Bill (USD)'
+tips.csv
+>
+pl
+ot-labels.png
+$
+display
+plot-labels.png
+Figure 7-12.
+A violin plot with a title and labels
+Annotating your visualization with proper labels and a title is especially useful if you want to share it with others (or your future self), as they will make it easier to understand
+what’s being shown.
+Going Beyond Basic Plots
+Although
+rush plot
+is suitable for creating basic plots when you’re exploring data, it certainly has its limitations.
+Sometimes you need more flexibility and sophisticated options such as multiple geometries, coordinate transformations, and theming.
+In that case, it might be worthwhile to learn more about the underlying package from which
+rush plot
+draws its
+capabilities, namely the ggplot2 package for R.
+If you’re more into Python than R, there’s the
+plotnine package
+, which is a reimplementation of ggplot2 for Python.
+Summary
+In this chapter we’ve looked at various ways to explore your data.
+Both textual and graphical data visualizations have their pros and cons.
+The graphical ones are obviously of much higher quality but can be tricky to view at the command line.
+This is where textual visualizations come in handy.
+At least
+rush
+, thanks to R and ggplot2, has a consistent syntax for creating both types.
+The next chapter is yet another intermezzo chapter in which I discuss how you can speed up your commands and pipelines.
+Feel free to read that chapter later if you can’t wait to start modeling your data in
+Chapter 9
+.
+For Further Exploration
+A proper ggplot2 tutorial is unfortunately beyond the scope of this book. If you want to get better at visualizing your data, I strongly recommend that you invest some time in understanding the power and beauty of the grammar of graphics. Chapters 3 and 28 of the book
+R for Data Science
+by Hadley Wickham and Garrett Grolemund (O’Reilly) are an excellent resource.
+Speaking of Chapters 3 and 28, I
+translated those to Python using plotnine and Pandas
+, in case you’re more into Python than R.
+1
+Mark Nudelman,
+less
+– Opposite of
+more
+, version 551, 2019,
+https://www.greenwoodsoftware.com/less
+.
+2
+Christopher Groskopf,
+csvstat
+– Print Descriptive Statistics for Each Column in a CSV File
+, version 1.0.5, 2020,
+https://csvkit.rtfd.org
+.
+3
+The R Foundation for Statistical Computing,
+R – a Language and Environment for Statistical Computing
+, version 4.0.4, 2021,
+https://www.r-project.org
+.
+4
+Jeroen Janssens,
+servewd
+– Serve the Current Working Directory Using a Simple HTTP Server
+, version 0.1, 2021,
+https://github.com/jeroenjanssens/dsutils
+.
+
+Chapter 8.
+Parallel Pipelines
+In the previous chapters, we’ve been dealing with commands and pipelines that take care of an entire task at once.
+In practice, however, you may find yourself facing a task that requires the same command or pipeline to run multiple times.
+For example, you may need to:
+Scrape hundreds of web pages
+Make dozens of API calls and transform their output
+Train a classifier for a range of parameter values
+Generate scatter plots for every pair of features in your dataset
+In any of these examples, there’s a certain form of repetition involved.
+With your favorite scripting or programming language, you could take care of this with a
+for
+loop or a
+while
+loop.
+On the command line, the first thing you might be inclined to do is to press the up arrow key to bring back the previous command, modify it if necessary, and press Enter to run the command again.
+This is fine to do two or three times, but imagine doing it
+dozens
+of times.
+Such an approach quickly becomes cumbersome, inefficient, and prone to errors.
+The good news is that you can write such loops on the command line as well.
+That’s what this chapter is all about.
+Sometimes, repeating a fast command again and again in succession (in a
+serial
+manner) is sufficient.
+When you have multiple cores (and perhaps even multiple machines), it would be nice to make use of those, especially when you’re faced with a data-intensive task.
+Using multiple cores or machines may reduce the total running time significantly.
+In this chapter I will introduce a very powerful tool called
+parallel
+⁠
+1
+that can take care of exactly this. It enables you to apply a command or pipeline for a range of arguments such as numbers, lines, and files.
+Plus, as the name implies, it allows you to run your commands in
+parallel
+.
+Overview
+This intermezzo chapter discusses several approaches to speeding up tasks that require commands and pipelines to be run many times.
+My main goal is to demonstrate to you the flexibility
+and power of
+parallel
+.
+Because this tool can be combined with any other tool discussed in this book, it will change the way you use the command line for data science for the better.
+In this chapter, you’ll learn about:
+Running commands in serial to a range of numbers, lines, and files
+Breaking a large task into several smaller tasks
+Running pipelines in parallel
+Distributing pipelines to multiple machines
+This chapter starts with the following files:
+$
+cd
+/data/ch08
+$
+l
+total 20K
+-rw-r--r-- 1 dst dst  126 Jun 29 14:32 emails.txt
+-rw-r--r-- 1 dst dst   61 Jun 29 14:32 movies.txt
+-rwxr-xr-x 1 dst dst  125 Jun 29 14:32
+slow.sh
+*
+-rw-r--r-- 1 dst dst 5.1K Jun 29 14:32 users.json
+The instructions for getting these files are in
+Chapter 2
+.
+Any other files are either downloaded or generated using command-line tools.
+Serial Processing
+Before I dive into parallelization, I want to briefly discuss looping in a serial fashion.
+It’s worthwhile to know how to do this because this functionality is always available, the syntax closely resembles looping in other programming languages, and it will really make you appreciate
+parallel
+.
+From the examples provided in the introduction of this chapter, we can distill three types of items to loop over: numbers, lines, and files.
+These three types of items will be discussed in the next three subsections, respectively.
+Looping Over Numbers
+Imagine that you need to
+compute the square of every even integer between 0 and 100. There’s a tool
+called
+bc
+that is a
+basic calculator
+you can pipe an equation to.
+The command to compute the square of 4 looks as follows:
+$
+echo
+"4^2"
+|
+bc
+16
+For a one-off calculation, this will do.
+However, as mentioned in the introduction, you would have to be crazy to press the up arrow key, change the number, and press Enter 50 times!
+It would be better to let the shell do the hard work for
+you by using a
+for
+loop:
+$
+for
+i in {0..100..2}
+>
+do
+>
+echo
+"
+$i
+^2"
+|
+bc
+>
+done
+|
+trim
+0
+4
+16
+36
+64
+100
+144
+196
+256
+324
+… with 41 more lines
+The Z shell has a feature
+called
+brace expansion
+, which transforms
+{0..100..2}
+into a list separated by spaces:
+0 2 4 … 98 100
+. The variable
+i
+is assigned the value
+0
+in the first iteration,
+1
+in the second iteration, and so forth.
+The value of this variable can be used by prefixing it with a dollar sign (
+$
+). The shell will replace
+$i
+with its value before
+echo
+is executed. Note that there can be more than one command between
+do
+and
+done
+.
+Although the syntax may appear a bit odd compared to your favorite programming language, it’s worth remembering this because it’s always available in the shell.
+I’ll introduce a better and more flexible way of repeating commands in a moment.
+Looping Over Lines
+The second type of item
+you can loop over is lines.
+These lines can come from either a file or standard input.
+This is a very generic approach because the lines can contain anything, including numbers, dates, and email addresses.
+Imagine that you want to send an email to all your contacts.
+Let’s first generate some fake users using the free
+Random User Generator API
+:
+$
+curl
+-s
+"https://randomuser.me/api/1.2/?results=5&seed=dsatcl2e"
+>
+users.json
+$
+<
+users.json
+jq
+-r
+'.results[].email'
+>
+emails
+$
+bat
+emails
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+emails
+───────┼────────────────────────────────────────────────────────────────────────
+1   │ selma.andersen@example.com
+2   │ kent.clark@example.com
+3   │ ditmar.niehaus@example.com
+4   │ benjamin.robinson@example.com
+5   │ paulo.muller@example.com
+───────┴────────────────────────────────────────────────────────────────────────
+You can loop over the lines from
+emails
+with a
+while
+loop:
+$
+while
+read
+line
+>
+do
+>
+echo
+"Sending invitation to
+${line}
+."
+>
+done
+<
+emails
+Sending invitation to selma.andersen@example.com.
+Sending invitation to kent.clark@example.com.
+Sending invitation to ditmar.niehaus@example.com.
+Sending invitation to benjamin.robinson@example.com.
+Sending invitation to paulo.muller@example.com.
+In this case you need to use a
+while
+loop, because the Z shell does not know beforehand how many lines the input consists of.
+Although the
+curly braces around the
+line
+variable are not necessary in this case (since variable names cannot contain periods), including them is still good
+practice
+.
+This redirection can also be placed before
+while
+.
+You can also provide input to a while loop interactively by specifying the special file standard input
+/dev/stdin
+. Press Ctrl-D when you are done:
+$
+while
+read
+line;
+do
+echo
+"You typed:
+${line}
+."
+;
+done
+<
+/dev/stdin
+one
+You typed: one.
+two
+You typed: two.
+three
+You typed: three.
+This method, however, has the disadvantage that, once you press Enter, the commands between
+do
+and
+done
+are run
+immediately for that line of input. There’s no turning back.
+Looping Over Files
+In this section I discuss
+the third type of item that we often need to loop over: files.
+To handle special
+characters, use
+globbing
+(i.e., pathname expansion) instead of
+ls
+:
+$
+for
+chapter in /data/
+*
+>
+do
+>
+echo
+"Processing Chapter
+${chapter}
+."
+>
+done
+Processing Chapter /data/ch01.
+Processing Chapter /data/ch02.
+Processing Chapter /data/ch03.
+Processing Chapter /data/ch04.
+Processing Chapter /data/ch05.
+Processing Chapter /data/ch06.
+Processing Chapter /data/ch07.
+Processing Chapter /data/ch08.
+Processing Chapter /data/ch09.
+Processing Chapter /data/ch10.
+Just as with brace expansion, the expression
+/data/*
+is first expanded into a list by the Z shell before it’s processed by the for loop.
+A more elaborate
+alternative to listing files is
+find
+,
+2
+which:
+Can traverse down directories
+Allows for elaborate searching on properties such as size, access time, and
+permissions
+Handles special characters such as spaces and newlines
+For example, the following
+find
+invocation lists all files located under the directory
+/data
+that have
+csv
+as their extension and are smaller than 2 KB:
+$
+find
+/data
+-type f -name
+'*.csv'
+-size -2k
+/data/ch03/tmnt-basic.csv
+/data/ch03/tmnt-missing-newline.csv
+/data/ch03/tmnt-with-header.csv
+/data/ch05/names-comma.csv
+/data/ch05/irismeta.csv
+/data/ch05/names.csv
+/data/ch07/datatypes.csv
+Parallel Processing
+Let’s say that you have a very
+long running tool, such as the one shown here:
+$
+bat
+slow.sh
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+slow.sh
+───────┼────────────────────────────────────────────────────────────────────────
+1   │
+#!/bin/bash
+2   │
+echo
+"Starting job $1"
+|
+ts
+3   │ duration
+=
+$((
+1
++
+RANDOM
+%
+5
+))
+4   │ sleep $duration
+5   │
+echo
+"Job $1 took ${duration} seconds"
+|
+ts
+───────┴────────────────────────────────────────────────────────────────────────
+ts
+adds a timestamp.
+The magic variable
+RANDOM
+calls an internal Bash function that returns a pseudorandom integer between 0 and 32767. Taking the remainder of the division of that integer by 5 and adding 1 ensures that the
+duration
+is between 1 and 5.
+sleep
+pauses execution for a given number of seconds.
+This process probably doesn’t take up all the available resources.
+And it so happens that you need to run this command a lot of times.
+For example, you need to download a whole sequence of files.
+A naive way to parallelize is to run the commands in the background.
+Let’s run
+slow.sh
+three times:
+$
+for
+i in {A..C};
+do
+>
+./slow.sh
+$i &
+>
+done
+[2] 162
+[3] 163
+[4] 164
+$
+Jun 29 14:32:36 Starting job A
+Jun 29 14:32:36 Starting job B
+Jun 29 14:32:36 Starting job C
+Jun 29 14:32:37 Job B took 1 seconds
+[3]  - done       ./slow.sh $i
+$
+Jun 29 14:32:40 Job A took 4 seconds
+[2]  - done       ./slow.sh $i
+$
+Jun 29 14:32:41 Job C took 5 seconds
+[4]  + done       ./slow.sh $i
+$
+The ampersand (
+&
+) sends the command to the background, allowing the for loop to continue immediately with the next iteration.
+This line shows the job number given by the Z shell and the process ID, which can be used for more fine-grained job control. This topic, while powerful, is beyond the scope of this book.
+Note
+Keep in mind that not everything can be parallelized.
+API calls may be limited to a certain number, and some commands can have only one instance.
+Figure 8-1
+illustrates, on a conceptual level, the difference between serial processing, naive parallel processing, and parallel processing with GNU Parallel in terms of the number of concurrent processes and the total amount of time it takes to run
+everything
+.
+There are two problems with the naive approach.
+First, there’s no way to control how many processes you are running concurrently.
+If you start too many jobs at once, they could be competing for the same resources, such as CPU, memory, disk access, and network bandwidth.
+This could lead to taking longer to run everything.
+Second, it’s difficult to tell which
+output belongs to which input.
+Let’s look at a better approach.
+Figure 8-1.
+Serial processing, naive parallel processing, and parallel processing with GNU Parallel
+Introducing GNU Parallel
+Allow me to introduce
+parallel
+, a command-line
+tool that allows you to parallelize and distribute commands and pipelines.
+The beauty of this tool is that existing tools can be used as they are; they do not need to be modified.
+Warning
+Be aware that there are two command-line tools with the name
+parallel
+.
+If you’re using the Docker image, then you already have the correct one installed.
+Otherwise, you can check that you have the correct one by running
+parallel --version
+.
+It should say “GNU parallel.”
+Before I delve into the details of
+parallel
+, here’s a little teaser to show you how easy it is to replace the for loop from earlier:
+$
+seq
+0 2 100 |
+parallel
+"echo {}^2 | bc"
+|
+trim
+0
+4
+16
+64
+36
+100
+144
+196
+324
+256
+… with 41 more lines
+This is
+parallel
+in its simplest form: the items to loop over are passed via standard input, and there aren’t any arguments other than the command that
+parallel
+needs to run.
+See
+Figure 8-2
+for an illustration of how
+parallel
+concurrently distributes input among processes and collects their outputs.
+Figure 8-2.
+GNU Parallel concurrently distributes input among processes and collects their outputs
+As you can see, it basically acts as a for loop.
+Here’s another teaser, which replaces the for loop from the previous section:
+$
+parallel
+--jobs 2
+./slow.sh
+::: {A..C}
+Jun 29 14:32:44 Starting job B
+Jun 29 14:32:47 Job B took 3 seconds
+Jun 29 14:32:44 Starting job A
+Jun 29 14:32:49 Job A took 5 seconds
+Jun 29 14:32:47 Starting job C
+Jun 29 14:32:51 Job C took 4 seconds
+Here, using the
+--jobs
+option, I specify that
+parallel
+can run no more than two jobs concurrently. The arguments to
+slow.sh
+are specified as an argument instead of via standard input.
+With a whopping 159 different options,
+parallel
+offers a lot of functionality.
+(Perhaps too much.)
+Luckily, you only need to know a handful to be effective.
+The manual page is quite
+informative, in case you need to use a less common option.
+Specifying Input
+The most important
+argument to
+parallel
+is the command or pipeline that you’d like to run for every input.
+The question is: where should the input item be inserted in the command line?
+If you don’t specify anything, then the input item
+will be appended to the end of the pipeline:
+$
+seq
+3 |
+parallel
+cowsay
+___
+< 1 >
+---
+\   ^__^
+\  (oo)\_______
+(__)\       )\/\
+||----w |
+||     ||
+___
+< 2 >
+---
+\   ^__^
+\  (oo)\_______
+(__)\       )\/\
+||----w |
+||     ||
+___
+< 3 >
+---
+\   ^__^
+\  (oo)\_______
+(__)\       )\/\
+||----w |
+||     ||
+The above is the same as running:
+$
+cowsay
+1
+>
+/dev/null
+$
+cowsay
+2
+>
+/dev/null
+$
+cowsay
+3
+>
+/dev/null
+Because the output is the same as before, I redirect it to
+/dev/null
+to suppress it.
+Although this often works, I advise you to be explicit about where the input item should be inserted in the command by using placeholders.
+In this case, because you want to use the entire input line (a number) at once, you need only one placeholder.
+You specify the placeholder—that is, where to put the input item—with a pair of curly braces (
+{}
+):
+$
+seq
+3 |
+parallel
+cowsay {}
+>
+/dev/null
+Note
+There are other ways to provide input to
+parallel
+.
+I prefer piping the input (as I do throughout this chapter) because that’s how most command-line tools are chained together into a pipeline.
+The other ways involve syntax that’s not seen anywhere else.
+Having said that, they do enable additional functionality, such as iterating over all possible combinations of multiple lists, so be sure to read
+parallel
+⁠’s manual page if you’d like to know more.
+When the input items are filenames, some modifiers allow you to use only a portion of the filename.
+For example, with
+{/}
+, only the basename of the filename will be used:
+$
+find
+/data/ch03
+-type f |
+parallel
+echo
+'{#}\) \"{}\" has basename \"{/}\"'
+1) "/data/ch03/tmnt-basic.csv" has basename "tmnt-basic.csv"
+2) "/data/ch03/top2000.xlsx" has basename "top2000.xlsx"
+3) "/data/ch03/r-datasets.db" has basename "r-datasets.db"
+4) "/data/ch03/tmnt-missing-newline.csv" has basename "tmnt-missing-newline.csv"
+5) "/data/ch03/tmnt-with-header.csv" has basename "tmnt-with-header.csv"
+6) "/data/ch03/logs.tar.gz" has basename "logs.tar.gz"
+Characters
+such as parentheses (
+)
+) and quotes (
+"
+) have a special meaning in the shell. To use them literally, you put a backslash (
+\
+) in front of them. This is called
+escaping
+.
+If the input line has multiple parts separated by a delimiter, you can add numbers to the placeholders. For example:
+$
+<
+input.csv
+parallel
+--colsep ,
+"mv {2} {1}"
+>
+/dev/null
+Here, you can apply the same placeholder modifiers.
+It is also possible to reuse the same input item.
+If the input to
+parallel
+is a CSV file with a header, then
+you can use the column names as placeholders:
+$
+<
+input.csv
+parallel
+-C, --header :
+"invite {name} {email}"
+Tip
+If you ever start to wonder whether your placeholders are set up correctly, you can add the
+--dryrun
+option.
+Instead of actually executing the commands,
+parallel
+will print out all the commands exactly as if they have been executed.
+Controlling the Number of Concurrent Jobs
+By default,
+parallel
+runs
+one job per CPU core.
+You can control the number of jobs that will be run concurrently with the
+--jobs
+or
+-j
+option.
+Specifying a number (
+N
+) means that many jobs will be run concurrently.
+If you put a plus sign in front of the number, then
+parallel
+will run
+N
+jobs plus the number of CPU cores. If you put a minus sign in front of the number, then
+parallel
+will run
+N – M
+jobs, where
+M
+is the number of CPU cores.
+You can also specify a percentage, where the default is 100% of the number of CPU cores.
+The optimal number of jobs to run concurrently depends on the actual commands you are running:
+$
+seq
+5 |
+parallel
+-j0
+"echo Hi {}"
+Hi 1
+Hi 2
+Hi 3
+Hi 4
+Hi 5
+$
+seq
+5 |
+parallel
+-j200%
+"echo Hi {}"
+Hi 1
+Hi 2
+Hi 3
+Hi 4
+Hi 5
+If you specify
+-j1
+, then the commands will be run in serial. Even though this approach doesn’t do the name of the tool justice, it still has its uses—for example, when you need to access an API that allows only one connection at a time. If you specify
+-j0
+, then
+parallel
+will run as many jobs in parallel as possible. This can be compared to your
+for
+loop with the ampersand. Doing this is not advised.
+Logging and Output
+To save the output of each
+command, you might be tempted to do the following:
+$
+seq
+5 |
+parallel
+"echo
+\"
+Hi {}
+\"
+> hi-{}.txt"
+This will save the output into individual files.
+Or if you want to save everything into one big file, you could do the following:
+$
+seq
+5 |
+parallel
+"echo Hi {}"
+>>
+one-big-file.txt
+However,
+parallel
+offers the
+--results
+option, which stores the output in separate files.
+For each job,
+parallel
+creates three files:
+seq
+, which holds the job number;
+stdout
+, which contains the output produced by the job; and
+stderr
+, which contains any errors produced by the job.
+These three files are placed in subdirectories based on the input values.
+parallel
+still prints all the output, which is redundant in this case.
+You can redirect both the standard input and standard output to
+/dev/null
+as follows:
+$
+seq
+10 |
+parallel
+--results outdir
+"curl 'https://anapioficeandfire.com/api/ch
+aracters/{}' | jq -r '.aliases[0]'"
+2>
+/dev/null
+1>&
+2
+$
+tree
+outdir
+|
+trim
+outdir
+└── 1
+├── 1
+│   ├── seq
+│   ├── stderr
+│   └── stdout
+├── 10
+│   ├── seq
+│   ├── stderr
+│   └── stdout
+… with 34 more lines
+See
+Figure 8-3
+for a pictorial overview of how the
+--results
+option works.
+Figure 8-3.
+GNU Parallel stores output in separate files with the
+--results
+option
+When you’re running multiple jobs in parallel, the order in which the jobs are run may not correspond to the order of the input.
+The output of jobs is therefore also mixed up.
+To keep the same order, specify the
+--keep-order
+or
+-k
+option.
+Sometimes it’s useful to record which input generated which output.
+parallel
+allows you to
+tag
+the output with the
+--tag
+option, which prepends each line with the
+input item:
+$
+seq
+5 |
+parallel
+--tag
+"echo 'sqrt({})' | bc -l"
+1       1
+2       1.41421356237309504880
+3       1.73205080756887729352
+4       2.00000000000000000000
+5       2.23606797749978969640
+$
+parallel
+--tag --keep-order
+"echo '{1}*{2}' | bc -l"
+::: 3 4 ::: 5 6 7
+3 5     15
+3 6     18
+3 7     21
+4 5     20
+4 6     24
+4 7     28
+Creating Parallel Tools
+The
+bc
+tool, which I used in the
+beginning of this chapter, is not parallel by itself.
+However, you can parallelize it using
+parallel
+.
+The Docker image contains a tool
+called
+pbc
+.
+3
+Its code is shown here:
+$
+bat
+$(
+which
+pbc
+)
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+/usr/bin/dsutils/pbc
+───────┼────────────────────────────────────────────────────────────────────────
+1   │
+#!/bin/bash
+2   │
+# pbc: parallel bc. First column of input CSV is mapped to {1}, second
+│
+to {2}, and so forth.
+3   │
+#
+4   │
+# Example usage: paste -d, <(seq 100) <(seq 100 -1 1) | ./pbc 'sqrt({1}
+│
+*{2})'
+5   │
+#
+6   │
+# Dependency: GNU parallel
+7   │
+#
+8   │
+# Author: http://jeroenjanssens.com
+9   │
+10   │ parallel -C, -k -j100%
+"echo '$1' | bc -l"
+───────┴────────────────────────────────────────────────────────────────────────
+This tool allows us to simplify the code used in the beginning of the chapter too.
+And it can process comma-separated values simultaneously:
+$
+seq
+100 |
+pbc
+'{1}^2'
+|
+trim
+1
+4
+9
+16
+25
+36
+49
+64
+81
+100
+… with 90 more lines
+$
+paste
+-d,
+<(
+seq
+4
+)
+<(
+seq
+4
+)
+<(
+seq
+4
+)
+|
+pbc
+'sqrt({1}+{2})^{3}'
+1.41421356237309504880
+4.00000000000000000000
+14.69693845669906858905
+63.99999999999999999969
+Distributed Processing
+Sometimes you need more power
+than your local machine, even with all its cores, can offer.
+Luckily,
+parallel
+can also leverage the power of remote machines, which really allows you to speed up your pipeline.
+What’s great is that
+parallel
+doesn’t have to be installed on the remote machine.
+All that’s required is that you’re able
+to connect to the remote machine with the
+Secure Shell
+protocol (or SSH), which is also what
+parallel
+uses to distribute your pipeline.
+(Having
+parallel
+installed is helpful because it can then determine how many cores to employ on each remote machine; I’ll talk more about this later.)
+First, we’re going to obtain a list of running Amazon Web Services’ Elastic Compute Cloud (AWS EC2) instances.
+Don’t worry if you don’t have any remote machines; you can replace any occurrence of
+--slf hostnames
+, which tells
+parallel
+which remote machines to use, with
+--sshlogin :
+.
+This way, you can still follow along with the examples in this section.
+Once you know which remote machines to take over, there are three flavors of distributed processing to consider:
+Running ordinary commands on remote machines
+Distributing local data directly among remote machines
+Sending files to remote machines, processing them, and retrieving the results
+Get List of Running AWS EC2 Instances
+In this section, we’re
+creating a file named
+hostnames
+that will contain one hostname of a remote machine per line.
+I’m using Amazon Web Services (AWS) as an example.
+I assume that you have an AWS account and that you know how to launch instances.
+If you’re using a different cloud computing service (such as Google Cloud Platform or Microsoft Azure), or if you have your own servers, please make sure that you create a
+hostnames
+file yourself before continuing to the next section.
+You can obtain a list of running AWS EC2 instances
+using
+aws
+,
+4
+the command-line interface to the AWS API.
+With
+aws
+, you can do almost everything you can do with the online AWS Management Console.
+The command
+aws ec2 describe-instances
+returns a lot of information about all your EC2 instances
+in JSON format (see
+the online documentation
+for more information).
+You can extract the relevant fields using
+jq
+:
+$
+aws
+ec2 describe-instances |
+jq
+'.Reservations[].Instances[] | {public_dns: .P
+ublicDnsName, state: .State.Name}'
+The possible states of an EC2 instance are
+pending
+,
+running
+,
+shutting-down
+,
+terminated
+,
+stopping
+, and
+stopped
+.
+Because you can only distribute your pipeline to running instances, you filter out the nonrunning instances as follows:
+>
+aws
+ec2 describe-instances |
+jq
+-r
+'.Reservations[].Instances[] | select(.Stat
+e.Name=="running") | .PublicDnsName'
+|
+tee
+hostnames
+ec2-54-88-122-140.compute-1.amazonaws.com
+ec2-54-88-89-208.compute-1.amazonaws.com
+(Without the
+-r
+or
+--raw-output
+option, the hostnames would have been surrounded by double quotes.)
+The output is saved to
+hostnames
+, so that I can pass this to
+parallel
+later.
+As mentioned,
+parallel
+employs
+ssh
+⁠
+5
+to connect to the remote machines.
+If you want to connect to your EC2 instances without typing the credentials every time, you can add something like the following text to the file
+~/.ssh/config
+:
+$
+bat
+~/.ssh/config
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+/home/dst/.ssh/config
+───────┼────────────────────────────────────────────────────────────────────────
+1   │
+Host
+*
+.amazonaws.com
+2   │
+IdentityFile
+~/.ssh/MyKeyFile.pem
+3   │
+User
+ubuntu
+───────┴────────────────────────────────────────────────────────────────────────
+Depending on which distribution
+you’re running, your username may be different than
+ubuntu
+.
+Running Commands on Remote Machines
+The first flavor of distributed
+processing is to run ordinary commands on remote machines.
+Let’s first double-check that
+parallel
+is working by running the tool
+hostname
+⁠
+6
+on each EC2 instance:
+$
+parallel
+--nonall --sshloginfile hostnames hostname
+ip-172-31-23-204
+ip-172-31-23-205
+Here, the
+--sshloginfile
+or
+--slf
+option is used to refer to the file
+hostnames
+.
+The
+--nonall
+option instructs
+parallel
+to execute the same command on every remote machine in the
+hostnames
+file without using any parameters.
+Remember, if you don’t have any remote machines to utilize, you can replace
+--slf hostnames
+with
+--sshlogin :
+so that the command is run on your local machine:
+$
+parallel
+--nonall --sshlogin : hostname
+data-science-toolbox
+Running the same command on every remote machine once requires only one core per machine. If you wanted to distribute the list of arguments passed in to
+parallel
+, then it could potentially use more than one core. If it’s not specified explicitly,
+parallel
+will try to determine the number of cores:
+$
+seq
+2 |
+parallel
+--slf hostnames echo
+2>&
+1
+bash: parallel: command not found
+parallel: Warning: Could not figure out number of cpus on ec2-54-88-122-140.comp
+ute-1.amazonaws.com (). Using 1.
+1
+2
+In this case, I have
+parallel
+installed on one of the two remote machines.
+I’m getting a warning message indicating that
+parallel
+is not found on one of them.
+As a result,
+parallel
+cannot determine the number of cores and will default to using one core.
+When you receive this warning message, you can do one of the following four things:
+Don’t worry and be happy with using one core per machine.
+Specify the number of jobs for each machine via the
+--jobs
+or
+-j
+option.
+Specify the number of cores to use per machine by putting, for example,
+2/
+(if you want two cores), in front of each hostname in the
+hostnames
+file.
+Install
+parallel
+using a package manager—for example, if the remote machines all run Ubuntu:
+$
+parallel
+--nonall --slf hostnames
+"sudo apt-get install -y parallel"
+Distributing Local Data Among Remote Machines
+The second flavor of
+distributed processing is to distribute local data directly among remote machines.
+Imagine that you have one very large dataset that you want to process using multiple remote machines.
+For simplicity’s sake, let’s sum all integers from 1 to 1,000.
+First, let’s double-check that your input is actually being distributed by printing the hostname of the remote machine and the length of the input it received using
+wc
+:
+$
+seq
+1000 |
+parallel
+-N100 --pipe --slf hostnames
+"(hostname; wc -l) | paste -s
+d:"
+ip-172-31-23-204:100
+ip-172-31-23-205:100
+ip-172-31-23-205:100
+ip-172-31-23-204:100
+ip-172-31-23-205:100
+ip-172-31-23-204:100
+ip-172-31-23-205:100
+ip-172-31-23-204:100
+ip-172-31-23-205:100
+ip-172-31-23-204:100
+Excellent. You can see that your 1,000 numbers get distributed evenly in subsets of 100 (as specified by
+-N100
+).
+Now you’re ready to sum all those numbers:
+$
+seq
+1000 |
+parallel
+-N100 --pipe --slf hostnames
+"paste -sd+ | bc"
+|
+paste
+-sd
+500500
+Here, you immediately also sum the 10 sums you get back from the remote machines.
+Let’s check that the answer is correct by doing the same calculation without
+parallel
+:
+$
+seq
+1000 |
+paste
+-sd+ |
+bc
+500500
+Good, that works.
+If you have a larger pipeline that you want to execute on the remote machines, you can also put it in a separate script and upload it with
+parallel
+.
+I’ll demonstrate this by creating a very simple command-line tool called
+add
+:
+$
+echo
+'#!/usr/bin/env bash'
+>
+add
+$
+echo
+'paste -sd+ | bc'
+>>
+add
+$
+bat
+add
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+add
+───────┼────────────────────────────────────────────────────────────────────────
+1   │
+#!/usr/bin/env bash
+2   │ paste -sd+
+|
+bc
+───────┴────────────────────────────────────────────────────────────────────────
+$
+chmod
+u+x
+add
+$
+seq
+1000 |
+./add
+500500
+Using the
+--basefile
+option,
+parallel
+first uploads the file
+add
+to all remote machines before running the jobs:
+$
+seq
+1000 |
+>
+parallel
+-N100 --basefile
+add
+--pipe --slf hostnames
+'./add'
+|
+>
+./add
+500500
+Summing 1,000 numbers is of course only a toy example.
+And it would’ve been much faster to do this locally.
+Still, I hope it’s clear from this
+that
+parallel
+can be incredibly powerful.
+Processing Files on Remote Machines
+The third flavor of distributed
+processing is to send files to remote machines, process them, and retrieve the results.
+Imagine that you want to count how often each borough of New York City receives service calls on 311.
+You don’t have that data on your local machine yet, so let’s first obtain it from the free
+NYC Open Data API
+:
+$
+seq
+0 100 900 |
+parallel
+"curl -sL 'http://data.cityofnewyork.us/resource/erm
+2-nwe9.json?
+\$
+limit=100&
+\$
+offset={}' | jq -c '.[]' | gzip > nyc-{#}.json.gz"
+You now have 10 files containing compressed JSON data:
+$
+l
+nyc
+*
+json.gz
+-rw-r--r-- 1 dst dst 14K Jun 29 14:34
+nyc-10.json.gz
+-rw-r--r-- 1 dst dst 13K Jun 29 14:33
+nyc-1.json.gz
+-rw-r--r-- 1 dst dst 13K Jun 29 14:33
+nyc-2.json.gz
+-rw-r--r-- 1 dst dst 14K Jun 29 14:33
+nyc-3.json.gz
+-rw-r--r-- 1 dst dst 14K Jun 29 14:33
+nyc-4.json.gz
+-rw-r--r-- 1 dst dst 13K Jun 29 14:33
+nyc-5.json.gz
+-rw-r--r-- 1 dst dst 14K Jun 29 14:34
+nyc-6.json.gz
+-rw-r--r-- 1 dst dst 13K Jun 29 14:33
+nyc-7.json.gz
+-rw-r--r-- 1 dst dst 14K Jun 29 14:34
+nyc-8.json.gz
+-rw-r--r-- 1 dst dst 14K Jun 29 14:34
+nyc-9.json.gz
+Note that
+jq -c '.[]'
+is used to flatten the array of JSON
+objects so that there’s one object per line, with a total of 100 lines per file.
+Using
+zcat
+,
+7
+you can
+directly print the contents of a compressed file:
+$
+zcat
+nyc-1.json.gz
+|
+trim
+{"unique_key":"51022229","created_date":"2021-06-28T02:00:31.000","agency":"NYP…
+{"unique_key":"51026918","created_date":"2021-06-28T02:00:10.000","agency":"NYP…
+{"unique_key":"51024237","created_date":"2021-06-28T02:00:04.000","agency":"NYP…
+{"unique_key":"51025570","created_date":"2021-06-28T01:59:56.000","agency":"NYP…
+{"unique_key":"51021715","created_date":"2021-06-28T01:59:54.000","agency":"NYP…
+{"unique_key":"51029212","created_date":"2021-06-28T01:59:46.000","agency":"NYP…
+{"unique_key":"51026777","created_date":"2021-06-28T01:59:42.000","agency":"NYP…
+{"unique_key":"51028611","created_date":"2021-06-28T01:59:32.000","agency":"NYP…
+{"unique_key":"51019729","created_date":"2021-06-28T01:59:28.000","agency":"NYP…
+{"unique_key":"51028159","created_date":"2021-06-28T01:59:17.000","agency":"NYP…
+… with 90 more lines
+Let’s see what one line of
+JSON looks like using
+head
+:
+$
+zcat
+nyc-1.json.gz
+|
+head
+-n 1
+{"unique_key":"51022229","created_date":"2021-06-28T02:00:31.000","agency":"NYPD
+","agency_name":"New York City Police Department","complaint_type":"Blocked Driv
+eway","descriptor":"No Access","location_type":"Street/Sidewalk","incident_zip":
+"10031","incident_address":"791 ST NICHOLAS AVENUE","street_name":"ST NICHOLAS A
+VENUE","cross_street_1":"WEST  149 STREET","cross_street_2":"WEST  150 STREET","
+intersection_street_1":"WEST  149 STREET","intersection_street_2":"WEST  150 STR
+EET","city":"NEW YORK","landmark":"ST NICHOLAS AVENUE","status":"In Progress","c
+ommunity_board":"09 MANHATTAN","bbl":"1020640033","borough":"MANHATTAN","x_coord
+inate_state_plane":"1000047","y_coordinate_state_plane":"240589","open_data_chan
+nel_type":"MOBILE","park_facility_name":"Unspecified","park_borough":"MANHATTAN"
+,"latitude":"40.827022608423036","longitude":"-73.94292011775158","location":{"l
+atitude":"40.827022608423036","longitude":"-73.94292011775158","human_address":"
+{\"address\": \"\", \"city\": \"\", \"state\": \"\", \"zip\": \"\"}"},":@compute
+d_region_efsh_h5xi":"12428",":@computed_region_f5dn_yrer":"37",":@computed_regio
+n_yeji_bk3q":"4",":@computed_region_92fq_4b7q":"36",":@computed_region_sbqj_enih
+":"19"}
+If you wanted to get the total number of service calls per borough on your local machine, you would run the following command:
+$
+zcat
+nyc
+*
+json.gz |
+>
+jq
+-r
+'.borough'
+|
+>
+tr
+'[A-Z] '
+'[a-z]_'
+|
+>
+sort
+|
+uniq
+-c |
+sort
+-nr |
+>
+awk
+'{print $2","$1}'
+|
+>
+header
+-a borough,count |
+>
+csvlook
+│ borough       │ count │
+├───────────────┼───────┤
+│ bronx         │   349 │
+│ manhattan     │   283 │
+│ brooklyn      │   218 │
+│ queens        │   137 │
+│ staten_island │    13 │
+Expand all compressed files using
+zcat
+.
+For each call, extract the name of the borough using
+jq
+.
+Convert borough names to lowercase and replace spaces with underscores (because
+awk
+splits on whitespace by default).
+Count the occurrences of each borough using
+sort
+and
+uniq
+.
+Reverse the two columns and delimit them by comma using
+awk
+.
+Add a header using
+header
+.
+Imagine for a moment that your own machine is so slow that you simply cannot perform this pipeline locally.
+You can use
+parallel
+to distribute the local files among the remote machines, let them do the processing, and retrieve the results:
+$
+ls
+*
+.json.gz |
+>
+parallel
+-v --basefile jq \
+>
+--trc {.}.csv \
+>
+--slf hostnames \
+>
+"zcat {} | ./jq -r '.borough' | tr '[A-Z] ' '[a-z]_' | sort | uniq -c | awk '{
+print
+\$
+2
+\"
+,
+\"\$
+1}' > {.}.csv"
+Print the list of files and pipe it into
+parallel
+.
+Transmit the
+jq
+binary to each remote machine. Luckily,
+jq
+has no dependencies. This file will be removed from the remote machines afterward because I specified the
+--trc
+option (which implies the
+--cleanup
+option). Note that the pipeline uses
+./jq
+instead of just
+jq
+. That’s because the pipeline needs to use the version that was uploaded and not the version that may or may not be on the search path.
+The command-line argument
+--trc {.}.csv
+is short for
+--transfer --return {.}.csv --cleanup
+. (The replacement string
+{.}
+gets replaced with the input filename without the last extension.) Here, this means that
+the JSON file gets transferred to the remote machine, the CSV file gets returned to the local machine, and both files will be removed from the remote machine after each job.
+Specify a list of hostnames. Remember, if you want to try this out locally, you can specify
+--sshlogin :
+instead of
+--slf hostnames
+.
+Note the escaping in the
+awk
+expression. Quoting can sometimes be tricky. Here, the dollar signs and the double quotes are escaped. If quoting ever gets too confusing, remember that you put the pipeline into a separate command-line tool, just as I did with
+add
+.
+If you were to run
+ls
+on one of the
+remote machines during this process, you would see that
+parallel
+indeed transfers (and cleans up) the binary
+jq
+, the JSON files, and the CSV files:
+$
+ssh
+$(
+head
+-n 1 hostnames
+)
+ls
+Each CSV file looks
+something like this:
+>
+cat
+nyc-1.json.csv
+bronx,3
+brooklyn,5
+manhattan,24
+queens,3
+staten_island,2
+You can sum the counts in each CSV file by using
+rush
+and the tidyverse:
+$
+cat
+nyc
+*
+csv |
+header
+-a borough,count |
+>
+rush
+run -t
+'group_by(df, borough) %>% summarize(count = sum(count))'
+- |
+>
+csvsort
+-rc count |
+csvlook
+│ borough       │ count │
+├───────────────┼───────┤
+│ bronx         │   349 │
+│ manhattan     │   283 │
+│ brooklyn      │   218 │
+│ queens        │   137 │
+│ staten_island │    13 │
+Or if you prefer to use SQL to aggregate results,
+you can use
+csvsql
+, as discussed in
+Chapter 5
+:
+$
+cat
+nyc
+*
+csv |
+header
+-a borough,count |
+>
+csvsql
+--query
+'SELECT borough, SUM(count) AS count FROM stdin GROUP BY boroug
+h ORDER BY count DESC'
+|
+>
+csvlook
+│ borough       │ count │
+├───────────────┼───────┤
+│ bronx         │   349 │
+│ manhattan     │   283 │
+│ brooklyn      │   218 │
+│ queens        │   137 │
+│ staten_island │    13 │
+Summary
+As a data scientist, you work with data—occasionally a lot of data.
+This means that sometimes you need to run a command multiple times or distribute data-intensive commands over multiple cores.
+In this chapter, I have shown you how easy it is to parallelize commands.
+parallel
+is a very powerful and flexible tool to speed up ordinary command-line tools and distribute them.
+It offers a lot of functionality, and in this chapter I’ve only been able to scratch the surface.
+In the next chapter I’m going to cover the fourth step of the OSEMN model: modeling data.
+For Further Exploration
+Once you have a basic understanding of
+parallel
+and its most important options, I recommend that you take a look at
+its online tutorial
+. Among other things, you’ll learn different ways of specifying input, how to keep a log of all the jobs, and how to timeout, resume, and retry jobs. As Ole Tange, creator of
+parallel
+, says in this tutorial, “Your command line will love you for it.”
+1
+Ole Tange,
+parallel
+– Build and Execute Shell Command Lines from Standard Input in Parallel
+, version 20161222, 2016,
+https://www.gnu.org/software/parallel
+.
+2
+Eric B. Decker, James Youngman, and Kevin Dalley,
+find
+– Search for Files in a Directory Hierarchy
+, version 4.7.0, 2019,
+https://www.gnu.org/software/findutils
+.
+3
+Jeroen Janssens,
+pbc
+– Parallel
+bc
+, version 0.1, 2021,
+https://github.com/jeroenjanssens/dsutils
+.
+4
+Amazon Web Services,
+aws
+– Unified Tool to Manage AWS Services
+, version 2.1.32, 2021,
+https://aws.amazon.com/cli
+.
+5
+Tatu Ylonen et al.,
+ssh
+– OpenSSH Remote Login Client
+, version 1:8.2p1-4ubuntu0.2, 2020,
+https://www.openssh.com
+.
+6
+Peter Tobias, Bernd Eckenfels, and Michael Meskes,
+hostname
+– Show or Set the System’s Host Name
+, version 3.23, 2021,
+https://sourceforge.net/projects/net-tools/
+.
+7
+Antonio Diaz Diaz,
+zcat
+– Decompress and Concatenate Files to Standard Output
+, version 1.10, 2021,
+https://www.nongnu.org/zutils/zutils.html
+.
+
+Chapter 9.
+Modeling Data
+In this chapter we’re going to perform the fourth step of the OSEMN model: modeling data.
+Generally speaking, a model is an abstract or higher-level description of your data.
+Modeling is a bit like creating visualizations in the sense that we’re taking a step back from the individual data points to see the bigger picture.
+Visualizations are characterized by shapes, positions, and colors: we can interpret them by looking at them.
+Models, on the other hand, are internally characterized by numbers, which means that computers can use them to do things like make predictions about new data points.
+(We can still visualize models so that we can try to understand them and see how they are performing.)
+In this chapter I’ll consider three types of algorithms commonly used to model data:
+Dimensionality reduction
+Regression
+Classification
+These algorithms come from
+the field of statistics and machine learning, so I’m going to change the vocabulary a bit.
+Let’s assume that I have a
+CSV file, also known as a
+dataset
+.
+Each row, except for the header, is considered
+a
+data point
+.
+Each data point has one
+or more
+features
+, or properties that have been measured.
+Sometimes a data point also has a
+label
+, which is,
+generally speaking, a judgment or outcome.
+This becomes more concrete when I introduce the wine dataset later in this chapter.
+The first type of
+algorithm (dimensionality reduction) is most often unsupervised, which means that it creates a model based on the features of the dataset only.
+The other two types of
+algorithms (regression and classification) are by definition supervised algorithms, which means that they also incorporate the labels into the model.
+Warning
+This chapter is by no means an introduction to machine learning.
+That implies that I must skim over many details.
+My general advice is that you become familiar with an algorithm before applying it to your data.
+At the end of this chapter I recommend a few books about machine learning.
+Overview
+In this chapter, you’ll learn how to:
+Reduce the dimensionality of your dataset using
+tapkee
+⁠
+1
+Predict the quality of white wine using
+vw
+⁠
+2
+Classify wine as red
+or white using
+skll
+⁠
+3
+This chapter starts with the following file:
+$
+cd
+/data/ch09
+$
+l
+total 4.0K
+-rw-r--r-- 1 dst dst 503 Jun 29 14:34 classify.cfg
+The instructions for getting this file are in
+Chapter 2
+.
+Any other files are either downloaded or generated using command-line tools.
+More Wine, Please!
+Throughout this chapter, I’ll be
+using a dataset of wine tasters’ notes on red and white varieties of a Portuguese wine called vinho verde.
+Each data point represents a wine. Each wine is rated on 11 physicochemical properties: (1) fixed acidity, (2) volatile acidity, (3) citric acid, (4) residual sugar, (5) chlorides, (6) free sulfur dioxide, (7) total sulfur dioxide, (8) density, (9) pH, (10) sulfates, and (11) alcohol.
+There is also an overall quality score between 0 (very bad) and 10 (excellent), which is the median of at least three evaluations by wine experts. More information about this dataset is available at the
+UCI Machine Learning Repository
+.
+The dataset is split into two files: one for white wine and one for red wine.
+The first step is to obtain the two files using
+curl
+(and of course
+parallel
+, because I haven’t got all day):
+$
+parallel
+"curl -sL http://archive.ics.uci.edu/ml/machine-learning-databases/wi
+ne-quality/winequality-{}.csv > wine-{}.csv"
+::: red white
+The triple colon is
+just another way to pass data to
+parallel
+:
+$
+cp
+/data/.cache/wine-
+*
+.csv
+.
+Let’s inspect both files and count the number of lines:
+$
+<
+wine-red.csv
+nl
+|
+>
+fold
+|
+>
+trim
+1  "fixed acidity";"volatile acidity";"citric acid";"residual sugar";"chlor
+ides";"free sulfur dioxide";"total sulfur dioxide";"density";"pH";"sulphates";"a
+lcohol";"quality"
+2  7.4;0.7;0;1.9;0.076;11;34;0.9978;3.51;0.56;9.4;5
+3  7.8;0.88;0;2.6;0.098;25;67;0.9968;3.2;0.68;9.8;5
+4  7.8;0.76;0.04;2.3;0.092;15;54;0.997;3.26;0.65;9.8;5
+5  11.2;0.28;0.56;1.9;0.075;17;60;0.998;3.16;0.58;9.8;6
+6  7.4;0.7;0;1.9;0.076;11;34;0.9978;3.51;0.56;9.4;5
+7  7.4;0.66;0;1.8;0.075;13;40;0.9978;3.51;0.56;9.4;5
+8  7.9;0.6;0.06;1.6;0.069;15;59;0.9964;3.3;0.46;9.4;5
+… with 1592 more lines
+$
+<
+wine-white.csv
+nl
+|
+fold
+|
+trim
+1  "fixed acidity";"volatile acidity";"citric acid";"residual sugar";"chlor
+ides";"free sulfur dioxide";"total sulfur dioxide";"density";"pH";"sulphates";"a
+lcohol";"quality"
+2  7;0.27;0.36;20.7;0.045;45;170;1.001;3;0.45;8.8;6
+3  6.3;0.3;0.34;1.6;0.049;14;132;0.994;3.3;0.49;9.5;6
+4  8.1;0.28;0.4;6.9;0.05;30;97;0.9951;3.26;0.44;10.1;6
+5  7.2;0.23;0.32;8.5;0.058;47;186;0.9956;3.19;0.4;9.9;6
+6  7.2;0.23;0.32;8.5;0.058;47;186;0.9956;3.19;0.4;9.9;6
+7  8.1;0.28;0.4;6.9;0.05;30;97;0.9951;3.26;0.44;10.1;6
+8  6.2;0.32;0.16;7;0.045;30;136;0.9949;3.18;0.47;9.6;6
+… with 4891 more lines
+$
+wc
+-l wine-{red,white}.csv
+1600 wine-red.csv
+4899 wine-white.csv
+6499 total
+For clarity, I use
+nl
+to add line numbers.
+To see the entire header, I use
+fold
+.
+At first glance, this data appears to be quite clean.
+Still, let’s scrub it so that it conforms more to what most command-line tools expect.
+Specifically, I will:
+Convert the header to lowercase
+Replace the semicolons with commas
+Replace spaces with underscores
+Remove unnecessary quotes
+The tool
+tr
+can take care of
+all these things.
+Let’s use a for loop—for old times’ sake—to process both files:
+$
+for
+COLOR in red white;
+do
+>
+<
+wine-$COLOR.csv
+tr
+'[A-Z]; '
+'[a-z],_'
+|
+tr
+-d \"
+>
+wine-${COLOR}-clean.csv
+>
+done
+Let’s also create a single dataset
+by combining the two files.
+I’ll use
+csvstack
+⁠
+4
+to add a column named
+type
+, which will be “red” for rows of the first file and “white” for rows of the second file:
+$
+csvstack
+-g red,white -n type wine-{red,white}-clean.csv |
+>
+xsv
+select 2-,1
+>
+wine.csv
+The new column
+type
+is placed at the beginning by
+csvstack
+.
+Some algorithms assume that the label is the last column, so I use
+xsv
+to move the column
+type
+to the end.
+It’s good practice to check whether
+there are any missing values in this dataset, because most machine learning algorithms can’t handle them:
+$
+csvstat
+wine.csv
+--nulls
+1. fixed_acidity: False
+2. volatile_acidity: False
+3. citric_acid: False
+4. residual_sugar: False
+5. chlorides: False
+6. free_sulfur_dioxide: False
+7. total_sulfur_dioxide: False
+8. density: False
+9. ph: False
+10. sulphates: False
+11. alcohol: False
+12. quality: False
+13. type: False
+Excellent!
+If there were any missing values, we could fill them with, say, the average or most common value of that feature.
+An alternative, less subtle approach is to remove any data points that have at least one missing value.
+Just out of curiosity, let’s see what the distribution of quality looks like for both red and white wines (
+Figure 9-1
+):
+$
+rush
+run -t
+'ggplot(df, aes(x = quality, fill = type)) + geom_density(adjust =
+3, alpha = 0.5)'
+wine.csv
+>
+wine-quality.png
+$
+display
+wine-quality.png
+Figure 9-1.
+Comparing the quality of red and white wines using a density plot
+From the density plot, you can see
+that the quality of white wine is distributed more toward higher values.
+Does this mean that white wines are better overall than red wines, or that the white wine experts more easily give higher scores than the red wine experts?
+That’s something that the data doesn’t tell us.
+Or is there perhaps a relationship between alcohol content and quality?
+Let’s use
+rush
+to find out (
+Figure 9-2
+):
+$
+rush
+plot --x alcohol --y quality --color type --geom smooth
+wine.csv
+>
+wine-a
+lcohol-vs-quality.png
+$
+display
+wine-alcohol-vs-quality.png
+Figure 9-2.
+Relationship between the alcohol contents of wine and its quality
+Eureka! Ahem, let’s carry on with some modeling, shall we?
+Dimensionality Reduction with Tapkee
+The goal of dimensionality reduction
+is to map high-dimensional data points onto a lower-dimensional mapping.
+The challenge is to keep similar data points close together on the lower-dimensional mapping.
+As we’ve seen in the previous section, our wine dataset contains 13 features.
+I’ll stick with two dimensions because that’s straightforward to visualize.
+Dimensionality reduction is often regarded as being part of exploration.
+It’s useful for when there are too many features for plotting.
+You could do a scatter-plot matrix, but that shows you only two features at a time.
+It’s also useful as a preprocessing step for other machine learning
+algorithms
+.
+Most dimensionality reduction algorithms are unsupervised.
+This means they don’t employ the labels of the data points to construct the lower-dimensional mapping.
+In this section I’ll look at two techniques used for dimensionality reduction: PCA, which stands for
+Principal Component Analysis
+,
+5
+and t-SNE, which stands for
+t-Distributed
+Stochastic Neighbor Embedding
+.
+6
+Introducing Tapkee
+Tapkee is a C++ template library for dimensionality reduction.
+7
+The library contains implementations of many dimensionality-reduction algorithms, including:
+Locally Linear Embedding
+Isomap
+Multidimensional Scaling
+PCA
+t-SNE
+More information about these algorithms can be found on
+Tapkee’s website
+.
+Although Tapkee is mainly a library that can be included in other applications, it also offers the
+command-line tool
+tapkee
+.
+I’ll use this tool to perform dimensionality reduction on our wine dataset.
+Linear and Nonlinear Mappings
+First, I’ll scale the
+features using standardization so that each feature is equally important.
+This generally leads to better results when applying machine learning
+algorithms
+.
+To scale, I use
+rush
+and the tidyverse package:
+$
+rush
+run --tidyverse --output wine-scaled.csv \
+>
+'select(df, -type) %>%
+>
+scale() %>%
+>
+as_tibble() %>%
+>
+mutate(type = df$type)'
+wine.csv
+$
+csvlook
+wine-scaled.csv
+│ fixed_acidity │ volatile_acidity │ citric_acid │ residual_sugar │ chlorides │…
+├───────────────┼──────────────────┼─────────────┼────────────────┼───────────┤…
+│        0.142… │           2.189… │     -2.193… │        -0.745… │    …
+│        0.451… │           3.282… │     -2.193… │        -0.598… │    …
+│        0.451… │           2.553… │     -1.917… │        -0.661… │    …
+│        3.074… │          -0.362… │      1.661… │        -0.745… │    …
+│        0.142… │           2.189… │     -2.193… │        -0.745… │    …
+│        0.142… │           1.946… │     -2.193… │        -0.766… │    …
+│        0.528… │           1.581… │     -1.780… │        -0.808… │    …
+│        0.065… │           1.885… │     -2.193… │        -0.892… │    …
+… with 6489 more lines
+I need to temporarily remove the column
+type
+because
+scale()
+only works on numerical columns.
+The
+scale()
+function accepts a
+data frame but returns a matrix.
+The function
+as_tibble()
+converts the
+matrix back to a data frame.
+Finally, I add back the
+type
+column.
+Now we apply both dimensionality-reduction techniques and visualize the mapping using
+Rio-scatter
+:
+$
+xsv
+select
+'!type'
+wine-scaled.csv
+|
+>
+header
+-d |
+>
+tapkee
+--method pca |
+>
+tee
+wine-pca.txt |
+trim
+-0.568882,3.34818
+-1.19724,3.22835
+-0.952507,3.23722
+-1.60046,1.67243
+-0.568882,3.34818
+-0.556231,3.15199
+-0.53894,2.28288
+1.104,2.56479
+0.231315,2.86763
+-1.18363,1.81641
+… with 6487 more lines
+Deselect the column
+type
+.
+Remove the header.
+Apply PCA:
+$
+<
+wine-pca.txt
+header
+-a pc1,pc2 |
+>
+paste
+-d, -
+<(
+xsv
+select type
+wine-scaled.csv
+)
+|
+>
+tee
+wine-pca.csv |
+csvlook
+│      pc1 │     pc2 │ type  │
+├──────────┼─────────┼───────┤
+│  -0.569… │  3.348… │ red   │
+│  -1.197… │  3.228… │ red   │
+│  -0.953… │  3.237… │ red   │
+│  -1.600… │  1.672… │ red   │
+│  -0.569… │  3.348… │ red   │
+│  -0.556… │  3.152… │ red   │
+│  -0.539… │  2.283… │ red   │
+│   1.104… │  2.565… │ red   │
+… with 6489 more lines
+Add back the header with columns
+pc1
+and
+pc2
+.
+Add back the column
+type
+.
+Now we can create a scatter plot (
+Figure 9-3
+):
+$
+rush
+plot --x pc1 --y pc2 --color type --shape type
+wine-pca.csv
+>
+wine-pca.pn
+g
+$
+display
+wine-pca.png
+Figure 9-3.
+Linear dimensionality reduction with PCA
+Let’s perform t-SNE with
+the same approach:
+$
+xsv
+select
+'!type'
+wine-scaled.csv
+|
+>
+header
+-d |
+>
+tapkee
+--method t-sne |
+>
+header
+-a x,y |
+>
+paste
+-d, -
+<(
+xsv
+select type
+wine-scaled.csv
+)
+|
+>
+rush
+plot --x x --y y --color type --shape type
+>
+wine-tsne.png
+Deselect the column
+type
+.
+Remove the header.
+Apply t-SNE.
+Add back the header with columns
+x
+and
+y
+.
+Add back the column
+type
+.
+Create a scatter plot with the same approach (
+Figure 9-4
+):
+$
+display
+wine-tsne.png
+Figure 9-4.
+Nonlinear dimensionality reduction with t-SNE
+We can see that t-SNE does a better job than PCA at separating the red and white wines based on their physicochemical properties.
+These scatter plots verify that the dataset has a certain structure; there’s a relationship between the features and the labels.
+Knowing this, I’m comfortable moving forward by applying supervised machine learning.
+I’ll start with a regression task and then
+continue with a classification task.
+Regression with Vowpal Wabbit
+In this section, I’m going
+to create a model that predicts the quality of the white wine, based on its physicochemical properties.
+Because the quality is a number between 0 and 10, we can consider this a regression task.
+For this I’ll be using Vowpal Wabbit, or
+vw
+.
+Preparing the Data
+Instead of working with CSV,
+vw
+has its own data format.
+The tool
+csv2vw
+⁠
+8
+can,
+as its name implies, convert CSV to this format.
+The
+--label
+option is used to indicate which column contains the labels.
+Let’s examine the result:
+$
+csv2vw
+wine-white-clean.csv
+--label quality |
+trim
+6 | alcohol:8.8 chlorides:0.045 citric_acid:0.36 density:1.001 fixed_acidity:7 …
+6 | alcohol:9.5 chlorides:0.049 citric_acid:0.34 density:0.994 fixed_acidity:6.…
+6 | alcohol:10.1 chlorides:0.05 citric_acid:0.4 density:0.9951 fixed_acidity:8.…
+6 | alcohol:9.9 chlorides:0.058 citric_acid:0.32 density:0.9956 fixed_acidity:7…
+6 | alcohol:9.9 chlorides:0.058 citric_acid:0.32 density:0.9956 fixed_acidity:7…
+6 | alcohol:10.1 chlorides:0.05 citric_acid:0.4 density:0.9951 fixed_acidity:8.…
+6 | alcohol:9.6 chlorides:0.045 citric_acid:0.16 density:0.9949 fixed_acidity:6…
+6 | alcohol:8.8 chlorides:0.045 citric_acid:0.36 density:1.001 fixed_acidity:7 …
+6 | alcohol:9.5 chlorides:0.049 citric_acid:0.34 density:0.994 fixed_acidity:6.…
+6 | alcohol:11 chlorides:0.044 citric_acid:0.43 density:0.9938 fixed_acidity:8.…
+… with 4888 more lines
+In this format, each line is one data point.
+The line starts with the label, followed by a pipe symbol and then by feature name/value pairs separated by spaces.
+While this format may seem overly verbose when compared to the CSV format, it does offer more flexibility, such as weights, tags, namespaces, and a sparse feature representation.
+With the wine dataset, we don’t need this flexibility, but it might be useful when applying
+vw
+to more complicated problems.
+This article
+explains the
+vw
+format in more detail.
+Once we’ve created, or
+trained
+, a regression model, it can be used to make predictions about new, unseen data points.
+In other words, if we give the model a wine it hasn’t seen before, it can predict, or
+test
+, its quality.
+To properly evaluate the accuracy of these predictions, we need to set aside some data that will not be used for training.
+It’s common to use 80% of the complete dataset for training and the remaining 20% for testing.
+I can do this by first splitting
+the complete dataset into five equal parts using
+split
+.
+9
+I verify the number of data points in each part using
+wc
+:
+$
+csv2vw
+wine-white-clean.csv
+--label quality |
+>
+shuf
+|
+>
+split
+-d -n r/5 - wine-part-
+$
+wc
+-l wine-part-
+*
+980 wine-part-00
+980 wine-part-01
+980 wine-part-02
+979 wine-part-03
+979 wine-part-04
+4898 total
+The tool
+shuf
+⁠
+10
+randomizes the
+dataset to ensure that both the training and the test have similar quality distribution.
+Now I can use the first part (so 20%) for the testing set
+wine-test.vw
+and combine the four remaining parts (i.e., 80%) into the training set
+wine-train.vw
+:
+$
+mv
+wine-part-00
+wine-test.vw
+$
+cat
+wine-part-
+*
+>
+wine-train.vw
+$
+rm
+wine-part-
+*
+$
+wc
+-l wine-
+*
+.vw
+980 wine-test.vw
+3918 wine-train.vw
+4898 total
+Now we’re ready to train a model using
+vw
+.
+Training the Model
+The tool
+vw
+accepts many
+different options (nearly four hundred!).
+Luckily, you don’t need all of them to be effective.
+To annotate the options I use here, I’ll put each one on a separate line:
+$
+vw
+\
+>
+--data
+wine-train.vw
+\
+>
+--final_regressor wine.model \
+>
+--passes 10 \
+>
+--cache_file wine.cache \
+>
+--nn 3 \
+>
+--quadratic :: \
+>
+--l2 0.000005 \
+>
+--bit_precision 25
+creating quadratic features for pairs: ::
+WARNING: any duplicate namespace interactions will be removed
+You can use --leave_duplicate_interactions to disable this behaviour.
+using l2 regularization = 5e-06
+final_regressor = wine.model
+Num weight bits = 25
+learning rate = 0.5
+initial_t = 0
+power_t = 0.5
+decay_learning_rate = 1
+creating cache_file = wine.cache
+Reading datafile = wine-train.vw
+num sources = 1
+Enabled reductions: gd, generate_interactions, nn, scorer
+average  since         example        example  current  current  current
+loss     last          counter         weight    label  predict features
+49.000000 49.000000            1            1.0   7.0000   0.0000       78
+38.224279 27.448559            2            2.0   6.0000   0.7609       78
+29.787616 21.350952            4            4.0   6.0000   1.5382       78
+23.172403 16.557191            8            8.0   6.0000   2.2755       78
+16.745619 10.318835           16           16.0   5.0000   3.0704       78
+11.383260 6.020901           32           32.0   6.0000   3.9637       78
+6.953757 2.524254           64           64.0   5.0000   4.9483       78
+4.096179 1.238601          128          128.0   7.0000   5.6035       78
+2.365188 0.634197          256          256.0   5.0000   6.0535       78
+1.575675 0.786162          512          512.0   5.0000   6.0247       78
+1.210981 0.846286         1024         1024.0   5.0000   5.7023       78
+0.977191 0.743401         2048         2048.0   7.0000   6.0133       78
+0.936266 0.936266         4096         4096.0   6.0000   5.7761       78 h
+0.819179 0.702092         8192         8192.0   6.0000   5.9635       78 h
+0.722494 0.625809        16384        16384.0   7.0000   6.2734       78 h
+0.668416 0.614337        32768        32768.0   6.0000   5.0941       78 h
+finished run
+number of examples per pass = 3527
+passes used = 10
+weighted example sum = 35270.000000
+weighted label sum = 206890.000000
+average loss = 0.605274 h
+best constant = 5.865891
+total feature number = 2749740
+The file
+wine-train.vw
+is used to train the model.
+The model, or
+regressor
+, will be stored in the file
+wine.model
+.
+The learning algorithm will make 10 passes over the training data.
+Caching is needed when making multiple passes.
+Use a neural network with three hidden units.
+Create and use quadratic features, based on all input features. Any duplicates will be removed by
+vw
+.
+Use l2 regularization.
+Use 25 bits to store the features.
+Now that I have trained a
+regression model, let’s use it to make predictions.
+Testing the Model
+The model is stored in
+the file
+wine.model
+.
+To use that model to make predictions, I run
+vw
+again, but now with a different set of options:
+$
+vw
+\
+>
+--data
+wine-test.vw
+\
+>
+--initial_regressor
+wine.model
+\
+>
+--testonly \
+>
+--predictions predictions \
+>
+--quiet
+$
+bat
+predictions
+|
+trim
+5.963508
+6.166912
+5.336860
+6.251552
+6.034288
+6.529794
+5.025755
+6.123046
+6.090032
+5.573547
+… with 970 more lines
+The file
+wine-test.vw
+is used to test the model.
+Use the model stored in the file
+wine.model
+.
+Ignore label information and just test.
+The predictions are stored in a file called
+predictions
+.
+Don’t output diagnostics or progress updates.
+Let’s use
+paste
+to combine the predictions in the file
+predictions
+with the true, or
+observed
+, values that are in the file
+wine-test.vw
+.
+Using
+awk
+, I can compare the predicted values with the observed values and compute the mean absolute error (MAE).
+The MAE tells us how far off
+vw
+is on average when it comes to predicting the quality of a white wine:
+$
+paste
+-d,
+predictions
+<(
+cut
+-d
+'|'
+-f 1
+wine-test.vw
+)
+|
+>
+tee
+results.csv |
+>
+awk
+-F,
+'{E+=sqrt(($1-$2)^2)} END {print "MAE: " E/NR}'
+|
+>
+cowsay
+_______________
+< MAE: 0.569113 >
+---------------
+\   ^__^
+\  (oo)\_______
+(__)\       )\/\
+||----w |
+||     ||
+So the predictions are, on average, about 0.6 points off.
+Let’s visualize the
+relationship between the observed values and the predicted values using
+rush plot
+(
+Figure 9-5
+):
+$
+<
+results.csv
+header
+-a
+"predicted,observed"
+|
+>
+rush
+plot --x observed --y predicted --geom jitter
+>
+wine-regression.png
+$
+display
+wine-regression.png
+Figure 9-5.
+Regression with Vowpal Wabbit
+I can imagine that the options used to train the model might be a bit overwhelming.
+Let’s see how
+vw
+performs when I use all the default values:
+$
+vw
+-d
+wine-train.vw
+-f wine2.model --quiet
+$
+vw
+-data
+wine-test.vw
+-i
+wine2.model
+-t -p
+predictions
+--quiet
+$
+paste
+-d,
+predictions
+<(
+cut
+-d
+'|'
+-f 1
+wine-test.vw
+)
+|
+>
+awk
+-F,
+'{E+=sqrt(($1-$2)^2)} END {print "MAE: " E/NR}'
+MAE: 0.626015
+Train a regression model.
+Test the regression model.
+Compute the MAE.
+Apparently, with the default values the MAE is 0.046 higher, meaning that the predictions are slightly worse.
+In this section, I’ve only been able to scratch the surface of what
+vw
+can do.
+There’s a reason why it accepts so many options.
+Besides regression, it also supports binary classification, multiclass classification, reinforcement learning, and Latent Dirichlet Allocation, among other things. You can learn more from the many tutorials
+and articles on the
+Vowpal Wabbit website
+.
+Classification with SciKit-Learn Laboratory
+In this section I’m going to train
+a classification model, or
+classifier
+, that predicts whether a wine is red or white.
+While we could use
+vw
+for this, I’d like to demonstrate another tool: SciKit-Learn Laboratory (SKLL).
+As the name implies, it’s built on top of SciKit-Learn, a popular machine learning package for Python.
+SKLL, itself a Python package,
+provides the
+run_experiment
+tool, which makes it possible to use SciKit-Learn from the command line.
+Instead of
+run_experiment
+, I use the alias
+skll
+because I find it easier to remember, as it corresponds to the package name:
+$
+alias
+skll=run_experiment
+$
+skll
+usage: run_experiment [-h] [-a NUM_FEATURES] [-A] [-k] [-l] [-m MACHINES]
+[-q QUEUE] [-r] [-v] [--version]
+config_file [config_file ...]
+run_experiment: error: the following arguments are required: config_file
+Preparing the Data
+skll
+expects the training and
+test datasets to have the same filenames, located in separate directories.
+Because its predictions are not necessarily in the same order as the original dataset, I add a column,
+id
+, that contains a unique identifier so that I can match the predictions with the correct data points.
+Let’s create a balanced dataset:
+$
+NUM_RED=
+"
+$(
+<
+wine-red-clean.csv
+wc
+-l
+)
+"
+$
+csvstack
+-n type -g red,white \
+>
+wine-red-clean.csv
+\
+>
+<(
+<
+wine-white-clean.csv
+body
+shuf |
+head
+-n $NUM_RED
+)
+|
+>
+body
+shuf |
+>
+nl
+-s, -w1 -v0 |
+>
+sed
+'1s/0,/id,/'
+|
+>
+tee
+wine-balanced.csv |
+csvlook
+│    id │ type  │ fixed_acidity │ volatile_acidity │ citric_acid │ residual_sug…
+├───────┼───────┼───────────────┼──────────────────┼─────────────┼─────────────…
+│     1 │ red   │          7.50 │            0.400 │        0.18 │           1.…
+│     2 │ red   │          6.70 │            0.760 │        0.02 │           1.…
+│     3 │ white │          5.70 │            0.260 │        0.27 │           4.…
+│     4 │ white │          5.80 │            0.230 │        0.27 │           1.…
+│     5 │ red   │          7.90 │            0.765 │        0.00 │           2.…
+│     6 │ white │          5.30 │            0.260 │        0.23 │           5.…
+│     7 │ red   │          6.70 │            0.580 │        0.08 │           1.…
+│     8 │ white │          8.00 │            0.170 │        0.29 │           2.…
+… with 3190 more lines
+Store the number of red wines in the variable
+NUM_RED
+.
+Combine all red wines with a random sample of white wines.
+Add line numbers using
+nl
+in front of each line.
+Replace the
+0
+on the first line with
+id
+so that it’s a proper column name.
+Let’s split this balanced dataset into a training set and a test set:
+$
+mkdir
+-p {train,test}
+$
+HEADER=
+"
+$(
+<
+wine-balanced.csv
+header
+)
+"
+$
+<
+wine-balanced.csv
+header
+-d |
+shuf
+|
+split
+-d -n r/5 - wine-part-
+$
+wc
+-l wine-part-
+*
+640 wine-part-00
+640 wine-part-01
+640 wine-part-02
+639 wine-part-03
+639 wine-part-04
+3198 total
+$
+cat
+wine-part-00
+|
+header
+-a $HEADER
+>
+test/features.csv &&
+rm
+wine-part-00
+$
+cat
+wine-part-
+*
+|
+header
+-a $HEADER
+>
+train/features.csv &&
+rm
+wine-part-
+*
+$
+wc
+-l t
+*
+/features.csv
+641 test/features.csv
+2559 train/features.csv
+3200 total
+Now that I have a balanced training dataset and a balanced test dataset, I can continue with building a classifier.
+Running the Experiment
+Training a classifier in
+skll
+is done
+by defining an experiment in a configuration file.
+It consists of several sections that specify, for example, where to look for the datasets, which classifiers to train, and what kind of output to generate.
+Here’s the configuration file
+classify.cfg
+that I’ll use:
+$
+bat
+classify.cfg
+───────┬────────────────────────────────────────────────────────────────────────
+│ File:
+classify.cfg
+───────┼────────────────────────────────────────────────────────────────────────
+1   │ [General]
+2   │
+experiment_name
+=
+wine
+3   │
+task
+=
+evaluate
+4   │
+5   │ [Input]
+6   │
+train_directory
+=
+train
+7   │
+test_directory
+=
+test
+8   │
+featuresets
+=
+[["features"]]
+9   │
+feature_scaling
+=
+both
+10   │
+label_col
+=
+type
+11   │
+id_col
+=
+id
+12   │
+shuffle
+=
+true
+13   │
+learners
+=
+["KNeighborsClassifier", "LogisticRegression", "DecisionTree
+│
+Classifier", "RandomForestClassifier"]
+14   │
+suffix
+=
+.csv
+15   │
+16   │ [Tuning]
+17   │
+grid_search
+=
+false
+18   │
+objectives
+=
+["neg_mean_squared_error"]
+19   │
+param_grids
+=
+[{}, {}, {}, {}]
+20   │
+21   │ [Output]
+22   │
+logs
+=
+output
+23   │
+results
+=
+output
+24   │
+predictions
+=
+output
+25   │
+models
+=
+output
+───────┴────────────────────────────────────────────────────────────────────────
+I run the experiment using
+skll
+:
+$
+skll
+-l
+classify.cfg
+2>
+/dev/null
+The option
+-l
+specifies to run in local mode.
+skll
+also offers the possibility to run experiments on clusters.
+The time it takes to run an experiment depends on the complexity of the chosen algorithms and the size of the
+data.
+Parsing the Results
+Once all classifiers have been
+trained and tested, the results can be found in the directory
+output
+:
+$
+ls
+-1
+output
+wine_features_DecisionTreeClassifier.log
+wine_features_DecisionTreeClassifier.model
+wine_features_DecisionTreeClassifier_predictions.tsv
+wine_features_DecisionTreeClassifier.results
+wine_features_DecisionTreeClassifier.results.json
+wine_features_KNeighborsClassifier.log
+wine_features_KNeighborsClassifier.model
+wine_features_KNeighborsClassifier_predictions.tsv
+wine_features_KNeighborsClassifier.results
+wine_features_KNeighborsClassifier.results.json
+wine_features_LogisticRegression.log
+wine_features_LogisticRegression.model
+wine_features_LogisticRegression_predictions.tsv
+wine_features_LogisticRegression.results
+wine_features_LogisticRegression.results.json
+wine_features_RandomForestClassifier.log
+wine_features_RandomForestClassifier.model
+wine_features_RandomForestClassifier_predictions.tsv
+wine_features_RandomForestClassifier.results
+wine_features_RandomForestClassifier.results.json
+wine.log
+wine_summary.tsv
+skll
+generates four files
+for each classifier: one log, two files with results, and one file with predictions.
+I extract the algorithm names and sort them by their accuracies using the following SQL query:
+$
+<
+output/wine_summary.tsv
+csvsql
+--query
+"SELECT learner_name, accuracy FROM s
+tdin ORDER BY accuracy DESC"
+|
+csvlook
+-I
+│ learner_name           │ accuracy  │
+├────────────────────────┼───────────┤
+│ RandomForestClassifier │ 0.9890625 │
+│ KNeighborsClassifier   │ 0.9875    │
+│ LogisticRegression     │ 0.9859375 │
+│ DecisionTreeClassifier │ 0.9640625 │
+The relevant column here is
+accuracy
+, which indicates the percentage of data points that are classified correctly.
+From this we see that actually all algorithms are
+performing
+really well.
+RandomForestClassifier comes out as the best-performing algorithm, closely followed by KNeighborsClassifier.
+Each JSON file contains a
+confusion matrix, giving you additional insight into the performance of each classifier.
+A confusion matrix is a table in which the columns refer to the true labels (red and white) and the rows refer to the predicted labels.
+Higher numbers on the diagonal mean more correct predictions.
+With
+jq
+I can print the name of each classifier and extract the associated confusion matrix:
+$
+jq
+-r
+'.[] | "\(.learner_name):\n\(.result_table)\n"'
+output/
+*
+.json
+DecisionTreeClassifier:
++-------+-------+---------+-------------+----------+-------------+
+|       |   red |   white |   Precision |   Recall |   F-measure |
++=======+=======+=========+=============+==========+=============+
+|   red | [309] |       8 |       0.954 |    0.975 |       0.964 |
++-------+-------+---------+-------------+----------+-------------+
+| white |    15 |   [308] |       0.975 |    0.954 |       0.964 |
++-------+-------+---------+-------------+----------+-------------+
+(row = reference; column = predicted)
+KNeighborsClassifier:
++-------+-------+---------+-------------+----------+-------------+
+|       |   red |   white |   Precision |   Recall |   F-measure |
++=======+=======+=========+=============+==========+=============+
+|   red | [311] |       6 |       0.994 |    0.981 |       0.987 |
++-------+-------+---------+-------------+----------+-------------+
+| white |     2 |   [321] |       0.982 |    0.994 |       0.988 |
++-------+-------+---------+-------------+----------+-------------+
+(row = reference; column = predicted)
+LogisticRegression:
++-------+-------+---------+-------------+----------+-------------+
+|       |   red |   white |   Precision |   Recall |   F-measure |
++=======+=======+=========+=============+==========+=============+
+|   red | [311] |       6 |       0.990 |    0.981 |       0.986 |
++-------+-------+---------+-------------+----------+-------------+
+| white |     3 |   [320] |       0.982 |    0.991 |       0.986 |
++-------+-------+---------+-------------+----------+-------------+
+(row = reference; column = predicted)
+RandomForestClassifier:
++-------+-------+---------+-------------+----------+-------------+
+|       |   red |   white |   Precision |   Recall |   F-measure |
++=======+=======+=========+=============+==========+=============+
+|   red | [313] |       4 |       0.991 |    0.987 |       0.989 |
++-------+-------+---------+-------------+----------+-------------+
+| white |     3 |   [320] |       0.988 |    0.991 |       0.989 |
++-------+-------+---------+-------------+----------+-------------+
+(row = reference; column = predicted)
+A confusion matrix is especially helpful when you have more than two classes, so that you can see which kinds of misclassifications happen, and when the cost of an incorrect classification is not the same for each class.
+From a usage perspective, it’s interesting to consider that
+vw
+and
+skll
+take two different approaches:
+vw
+uses command-line options, whereas
+skll
+requires a separate file.
+Both approaches have their advantages and disadvantages.
+While command-line options enable more ad hoc usage, a configuration file is perhaps easier to reproduce.
+Then again, as we’ve seen, invoking
+vw
+with any number of options can easily be placed in script or in a
+Makefile
+.
+The opposite approach—making
+skll
+accept options such that it doesn’t need a configuration file—is less
+straightforward.
+Summary
+In this chapter we’ve looked at modeling data.
+Through examples, I dived into three different machine learning tasks—namely dimensionality reduction, which is unsupervised, and regression and classification, which are both supervised.
+A proper machine learning tutorial is unfortunately beyond the scope of this book.
+In the next section I have a couple of recommendations in case you want to learn more about machine learning.
+This was the fourth and last step of the OSEMN model for data science that I’m covering in this book.
+The next chapter is the last intermezzo chapter and will be about leveraging the command line elsewhere.
+For Further Exploration
+The book
+Python Machine Learning
+by Sebastian Raschka and Vahid Mirjalili (Packt) offers a comprehensive overview of machine learning and how to apply it using Python.
+The later chapters of
+R for Everyone
+by Jared Lander (Addison-Wesley) explain how to accomplish various machine learning tasks using R.
+If you want to get a deeper understanding of machine learning, I highly recommend you pick up
+Pattern Recognition and Machine Learning
+by Christopher Bishop (Springer) and
+Information Theory, Inference, and Learning Algorithms
+by David MacKay  (Cambridge University Press).
+If you’re interested in learning more about the t-SNE algorithm, I recommend the original article about it:
+“Visualizing Data Using t-SNE”
+by Laurens van der Maaten and Geoffrey Hinton.
+1
+Sergey Lisitsyn, Christian Widmer, and Fernando J. Iglesias Garcia,
+tapkee
+– an Efficient Dimension Reduction Library
+, version 1.2, 2013,
+http://tapkee.lisitsyn.me
+.
+2
+John Langford,
+vw
+– Fast Machine Learning Library for Online Learning
+, version 8.10.1, 2021,
+https://vowpalwabbit.org
+.
+3
+Educational Testing Service,
+skll
+– SciKit-Learn Laboratory
+, version 2.5.0, 2021,
+https://skll.readthedocs.org
+.
+4
+Christopher Groskopf,
+csvstack
+– Stack Up the Rows from Multiple CSV Files
+, version 1.0.5, 2020,
+https://csvkit.rtfd.org
+.
+5
+Karl Pearson, “On Lines and Planes of Closest Fit to Systems of Points in Space,”
+Philosophical Magazine
+2, no. 11 (1901): 559–72,
+http://pca.narod.ru/pearson1901.pdf
+.
+6
+Laurens van der Maaten and Geoffrey Everest Hinton, “Visualizing Data Using t-SNE,”
+Journal of Machine Learning Research
+9 (2008): 2579–605,
+https://www.jmlr.org/papers/volume9/vandermaaten08a/vandermaaten08a.pdf
+.
+7
+Sergey Lisitsyn, Christian Widmer, and Fernando J. Iglesias Garcia, “Tapkee: An Efficient Dimension Reduction Library,”
+Journal of Machine Learning Research
+14 (2013): 2355–59,
+https://jmlr.org/papers/volume14/lisitsyn13a/lisitsyn13a.pdf
+.
+8
+Jeroen Janssens,
+csv2vw
+– Convert CSV to Vowpal Wabbit Format
+, version 0.1, 2021,
+https://github.com/jeroenjanssens/dsutils
+.
+9
+Torbjorn Granlund and Richard M. Stallman,
+split
+– Split a File into Pieces
+, version 8.30, 2019,
+https://www.gnu.org/software/coreutils
+.
+10
+Paul Eggert,
+shuf
+– Generate Random Permutations
+, version 8.30, 2019,
+https://www.gnu.org/software/coreutils
+.

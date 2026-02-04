@@ -4,16 +4,55 @@ Domain-specific agents that process knowledge from imported sources (epub, pdf, 
 
 ## Available Agents
 
-| Agent | Domain | Description |
-|-------|--------|-------------|
-| [platform-engineering](./platform-engineering/agent.md) | Platform Engineering | IDP, DevEx, self-service automation |
-| [azure-architecture](./azure-architecture/agent.md) | Azure Architecture | WAF, CAF, landing zones, solution design |
-| [azure-networking](./azure-networking/agent.md) | Azure Networking | VNets, hub-spoke, Private Link, hybrid connectivity |
-| [azure-security](./azure-security/agent.md) | Azure Security | Identity, Entra ID, Defender, Sentinel, Zero Trust |
-| [sbom-analysis](./sbom-analysis/agent.md) | SBOM Analysis | Docker Scout, Trivy, CVE analysis, supply chain |
-| [csharp-engineering](./csharp-engineering/agent.md) | C# Engineering | .NET, ASP.NET Core, Clean Architecture, DDD |
-| [argocd](./argocd/agent.md) | Argo CD | GitOps, Kubernetes CD, ApplicationSets |
-| [kubernetes](./kubernetes/agent.md) | Kubernetes | MicroK8s, K3s, standard K8s, AKS |
+### Cloud & Infrastructure
+
+| Agent | Domain | Description | Knowledge |
+|-------|--------|-------------|-----------|
+| [azure-architecture](./azure-architecture/agent.md) | Azure Architecture | WAF, CAF, landing zones, solution design | 25 sources |
+| [azure-networking](./azure-networking/agent.md) | Azure Networking | VNets, hub-spoke, Private Link, hybrid | 2 sources |
+| [azure-security](./azure-security/agent.md) | Azure Security | Identity, Entra ID, Defender, Zero Trust | 5 sources |
+| [cloud-architecture](./cloud-architecture/agent.md) | Cloud Architecture | AWS, GCP, OCI, multi-cloud | 6 sources |
+| [kubernetes](./kubernetes/agent.md) | Kubernetes | MicroK8s, K3s, standard K8s, AKS | 8 sources |
+| [platform-engineering](./platform-engineering/agent.md) | Platform Engineering | IDP, DevEx, self-service automation | 2 sources |
+| [argocd](./argocd/agent.md) | Argo CD | GitOps, Kubernetes CD, ApplicationSets | 1 source (web, TTL: 30d) |
+| [kratix](./kratix/agent.md) | Kratix | Platform orchestration, Promises, IDP | 1 source (web, TTL: 30d) |
+| [dagger](./dagger/agent.md) | Dagger | Programmable CI/CD, containers, SDKs | 1 source (web, TTL: 30d) |
+| [radius](./radius/agent.md) | Radius | Cloud-native apps, multi-cloud, Bicep | 1 source (web, TTL: 30d) |
+
+### Security
+
+| Agent | Domain | Description | Knowledge |
+|-------|--------|-------------|-----------|
+| [security-offensive](./security-offensive/agent.md) | Security Offensive | Pentest, ethical hacking, red team, forensics | 23 sources |
+| [cryptography](./cryptography/agent.md) | Cryptography | Encryption, protocols, PKI, secure coding | 2 sources |
+| [reverse-engineering](./reverse-engineering/agent.md) | Reverse Engineering | Binary analysis, disassembly, debugging | 5 sources |
+| [sbom-analysis](./sbom-analysis/agent.md) | SBOM Analysis | Docker Scout, Trivy, CVE analysis | - |
+
+### Programming Languages
+
+| Agent | Domain | Description | Knowledge |
+|-------|--------|-------------|-----------|
+| [programming](./programming/agent.md) | Programming | Algorithms, data structures, CS fundamentals | 2 sources |
+| [python-engineering](./python-engineering/agent.md) | Python | Python, Django, Flask, FastAPI, pandas | 3 sources |
+| [javascript-engineering](./javascript-engineering/agent.md) | JavaScript | JS, TypeScript, Node.js, React, Vue | 3 sources |
+| [go-engineering](./go-engineering/agent.md) | Go | Golang, concurrency, cloud-native | 1 source |
+| [ruby-engineering](./ruby-engineering/agent.md) | Ruby | Ruby, Rails, gems, RSpec | 2 sources |
+| [cpp-engineering](./cpp-engineering/agent.md) | C++ | Modern C++, STL, performance | 1 source |
+| [csharp-engineering](./csharp-engineering/agent.md) | C# | .NET, ASP.NET Core, Clean Architecture | 2 sources |
+
+### Data & AI
+
+| Agent | Domain | Description | Knowledge |
+|-------|--------|-------------|-----------|
+| [data-science](./data-science/agent.md) | Data Science | ML, deep learning, AI, NLP, generative AI | 16 sources |
+| [data-engineering](./data-engineering/agent.md) | Data Engineering | ETL/ELT, pipelines, lakehouse, governance | 3 sources |
+
+### Architecture & DevOps
+
+| Agent | Domain | Description | Knowledge |
+|-------|--------|-------------|-----------|
+| [software-architecture](./software-architecture/agent.md) | Software Architecture | Microservices, event-driven, DDD, system design | 14 sources |
+| [linux-administration](./linux-administration/agent.md) | Linux Administration | System admin, bash, DevOps, containers | 5 sources |
 
 ## Adding Knowledge
 

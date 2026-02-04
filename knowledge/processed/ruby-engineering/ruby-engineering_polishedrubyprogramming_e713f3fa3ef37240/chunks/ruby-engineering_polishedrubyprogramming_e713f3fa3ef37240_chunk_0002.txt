@@ -1,0 +1,4221 @@
+u have to raise it manually:
+def first_n_matching_records_starting_at_offset(n, o, &blk)
+raise ArgumentError, "block required" unless blk
+_first_n_records(number: n, offset: o, &blk)
+end
+In this section, you learned about complexity trade-offs when designing methods.
+Summary
+In this chapter, you've learned many principles of good library design. You've learned that you should focus on the user experience when designing your library. You've learned how to decide how large a library you want to design, and the trade-offs between defining many simpler methods compared to fewer, more complex methods.
+In the next chapter, you'll learn about designing extensible libraries using plugin systems.
+Questions
+What should you focus on when first designing the library?
+If you currently don't have a need for flexibility in your library, is it a good idea to increase the size of your library to add flexibility?
+What is the main issue with having many similar methods with minor differences in behavior?
+
+Chapter 8
+: Designing for Extensibility
+Most decent-sized libraries benefit from being designed upfront for extensibility. The larger the library, the more it benefits from extensible design. In this chapter, you'll learn how to make your libraries extensible, with a full discussion on implementing a plugin system to do so. You'll also learn how restricting mutability can result in more maintainable libraries that are easier to understand.
+In this chapter, we will cover the following topics:
+Using Ruby's extensibility features
+Designing plugin systems
+Understanding globally frozen, locally mutable design
+By the end of this chapter, you'll be close to an expert in plugin system design.
+Technical requirements
+In this chapter and all chapters of this book, code given in code blocks is designed to execute on Ruby 3.0. Many of the code examples will work on earlier versions of Ruby, but not all. The code for this chapter can be found here,
+https://github.com/PacktPublishing/Polished-Ruby-Programming/tree/main/Chapter08
+.
+Using Ruby's extensibility features
+One of the
+great aspects of Ruby is that even if you don't explicitly design your library for extensibility, the language itself offers ways to make the library extensible. Using the built-in language features directly makes it possible to extend a library, even if the library itself wasn't designed for extensibility.
+Ruby has many ways to modify the behavior of objects. Other than the immediate objects, which we discussed in
+Chapter 1
+,
+Getting the Most out of Core Classes
+, and objects that are frozen and cannot be modified, all Ruby objects support extension by modifying the object's singleton class.
+Commonly, libraries will define methods in classes. Let's say you are designing a Ruby library to manage books and users for physical libraries (those that lend out books such as this book). The physical library has many users, most of whom check out books on a regular basis. For each user, you want to track the books they have checked out, and for each book, you want to
+know to whom the book is checked out. We'll name this library
+Libry
+, since that is nice and short, and as of the time of writing, is not yet used:
+class Libry
+class User
+def initialize(id)
+@id = id
+@books = []
+end
+attr_accessor :books
+end
+class Book
+def initialize(name)
+@name = name
+end
+attr_accessor :checked_out_to
+end
+end
+In the previous example, you start with the basics for the library user, giving each user an ID and an array to track the books. For
+books
+, you want to track the name of the book.
+When a user checks out a book, doing so updates the book to keep track of who has checked the book out, and it updates the list of books the user has checked out:
+class Libry
+class User
+def checkout(book)
+book.checked_out_to = self
+@books << book
+end
+end
+end
+Books are
+returned to the library via a mail slot. You implement book return, or check-in, using the following:
+class Libry
+class Book
+def checkin
+checked_out_to.books.delete(self)
+@checked_out_to = nil
+end
+end
+end
+When a book is checked in, it is removed from the list of books checked out to the user, and then the book is updated to show that it is not checked out to any user.
+This is a fairly simple Ruby library design, with no features designed for extensibility. However, if you want to modify the behavior of a particular book, you can always just define a method on the
+Libry::Book
+instance as shown here:
+book = Libry::Book.new('name')
+def book.checked_out_to=(user)
+def user.checkout(book)
+nil
+end
+nil
+end
+The
+checked_out_to=
+method internally creates a singleton class for the
+book
+instance and an instance method in the singleton class. Maybe this book is cursed and checking it out will
+curse the user who checks it out.
+Libry
+doesn't support cursing users yet, but you can have the curse make it so the user cannot check out another book.
+Let's confirm that a user cannot check out a book after checking out a book that has been cursed:
+user = Libry::User.new(1)
+user.checkout(Libry::Book.new('x'))
+user.checkout(book)
+user.books.length
+# => 2
+In the preceding example, the user has checked out two books, and everything is working as expected. However, because the user checked out the cursed
+book
+instance, attempts to check out another book should fail. Let's try that:
+user.checkout(Libry::Book.new('y'))
+user.books.length
+# => 2
+The number of books the user has checked out has not increased, showing the user is now cursed.
+This approach does work, and you can extend your library to support book and user cursing this way, but it's considered a bit of a code smell to manually define singleton methods on objects, at least if you are defining the same method on multiple objects. The more idiomatic approach in Ruby is to use modules, as shown here:
+module Cursed
+module Book
+def checked_out_to=(user)
+user.extend(User)
+super
+end
+end
+module User
+def checkout(book)
+nil
+end
+end
+end
+In the
+preceding code, we first design the
+Cursed
+module that just acts as a namespace, with
+Cursed::Book
+and
+Cursed::User
+modules nested underneath for modifying the behavior of
+Libry::Book
+and
+Libry::User
+.
+Cursing a book is now as simple as extending the book with the
+Cursed::Book
+module. We can check that after a user checks out the cursed book, they can no longer check out any additional books, as follows:
+user = Libry::User.new(3)
+user.checkout(Libry::Book.new('x'))
+book = Libry::Book.new('name')
+book.extend(Cursed::Book)
+user.checkout(book)
+user.books.length
+# => 2
+user.checkout(Libry::Book.new('y'))
+user.books.length
+# => 2
+As you can see, Ruby
+offers the ability to easily extend classes and objects, even if the classes were not designed with extensibility in mind. However,
+what if you design the classes with extensibility in mind? Can you make the extensibility easier?
+The answer is yes, you can, and you'll learn how to do this in the next section on designing plugin systems.
+Designing plugin systems
+Having a defined
+plugin system for a library can be a huge advantage. Libraries that do not have a plugin system usually handle extensions to the library in an ad hoc manner that differs per extension. With a plugin system, extensions to the library operate in a uniform manner for each extension. This has the following advantages for everyone involved:
+The library creator can create the plugin system that works best for their library, allowing extensibility in the parts that should be extensible, and not allowing extensibility in parts that do not need to be extensible.
+The plugin creator can review the plugin system to determine how the library should be extended, such as which extension points exist. They probably also have many other examples of extensions to the library that they can review, which makes the process of building their plugin much easier.
+The library user knows how to use the plugin system for all of the library's extensions, they do not have to review the documentation for each extension in order to determine how to properly use the extension.
+Probably the biggest advantage of designing a plugin system for a library is that the library itself can be built out of plugins. Only the core part of the library that is essential needs to be loaded by default. All other optional features can be built as optional plugins to the library that the library user can choose to load. This approach to building libraries has important advantages.
+The first advantage is
+that in most cases, the core of the library turns out to be a small part of the library, and only loading that core by default makes things significantly simpler. For a new user using a monolithic library for the first time, even knowing where to focus in terms of using the library can be a daunting proposition. Documentation can definitely help in such cases, but there is simply so much more code available that the new user is often overwhelmed. A library based on a plugin system, even if the library itself is quite large, will generally have a small enough core that a new user can read through the core of the library within a few hours and have a good idea about how it works.
+The second advantage is that, at least by default, libraries designed around plugin systems tend to be significantly faster. The startup time for libraries that only load the core of the library by default is often significantly faster than startup times for monolithic libraries. Large monolithic libraries can take seconds to load, whereas large libraries designed around plugin systems often load in fractions of a second. Additionally, it's not just startup times that are faster, but performance is often significantly improved. Very few users use more than a small portion of a large library. However, a large monolithic library has to have each feature assume that all other features may be in use and account for them. With a library designed around a plugin system, the core doesn't need to assume any plugins are in use and can be written to be as fast as possible. Features that may slow the core down can be implemented as separate plugins, each of which only overrides the part of the core that it needs in order to function.
+That leads to the next advantage. By moving each separate feature into its own plugin, each user only has to load the plugins they need for their application, and doesn't have to pay the startup cost of loading any of the other plugins, or the runtime cost of the code related to the other plugins. This is a good basic principle of library design, which is to only make the user pay for the features they are using, and not make them pay for features they are not using.
+Hopefully this section has
+persuaded you to consider designing a plugin system in a future library. In the next section, you'll learn how to design a plugin system that delivers these advantages.
+Designing a basic plugin system
+The first thing you need to
+decide when designing a plugin system is which objects in your library you would like to be extensible. In the previous example, we were managing a library with books (
+Libry::Book
+) and users (
+Libry::User
+). Let's redesign
+Libry
+to use a plugin system.
+The first decision point when designing a plugin system is to decide whether you want to use an include-based or prepend-based plugin system. With an include-based plugin system, all methods are in modules that are included in the classes in the library, and the classes themselves are empty. With a prepend-based plugin system, methods are defined inside classes, and plugins contain modules that are prepended to the classes.
+In general, an include-based plugin system is better. With an include-based system, a user of the library can add normal instance methods to the class and call
+super
+to get the default behavior. With a prepend-based system, methods a user defines directly in the class may have no effect, and that can be quite confusing to users. With a prepend-based system, users must prepend a module to the class with the method they want to define after they have already loaded all of the system plugins, or otherwise loading a plugin can override the user's custom methods. The rest of this section will focus on include-based plugin systems.
+With an include-based plugin system, the basics of
+Libry
+may look something like this, with empty
+Libry::Book
+and
+Libry::User
+classes:
+class Libry
+class Book; end
+class User; end
+The core of the library will itself be a plugin. Usually, you will have a defined namespace for the plugins, and each plugin will be a module inside that module. So, we'll have a
+Libry::Plugins
+module to hold plugins, and the
+Libry::Plugins::Core
+module for the core plugin:
+module Plugins
+module Core
+In the case of
+Libry
+, we probably
+want to allow plugins to modify both
+Libry::Book
+and
+Libry::User
+. We'll put the methods for
+Libry::Book
+in a
+BookMethods
+module:
+module BookMethods
+attr_accessor :checked_out_to
+def initialize(name)
+@name = name
+end
+def checkin
+checked_out_to.books.delete(self)
+@checked_out_to = nil
+end
+end
+We'll put the methods for
+Libry::User
+in a
+UserMethods
+module:
+module UserMethods
+attr_accessor :books
+def initialize(id)
+@id = id
+@books = []
+end
+def checkout(book)
+book.checked_out_to = self
+@books << book
+end
+end
+end
+end
+Now, all we need is a
+method that loads plugins to wire everything up. We'll add the
+Libry.plugin
+method for this:
+def self.plugin(mod)
+if defined?(mod::BookMethods)
+Book.include(mod::BookMethods)
+end
+if defined?(mod::UserMethods)
+User.include(mod::UserMethods)
+end
+end
+The
+plugin
+method will accept a plugin module and include the plugin's
+BookMethods
+module in
+Libry::Book
+and the plugin's
+UserMethods
+module in
+Libry::User
+, assuming the plugin defines those modules. Finally, you can load the core plugin into the library, so that the core behavior is available by default:
+plugin(Plugins::Core)
+end
+Then, you can check that the plugin-based system works as you expect:
+book = Libry::Book.new('b')
+user = Libry::User.new 1
+user.books.size
+# => 0
+user.checkout(book)
+user.books.size
+# => 1
+book.checkin
+user.books.size
+# => 0
+If you haven't worked
+with a plugin system before, it may look like this added complexity instead of removed complexity. If you only have a single plugin, that will always be the case. There is some cognitive overhead inherent in a plugin system, and in general, you should only implement a plugin system in cases where the benefit of the plugin system is worth the extra cognitive overhead. Most libraries are small enough not to need a plugin system, after all.
+What's the advantage of this plugin system?
+Well, say you want to offer a book cursing feature, but most libraries don't need or want to support book cursing. You can design book cursing as a separate plugin:
+class Libry
+module Plugins
+module Cursing
+module BookMethods
+def curse!
+@cursed = true
+end
+def checked_out_to=(user)
+user.curse! if @cursed
+super
+end
+end
+In the
+previous example, we added a
+curse!
+method that marks the book as cursed. We also overrode the
+checked_out_to=
+method to curse the user if the book is cursed.
+For the user side of book cursing, if the
+curse!
+method is called on a user, they are cursed and no longer able to check out a book:
+module UserMethods
+def curse!
+@cursed = true
+end
+def checkout(book)
+super unless @cursed
+end
+end
+end
+end
+end
+Users of
+Libry
+that don't want to support book cursing wouldn't load this plugin. For users of
+Libry
+that want to support this plugin, they can load it:
+Libry.plugin(Libry::Plugins::Cursing)
+After loading the plugin, you can check whether book cursing works:
+book = Libry::Book.new('a')
+cursed_book = Libry::Book.new('b')
+cursed_book.curse!
+user = Libry::User.new 2
+user.checkout(cursed_book)
+user.books.size
+# => 1
+user.checkout(book)
+user.books.size
+# => 1
+In the preceding code, after a
+user checks out a cursed book, we can see that the user cannot check out additional books.
+The value proposition of the plugin system from the user perspective is high. With a single line of code:
+Libry.plugin(Libry::Plugins::Cursing)
+The user has loaded the feature. They don't need to worry about which modules need to be included in which objects. They just need to load the plugin with one line of code, and the plugin system takes care of the rest.
+For the plugin author, the advantages are just as high. They don't need to monkey patch a class to alias and modify a method or prepend a module to a class and risk overriding the user's code. They can write regular instance methods as needed, just inside an appropriately named module. If they are overriding an existing method, they can call
+super
+to get the default
+behavior of the method. Alternatively, if they want to explicitly not allow the default behavior, as in the example of a cursed user attempting to check out a book, they can just avoid calling
+super
+in that case.
+Handling changes to classes
+The plugin system designed in the previous section works well, but it is simpler than one designed for production use. Thankfully, it doesn't take much additional work to build on the existing design and add all the features needed for a large library.
+What if you want to add a plugin to keep track of all books or users?
+This isn't related to a particular
+Libry::Book
+or
+Libry::User
+instance, it's really a class-level concern. For
+tracking class-level information, you wouldn't want to include a module in
+Libry::Book
+and
+Libry::User
+, you would want to extend the
+Libry::Book
+and
+Libry::User
+classes with a module for that behavior.
+Let's start by modifying the
+Libry.plugin
+method to support extending the classes with a module in addition to including a module in the classes. The start of the method remains the same. Then you add the support for extending the classes if the plugin includes the appropriately named modules:
+class Libry
+def self.plugin(mod)
+# same as before
+if defined?(mod::BookClassMethods)
+Book.extend(mod::BookClassMethods)
+end
+if defined?(mod::UserClassMethods)
+User.extend(mod::UserClassMethods)
+end
+end
+end
+This checks whether the plugin module contains the
+BookClassMethods
+or
+UserClassMethods
+modules for defining class-level behavior, and if so, extends the appropriate classes.
+That was pretty easy. It's
+almost the same code in both cases, just changing from
+include
+to
+extend
+and using a different module name. Next, you can add a plugin that will track created books and users, named
+Tracking
+. The good thing about this tracking support is that it is fairly generic, since you aren't tracking anything specific to books or users, just that they were created:
+module Libry::Plugins::Tracking
+module TrackingMethods
+attr_reader :tracked
+def new(*)
+obj = super
+(@tracked ||= []) << obj
+obj
+end
+end
+BookClassMethods = TrackingMethods
+UserClassMethods = TrackingMethods
+end
+This adds a
+TrackingMethods
+module to the
+Tracking
+plugin. It adds an attribute reader named
+tracked
+and overrides
+new
+to call
+super
+. It then takes the created instance and adds it to the array of tracked objects, initializing the
+@tracked
+instance variable to the empty array if it doesn't already exist. Then, it aliases the
+TrackingMethods
+module to
+BookClassMethods
+and
+UserClassMethods
+. This way, the
+Libry.plugin
+call will add this tracking support to books and users.
+Then you can test that it works:
+Libry.plugin(Libry::Plugins::Tracking)
+Libry::Book.new 'a'
+Libry::Book.new 'b'
+Libry::Book.tracked.size
+# => 2
+Libry::User.tracked.size
+# NoMethodError
+Well, that
+worked fine for books, but not users, as you can see that checking the number of tracked users raised
+NoMethodError
+.
+Why is that?
+This is because you hadn't created a user yet, so the tracking attribute for the
+Libry::User
+class hadn't been initialized to the empty array yet. You'll learn how to fix this issue in the next section.
+Plugin modifications to classes
+In order to fix the
+previous issue, the plugin system needs to be able to run code after the plugin modules have been loaded into the appropriate classes. One way to do that is to have the
+Libry.plugin
+method call a singleton method on the plugin module. Since this is used for running code after loading the plugin, you can call it
+after_load
+. You can first update the
+Libry.plugin
+method to support this:
+class Libry
+def self.plugin(mod)
+# same as before
+mod.after_load if mod.respond_to?(:after_load)
+end
+end
+Then you can modify your
+Tracking
+plugin to support the
+after_load
+method, setting the instance variable in each class to the empty array:
+module Libry::Plugins::Tracking
+def self.after_load
+[Libry::Book, Libry::User].each do |klass|
+klass.instance_exec{@tracked ||= []}
+end
+end
+This makes the
+definition of the
+new
+method easier, since you can assume the
+@tracked
+instance variable is already set:
+module TrackingMethods
+def new(*)
+obj = super
+@tracked << obj
+obj
+end
+end
+end
+Then you can test that you get the correct results:
+Libry.plugin(Libry::Plugins::Tracking)
+Libry::Book.new 'a'
+Libry::Book.new 'b'
+Libry::Book.tracked.size
+# => 2  # or 4
+Libry::User.tracked.size
+# => 0
+Success! You get
+0
+as the size of the tracked users, instead of
+NoMethodError
+. You'll either get
+2
+or
+4
+for the books, depending on whether you were still in the same Ruby process as when you ran the previous example. This is because the
+after_load
+method did not override an existing array of tracked objects. You should always design your plugin
+after_load
+hook to be idempotent if possible.
+Maybe after
+working on this, you find out your
+Cursing
+plugin is a hit, but now you have requests for an
+AutoCurse
+plugin that will automatically curse every newly created book after the plugin is loaded, and will curse all books currently possessed by the user when the user is cursed. The plugin itself seems easy enough to design:
+module Libry::Plugins::AutoCurse
+module BookMethods
+def initialize(*)
+super
+curse!
+end
+end
+module UserMethods
+def curse!
+super
+books.each(&:curse!)
+end
+end
+end
+In the previous example, you curse the book in
+initialize
+, since
+initialize
+is called for each newly created book. You can override the
+curse!
+method for users to call
+super
+for the default behavior, and then call
+curse!
+on each book they possess. Let's try using this plugin:
+Libry.plugin(Libry::Plugins::AutoCurse)
+Libry::Book.new('a')
+# NoMethodError: undefined method `curse!'
+Assuming you are
+running this as a process that didn't already load the
+Cursing
+plugin, you end up with
+NoMethodError
+, because when you create a book, it calls
+curse!
+on the book, but the
+Cursing
+plugin hasn't been loaded, so the
+curse!
+method is not defined on
+Libry::Book
+. Here you have a situation where the
+AutoCurse
+plugin depends on the
+Cursing
+plugin.
+How do you fix this?
+The best to fix it is to add support for plugin dependencies to the plugin system.
+Supporting plugin dependencies
+The best way to
+support plugin dependencies is to make sure the dependencies of the plugin are loaded before the plugin (loading the dependencies after the plugin will cause load order issues). One way for you to fix it is to modify the
+Libry.plugin
+method to support a
+before_load
+hook in addition to the
+after_load
+hook:
+class Libry
+def self.plugin(mod)
+mod.before_load if mod.respond_to?(:before_load)
+# same as before
+end
+end
+Then you can define a
+before_load
+method in your
+AutoCurse
+plugin:
+module Libry::Plugins::AutoCurse
+def self.before_load
+Libry.plugin(Libry::Plugins::Cursing)
+end
+end
+Then you
+can test that cursing works correctly without explicitly loading the
+Cursing
+plugin before the
+AutoCurse
+plugin:
+user = Libry::User.new 1
+book = Libry::Book.new 'a'
+user.checkout(book)
+Libry.plugin(Libry::Plugins::AutoCurse)
+user.curse!
+This plugin system is getting closer to being production-ready! The next change that would be helpful is to make it easier for the user to load plugins.
+Making plugin loading easier
+As the plugin system is
+currently designed, to load a plugin, you have to manually load the plugin code, often by requiring a file, and then pass the plugin module object to the
+Libry.plugin
+method. In general, it's easier on users if they can just pass a symbol specifying the plugin to load and have the plugin system find the file containing the plugin, load the file, and then find the plugin module and use that.
+Implementing the aforementioned is a multi-step process:
+The first step is to offer a way to register plugins by symbol. This you can do using a hash constant, and a singleton method for registering plugins:
+class Libry
+PLUGINS = {}
+def self.register_plugin(symbol, mod)
+PLUGINS[symbol] = mod
+end
+end
+The second step is registering plugins, which is usually done inside the definition of the plugin. To register a
+Libry
+plugin, such as
+AutoCurse
+or
+Cursing
+, the plugin needs to call
+Libry.register_plugin
+with the first argument being the symbol to use, and the second argument being the plugin module. For example, the
+AutoCurse
+plugin would have code similar to the one shown here (the
+Cursing
+and
+Tracking
+plugins would have something similar, using
+:cursing
+and
+:tracking
+as the symbol):
+module Libry::Plugins::AutoCurse
+Libry.register_plugin(:auto_curse, self)
+end
+For the third step, you would store this plugin in a specific place under the Ruby library path. So, if the
+lib
+directory is in the Ruby load path, you would place the
+Libry::Plugins::AutoCurse
+module definition in
+lib/libry/plugins/auto_curse.rb
+.
+The final step is
+modifying the
+Libry.plugin
+method to support a symbol being passed. If a symbol is passed instead of a module, the related file under
+libry/plugins
+in the Ruby library path is required. After requiring the file, the symbol is used to look into the
+Libry::PLUGINS
+hash to find the related module:
+class Libry
+def self.plugin(mod)
+if mod.is_a?(Symbol)
+require "libry/plugins/#{mod}"
+mod = PLUGINS.fetch(mod)
+end
+# same as before
+end
+end
+After all of those previous steps, users of
+Libry
+can now load the
+AutoCurse
+plugin more easily:
+Libry.plugin(:auto_curse)
+Allowing loading of plugins using symbols makes things much easier on the user, since the user no longer needs to worry about loading the plugin file manually, and doesn't have to worry about passing the full plugin name to the
+plugin
+method.
+So far, we've been assuming that our plugin system only deals with a single class,
+Libry
+. However, in many cases, it is helpful for plugin systems to deal with subclasses. We'll learn how to do that in the next section.
+Handling subclasses in plugin systems
+What if you want to make a subclass of
+Libry
+,
+and want to be able to load plugins into the subclass, without affecting
+Libry
+itself?
+Since plugins affect
+Libry::Book
+and
+Libry::User
+, you cannot do this
+currently. So, the first order of business is to make sure that subclasses of
+Libry
+use their own subclasses of
+Libry::Book
+and
+Libry::User
+. You can override the
+Libry.inherited
+method to implement that support:
+class Libry
+def self.inherited(subclass)
+subclass.const_set(:Book, Class.new(self::Book))
+subclass.const_set(:User, Class.new(self::User))
+end
+end
+Then you need to modify the
+Libry.plugin
+method to only modify constants under the receiver. The first part of the method focused on loading the plugin from the file system remains the same:
+class Libry
+def self.plugin(mod)
+if mod.is_a?(Symbol)
+require "libry/plugins/#{mod}"
+mod = PLUGINS.fetch(mod)
+end
+The
+before_load
+method needs to be modified to accept the subclass loading the plugin as an argument:
+mod.before_load(self) if mod.respond_to?(:before_load)
+The references to the
+Book
+and
+User
+constants in the
+plugin
+method need to be qualified to the receiver of the method (
+self
+), instead of found using the normal constant lookup. This is important, because without the
+self::
+qualification, Ruby's constant lookup will always result in an unqualified reference to
+Book
+meaning
+Libry::Book
+, not the
+Book
+constant for the
+Libry
+subclass (there's a similar issue for
+User
+):
+if defined?(mod::BookMethods)
+self::Book.include(mod::BookMethods)
+end
+if defined?(mod::UserMethods)
+self::User.include(mod::UserMethods)
+end
+Handling the
+plugin modules that extend the classes works similarly:
+if defined?(mod::BookClassMethods)
+self::Book.extend(mod::BookClassMethods)
+end
+if defined?(mod::UserClassMethods)
+self::User.extend(mod::UserClassMethods)
+end
+The
+after_load
+method also needs to be modified to accept the subclass loading the plugin as an argument:
+mod.after_load(self) if mod.respond_to?(:after_load)
+end
+end
+With this new approach, the
+Tracking
+plugin's
+after_load
+method would need to be modified to take the subclass as an argument and use the subclass to qualify constant references:
+module Libry::Plugins::Tracking
+def self.after_load(libry)
+[libry::Book, libry::User].each do |klass|
+klass.instance_exec{@tracked ||= []}
+end
+end
+The
+Tracking
+plugin also needs to make sure that it handles class instance variables for subclasses. Options here are either copying the values from the parent class into the subclass or setting initialized values in the subclass:
+module TrackingMethods
+def inherited(subclass)
+subclass.instance_variable_set(:@tracked, [])
+end
+end
+end
+As shown in the
+previous example, it's probably best for subclasses to have their own list of tracked books, so you can set the list of tracked objects to the empty array.
+You also need to modify the
+before_load
+method in the
+AutoCurse
+plugin to take the subclass, and only load the
+Cursing
+plugin into that subclass:
+module Libry::Plugins::AutoCurse
+def self.before_load(libry)
+libry.plugin(:cursing)
+end
+end
+You can now test that loading the plugin into a subclass works:
+libry = Class.new(Libry)
+user = libry::User.new 1
+book = libry::Book.new 'a'
+user.checkout(book)
+libry.plugin(:auto_curse)
+user.curse!
+You can
+also test that this doesn't affect the superclass:
+user = Libry::User.new 1
+user.respond_to?(:curse!)
+# => false
+We have almost completed the design of the plugin system. One final useful feature for the plugin system is to allow for configuration.
+Configuring plugins
+While some
+plugins do not require any configuration, many plugins need to be configured with user-specific values in order to be useful. The easiest way to allow for plugin configuration is to allow the user to pass arguments when loading the plugin. For example, maybe you want to allow the
+Tracking
+plugin to accept a block that is yielded each tracked object. You could use this to automatically check out a book to each user when the user is created.
+To implement this feature, you can have the
+Libry.plugin
+method accept arguments and pass them to the
+before_load
+and
+after_load
+methods:
+class Libry
+def self.plugin(mod, ...)
+# plugin loading code
+if mod.respond_to?(:before_load)
+mod.before_load(self, ...)
+end
+# include/extend code
+if mod.respond_to?(:after_load)
+mod.after_load(self, ...)
+end
+nil
+end
+end
+In your
+Tracking
+plugin, you
+can update the
+after_load
+method to save a passed block:
+module Libry::Plugins::Tracking
+def self.after_load(libry, &block)
+[libry::Book, libry::User].each do |klass|
+klass.instance_exec do
+@tracked ||= []
+@callback = block
+end
+end
+end
+You'll also want to set the callback when subclassing
+Book
+and
+User
+:
+module TrackingMethods
+def inherited(subclass)
+callback = @callback
+subclass.instance_exec do
+@tracked = []
+@callback = callback
+end
+end
+Additionally, you'll
+want to make sure that the class
+new
+method calls the block used when loading the plugin, if a block was passed when loading the plugin:
+def new(*)
+obj = super
+@tracked << obj
+@callback&.(obj)
+obj
+end
+end
+end
+Now you can use this feature to automatically check out a book to users that you know they will cherish forever:
+book = Libry::Book.new('Polished Ruby Programming')
+Libry.plugin(:tracking) do |obj|
+if obj.is_a?(Libry::User)
+obj.checkout(book)
+end
+end
+After loading the
+plugin with this block, you can test to see whether it works. Only at the end here does it look like it would have been useful to add
+attr_reader
+for the book's name:
+user = Libry::User.new 1
+user.books.map do |book|
+book.instance_variable_get(:@name)
+end
+# => ["Polished Ruby Programming"]
+In this section, you learned all about designing useful plugin systems for libraries. In the next section, you'll learn about globally frozen, locally mutable design, and how to achieve it in Ruby.
+Understanding globally frozen, locally mutable design
+You learned in
+Chapter 3
+,
+Proper Variable Usage
+, about the benefits of frozen objects with an
+unfrozen internal cache. It is usually a good idea to freeze an object
+you do not plan to modify. This principle extends not just to regular objects, but to classes and modules as well.
+In general, when you first load a library, you don't want it to be frozen, because then you cannot modify it. When
+Ruby starts up, it doesn't have any frozen classes; it allows the programmer to modify every class. This flexibility is very important during application setup.
+During application setup, before you start accepting user input, you generally want to have complete control to modify any part of the program.
+However, in general, after application setup, this flexibility is unnecessary and can be actively harmful. In most cases, you don't want the classes or modules in your application to be modified at runtime. Modifying instances of those classes may be fine if the class does not use frozen instances, but you generally don't want your application code adding or removing methods from classes at runtime, except possibly to define singleton methods on instances.
+As a user of a library, it's a good idea to freeze classes after you have completed the setup. Using the
+Libry
+example from the previous section, that could be as simple as freezing after setup:
+class MyLibry < Libry
+# application setup/plugin loading
+plugin(:tracking)
+Book.freeze
+User.freeze
+freeze
+end
+However, for libraries
+that are not prepared for this, doing so can break the library. If you want your library to be compatible with globally frozen, locally mutable design, you
+need to analyze all of the classes in your
+library and see how they should handle
+freeze
+. If the class doesn't have any constants or instance variables, it probably doesn't need changes. However, for
+every constant and instance variable, you need to analyze how it should be handled if the class is frozen.
+This also extends to plugins that add instance variables to the class, such as the
+Tracking
+plugin. The
+Tracking
+plugin adds
+@tracked
+and
+@callback
+instance variables to the related
+MyLibry::Book
+or
+MyLibry::User
+constants. In this case,
+@tracked
+is an array of all instances created. If you freeze the
+@tracked
+array, you will no longer be able to create new instances of
+MyLibry::Book
+or
+MyLibry::User
+. That's probably not what you want, so you probably shouldn't freeze it.
+@callback
+is either
+nil
+or a
+Proc
+instance, and in either case, it's already immutable, so it doesn't need to be frozen either. After performing the analysis, it looks like the
+Tracking
+plugin doesn't need changes after all. That's good.
+However, there may be good reasons to freeze a
+MyLibry::Book
+or
+MyLibry::User
+instance, but freezing those instances does not work correctly. This is because a frozen user can still check out a book:
+user = MyLibry::User.new(1)
+user.freeze
+user.checkout(MyLibry::Book.new('b'))
+That should probably fail
+because it modifies the books the user has checked out. Make sure to define
+freeze
+methods appropriately in your classes, and if you are
+building plugins and the plugins add instance
+variables, they should probably also define a
+freeze
+method to
+handle the instance variables appropriately, then call
+super
+to get the default behavior.
+This issue doesn't just affect your library classes, it also potentially affects any class or module in Ruby. Let's say you are using a library that uses
+autoload
+:
+class Foo
+autoload :Object, 'foo/object'
+end
+None of your code references
+Foo::Object
+, except this rarely used case in an error condition, which unfortunately you don't have covering tests for. Also, unfortunately,
+Foo::Object
+is itself not tested well by the library author, because almost nobody uses it. The
+foo/object.rb
+file it loads looks like this:
+Foo.class_eval do
+class Object
+def initialize(object)
+@object = object
+end
+def method_missing(meth, ...)
+@object.send(:run, meth, ...)
+end
+def respond_to_missing?(meth)
+true
+end
+end
+end
+Unfortunately, when
+Foo::Object
+is referenced, the autoload triggers,
+foo/object.rb
+is loaded, a few warnings are printed, and then everything stops. The intent of the code
+was to define a
+Foo::Object
+class, but because
+Foo.class_eval
+doesn't change the current module nesting, the
+class Object
+definition inside
+modifies the
+::Object
+class. Modifying
+Object#initialize
+,
+Object#method_missing
+, or
+Object#respond_to_missing
+can cause an infinite loop, which is why everything stops.
+One approach to
+handling this case is to freeze all core classes. That way, if
+someone makes a mistake like this during application runtime,
+FrozenError
+will be raised, which is certainly better than an infinite loop. You can do this manually:
+Object.freeze
+Kernel.freeze
+# ...
+However, there are a lot of core classes and modules (over 300), at least if you are using Rubygems, so this approach is probably not desired. Thankfully, there is a gem named
+refrigerator
+that handles freezing all core classes, and you can use that:
+require 'refrigerator'
+Refrigerator.freeze_core
+Using
+refrigerator
+in your application may be difficult if you are using libraries that modify the core classes at runtime. Thankfully,
+refrigerator
+has support for skipping those core classes, assuming you really do need to modify them.
+Using globally frozen, locally mutable design can improve the robustness of your library, especially in cases where your library will be used by multiple threads in the same process.
+Summary
+In this chapter, you've learned how to design libraries for extensibility, and you are probably close to an expert on plugin system design. You've also learned about globally frozen, locally mutable design, and how to properly freeze your libraries and runtime environment. With your knowledge of these topics, you are now much better able to design flexible and robust libraries.
+In the next chapter, you'll learn about metaprogramming, and when an appropriate time to use it is.
+Questions
+What is the idiomatic way to add behavior to an individual object in Ruby?
+If you have a medium or large library, what's the advantage of designing a plugin system for it?
+What is the advantage of freezing the core classes when running a Ruby application?
+
+Chapter 9
+: Metaprogramming and When to Use It
+Ruby has powerful metaprogramming capabilities, which is a double-edged sword. In the hands of a principled programmer, metaprogramming capabilities result in simpler, less verbose code. However, when misused, metaprogramming can result in code that is difficult to work with and hard to debug.
+In this chapter, you'll learn about principles of responsible metaprogramming, so you can put metaprogramming to appropriate use in your libraries.
+We will cover the following topics:
+Learning the pros and cons of abstraction
+Eliminating redundancy
+Understanding different ways of metaprogramming methods
+Using
+method_missing
+judiciously
+By the end of this chapter, you'll have a better understanding of Ruby metaprogramming and how best to take advantage of it.
+Technical requirements
+In this chapter and all chapters of this book, code given in code blocks is designed to execute on Ruby 3.0. Many of the code examples will work on earlier versions of Ruby, but not all. The code for this chapter is available online at
+https://github.com/PacktPublishing/Polished-Ruby-Programming/tree/main/Chapter09
+.
+Learning the pros and cons of abstraction
+Unlike in many other programming languages, metaprogramming in Ruby isn't that much different than regular programming. Many other programming languages implement
+metaprogramming with a preprocessor before compilation or a macro processor during compilation, and there are things you can do in the metaprogramming environment that you cannot do in the runtime environment and vice versa. Thankfully, Ruby has no such restrictions on its metaprogramming. You use the same syntax for metaprogramming that you use for regular programming, and you can do metaprogramming at any time.
+The main difference between programming and metaprogramming in Ruby is conceptual. Conceptually in Ruby, metaprogramming operates at a higher realm of abstraction than regular programming. If regular programming in Ruby uses classes to create objects and modify the data in those objects, metaprogramming in Ruby creates new classes and modifies the methods in those classes. Looking at metaprogramming this way, you could say that simply defining a class or a method is metaprogramming. Refer to the following code:
+class A
+def b
+nil
+end
+end
+However, normal class definition is not really thought of as metaprogramming, even though it is equivalent to something like the following, which would generally be considered metaprogramming:
+def_class = ->(sym, method_hash) do
+c = Object.const_set(sym, Class.new)
+method_hash.each do |meth, val|
+c.define_method(meth){val}
+end
+end
+def_class.call(:A, b: nil)
+So why is a normal class definition not considering metaprogramming, when the equivalent approach using
+Class.new
+,
+const_set
+, and
+define_method
+is considered metaprogramming? The main difference between the two cases is that one is a concrete approach and one is an abstract approach. With a normal class definition, inside the class, you know exactly what class you are dealing with, and inside the method, you know what method you are defining. With the
+def_class
+approach, inside the lambda, you do not know what class is being defined, since that depends on the arguments. You don't know what methods you are defining.
+In the example,
+method_hash
+is a hash, but it could be any object that responds to
+each
+, and that could involve reading a file, or a network call, or getting input from the user.
+Abstraction has
+both advantages and disadvantages. Consider a class definition such as the following:
+class MetaStruct
+def self.method_missing(meth, arg=nil, &block)
+block ||= proc{arg}
+define_method(meth, &block)
+end
+end
+This use of
+method_missing
+can make defining simple methods less verbose, shown as follows:
+class A < MetaStruct
+b
+foo 1
+bar{3.times.map{foo}}
+end
+A.new.b
+# => nil
+A.new.foo
+# => 1
+A.new.bar
+# => [1, 1, 1]
+This programing does
+DRY
+(short for
+Don't Repeat Yourself
+) up the method definitions, but at what cost? Calling a method on the class that the class does not respond to now results in a
+method being defined instead of
+NoMethodError
+being raised, which is almost assuredly going to be the source of confusing bugs. This is an abstraction, but it's an abstraction that adds negative value to your code.
+While there
+are negative uses of abstractions, there are many positive uses of abstractions. For example, if you want to write a method caching abstraction, you could have a module named
+Memomer
+that prepends a module to a class that extends
+Memomer
+, and keeps track of that module. Refer to the following code:
+module Memomer
+def self.extended(klass)
+mod = Module.new
+klass.prepend(mod)
+klass.instance_variable_set(:@memomer_mod, mod)
+end
+The module can have a
+memoize
+method that will define a method in the module that is prepended to the class. The
+memoize
+method will see whether a cached value is already set, and return it if so. If not, it will call
+super
+to get the value, and cache it, as shown in the following code block:
+def memoize(arg)
+iv = :"@memomer_#{arg}"
+@memomer_mod.define_method(arg) do
+if instance_variable_defined?(iv)
+return instance_variable_get(iv)
+end
+v = super()
+instance_variable_set(iv, v)
+v
+end
+end
+end
+You can
+also use this with your previous class of
+A
+, as follows:
+class A < MetaStruct
+extend Memomer
+memoize :bar
+end
+This will cache calls to
+bar
+, even if the definition of
+foo
+changes:
+a = A.new
+a.bar
+# => [1, 1, 1]
+A.foo 2
+A.new.bar
+# => [2, 2, 2]
+a.bar
+# => [1, 1, 1]
+As you can see, there are both good and bad uses of abstraction, and you can use both in the same class. The goal is to be able to see the difference between two cases, and in the real world, the difference may not be as obvious.
+In this section, you learned
+about the pros and cons of implementing abstractions in your Ruby programs using metaprogramming. In the next section, you'll learn about one of the best reasons to use metaprogramming in Ruby, which is to eliminate redundant code.
+Eliminating redundancy
+One of the best reasons to use metaprogramming is to eliminate redundancy. No Ruby programmer
+wants to write the same or similar code over and over, after all, unless they are getting paid by the line. Imagine programming in Ruby without
+attr_accessor
+, as shown in the following example:
+class Foo
+def bar
+@bar
+end
+def bar=(v)
+@bar = v
+end
+def baz
+@baz
+end
+def baz=(v)
+@baz = v
+end
+end
+It would definitely suck to have to define accessor methods this verbosely. It's hard to believe, but there are programming languages where you still have to do that, even some that were
+originally released after Ruby. Ruby realizes that no programmer likes that sort of repetitive coding, and being designed around programmer happiness, Ruby includes
+attr_accessor
+and similar methods so you can just do the following:
+class Foo
+attr_accessor :bar, :baz
+end
+Pretty much anytime you see yourself writing repetitive methods, see whether there is a way you can eliminate the redundancy via metaprogramming. For example, imagine you were storing data in an internal hash like this:
+class FooStruct
+def initialize(**kwargs)
+@values = kwargs
+end
+And you wanted to write accessors that read and write common data to the hash:
+def bar
+@values[:bar]
+end
+def bar=(v)
+@values[:bar] = v
+end
+def baz
+@values[:baz]
+end
+def baz=(v)
+@values[:baz] = v
+end
+end
+Since all of these accessor methods are the same, try to metaprogram them. If this is the only place you are
+using methods like this in your library or application, it's best to metaprogram directly in the class to avoid unnecessary indirection and keep the definitions local to the class (keeping the same
+initialize
+method as defined previously):
+class FooStruct
+%i[bar baz].each do |field|
+define_method(field) do
+@values[field]
+end
+define_method(:"#{field}=") do |v|
+@values[field] = v
+end
+end
+end
+You can then test that this works correctly, as follows:
+foo = FooStruct.new
+foo.bar = 1
+foo.baz = 2
+foo.bar
+# => 1
+foo.baz
+# => 2
+However, if you plan on needing methods like these in multiple classes, it's best to move the metaprogramming
+code into a module. Maybe different classes need different instance variables, so you need to accept the instance variable to use as an argument:
+module HashAccessor
+def hash_accessor(iv, *fields)
+fields.each do |field|
+define_method(field) do
+instance_variable_get(iv)[field]
+end
+define_method(:"#{field}=") do |v|
+instance_variable_get(iv)[field] = v
+end
+end
+end
+end
+Then you can extend your class with the module, and then define the methods similarly to how
+attr_accessor
+works (again, using the
+initialize
+method for
+FooStruct
+given previously):
+class FooStruct
+extend HashAccessor
+hash_accessor :@values, :bar, :baz
+end
+You can
+then test that this works correctly:
+foo = FooStruct.new
+foo.bar = 1
+foo.baz = 2
+foo.bar
+# => 1
+foo.baz
+# => 2
+The advantage of extracting this feature is that you can use it in multiple places. Let's say you are writing a
+Bar
+class that keeps its data in a
+class
+instance variable, as follows:
+class Bar
+@options = {:foo=>1, :baz=>2}
+end
+Let's say you want to add class-level accessors for
+Bar
+, so that you can change the values of the
+:foo
+and
+:baz
+options. Can you use your
+HashAccessor
+module to do that? Yes, you can. However, if you use the same approach as you did for
+FooStruct
+, it won't work correctly. Refer to the following code:
+class Bar
+extend HashAccessor
+hash_accessor :@options, :foo, :baz
+end
+Bar.foo
+# NoMethodError
+This is because
+hash_accessor
+defines instance methods in the receiver. In this case, you don't
+want to define instance methods in
+Bar
+, you want to define methods you can call on
+Bar
+itself (class/singleton methods). Therefore, you need to operate on the singleton class of
+Bar
+:
+class Bar
+singleton_class.extend HashAccessor
+singleton_class.hash_accessor :@options, :foo, :baz
+end
+Then you can test that this works:
+Bar.foo = 1
+Bar.baz = 2
+Bar.foo
+# => 1
+Bar.baz
+# => 2
+The most interesting part here is how this line of metaprogramming works:
+Bar.singleton_class.extend HashAccessor
+If you remember that
+extend
+is shorthand for
+singleton_class.include
+, what this code is actually doing is the following:
+Bar.singleton_class.singleton_class.include HashAccessor
+This code includes a module in the
+singleton
+class of the singleton class of
+Bar
+, so that it can use
+metaprogramming in the singleton class of
+Bar
+in order to define methods you can call on
+Bar
+itself. This is one of the only cases where you need singleton classes of singleton classes, but Ruby will support as many levels of singleton classes as you need for your metaprogramming.
+In this section, you learned about eliminating redundant code using metaprogramming. In the next section, you'll learn how there are different approaches to metaprogramming methods in Ruby, and the trade-offs of each approach.
+Understanding different ways of metaprogramming methods
+There are two separate approaches to metaprogramming in Ruby. The two separate approaches
+each have advantages and disadvantages, so the most appropriate one to use depends on the specific situation.
+So far in
+this chapter, you've seen examples of using
+define_method
+, which is one of the methods used in
+block-based metaprogramming
+. There are other block-based metaprogramming methods, such as
+Class.new
+,
+Module.new
+, and
+Kernel#define_singleton_method
+:
+Class.new do
+# class-level block metaprogramming
+end
+Module.new do
+# module-level block metaprogramming
+end
+define_singleton_method(:method) do
+# singleton-method defining block metaprogramming
+end
+Using these block-based metaprogramming methods is the recommended approach in most cases. The main flexibility advantage of using the block-based metaprogramming approach is that
+you can easily operate with external data and even external code blocks. For example, let's say you are working on a module named
+Rusty
+, for writing
+rusty
+code.
+Rusty
+code strives to be one-third more efficient than Ruby code by defining methods using only two characters,
+fn
+, instead of the normal three you need in Ruby (
+def
+). It also supports defining methods that return static values using a
+vl
+method, in keeping with the two-character approach. Finally, because manually using
+extend Rusty
+in your existing classes could be a burden, you can use
+Rusty.struct
+to define classes that use
+Rusty
+. Refer to the following code snippet:
+module Rusty
+def self.struct(&block)
+klass = Class.new
+klass.extend(self)
+klass.class_eval(&block)
+klass
+end
+def fn(meth, &block)
+define_method(meth, &block)
+end
+def vl(meth, value)
+define_method(meth){value}
+end
+end
+With the
+Rusty
+module, you can now be more efficient when writing code in your other classes by using
+Rusty.struct
+:
+Baz = Rusty.struct do
+fn :rand do
+Time.now.usec/1000000.0
+end
+vl :class_name, :Baz
+end
+You can
+then check that your metaprogramming works as intended:
+Baz.new.rand
+# some float between 0.0 and 1.0
+Baz.new.class_name
+# => :Baz
+In general, if you are doing metaprogramming in Ruby, the block-based approach is the approach you
+want to reach for first. However, there is another approach, a dangerous approach, called the
+eval-based approach
+. With the eval-based approach, instead of metaprogramming with Ruby objects, you metaprogram by building a string of Ruby code.
+To get some experience with the eval-based approach, you decide to switch
+Rusty
+to it. First, you modify the
+fn
+method. This cannot take a block, since there is no way to get the Ruby code to use from the block. You need to pass in a string for the Ruby code, or something that when converted to a string is valid Ruby code. It turns out, the
+vl
+method can be implemented exactly the same way as the
+fn
+method. Both will append the string to themselves, which looks odd, but you'll see why it works in just a bit. Have a look at the following code block:
+module Rusty
+def fn(meth, code)
+self << "def #{meth}; #{code}; end;"
+end
+alias vl fn
+The next
+step is to modify
+Rusty.struct
+. There are many ways to implement this, but one of the simpler approaches involves the following:
+Using an array to hold the code
+Extending the array with the
+Rusty
+module
+Using
+instance_eval
+on the block in the context of the array
+With this approach,
+self
+in the
+fn
+method is an array, so calling
+fn
+appends the code to the array. After the block returns, you add an
+eval
+string that creates a class and defines the methods inside the class:
+def self.struct(name, &block)
+meths = []
+meths.extend(self)
+meths.instance_eval(&block)
+klass = eval(<<-END)
+class ::#{name}
+#{meths.join}
+self
+end
+END
+klass
+end
+end
+Using this new
+Rusty
+module, you can redefine the
+Baz
+class. You need to pass a string of Ruby code instead of a block for the
+rand
+method you are defining.
+For the
+class_name
+method, you need to pass a string with the symbol for the class you want
+to return inside it. You can't pass the symbol itself, because that will result in
+def class_name; Baz; end
+, which returns the class, not the name of the class:
+Rusty.struct(:Baz) do
+fn :rand, "Time.now.usec/1000000.0"
+vl :class_name, ":Baz"
+end
+You can check that this still works:
+Baz.new.rand
+# some float between 0.0 and 1.0
+Baz.new.class_name
+# => :Baz
+Now, why on earth would you want to metaprogram this way? There is only one good reason, and that is performance. Metaprogramming with the block-based approach often requires methods such as
+Module#const_get
+,
+Kernel#instance_variable_get
+, and
+Kernel#send
+, and these are about 2.5 times slower than directly using normal constant access (
+Foo::CONST
+), normal instance variable access (
+@iv
+), and normal method calling (
+self.meth
+). If you need the absolute fastest approach when using metaprogramming, then you need to use the eval-based approach.
+In addition to much clunkier code, the
+eval
+-based approach is far less safe. Because
+eval
+evaluates arbitrary Ruby code, it can do things such as delete every file you have access to. It is very risky to use the
+eval
+-based approach with any untrusted data. In general, you should avoid using the
+eval
+-based approach with any untrusted data, but if you absolutely
+must have the fastest possible performance and need to deal with untrusted data, you can use a
+whitelisting approach
+.
+For example, if you need to define a method using an untrusted name (provided by the user), this is probably a code injection vulnerability:
+Baz.class_eval "def #{name}; :foo end"
+That's because the value of the
+name
+variable could be
+"x; end; File.delete(__FILE__); def y; "
+, as some users might just think it is funny to delete the file running the code.
+If you want
+to be safe, you need to check that
+name
+is a valid method name (such that it can be defined directly using
+def
+). With modern versions of Ruby, it's actually fairly difficult to do that, considering you can use most Unicode codepoints in method names. However, assuming you only really want to optimize for names that use ASCII alphanumeric characters and the underscore, you can check whether the name matches a whitelist regular expression, and use the fast approach in that case. If it doesn't match, you can fall back to the slower block-based approach. In the following example, we use
+match?
+to see whether the given method name is safe to use with the
+eval
+-based approach.  If it is, we use
+class_eval
+and
+def
+to define the method. If it isn't, we use the slower
+define_method
+approach:
+if /\A[A-Za-z_][A-Za-z0-9_]*\z/.match?(name)
+Baz.class_eval "def #{name}; :foo end"
+else
+Baz.define_method(name){:foo}
+end
+This approach gets you increased performance for the common case when it is safe to do so and works in the uncommon case without allowing a vulnerability.
+In this section, you
+learned different approaches for metaprogramming methods and the trade-offs of each. In the next section, you'll learn when you should use
+method_missing
+, and when you shouldn't.
+Using method_missing judiciously
+In general, you should only use
+method_missing
+in cases where it is required. Overuse of
+method_missing
+in cases where it isn't necessary often leads to code that is
+difficult to understand and refactor. If you have a use case where literally any method can be called and should work, that is a good case for
+method_missing
+.
+Let's say you want a method where you can just type random words in, and it will return a list of symbols:
+words{this is a list of words}
+# => [:this, :is, :a, :list, :of, :words]
+This is a case where
+method_missing
+makes sense because any method could be called. Implementing this particular example is interesting. You want
+words
+to be a valid method you can call anywhere, but you want
+words
+inside the block to call
+method_missing
+. You can implement this by having
+instance_eval
+the block in the context of a
+BasicObject
+instance. It would be great to use
+define_singleton_method
+or
+singleton_class.define_method
+, but both
+define_singleton_method
+and
+singleton_class
+are defined in
+Kernel
+and not
+BasicObject
+. You could use a combination of
+Kernel#instance_method
+and
+UnboundMethod#bind_call
+to work around the inability to call
+define_singleton_method
+directly, with the following code:
+obj = BasicObject.new
+meth = Kernel.instance_method(:define_singleton_method)
+meth.bind_call(obj, :foo){:bar}
+obj.foo
+# => :bar
+However, another approach is to create a subclass of
+BasicObject
+and override
+method_missing
+in it, then
+instance_exec
+the block in the context of an instance of that
+BasicObject
+subclass. This is shown in the following code block:
+def words(&block)
+array = []
+Class.new(BasicObject) do
+define_method(:method_missing) do |meth, *|
+array << meth
+end
+end.new.instance_exec(&block)
+array.reverse
+end
+However, unless you absolutely must accept any method name, it's better to only define the methods
+you actually need. For example, let's say you have 50 fields and you want to define methods for each. The lazy way using
+method_missing
+is something like the following:
+class Struct50
+def method_missing(meth, *)
+@fields.fetch(meth){super}
+end
+end
+The alternative and recommended approach is to define actual methods this way:
+class Struct50
+valid_fields.each do |field|
+define_method(field){@fields[field]}
+end
+end
+Defining actual methods is much better for performance. In addition, with actual methods, calling
+Struct50.instance_methods
+returns all of the methods, which is much better when you need to figure out which methods instances of the class respond to. In the previous example, it also has the nice effect that if the
+@fields
+hash for the instance is missing a field, calling the method for the field does not raise
+NoMethodError
+. The flipside of this is that in the
+define_method
+approach, you cannot call a method for fields that exist in the
+@fields
+hash for a particular instance, but are not in the class's
+valid_fields
+.
+If you
+absolutely must use
+method_missing
+, make sure you also define
+respond_to_missing?
+as follows:
+class Struct50
+def respond_to_missing?(meth, *)
+@fields.include?(meth)
+end
+end
+Otherwise, code that uses
+respond_to?
+will return incorrect results:
+Struct50.new.respond_to?(:valid_field)
+# false when using method_missing without
+# respond_to_missing?
+While it's almost always better to use
+define_method
+over
+method_missing
+when you know the valid methods upfront, there is a case where you still want to use
+method_missing
+. That is when you have a very large number of valid methods, say over 1,000. The reason to prefer
+method_missing
+, in that case, is that each method defined with
+define_method
+has a cost in terms of memory used, with a related performance cost for the garbage collector. With
+method_missing
+, there are no separate methods, so there is no memory or garbage collector cost.
+In this section, you learned when it may make sense to use
+method_missing
+, and more importantly, when
+you should probably use a different approach.
+Summary
+In this chapter, you learned about metaprogramming and when to use it. You learned about the pros and cons of abstraction, and how to use metaprogramming to eliminate redundancy. You learned about the block-based and
+eval
+-based approaches to metaprogramming, and when to use each. You also learned about the trade-offs involved in deciding whether to use
+method_missing
+or
+define_method
+.
+In the next chapter, you'll use this metaprogramming knowledge to design useful domain-specific languages.
+Questions
+When is it a bad idea to implement an abstraction via metaprogramming?
+What is the most common reason to deal with singleton classes of singleton classes?
+When should you use
+eval
+-based metaprogramming instead of block-based metaprogramming?
+When should you use
+method_missing
+?
+
+Chapter 10
+: Designing Useful Domain-Specific Languages
+Ruby makes it easy to implement
+domain-specific languages
+(
+DSLs
+), and many popular libraries offer DSLs to improve their usability.
+In this chapter, you'll learn how to design and implement a DSL, which problems are handled well by DSLs, and both the advantages and disadvantages of using DSLs in your libraries.
+We will cover the following topics:
+Designing your DSL
+Implementing your DSL
+Learning when to use a DSL
+By the end of the chapter, you'll have a better understanding of not only how to design a DSL, but why it may or may not be a good idea to do so.
+Technical requirements
+In this chapter and all chapters of this book, code given in code blocks is designed to be executed on Ruby 3.0. Many of the code examples will work on earlier versions of Ruby, but not all. The code for this chapter is available online at
+https://github.com/PacktPublishing/Polished-Ruby-Programming/tree/main/Chapter10
+.
+Designing your DSL
+The most important
+thing to think about when designing a DSL is to focus on how the DSL will be used. Some DSLs are designed to configure a library. Some DSLs are used for making specific changes using the library. Some DSLs exist purely to reduce the verbosity of the code. Sometimes the library exposes a DSL as its only interface, and the library and DSL are basically the same thing. Let's focus first on DSLs designed for configuring a library.
+Configuration DSLs
+DSLs designed to
+configure libraries are often referred to as
+configuration DSLs
+. They are often initiated from a singleton method on the library's main module or class, often straightforwardly named
+configure
+.
+RSpec
+, a popular Ruby library for testing, uses a configuration DSL like this:
+RSpec.configure do |c|
+c.drb = true
+c.drb_port = 24601
+c.around do |spec|
+DB.transaction(rollback: :always, &spec)
+end
+end
+RSpec
+uses this DSL to configure itself. It passes in a configuration object, and you call methods on the
+configuration object to configure the library, in this case setting it to use
+drb
+(short for
+distributed Ruby
+, a standard library) on port
+24601
+. It also calls the
+around
+configuration method with a block, which is yielded a proc (named
+spec
+in this example), which is passed as a block to
+DB.transaction
+for wrapping the entire test case in a database transaction that is always rolled back.
+This type of configuration DSL is very helpful for users because it gives the user a single place to look for configuring the library. This is instead of the user looking through all of the
+RSpec
+documentation to determine how to configure settings such as the following:
+RSpec::Core::DRbRunner.new(port: 24601)
+RSpec::Core::Hooks.register(:prepend, :around) do |spec|
+DB.transaction(rollback: :always, &spec)
+end
+The user now has a
+single place they can look—the configuration DSL documentation—to determine all of the supported ways to configure the libraries. This makes configuration much easier. If your library has significant configuration options, strongly consider adding a configuration DSL for it. You don't necessarily have to use a separate method that takes a block.
+For many libraries, the DSL can be as simple as singleton methods you can call on the library's main module. For example, if
+RSpec
+used this approach, a possible configuration DSL would be the following:
+module RSpec
+self.drb = true
+self.drb_port = 24601
+around do |spec|
+DB.transaction(rollback: :always, &spec)
+end
+end
+This simpler approach has some disadvantages compared to the block-based approach, though. First, you need to know whether
+RSpec
+is a module or class because using
+module RSpec
+when
+RSpec
+is a class will result in a
+TypeError
+exception being raised. Second, writer methods (methods ending in
+=
+) are more awkward to call with this approach since they require an explicit
+self
+.
+Suppose that you forget the explicit
+self
+, and you do the following:
+module RSpec
+drb = true
+drb_port = 24601
+end
+Then you end up defining unused local variables, and this has no effect on the library. The general principle here is to avoid writer methods in cases where you will naturally call them on
+self
+. In these cases, it may be better to offer aliases such as
+set_drb
+and
+set_drb_port
+:
+module RSpec
+set_drb true
+set_drb_port 24601
+end
+An alternative to this is
+having multipurpose
+drb
+and
+drb_port
+methods, which when called without arguments act as reader methods, but when called with one argument act as writer methods. Refer to the following code block:
+module RSpec
+drb true       # Set the value
+drb_port 24601 # Set the value
+end
+RSpec.drb
+# => true
+RSpec.drb_port
+# => 24601
+Any of these approaches for configuration will work fine, the important principle is to make sure that you have a simple and well-documented way to configure your library, assuming your library is complex enough to require configuration.
+In this section, you learned
+about DSLs for configuring a library, using a real-world example from
+RSpec
+. In the next section, you'll learn about DSLs for making complex changes using a library.
+DSLs for making specific changes
+For libraries that need to
+make complex changes atomically, there are three common approaches. The first is passing arrays or hashes or some nesting of the arrays or hashes to a single method, often with keyword arguments to influence the command. Refer to the following code:
+Foo.process_bars(
+[:bar1, :baz2, 3, {quux: 1}],
+[:bar2, :baz4, 5],
+# ...
+skip_check: ->(bar){bar.number == 5},
+generate_names: true
+)
+This type of API is often hard for users to use. Manually making sure each of the arrays or hashes being passed in is the right format can be challenging by itself. It's best to avoid defining methods that require users to pass many complex objects if you can, as such methods are more difficult for users to use correctly.
+Another approach is creating objects and individually attaching them to a command object, which is passed in. You often see this pattern in less powerful and expressive languages, where objects are explicitly instantiated and then passed to methods:
+bar1 = Bar.new(:bar1, :baz2, 3, quux: 1)
+bar2 = Bar.new(:bar2, :baz4, 5)
+command = ProcessBarCommand.new
+command.add_bar(bar1)
+command.add_bar(bar2)
+# ...
+command.skip_check{|bar| bar.number == 5}
+command.generate_names = true
+Foo.process_bars(command)
+This approach is better
+than the previous approach in most cases, as it is easier for users to use. However, it is a bit verbose, and not idiomatic Ruby. For this type of command, an idiomatic approach in Ruby would be to use a DSL inside a block, such as the following code:
+Foo.process_bars do |c|
+c.bar(:bar1, :baz2, 3, quux: 1)
+c.bar(:bar2, :baz4, 5)
+# ...
+c.skip_check{|bar| bar.number == 5}
+c.generate_names = true
+end
+This retains the benefits of the command object approach but decreases the verbosity. Unlike the command object approach, it contains the logic for the command processing inside the block, which is an important conceptual difference. It also makes things easier for the user, as the user doesn't need to reference other constants manually, they just need to call methods on the yielded object.
+Note that there are cases when the command object approach is probably better, and that is when you are passing the object to multiple separate methods. While you can pass blocks to methods using the
+&
+operator, it's probably not a good general approach, because the block will get evaluated separately by each method. With the command object approach, the command can be self-contained and you do not need to recreate the command every time you are calling a method. When using the command object approach, it is often a good idea for the command object initializer to use a DSL, shown as follows:
+command = ProcessBarCommand.new do |c|
+c.bar(:bar1, :baz2, 3, quux: 1)
+c.bar(:bar2, :baz4, 5)
+# ...
+c.skip_check{|bar| bar.number == 5}
+c.generate_names = true
+end
+Foo.process_bars(command)
+With some extra work, you
+can have your library support the same configuration block both directly passed to
+Foo.process_bars
+and when using the command object approach with
+ProcessBarCommand.new
+. This gives you the best of both worlds. You'll learn how to implement this technique in a later section.
+In this section, you learned about DSLs for making complex changes in a library. In the next section, you'll learn about using DSLs to reduce the verbosity of code.
+DSLs for reducing the verbosity of code
+Sequel
+, a popular
+database library for Ruby, uses a DSL designed purely for reducing the verbosity of code. If you want to express an inequality condition in one of your database queries, you can use a long approach such as the following:
+DB[:table].where(Sequel[:column] > 11)
+# generates SQL: SELECT * FROM table WHERE (column > 11)
+In this case,
+Sequel[:column]
+returns an object representing the SQL identifier, which supports the
+>
+method. This type of usage occurs very often in
+Sequel
+, so often that it is desirable to have a shortcut.
+Sequel
+has multiple shortcuts for this, but the one enabled by default uses a simple DSL:
+DB[:table].where{column > 11}
+This uses an
+instance_exec
+DSL, where methods inside the block are called on an object different than the object outside the block. Inside the block, methods called without an explicit receiver return
+Sequel
+identifier objects, so
+column
+inside the block is basically translated to
+Sequel[:column]
+(which itself is a shortcut for
+Sequel::SQL::Identifier.new(:column)
+). One issue with this approach is that if users are not familiar with the method and do not know the block is executed using
+instance_exec
+, they may do something like the following:
+@some_var = 10
+DB[:table].where{column > @some_var}
+This doesn't work
+because the block is evaluated in the context of a different object. The need to reference methods or instance variables in the surrounding scope is common enough that the DSL also supports this approach, by yielding an object instead of using
+instance_exec
+if the block accepts an object:
+@some_var = 10
+DB[:table].where{|o| o.column > @some_var}
+In this section, you learned about DSLs designed to reduce code verbosity, using a real-world example from
+Sequel
+. In the next section, you'll learn about libraries implemented purely as DSLs.
+Libraries implemented as DSLs
+Some libraries are
+implemented purely as DSLs, in that the expected use of the library is only via the DSL, and you as a user are never expected to manually create the library's objects. One library designed like this is
+minitest/spec
+, which is another popular Ruby library for testing.
+With
+minitest/spec
+, all use of the library is via a DSL. You use
+describe
+to open a block for test examples. Inside the block,
+before
+is used for the code run before every example, and
+after
+for the code run after every example. You use
+it
+to define test examples. Notice in the following example, you never create any
+minitest
+objects:
+require 'minitest/autorun'
+describe Class do
+before do
+# setup code
+end
+after do
+# teardown code
+end
+it "should allow creating classes via .new" do
+Class.new.must_be_kind_of Class
+end
+end
+Another
+library implemented as a DSL is
+Sinatra
+, which was the
+first Ruby web framework showing you could implement a web application in a few lines of code, and an inspiration for many minimal web frameworks in Ruby and other languages. With Sinatra, after requiring the library, you can directly call methods to handle HTTP requests. This simple web application will return
+Index page
+for GET requests to the root of the application and
+File Not Found
+for all other requests, as shown here:
+require 'sinatra'
+get "/" do
+"Index page"
+end
+not_found do
+"File Not Found"
+end
+This type of DSL is not for
+every library. It is best left for specific environments, such as testing for
+minitest/spec
+, or for simple cases, such as only handling a few routes in Sinatra. For both
+minitest
+and Sinatra, there is an alternative API that is not a pure DSL, where classes are created in the standard Ruby way.
+In this section, you learned about designing different types of DSLs. In the next section, you'll learn how to implement the DSLs you learned about in this section.
+Implementing your DSL
+One of the
+best aspects of Ruby is how easy Ruby makes it to implement a DSL. After programmer friendliness, probably the main reason you see so many DSLs in Ruby is the simplicity of implementation. There are a few different DSL types you learned about in the previous sections, and you'll learn how to implement each in this section.
+The first type is the most basic type, where the DSL method accepts a block that is yielded as an object, and you call methods on the yielded object. For example, the
+RSpec
+configuration example could be implemented as follows:
+def RSpec.configure
+yield RSpec::Core::Configuration.new
+end
+In this case, the configuration is global and always affects the
+RSpec
+constant, so the
+RSpec::Configuration
+instance may not even need a reference to the receiver.
+For the
+Foo.process_bars
+example given previously, assuming the
+ProcessBarCommand
+uses the
+add_bar
+method and the DSL uses the simpler
+bar
+method, you need to implement a wrapper object specific to the DSL. Often the name of this object has DSL in it. Since the
+skip_check
+and
+generate_names
+methods are the same in both cases, you can cheat and use
+method_missing
+, though it is often better to define actual methods, as you learned in
+Chapter 9
+,
+Metaprogramming and When to Use It
+. In this example, we'll use the
+method_missing
+shortcut:
+class ProcessBarDSL
+def initialize(command)
+@command = command
+end
+def bar(...)
+@command.add_bar(...)
+end
+def method_missing(...)
+@command.send(...)
+end
+end
+With the
+ProcessBarDSL
+class created, you
+can implement
+Foo.process_bars
+by creating the
+ProcessBarCommand
+object, and yielding it wrapped in the
+ProcessBarDSL
+instance. After the block completes processing, you can implement the internal processing of the bars by calling a private internal method, here named as
+handle_bar_processing
+:
+def Foo.process_bars
+command = ProcessBarCommand.new
+yield ProcessBarDSL.new(command)
+handle_bar_processing(command)
+end
+If you want to support an API where you can either pass a block to
+Foo.process_bars
+or pass an already created
+ProcessBarCommand
+object, that is also easy to implement. Refer to the following code block:
+def Foo.process_bars(command=nil)
+unless command
+command = ProcessBarCommand.new
+yield ProcessBarDSL.new(command)
+end
+handle_bar_processing(command)
+end
+For the
+Sequel
+example
+with the
+where
+method, because it allows both the
+instance_exec
+approach and the
+block
+argument approach, it's slightly tricky. You need to check the
+arity
+of the block, and if the block has
+arity
+of
+1
+, then the block expects an argument, and you yield the object to it. If the block does not have
+arity
+of
+1
+, the block doesn't expect an argument, and you evaluate the block in the context of the object with
+instance_exec
+. Refer to the following code:
+def where(&block)
+cond = if block.arity == 1
+yield Sequel::VIRTUAL_ROW
+else
+Sequel::VIRTUAL_ROW.instance_exec(&block)
+end
+add_where(cond)
+end
+The
+Sequel::VIRTUAL_ROW
+object uses a
+method_missing
+approach since all methods are treated as column names. Simplified, it is similar to the following code, though the actual implementation is more complex at it also supports creating a SQL function object if arguments are passed:
+Sequel::VIRTUAL_ROW = Class.new(BasicObject) do
+def method_missing(meth)
+Sequel::SQL::Identifier.new(meth)
+end
+end.new
+In the
+minitest/spec
+example, the
+describe
+method is added to
+Kernel
+. It creates a class, sets a name
+for the class based on the argument, and passes the block given to
+class_eval
+. Simplified, it looks as follows:
+module Kernel
+def describe(name, *, &block)
+klass = Class.new(Minitest::Spec)
+klass.name = name
+klass.class_eval(&block)
+klass
+end
+end
+The
+before
+and
+after
+methods inside the
+describe
+block both define methods.
+before
+defines
+setup
+and
+after
+defines
+teardown
+. Simplified, they could be implemented by code as follows:
+class Minitest::Spec
+def self.before(&block)
+define_method(:setup, &block)
+end
+def self.after(&block)
+define_method(:teardown, &block)
+end
+end
+The
+it
+method is similar, but the method it defines starts with
+test
+, and includes the description given. It also includes an incremented number so that two specs with the same description end up defining different test methods. It's a very common mistake to copy an existing test, modify the copy to test an additional feature, and forget to change the name. With a manual
+test name definition, that results in the second test method overriding the first. This can be caught if running tests in verbose warning mode (the
+ruby -w
+switch), as in that case Ruby will emit method redefinition warnings, but otherwise, it is easy to miss and results in you not testing everything you think you are testing.
+Simplified, the
+it
+method could be implemented with an approach such as the following:
+class Minitest::Spec
+def self.it(description, &b)
+@num_specs ||= 0
+@num_specs += 1
+define_method("test_#{@num_specs}_#{description}", &b)
+end
+end
+One issue with the
+minitest/spec
+implementation of
+describe
+is that it adds the method to
+Kernel
+, so it ends up being a method on every object. You can call it inside other classes and methods. This adds to the flexibility, and it's probably a good choice for
+minitest/spec
+, but it may not be the best decision for DSLs in general.
+The Sinatra DSL works differently. It doesn't want to define methods such as
+get
+and
+not_found
+on every object, but it still wants you to be able to call them at the top level, outside of any classes and methods. It does this by calling
+extend
+in the top-level scope with a module. The top-level scope runs in the context of an object called
+main
+, and just like any other object, if you extend
+main
+with a module, the methods in the module are only added to
+main
+and not any other object. A simplified version of the Sinatra DSL is similar to the following:
+module Sinatra::Delegator
+meths = %i[get not_found] # ...
+meths.each do |meth|
+define_method(meth) do |*args, &block|
+Sinatra::Application.send(meth, *args, &block)
+end
+end
+end
+extend Sinatra::Delegator
+In this section, you've
+learned the basics of implementing a variety of different types of DSLs. In the next section, you'll learn about which use cases lend themselves to DSL usage, and which use cases don't.
+Learning when to use a DSL
+There are some use
+cases in Ruby where using a DSL makes a lot of sense, and other cases where using a DSL increases complexity and makes the code worse instead of better. The best cases for DSL use in Ruby are where using the DSL makes the library easier to maintain and makes it simpler for a user to use the library. If you find yourself in that situation, then a DSL definitely sounds like the right choice. However, in most cases, a DSL is a trade-off.
+In most cases, you design a DSL to make things easier in some way for the user, but it makes the internals more complex and makes your job as the maintainer of the library more difficult. It is possible but less likely for the opposite to be true, where you design a DSL to make your life as a maintainer easier, but the DSL makes the use of the library more difficult.
+Of the DSL examples given previously, the
+RSpec
+configuration example may be an example of the best case for a DSL. It definitely makes it easier for the user to configure the library since they only need to look in one spot for configuration. Implementation of the DSL is fairly simple, and having all configurations run through a single configuration object may make it easier to maintain the library.
+For the
+Foo.process_bars
+example, the DSL is definitely more idiomatic Ruby code, and likely to be easier for the user to use than the alternatives. In this case, it definitely adds maintenance work, since it requires creating a class specifically for the DSL. However, the DSL should be reasonably easy to maintain, so it's probably a good trade-off.
+For the
+Sequel
+example with the
+where
+method that takes a block and either yields an object or uses
+instance_exec
+, it's definitely questionable whether the benefits outweigh the costs. This
+DSL only saves a little bit of typing for the user, and the fact that it can yield an object or use
+instance_exec
+is often a source of confusion, especially for users not familiar with the library. In general, using
+instance_exec
+for short blocks often results in user confusion, since most Ruby programmers are used to calling methods with blocks and using instance variables of the surrounding scope inside the blocks, and breaking that is often a bad idea.
+In regards to the
+Sequel
+virtual row DSL, the DSL was designed back when the alternative approach was much more verbose (
+Sequel::SQL::Identifier.new(:column) > 11
+) than the current alternative approach (
+Sequel[:column] > 11
+), so the benefit of the DSL was higher back then than it is now. However, since the DSL is now widely used, it must continue to be supported. The principle to remember here is you will often need to support any DSL for a long time, so implementing a DSL just to reduce code verbosity is often a bad idea. Try hard to think of alternative approaches to using a DSL if you are using it just to reduce code verbosity.
+For
+minitest/spec
+, the benefit of using the DSL is huge. For basic usage, you don't need to know about any
+minitest
+specific classes, you only need to know about four methods,
+describe
+,
+before
+,
+after
+, and
+it
+. This greatly simplifies the interface for the user and is one reason
+minitest/spec
+is such a pleasure to use. This does have an implementation cost, as
+minitest/spec
+has extra complexity on top of
+minitest
+itself, so there is a significant amount of maintenance involved. However, this is another case where the benefit outweighs the cost.
+In the Sinatra case, the
+DSL is really what showed how simple web applications could be if you focused only on what was absolutely necessary to implement them. The actual DSL implementation in terms of extending
+main
+doesn't add much maintenance effort, so it is also a case where the benefit outweighs the cost.
+As you have learned, there are some situations where implementing a DSL can be useful, and other situations where implementing a DSL can make a library worse.
+Summary
+In this chapter, you've learned that focusing on how the DSL will be used is the key to designing a good DSL. You've seen many examples of DSL usage from a user perspective, and how to implement each of these possible DSLs. Finally, you've learned when it is a good idea to implement a DSL, and when it may not be a good idea. With all you've learned in this chapter, you are better able to decide when a DSL makes sense for your library, and if you decide it does make sense, how better to design and implement it.
+In the next chapter, you'll learn all about testing your Ruby code.
+Questions
+What is the main advantage of using a DSL for configuring libraries?
+How can you implement a DSL that works both as a normal block DSL and an
+instance_exec
+DSL?
+Of the various reasons given in this chapter for using a DSL, which is the most likely to cause problems for the user and the least likely to add value?
+
+Chapter 11
+: Testing to Ensure Your Code Works
+Testing is more critical in Ruby than in most other programming environments, partly because of the power and flexibility Ruby offers, and also because of Ruby's dynamic typing. With proper testing, you can have confidence that your code works the way you expect, which is critical whenever you are making changes to it.
+In this chapter, you'll learn that there are a lot of important considerations when testing, such as at what levels you want to test, how much abstraction should be used in your tests, and how thorough your tests need to be.
+We will cover the following topics in this chapter:
+Understanding why testing is so critical in Ruby
+Learning different approaches to testing
+Considering test complexity
+Understanding the many levels of testing
+Realizing that 100% coverage means nothing
+By the end of this chapter, you'll have a better understanding of testing in Ruby, and be better able to choose appropriate tradeoffs when designing your tests.
+Technical requirements
+In this chapter and all chapters of this book, code given in code blocks is designed to execute on Ruby 3.0. Many of the code examples will work on earlier versions of Ruby, but not all. The code for this chapter is available online at
+https://github.com/PacktPublishing/Polished-Ruby-Programming/tree/main/Chapter11
+.
+Understanding why testing is so critical in Ruby
+Testing is critical to ensure proper behavior in every programming language, but it is especially critical
+in Ruby. In many other programming languages, the
+programming language has a type system that will catch errors related to improper use of types when the program is compiled, before the program is run. Ruby uses a dynamic type system, so it will not catch many errors related to the improper use of data types. Ruby programs are also generally not compiled until you try to run them, so even simple syntax errors will not be caught unless you try to load the related code. Combined, these two qualities make testing in Ruby more critical than in many other programming languages.
+When talking about testing, the lack of type checking is often considered a missing feature. However, one of the best things about Ruby is that it doesn't require you to specify types for variables and methods. Unlike most languages, Ruby doesn't focus on the types of objects, only on what methods the objects respond to. That flexibility is what makes Ruby such a joy to program in.
+Similarly, not having a separate compilation step before running Ruby code is one of the qualities that makes Ruby easy to use. Ruby does ship with the ability to just compile programs and not actually run them, it's just not commonly used. This feature is very useful with large libraries if you just want to check that there are no syntax errors in any of the source files. You can access this feature using the
+-c
+command-line option, such as
+ruby -c file_name
+.
+If you want to do this for all
+.rb
+files under a given directory, you can find all files under a given directory using
+Dir.[]
+, then run
+ruby -c
+on each of the resulting files. In this case, it's a very good idea to use the
+--disable-gems
+flag in addition to the
+-c
+flag, because a huge part of Ruby startup time is spent loading
+rubygems
+, and you don't need
+rubygems
+at all if you are just checking syntax. Here's an example of how you could syntax check all Ruby files:
+Dir['/path/to/dir/**/*.rb'].each do |file|
+print file, ': '
+system('ruby', '-c', '--disable-gems', file)
+end
+This is useful, but it could be better. The previous example prints one line for every file, but it would better if it just reported files with invalid syntax. That's not a hard change to make. We'll print a period for each file as a simple way to indicate progress, and if a file has a syntax error, we'll print the error. We don't actually need to print the filename when printing the
+error because syntax errors generally include the
+filename at the start of the error message:
+Dir['/path/to/dir/**/*.rb'].each do |file|
+read, write = IO.pipe
+print '.'
+system('ruby', '-c', '--disable-gems', file,
+out: write, err: write)
+write.close
+output = read.read
+unless output.chomp == "Syntax OK"
+puts
+puts output
+end
+end
+This book was developed using
+ruby -c
+to check all source code examples. All source code in this book should at least have valid syntax.
+For other programming languages that have a separate compilation step, in addition to compilation errors showing you that you have a problem in your code, there are often compilation warnings, showing things that may be wrong, but are not technically errors and do not stop the compilation process. This is basically the compiler being your friend, trying to point out things that may be wrong even if the compiler isn't sure. Thankfully, Ruby has something similar.
+As we learned in
+Chapter 6
+,
+Formatting Code for Easy Reading
+, Ruby has a verbose warnings feature that prints additional warnings about cases that are not technically errors but still look wrong. You can enable this support using the
+ruby -w
+flag, and even better, you can combine it with the
+ruby -c
+flag to check source files for both syntax errors and compilation warnings. When used in this mode, the
+-w
+flag will only print compilation warnings, it won't print warnings for questionable behavior that can only be caught at runtime. Still, it's useful to include the
+-w
+flag whenever you are scanning code for syntax errors. You can update the previous example code to include reporting warnings instead of just reporting errors. Since files with warnings are still going to print
+Syntax OK
+at the end of the
+output, you need to remove that from the output before
+printing the output:
+Dir['/path/to/dir/**/*.rb'].each do |file|
+read, write = IO.pipe
+print '.'
+system('ruby', '-wc', '--disable-gems', file,
+out: write, err: write)
+write.close
+output = read.read
+unless output.chomp == "Syntax OK"
+puts
+puts output.sub(/Syntax OK\Z/, '')
+end
+end
+Scanning all files with
+ruby -wc
+is a great idea, but it only does some fairly basic checks on the file. To actually verify whether your code works the way you expect, you need to test it, and you'll learn different approaches to doing that in the next section.
+Learning different approaches to testing
+There are many
+approaches to testing in Ruby. It's possible to use any of them or potentially all of them successfully on the same project, though most Ruby projects stick to a single approach.
+One approach to testing is manual testing. This is where you just run the program or use the library, and make sure the results are as expected. It was common in older software for this to be the only method of testing. Applied vigorously enough, with strict checklists on everything in the system that had to be tested, manual testing can result in high-quality software. There were entire careers based not on writing software, but only manually testing software that was written by others.
+While it is possible to be successful purely with manual testing, it is very labor-intensive to manually test code, compared to having a computer automatically test code. Back when programs were much simpler, programming took much longer, and software releases were years apart, having a separate quality assurance department manually testing software before release was a reasonable approach.
+Times
+have changed since then, and it's almost always a bad idea to rely purely on manual testing. However, that doesn't mean that manual testing has no place. For some software, there may be small parts that are too complex or unreliable to test automatically, and you have to rely on manual testing for those. For example, if you are writing a Ruby program to generate pleasing music to listen to, you may be able to automatically test most of the pieces that make up the software. However, automatically testing whether the generated music is actually pleasing to listen to is probably harder to write than the software to generate pleasing music. For situations like that, incorporating manual testing into your testing approach is critical.
+Other than manual testing, there are three major approaches to testing in Ruby. One approach is
+called
+test after development
+(sometimes abbreviated
+TAD
+). With this approach, you develop the code first without any automated tests. After you have the software mostly working the way you want, you then go back and add tests for it. This is probably the most popular form of testing, and it generally works well, even though proponents of other automated testing approaches often look down on it.
+Another
+approach is called
+test-driven development
+(often abbreviated
+TDD
+). With TDD, you write the tests for your code before you write the code itself. How does this work? Well, first you write a test for a simple piece of code. Then you run the test and it fails. Then you write just enough code to make the test pass. Then you write another test for new behavior. You run the tests again and the first test passes and then the new test fails. Then you write just enough code to make the second test also pass, without breaking the first test. Then you refactor any code as needed while still keeping all tests passing. You repeat this process until the tests cover all desired functionality.
+The third approach
+is called
+behavior-driven development
+(often abbreviated
+BDD
+). With BDD, the tests (called
+specs
+) are written in a reduced form of English, often by a non-programmer, possibly even a project manager. Then a programmer writes code to transform this reduced form of English into executable Ruby code that can be used for testing. Then the programmer implements the features needed to get that executable Ruby test code to pass. Then the cycle repeats, writing additional specs in the reduced form of English, having that translated into executable Ruby code, and then writing the code to make sure the tests pass.
+All three approaches have different tradeoffs. With both
+TDD and BDD, you might end up with tests that are infeasible to implement, either because they are too difficult or the tests or specifications have bugs and it is actually impossible to have correct answers returned due to missing input. With
+TAD, since the tests are written after the library is developed, and the programmer is usually doing basic manual testing as they are writing the library, you end up writing fewer tests that you don't need.
+For an example
+of this, say the project manager has worked all week on learning the BDD syntax, which sort of reads like English but is far less flexible. Near the end of the week, they are thrilled that they are finally able to submit a valid specification such as the following:
+bdd_specification = <<END
+Feature: Check whether program finishes
+Scenario: User submits program
+Given the User submits a program with a "loop"
+When the User clicks a button to check
+whether the program will finish
+Then the system outputs whether the program will finish
+END
+The junior programmer in charge of maintaining the testing infrastructure gets this feature, then writes the necessary code to translate this sort-of English into executable Ruby code, which takes another week. Then this shows up on the feature board for another junior programmer to work on. After a week of working on it, the junior programmer has a partially working implementation, but it still has a lot of bugs they cannot fix. They decide to ask for help from their team leader, who looks at the specification, tries to stifle his laughter, and tells the junior programmer not to worry about it, and that he'll talk with the project manager. Then the tech lead has to have a difficult conversation with the project manager about how their seemingly simple request is actually a restatement of the halting problem, which is provably unsolvable.
+The previous example is, hopefully, an exaggeration of what could happen in the real world. In general, the only way to know whether it is possible to implement a complex feature is to try to implement it. If it is impossible to implement the feature, or infeasible due to an unexpected difficulty that was discovered during development, any time spent on testing the feature is wasted. In the previous example, two of the three weeks involved getting the testing set up, and one week was spent on implementation, so using a TAD approach, only one week would have been wasted instead of three weeks.
+TAD is not
+without its problems. The main issue with TAD is you can end up implementing a feature that works, but the interface to use it is hard to use or testing it is difficult. If you use a
+TAD approach, you need to realize this while you are writing the feature, and constantly remind yourself to think of how the user will use the feature, make sure to keep that usage as simple as you can and avoid unnecessary complexity. Otherwise, it is common for code developed using the TAD approach to be implemented in a manner that makes the implementation as easy as possible, but that makes testing difficult.
+With
+TDD, you can have the opposite problem. Because you are writing the test code first, you tend to design interfaces that are very easy to test but may be difficult to implement. Additionally, the needs when testing, especially when using mocked or stubbed objects, are often quite different than the needs of the average user of the library, so the interface you end up with when using a TDD approach might be easy for the use cases of the testing system, but not optimized for common user actions.
+Let's see an example of that. Let's say you are writing a method that times the execution of two different callable objects and returns whichever callable object is faster. With a TAD approach, you may design the code similar to the following example. This adds a
+faster_one
+method, which will time the calls to both the first argument and the second argument, and return the argument that takes the least time to call:
+class WhichFaster
+def faster_one(callable1, callable2)
+t1 = time{callable1.call}
+t2 = time{callable2.call}
+t1 > t2 ? callable2 : callable1
+end
+private def time
+t = clock_time
+yield
+clock_time - t
+end
+private def clock_time
+Process.clock_gettime(Process::CLOCK_MONOTONIC)
+end
+end
+This is a reasonably simple implementation, but testing it is quite challenging, mostly because of the usage of
+Process.clock_gettime(Process::CLOCK_MONOTONIC)
+. Testing the implementation robustly probably requires mocking at least the
+clock_time
+method, which means it isn't actually testing what happens inside that method. Alternatively, you could just pass in two callable objects, and you are sure that one is faster than the other. However, that approach is less robust, because which callable object is faster may change depending on time and the execution environment.
+When using
+TDD, the
+test code is written first, and maybe written in the way simplest for testing. For testing, it's probably easier to create an object to set the callable objects as attributes of the object, and then provide a couple of implementations for the timer, calling it with each timer implementation to make sure that the
+returned callable matches the one with the lowest time. Refer to the following code:
+describe WhichFaster do
+it "returns faster callable" do
+which = WhichFaster.new
+c1 = which.callable1 = ->{a}
+c2 = which.callable2 = ->{b}
+which.timer = {c1=>1, c2=>2}
+_(which.faster_one).must_equal c1
+which.timer = {c1=>2, c2=>1}
+_(which.faster_one).must_equal c2
+end
+end
+This is super
+simple to test. The implementation turns out to be much simpler as well. Just have attributes for the callable objects and the timer, get the times for each callable, and return the faster callable object. Check out the following code:
+class WhichFaster
+attr_accessor :callable1, :callable2, :timer
+def faster_one
+t1 = timer[callable1]
+t2 = timer[callable2]
+t1 > t2 ? callable2 : callable1
+end
+end
+While both the tests and implementation are simple, this is much more difficult to use. The complexity is removed from the library and forced onto to the user, who now has to do the following:
+which = WhichFaster.new
+which.callable1 = callable1
+which.callable2 = callable2
+which.timer = ->(callable) do
+t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+callable.call
+Process.clock_gettime(Process::CLOCK_MONOTONIC) - t
+end
+which.faster_one
+This is much more complex compared to the
+TAD approach. This is likely because the TAD approach focused on implementing a design, and not simply on passing a test. Just as you need to focus on the user experience and not just use the easiest implementation approach with TAD, you need to focus on the user experience and not just use the easiest testing approach with TDD.
+Another
+advantage of TAD is that since you've already implemented the library, you know where the most complex and error-prone sections of the implementation are, and you can focus on extra testing in those areas. With TDD, you are designing tests mostly around the proper use of the library, without knowing where the complex parts of the implementation will be. This makes it difficult to correctly expand the testing so that the most complex parts of the implementation have the appropriate testing. By writing tests up front, you can end up over-testing the simpler parts of the implementation and under-testing the more complex parts. Make sure if you use a
+TDD approach that you also review the implementation after it is finished, and make sure to add extra tests for more complex implementation areas, which you may not have known were needed originally.
+In deciding whether to use
+BDD, the primary consideration will be whether non-programmers will be assisting the programming team in writing specifications and the quality of the generated specifications. If non-programmers will not be assisting the programming team by writing specifications, BDD generally ends up being mostly wasted effort. Similarly, even if the non-programmers are writing specifications, if the specifications are buggy or are taking significant time for the programming team to automatically
+translate into executable Ruby code, the costs of BDD may exceed the benefits.
+In this section, you've learned about different approaches to testing. In the next section, you'll learn about test complexity, and the tradeoffs involved with making the tests more complex.
+Considering test complexity
+When
+programming, you tend to reach for abstractions to simplify code and reduce complexity. Since automated testing is just another form of programming, there is a natural tendency to use the same approach when writing tests. However, with abstraction comes indirection, and often complexity. For example, you may have three tests that do similar things, like in the following code snippet:
+describe Foo do
+it "should have bar return a Bar instance" do
+_(Foo.new.bar).must_be_kind_of(Bar)
+end
+it "should have baz return a Baz instance" do
+_(Foo.new.baz).must_be_kind_of(Baz)
+end
+it "should have quux return a Quux instance" do
+_(Foo.new.quux).must_be_kind_of(Quux)
+end
+end
+The programmer's natural inclination is to see the pattern and create an abstraction for it:
+describe Foo do
+def method_must_return_kind_of(meth, instance)
+_(Foo.new.send(meth)).must_be_kind_of(instance)
+end
+The programmer would later
+use that abstraction to attempt to simplify the test code:
+it "should have bar return a Bar instance" do
+method_must_return_kind_of(:bar, Bar)
+end
+it "should have baz return a Baz instance" do
+method_must_return_kind_of(:baz, Baz)
+end
+it "should have quux return a Quux instance" do
+method_must_return_kind_of(:quux, Quux)
+end
+end
+The issue with this approach to abstraction is that it decreases code locality by moving what is being tested away from the inside of the test block. If two of these tests pass, and the third fails inside the
+method_must_return_kind_of
+method, debugging the problem is more difficult. This is because the failing line will usually show inside the abstracted method, instead of inside the spec that called it.  The other issue here is that someone looking at the specs may not know what
+method_must_return_kind_of
+does. The naming doesn't indicate whether it is a class or instance method, for example. By abstracting specs in this way, you are increasing how much context is needed by the programmer trying to fix failing tests.
+In general, tests
+are designed to help avoid and debug problems in library code. The more abstractions you use in your test code, the more likely you are to be debugging your test code instead of your library code. Once you reach a certain level of test abstraction, a failing test gives you no confidence about whether the bug is in the library or the tests themselves, and that is a bad situation to be in.
+That does not mean that all abstractions in tests are bad. If you have 10 lines of test code that are called in 100 different specs for a specialized setup, having a method the specs can call for that setup that performs those 10 lines can be hugely helpful. Abstracting setup code in the tests is probably fine, as long as the setup code is identical or at least very similar between all cases. However, attempt to avoid abstracting the parts of the specs that are performing the actual testing, as opposed to setting up for the actual testing.
+There is often an
+alternative to the previous abstraction example, and that is defining multiple test methods using an enumerable, as follows:
+describe Foo do
+{bar: Bar, baz: Baz, quux: Quux}.each do |meth, klass|
+it "should have #{meth} return a #{klass} instance" do
+_(Foo.new.send(meth)).must_be_kind_of(klass)
+end
+end
+end
+This reduces the duplication of the test methods without the loss of code locality. Assume there is a failure in one of the specs, where the method does not return an object of the expected class. In that case, the test library will report the line inside the spec that failed. That makes it much easier to determine what was actually not working as expected, reducing the amount of time you need to spend debugging.
+In this section, you learned about tradeoffs in test complexity and the problems with excessive abstractions in tests. In the next section, you'll learn about the many levels at which you can test code in Ruby.
+Understanding the many levels of testing
+There are many
+levels at which you can test code in Ruby. The lowest level of
+testing is
+unit testing
+, where you are testing the smallest possible amount of code in your library, such as a single method in a single class, with all dependencies of the method mocked or stubbed. The highest level of testing is some
+form of
+acceptance testing
+, which can be automated or manual. In a web application, manual acceptance testing can be just using the development version of the application in a browser and trying different features. Automated acceptance testing of web applications tries to imitate this by running an actual browser and programmatically controlling it by telling it which links to click on and which buttons to press.
+There are multiple levels in between.
+Model testing
+runs
+at a higher level than unit testing, testing individual methods of objects, but with none of the method's dependencies mocked or stubbed.
+Integration testing
+involves testing that all parts of the system work together, also
+without mocking or stubbing anything. Usually, this involves accessing the highest part of the system and get the expected results, which gives reasonable assurance that the lower levels are working correctly. In terms of web applications, integration testing usually involves using the web application's Ruby interface to submit requests.
+In general, unit testing Ruby software tends to result in very brittle test code, where changes to the code that will not affect a user's use of the library will break unit tests. This is because unit tests are designed around mocking or stubbing all dependencies of a method. Imagine you have a method such as the following:
+class Foo
+singleton_class.alias_method(:build, :new)
+def build_foo(arg)
+Foo.build(arg)
+end
+end
+Unit testing the
+Foo#build_foo
+method would involve ensuring that it calls
+Foo.build
+with the argument, because
+Foo.build
+is an external dependency of the method. With the
+minitest
+library, this can be handled by combining the use of stubbing the
+Foo.build
+method, and returning the result by calling a mock object. Later, you verify the mock object was called with the expected arguments, as follows:
+describe Foo do
+it "#build_foo should call Foo.build" do
+mock = Minitest::Mock.new
+mock.expect :call, :foo, [1]
+Foo.stub :build, mock do
+_(Foo.new.build_foo(1)).must_equal :foo
+end
+mock.verify
+end
+end
+This issue here is, say
+you later decide you don't need the
+Foo.build
+method and change the implementation to use
+Foo.new
+as follows:
+class Foo
+def build_foo(arg)
+Foo.new(arg)
+end
+end
+If you do this, you end up breaking the test, even though the functionality is exactly the same. That's because the test is testing what messages the method is sending other objects. In most cases, which messages a method is sending to other objects is an implementation detail of the method, and something not worth testing. This brittleness is a natural, unavoidable consequence of unit testing. You can try to avoid the problem by not stubbing and/or mocking all dependencies of the method, just the ones you think are problematic, but that moves the test from a pure unit test to a hybrid of a unit test and a model test.
+The situation is even worse if you keep the
+Foo.build
+method, but change the behavior to be different. For example, maybe you change it to return a different type of object. In that case, the unit test still passes, even though it should break because the method now returns a different object than it did before. You would have to hope that you have other unit tests of the
+Foo.build
+method explicitly in order to catch the error.
+If unit tests are
+brittle and miss changes in stubbed and mocked methods by their nature, why do programmers use them?  In one word, speed. By stubbing and/or mocking all dependencies, pure unit tests are extremely fast. In cases where you have slow tests that are testing important aspects of the system, having a set of very fast unit tests that execute in a second or a few seconds at most can be valuable. However, unless you are sure you need the extra speed, it's best to stick to model tests. Slow and reliable tests are in general much better than fast tests that break without reason (false positives) and don't catch actual breakage (false negatives).
+For web applications, by far the most important tests to have are acceptance tests. You want to be sure as much as possible that high-level usage of your application returns the results you expect. It's also a good idea to have a robust set of model tests, especially for any cases not covered by the acceptance tests. However, if you only have time to implement and maintain a single type of test in your web application, focus on acceptance tests first.
+In this section, you learned about the many levels of testing Ruby libraries and applications. In the next section, you'll learn about test coverage and its importance in Ruby.
+Realizing that 100% coverage means nothing
+Code coverage
+allows you to check what part of your library or application is actually run. Coverage measurement is generally used as a rough gauge of how thorough your test suites are. There are multiple types of code coverage for Ruby. Using the built-in coverage library, line coverage, branch coverage, and method coverage are all supported.
+Line coverage
+is the
+simplest type of coverage. It allows you to check whether a line of code was ever executed during the testing process. This is important because any line without coverage during testing means the line was never tested at all. Now, just because the line was covered doesn't mean that the result of the line was actually tested. All it means is that at some point during testing, code somewhere on the line was executed.
+Branch coverage
+takes
+the same idea as line coverage but takes it a step farther. It ensures that all branches in the code were taken. Suppose if you have the following
+Foo
+class with a method named
+branch
+:
+class Foo
+attr_accessor :bar
+def branch(v)
+v > 1 ? bar : baz
+end
+def baz; raise; end
+end
+And you add a test for the method as follows:
+describe Foo do
+it "#branch should return the value of bar" do
+foo = Foo.new
+foo.bar = 3
+(foo.branch(2)).must_equal 3
+end
+end
+This test is OK, but it is incomplete. From a line coverage perspective, this will show 100% line coverage, as all lines are covered. This will even consider the line with the
+baz
+definition covered, even though
+baz
+is never called. This is because the line is executed when the
+Foo
+class definition is evaluated. The line
+v > 1 ? bar : baz
+will also show as covered, even though the test only executes the
+bar
+call and not the
+baz
+call. This is where
+branch coverage comes in. With branch coverage enabled, the coverage will show that the else branch of code on the line was not covered (the branch taken when
+v
+is not greater than
+1
+).
+Method coverage
+is
+similar to branch coverage, but it only tells you whether the method was executed during the tests. Method coverage with the previous test would be able to tell you that the
+baz
+method was never called.
+Just like line coverage only means the line was executed at one point, branch coverage only tells you the branch was executed at one point. You can write a test that gets full coverage without actually testing anything. Refer to the following code:
+describe Foo do
+it "#branch should return the value of bar" do
+Foo.new.branch(0) rescue nil
+Foo.new.branch(2) rescue nil
+end
+end
+This code executes all lines, branches, and methods, but provides no useful testing. The tests indicate that either method could raise an exception but doesn't test that either method does, and doesn't test what the return value of either method is.
+This brings us to the critical concept in regards to code coverage, which is that 100% coverage means nothing. The corollary to this concept is even more important, and that is that less than 100% coverage means something. Having 100% code coverage does not tell you anything, but having less than 100% code coverage tells you something. At the very least, having less than 100% code coverage means that there are certain parts of your code that you are not testing at all.
+Now, maybe you are OK with having untested code in your application. Maybe if you are testing the most important parts of your application, not testing other parts is an appropriate tradeoff. In general, there is limited time for testing, and testing time has to be prioritized, and focusing on code coverage testing may result in a failure to test more important code. However, if you've ever had to add covering tests to a library or application, you will probably quickly see that it finds bugs.
+Most of the time adding testing to improve code coverage
+will feel like boring drudge work. The tests covering the code may not be very valuable. However, what is very valuable is the process of going through the untested code. You'll find that some lines cannot be executed and can be deleted. You'll find that an
+if
+statement is not necessary, since it is tested in earlier code, and you can eliminate the unnecessary conditional and make your code faster. You'll find cases where error handling was buggy and resulted in an unexpected exception being thrown. You may even find security vulnerabilities. While 100% code coverage itself may not be valuable, the journey to get there often is.
+Summary
+In this chapter, you've learned why testing in Ruby is more critical than in many other programming languages. You've learned about different approaches to testing, such as manual testing, test after development, test-driven development, and behavior-driven development. You've learned that is important to limit the complexity of your tests by limiting the types of abstractions you use in your tests. You've learned about different levels of testing, and the tradeoffs between them. Finally, you've learned about different types of code coverage, and what 100% coverage means.
+Testing your library often alerts you to things you need to change in your library, and in the next chapter, you'll learn about how best to handle change in your libraries.
+Questions
+How do you check the syntax of a Ruby file and report errors and warnings?
+Is behavior-driven development a good idea if the programmers are going to be writing the specifications?
+Is it always bad to use abstractions in test code?
+Why might you prefer model testing to unit testing?
+What does 100% code coverage mean?
+
+Chapter 12
+: Handling Change
+As most libraries change over time, refactoring is an important tool during library development. Even in the best-written libraries, external requirement changes generally force changes in order for the library to continue to be useful. Some of these requirement changes can come from changes in Ruby itself.
+In this chapter, you'll learn about many different aspects of refactoring. You'll learn how to answer important refactoring questions, such as why you should refactor, when you should refactor, and how best to go about refactoring.
+We will cover the following topics in this chapter:
+Considering reasons to refactor
+Learning about the refactoring process
+Implementing the most common Ruby refactoring techniques
+Refactoring to add features
+Removing features properly
+By the end of this chapter, you'll understand better not just how to refactor, but why refactoring may or may not be a good idea for your library.
+Technical requirements
+In this chapter and all chapters of this book, code given in code blocks is designed to execute on Ruby 3.0. Many of the code examples will work on earlier versions of Ruby, but not all. The code for this chapter is available online at
+https://github.com/PacktPublishing/Polished-Ruby-Programming/tree/main/Chapter12
+.
+Considering reasons to refactor
+There are some common
+reasons you may want to refactor your library. One of the primary reasons is to simplify your library. Simplifying libraries can take a multitude of different forms, but a couple of common simplifications are realizing that in two or more places in your library, you are making the same change for the same reason. This is a case where you may want to add an abstraction for that type of change. Such an abstraction could be a new method, a new class or module, or possibly a modification of an existing method.
+Simplification can also work in the opposite direction, where you have a completely unnecessary abstraction that now makes sense to remove, and then inline the behavior into the places where the abstraction is currently used. This often occurs when the abstraction was created before there was a real need for it, or when the need for it previously existed, but there is no longer a need for it. For example, say you originally designed your library to work with multiple databases, but later you realize everyone is only using the library with the same database and the cost of maintaining support for multiple databases is not worth the benefits.
+Another common reason to want to refactor is to improve performance. When you are first implementing a new feature, the focus is on making sure the feature works for basic cases. Then, usually, you focus on making sure the feature handles corner cases correctly. Often, that's where you stop. If a feature works but doesn't operate as fast as it possibly could, that's usually not a problem. In general, unless the feature is in a critical path in your library or applications using your library, performance probably isn't much of a concern. However, in the cases where it is a concern, you may want to attempt to optimize performance. You'll learn more about refactoring to optimize performance in
+Chapter 14
+,
+Optimizing Your Library
+.
+A third common reason to refactor is to add extensibility points in your library. This is especially the case if your library exposes a class that is designed to be subclassed, or a module designed to be included in other classes or modules. Refactoring to add support for extensibility often adds a slight maintenance cost and performance overhead, but the additional flexibility is often worth it.
+While these are probably the main three primary reasons, there are plenty of additional reasons. You may have just inherited a complete mess of buggy code. The worst is when you inherited such code from a less experienced version of yourself, and you have nobody else to blame. Sometimes, the refactoring change is not caused by anything under your control, but by changes in one of the libraries you are depending on, new requirements imposed by external entities, such as your boss, or even changes in the programming language itself. For
+example, if you had older Ruby code and relied on the difference between
+Fixnum
+,
+Bignum
+, and
+Integer
+, starting in Ruby 2.4 you probably had a bad time, since from Ruby 2.4, they are all the same (except that
+Fixnum
+and
+Bignum
+cause deprecation warnings).
+In this section, you learned about common reasons to refactor your code. In the next section, you'll learn more about the refactoring process.
+Learning about the refactoring process
+In general, the process of
+refactoring existing code is similar to writing code in the first place. In many cases, it's even easier. Assuming you've followed the advice in
+Chapter 11
+,
+Testing to Ensure Your Code Works
+, you already have a good set of tests for the behavior you are refactoring. If you've inherited code without tests or with tests that don't give you good confidence that they will catch bugs that can be introduced during refactoring, before you start refactoring, the goal should be to get the tests in a good enough shape that you are comfortable that they will catch you if you fall. If you are in a position where you refactor some code and run the tests and everything passes, and your first thought is, "
+Maybe I am missing a case where this fails
+," then you probably don't have enough tests. You can add tests at that point, but that's not the best time. What if you add the tests after refactoring and they pass, but with the code before refactoring the tests would have failed? This is a case where behavior has changed, which could be a bug. If possible, make sure your test suite is solid and confidence-inspiring before starting any refactoring.
+After you have confidence in your test suite, the simplest way to refactor is the same as the way to write code originally, which is
+do the simplest thing that could possibly work
+. Let's walk through a pure refactoring situation, where no behavior should change. Let's say you are eliminating an unnecessary internal abstraction, such as a private method that could be replaced with an instance variable access. The simplest thing that could possibly work would involve the following steps:
+Find the first remaining use of the abstraction.
+Deabstract, by inlining the code from the abstraction into the code where the abstraction is used.
+Run tests for the library and make sure they all pass.
+If there are no remaining uses, you are done; otherwise, go to
+step 1
+.
+Following this exact process sounds easy, but it is actually hard. Almost always, the programmer's natural instinct is a different set of steps, such as the following:
+Find all uses of the abstraction.
+Deabstract each case by inlining the code from the abstraction into the code where the abstraction is used.
+Run tests for the library and hope they all pass.
+If you take that
+approach and all tests pass, great! However, if not all tests pass, you have a lot more work cut out for you since now you need to figure out where the error is. If your tests take a long time to run, there can definitely be an incentive to take the shortcut of making all changes first, especially if the refactoring itself is very simple. However, in this case, it's often best to test after the first change, after the third change, and once again at the end. In general, if a refactoring causes issues, it will usually show up after the first change, and in rarer cases in one of the first three changes. There are certainly cases where breakage can happen after the first three, but they are less common.
+In general, before you start the refactoring process, ask yourself whether you really need the refactoring. Make sure you have a good reason to refactor code. Do not refactor just because you don't like the design. You should be able to clearly state the problems with the current design and why refactoring is needed before starting the refactoring process. Refactoring can be a source of subtle bugs that are not caught without extensive testing. If the code you are refactoring is already known to be full of bugs, the risk of refactoring and adding bugs may be offset by the bugs it could fix. However, often the currently known bugs in the code already have known workarounds, and changing which bugs are present in the code, such as a refactoring that fixes two bugs but adds one, can actually result in a worse experience for users.
+In some programming languages, simple refactoring approaches can be automated, but due to the dynamic nature of Ruby, automatic refactoring is rarely robust. There are automated refactoring tools for Ruby, but they usually don't catch cases when using Ruby features such as
+send
+,
+instance_variable_get
+,
+const_missing
+, and
+method_missing
+.
+Maybe you think your code could benefit from refactoring, but you don't have a pressing need to refactor now. In this case, it's usually better to wait to refactor until you really know you need to refactor. A
+good general principle is to refactor as late as possible and only as needed to solve actual issues you are experiencing in your use of the code.
+In this section, you learned about the refactoring process. In the next section, you'll learn from examples of two of the most common Ruby refactoring techniques.
+Implementing the most common Ruby refactoring techniques
+Two refactoring techniques
+are very common in Ruby, extracting a method and extracting a class. Let's focus first on extracting a method, as that is more common.
+Extracting a method
+Extracting a method is
+generally done when you
+have found the same code or same pattern of code in multiple places that is being executed for the same reasons.
+As an example of this, consider a SQL database library that needs to execute
+INSERT
+,
+UPDATE
+, and
+DELETE
+SQL queries to modify data.
+You have a
+Database
+class with separate methods to handle each type of query. The
+insert
+method checks out a connection, executes the SQL for the
+INSERT
+statement on the connection, and uses
+ensure
+to make sure the connection is checked back in, because you do not want to leak connections if an exception is raised. Refer to the following code block:
+class Database
+def insert(*args)
+conn = checkout_connection
+conn.execute(insert_sql(*args))
+ensure
+checkin_connection(conn) if conn
+end
+The
+update
+and
+delete
+methods are
+implemented similarly, checking
+out a connection, executing the appropriate SQL on the connection, and then checking the connection back in:
+def update(*args)
+conn = checkout_connection
+conn.execute(update_sql(*args))
+ensure
+checkin_connection(conn) if conn
+end
+def delete(*args)
+conn = checkout_connection
+conn.execute(delete_sql(*args))
+ensure
+checkin_connection(conn) if conn
+end
+end
+Due to the repetitive nature of the code, this seems like a natural candidate for method extraction. By extracting the repetitive behavior of a method, you can reduce the duplication and make it so future enhancements can occur in one place.
+When starting the method extraction, the most important thing to consider is what you want the extracted method to do. Ideally, the extracted method would extract all the repetitive behavior, and still allow for easy use. Since the place in each method where the code differs is in the middle of the method, one way to extract a method is to extract the connection checkout and check-in parts. Since
+checkout_connection
+is already used, you could call a new method,
+checkout
+, and have it use a block-based API, as follows:
+class Database
+private def checkout
+conn = checkout_connection
+yield conn
+ensure
+checkin_connection(conn) if conn
+end
+This allows you
+to simplify the
+insert
+,
+update
+, and
+delete
+methods, which
+eliminates a lot of the repetitive code:
+def insert(*args)
+checkout do |conn|
+conn.execute(insert_sql(*args))
+end
+end
+def update(*args)
+checkout do |conn|
+conn.execute(update_sql(*args))
+end
+end
+def delete(*args)
+checkout do |conn|
+conn.execute(delete_sql(*args))
+end
+end
+end
+However, this result is still rather unsatisfying, as there is still a substantial amount of duplication left. Since
+conn.execute
+is the same in each method, that could be moved into the extracted method. Alternatively, it may be a good idea to leave the currently extracted method, since a method that just handles connection checkouts and check-ins using a block definitely sounds useful. You decide to extract a
+Database#execute
+method that handles the connection checkout and execution, and just yields to get the SQL to execute:
+class Database
+private def execute
+checkout do |conn|
+conn.execute(yield)
+end
+end
+This allows you to
+simplify the
+insert
+,
+update
+, and
+delete
+methods
+even more, with very little repetitive code left:
+def insert(*args)
+execute{insert_sql(*args)}
+end
+def update(*args)
+execute{update_sql(*args)}
+end
+def delete(*args)
+execute{delete_sql(*args)}
+end
+end
+This works fine, but looks a little strange, mostly due to the fact that the block is no longer called with an argument, but the SQL is still generated inside of the block. Taking another look at the code, SQL generation does not depend on the connection itself, so there is no reason to use a block in the
+execute
+method. It would probably be best to have the
+execute
+method take the SQL to execute as an argument:
+class Database
+private def execute(sql)
+checkout do |conn|
+conn.execute(sql)
+end
+end
+Then, the
+insert
+,
+update
+, and
+delete
+methods
+just need to
+change to pass the SQL to use as a positional argument:
+def insert(*args)
+execute(insert_sql(*args))
+end
+def update(*args)
+execute(update_sql(*args))
+end
+def delete(*args)
+execute(delete_sql(*args))
+end
+end
+This is probably the best way to extract the method. Actually, you extracted two methods. Maybe you don't need to extract both methods, and you can combine the extracted methods into a single method:
+class Database
+private def execute(sql)
+conn = checkout_connection
+conn.execute(sql)
+ensure
+checkin_connection(conn) if conn
+end
+end
+Whether it's better to
+keep both
+execute
+and
+checkout
+as extracted methods or to combine them into a single
+execute
+method
+depends on whether you have a use for calling
+checkout
+separately. If there are places in your class where you are checking out a connection but not executing a SQL statement on it, or places where you are checking out a connection and executing multiple SQL statements on it, then it's probably best to keep
+checkout
+as a separate method. However, if you would never be calling
+checkout
+separately, it probably does not make sense to keep it as a separate method, and you could make your code faster by having a single
+execute
+method.
+Extracting a class
+Extracting a class is less
+common than extracting a
+method, but there are still places where it makes sense to do so. As you learned in
+Chapter 2
+,
+Designing Useful Custom Classes
+, classes that deal with only a single responsibility are often easier to maintain, so one reason to extract a class is to take a class that has many responsibilities and break it into separate classes. As you learned, it's not always a good idea to break a large class into smaller classes. You should carefully consider the benefit of using a single class versus the extra cognitive overhead that an extra class entails.
+Let's say you are designing a system for tracking clients of a shipping business in the United States named
+Shippers Pack Urgently
+(
+SPU
+for short). For each client, you need to keep track of
+their first and last name, their address, and their phone number. Due to formatting requirements for address label printing, you must keep track of the portions of the address as separate fields. These fields are the street, city, state, and ZIP code. You decide to design a
+Client
+class to hold client information and initialize instances by assigning all arguments given to instance variables. Refer to the following code:
+class Client
+def initialize(first_name, last_name, street, city,
+state, zip, phone)
+@first_name = first_name
+@last_name = last_name
+@street = street
+@city = city
+@state = state
+@zip = zip
+@phone = phone
+end
+As you learned in
+Chapter 4
+,
+Methods and Their Arguments
+, this isn't a particularly good approach as
+the method takes seven positional
+arguments, but we'll ignore that for now. Clients occasionally need to change either their phone number or their address, so you have the
+update_phone
+and
+update_address
+methods to handle updating the phone number and address information:
+def update_phone(phone)
+@phone = phone
+end
+def update_address(street, city, state, zip)
+@street = street
+@city = city
+@state = state
+@zip = zip
+end
+In the normal course of business, the business sends letters to clients, either thanking them for being customers or promoting new services. To handle formatting of address labels for these letters, there is a
+format_address_label
+method:
+def format_address_label
+<<~END
+#{@first_name} #{@last_name}
+#{@street}
+#{@city}, #{@state} #{@zip}
+END
+end
+end
+SPU makes money by
+packing and shipping high-priority items for clients. They
+are a little unusual as every package they pack they ship as soon as it is packed, due mainly to the urgency. In other words, each package is a separate shipment, and you decide to use a
+Shipment
+class for tracking shipments. For each shipment, you need to track the contents of the shipment, the date it was shipped, who the item is being shipped to, and the address information for the shipment. Similar to the
+Client
+class, you initialize the
+Shipment
+instances by assigning the arguments to instance variables:
+class Shipment
+def initialize(contents, ship_date, ship_to,
+street, city, state, zip)
+@contents = contents
+@ship_date = ship_date
+@ship_to = ship_to
+@street = street
+@city = city
+@state = state
+@zip = zip
+end
+Unlike the address of a
+client, the address of a shipment never changes, so
+there is no method to update the address of a shipment. However, all shipments have a label placed on them, so that SPU employees can look at the package at any point to determine where it is going. Similar to the
+Client
+class, the
+Shipment
+class uses
+format_address_label
+for this:
+def format_address_label
+<<~END
+#{@ship_to}
+#{@street}
+#{@city}, #{@state} #{@zip}
+END
+end
+end
+In this example, we are storing address information in both the
+Shipment
+and
+Client
+classes. Both
+Shipment
+and
+Client
+have a need for address formatting, even if the formatting is slightly different. This is a situation where extracting an
+Address
+class can be beneficial. The
+Address
+class will need to store the same street, city, state, and ZIP information that you were storing in
+Shipment
+and
+Client
+:
+class Address
+def initialize(street, city, state, zip)
+@street = street
+@city = city
+@state = state
+@zip = zip
+end
+end
+At this point, you need to
+decide whether you want to change
+Shipment
+and
+Client
+in a backward-compatible manner, or whether you can
+drop backward compatibility. If this code is in a library used in other applications, and you cannot change all applications using the library at the same time, you probably need to keep backward compatibility. Changing
+Client#initialize
+while keeping backward compatibility would look like the following:
+class Client
+def initialize(first_name, last_name, street, city,
+state, zip, phone)
+@first_name = first_name
+@last_name = last_name
+@address = Address.new(street, city, state, zip)
+@phone = phone
+end
+end
+Similarly, changing
+Shipment#initialize
+would look like this:
+class Shipment
+def initialize(contents, ship_date, ship_to,
+street, city, state, zip)
+@contents = contents
+@ship_date = ship_date
+@ship_to = ship_to
+@address = Address.new(street, city, state, zip)
+end
+end
+However, if this is a
+separate application and it is not too
+difficult to change all callers of
+Client.new
+and
+Shipment.new
+, backward compatibility is not an issue, and it may be a better idea to change the API for
+Client
+and
+Shipment
+to accept an
+Address
+instance:
+class Client
+def initialize(first_name, last_name, address, phone)
+@first_name = first_name
+@last_name = last_name
+@address = address
+@phone = phone
+end
+end
+class Shipment
+def initialize(contents, ship_date, ship_to, address)
+@contents = contents
+@ship_date = ship_date
+@ship_to = ship_to
+@address = address
+end
+end
+In this case, dropping backward compatibility makes the code more flexible. For example, if SPU decides to expand to different countries that use different address formats, it is much easier if
+Client
+and
+Shipment
+only deal with
+Address
+objects and not create
+Address
+objects themselves. This is because the
+Address
+class may need to change to handle different address formats, and it is easier to make those changes just in the
+Address
+class, as opposed to making them in the
+Address
+,
+Client
+, and
+Shipment
+classes. It may even be easier to handle foreign addresses using a
+new
+Address
+class per country or region
+that uses a unique addressing format. By accepting an
+Address
+instance and not the different parts of the address,
+Client
+and
+Shipment
+can more easily handle possible future changes in addressing.
+A similar issue affects
+Client#update_address
+. To keep backward compatibility, you could have it continue to accept the four separate arguments, and create an
+Address
+instance:
+class Client
+def update_address(street, city, state, zip)
+@address = Address.new(street, city, state, zip)
+end
+end
+Likewise, if backward compatibility is not important, you could change it to accept an
+Address
+instance:
+class Client
+def update_address(address)
+@address = address
+end
+end
+Since you'll also need to format labels for addresses, you have a couple of options. One option is just formatting the address part:
+class Address
+def format_label
+<<~END
+#{@street}
+#{@city}, #{@state} #{@zip}
+END
+end
+end
+With this approach for
+only formatting the address
+part and not including the addressee, the
+Client
+and
+Shipment
+code to format an address label would look similar to the following:
+class Client
+def format_address_label
+<<~END
+#{@first_name} #{@last_name}
+#{@address.format_label}
+END
+end
+end
+class Shipment
+def format_address_label
+<<~END
+#{@ship_to}
+#{@address.format_label}
+END
+end
+end
+This isn't terrible, but it may not be the best approach. An alternative approach would be having
+Address#format_label
+take an argument for the addressee:
+class Address
+def format_label(addressee)
+<<~END
+#{addressee}
+#{@street}
+#{@city}, #{@state} #{@zip}
+END
+end
+end
+The advantage of this
+code is that the
+Client
+and
+Shipment
+code for
+formatting the address labels can be simpler:
+class Client
+def format_address_label
+@address.format_label("#{@first_name} #{@last_name}")
+end
+end
+class Shipment
+def format_address_label
+@address.format_label(@ship_to)
+end
+end
+Having simpler and less verbose code is definitely good, but the larger conceptual improvement, in this case, is that
+Address
+is now completely responsible for handling label formatting. If SPU decides to print a barcode or QR code at the top of each label, it can now be accomplished by modifying the code in a single place,
+Address#format_label
+.
+In this section, you
+learned about the most common
+Ruby refactoring techniques, extracting a method and extracting a class. In the next section, you'll learn how to approach refactoring when you need to add a new feature that requires refactoring.
+Refactoring to add features
+One common reason to
+refactor is to add features that are infeasible to implement with the current design. There are
+two ways to go about this. We'll call the first way the
+cowboy approach
+. With the cowboy approach, you just start implementing the new feature and refactor the existing application as needed while you are developing the feature. When you are done implementing the feature, you stop the refactoring.
+In the best-case scenario, the cowboy approach saves time. It can also result in the least refactoring changes needed since you only refactor as much as you need to in order to implement the feature you are adding. However, it may result in a partially implemented refactoring, if a full refactoring was not needed to implement the new feature. For the optimistic programmer, the cowboy approach fits better with their natural desire to just get stuff done. It's easy to understand why it is a fairly common approach. Proponents of the cowboy approach mostly have the "
+What could go wrong?
+" attitude.
+Unfortunately, at least two common things can go wrong. First, you could break existing code during the process of refactoring and implementing the new feature. The problem, in this case, is you may not know whether the failure was caused by the refactoring itself or by the implementation of the new feature. Debugging the issue becomes much more difficult because the new feature changes and the refactoring changes are both present and may be hard to separate. You can try backing out only the new feature changes to attempt to isolate the problem, but depending on the complexity of the new feature, that may be difficult by itself. You could also try backing out just the refactoring changes, but then the new feature would break. That may also be difficult to do.
+Second, you could run into
+problems with the new feature. In this case, existing tests pass, but the tests for the new feature do not. In this case, it is probably due to the implementation of the new feature itself, but it's hard to rule out the refactoring changes causing it. Maybe the new feature is exercising parts of the refactored code that the existing code base was not exercising. Even if you are pretty sure the problem is in the new feature implementation, it becomes more difficult to debug simply due to there being more outstanding changes, and it being harder to find the possible bugs in them.
+If the cowboy approach isn't the best way to go about implementing a new feature when refactoring is required, what should be done instead? We'll call the alternative approach the
+methodical approach
+. In the
+methodical approach, you always refactor first. It doesn't matter how much refactoring is needed or how large the new feature being added is, you always refactor first. Once you've completed the refactoring, you run the tests to make sure the refactoring didn't break anything. At this point, it's a good idea to get updated test coverage information, and add any covering tests needed for the newly refactored code, as you learned about in
+Chapter 11
+,
+Testing to Ensure Your Code Works
+.
+After you have fully tested the newly refactored code, you can commit those changes, and then you can begin implementing the feature you need. If during the process you find that additional refactoring is needed, you stash or stage your changes to implement the feature, and then implement and test the refactoring needed. Only after that refactoring has been completed, tested, and committed do you go back to implementing the new feature. After implementing the feature, you can run the tests for the feature and see whether they pass. If one of the existing tests fails at this point, you know something in the new feature is causing the test to fail. You also know that the failure was not caused by the refactoring. Likewise, if one of the new tests fails at this point, you also know it is likely due to the new feature itself and not the refactoring.
+Using the methodical approach will probably take a little longer in the best-case scenario. However, it is likely to result in a more complete refactoring, since you complete the refactoring before starting the implementation of the new feature, instead of refactoring just enough to implement the new feature. The greatest advantage of the
+methodical approach over the cowboy approach is that if something goes wrong, the problem space is significantly reduced, and it is in general much easier to find and fix any bugs found.
+In this section, you learned about the methodical and cowboy approaches to adding a feature that requires refactoring. In the next section, you'll learn how to properly remove features from your library.
+Removing features properly
+Removing features
+sounds like a bad thing for most new programmers, but it is probably one of the happiest moments for experienced programmers. One important thing to understand is that while most users think of features as assets if you are maintaining a library, features are best thought of as liabilities because every feature has a maintenance cost. When you add a new feature to a library you maintain, you are only increasing your future maintenance burden. By removing a feature in a library that you maintain, you are ridding yourself of a liability. This is one reason removing features is one of the happiest moments for experienced programmers.
+Obviously, a library with no features is worthless, so an important quality for a library to have is that the features it contains are useful, and not useless, or worse, actively harmful. However, it is often not possible to foresee when adding a feature whether it will continue to be useful in the years to come. In some cases, a new feature that seems like a great idea when originally implemented turns out to be a major problem in 5 years. The reason that experienced programmers are so happy to get rid of features is the features they generally get rid of are features that are holding the library back or causing the most significant maintenance burden. Simply the knowledge that they will no longer have to deal with the maintenance of the problematic feature is enough to cause significant joy for the remover.
+As a responsible library maintainer, you can't just remove features from your library anytime you want, as you are likely to break the code of people relying on your library. In order to ease the burden on your users, for whom feature removal may cause as much pain as removing the
+feature brings you joy, you need to properly deprecate the feature. How you deprecate the feature depends on what the feature is.
+Removing methods
+If the feature is a method, the
+simplest way to deprecate it is to call the
+warn
+method inside the feature. Make sure to include the name of the method called, which
+you can get by calling
+__callee__
+. Also, make sure to use the
+:uplevel
+keyword argument to
+warn
+, which will include the caller's filename and line number in the error message. In Ruby 3, it's also a good idea to include the
+:category
+keyword argument use the
+:deprecated
+category, as this marks the warning as a deprecation warning. This allows the users of your library to more easily see what method needs to be fixed. Observe the following code:
+def method_to_be_removed
+warn("#{__callee__} is deprecated",
+uplevel: 1, category: :deprecated)
+# ...
+end
+Things become more complicated if you still need to call the method internally until it is removed. In this case, it's best to have an internal private alias to the method that doesn't raise a warning, and change all internal callers to use it:
+def method_to_be_removed
+warn("#{__callee__} is deprecated",
+uplevel: 1, category: :deprecated)
+_method_to_be_removed
+end
+private def _method_to_be_removed
+# ...
+end
+If the feature being removed is a required positional argument to a method, first you make the required argument optional, and then you only issue the warning if the argument is given. To check whether the argument was given, you can use the technique you learned in
+Chapter 7
+,
+Designing Your Library
+, of setting a local variable inside a default argument value. Say you are planning to remove the argument in this method:
+def arg_to_be_removed(arg)
+# ...
+end
+You would
+change
+this to the following:
+def arg_to_be_removed(arg=(arg_not_given=true; nil))
+unless arg_not_given
+warn("Passing deprecated argument to #{__callee__}",
+uplevel: 1, category: :deprecated)
+end
+# ...
+end
+Adding a required positional argument is very similar, so we'll give an example here even though it isn't related to removing a feature. If you wanted to add a required argument to the method instead, you use the local variable in the default argument technique, but flip the conditional, as follows:
+def arg_to_be_added(arg, arg2=(arg2_not_given=true; nil))
+if arg2_not_given
+warn("Should now pass 2 arguments to #{__callee__}",
+uplevel: 1, category: :deprecated)
+end
+# ...
+end
+The technique for
+removing optional positional arguments or keyword
+arguments is the same as for removing a required positional argument.
+Removing constants
+If the feature being
+removed is a
+constant and not a method, you can use
+deprecate_constant
+:
+class Foo
+BAR = 1
+deprecate_constant :BAR
+end
+With this approach, any access to the constant will trigger a deprecation warning.
+If you still need internal access to the constant until it is removed, you can alias the constant before deprecating it, mark the aliased constant
+private
+, and change all internal access to use the private constant:
+class Foo
+BAR = 1
+BAR_ = BAR
+private_constant :BAR_
+deprecate_constant :BAR
+end
+Notice that the underscore here goes after the constant name and not before because using an underscore first defines a local variable and not a constant.
+This doesn't apply just to constants you define in your custom classes; this same approach can be used if you want to deprecate a top-level class, since top-level classes are just constants in
+Object
+. To deprecate the
+Foo
+class itself, while keeping
+Foo_
+for internal reference, use the following:
+class Object
+Foo_ = Foo
+private_constant :Foo_
+deprecate_constant :Foo
+end
+Note that in Ruby 3, deprecation
+warnings are not shown by default, even
+when we have
+$VERBOSE = true
+. You need to use the
+-w
+flag when starting Ruby, or set
+Warning[:deprecated] = true
+if you want deprecation warnings to be displayed.
+In general, you should keep the features with the deprecation warnings in your library until you release the next major version of your library. When you release the next major version, you can then feel the joy of removing the deprecated features.
+Summary
+In this chapter, you've learned how to handle change in your libraries. You've learned reasons to refactor your library, and how to handle the refactoring process. You've learned about implementing the two most common Ruby refactoring techniques, extracting a method and extracting a class. You've learned how important it is to refactor before adding features requiring refactoring. You've also learned about how to properly remove features from your libraries, and the joy of doing so. With all you've learned about refactoring, you are hopefully better able to successfully make appropriate changes to your libraries.
+In the next chapter, you'll learn about using common design patterns in your Ruby libraries.
+Questions
+What are three common reasons to refactor in a library?
+What is the most important prerequisite before starting refactoring?
+When does it make sense to extract multiple methods instead of a single method?
+In the best case, what's the fastest approach to implementing a feature that requires refactoring?
+What keyword arguments should you pass to
+Kernel#warn
+for deprecation warnings?
+
+Chapter 13
+: Using Common Design Patterns
+In the last chapter, you learned how best to handle change in your libraries. A couple of common changes are to implement new design patterns or to remove inappropriate design patterns. While design patterns are not as necessary in Ruby as they are in less powerful languages, they are still a useful tool to have in your toolbox. When dealing with design patterns, it is important to understand when it is useful to apply them, and when it is best to abstain from doing so. So in this chapter, you'll also learn when it is appropriate to use specific design patterns.
+In this chapter, we will cover the following topics:
+Learning about the many design patterns that are built into Ruby
+Handling cases where there can be only one
+Dealing with nothing
+Visiting objects
+Adapting and strategizing
+By the end of this chapter, you'll better understand design patterns that are built into Ruby, and how and why to implement other common design patterns in your libraries and applications.
+Technical requirements
+In this chapter and all chapters of this book, code given in code blocks is designed to execute on Ruby 3.0. Many of the code examples will work on earlier versions of Ruby, but not all. The code for this chapter is available online at
+https://github.com/PacktPublishing/Polished-Ruby-Programming/tree/main/Chapter13
+.
+Learning about the many design patterns that are built into Ruby
+Ruby internally
+uses many design patterns, supports design patterns in the core classes, and implements design patterns in some standard libraries. In this section, you'll learn about some common design patterns that Ruby uses by default.
+The object pool design pattern
+With the
+object pool design
+pattern, if you need a certain type of object, instead of allocating memory to create a new object, you can reuse an existing object. Ruby's garbage collection system is designed this way. Ruby would be significantly slower and much more prone to memory problems than it already is if it had to manually allocate memory from the operating system each time you created an object. Internally, Ruby uses the object pool pattern to improve object creation speed.
+Other than immediate objects such as
+true
+,
+false
+,
+nil
+, symbols, and most integers and floats, all other Ruby objects are stored in an object pool that is referred to as the
+Ruby heap
+. The
+Ruby
+heap is broken up into many sections called
+heap pages
+, and each of these pages is made up of
+slots
+. Each object you create in Ruby is stored in one of these slots. When Ruby needs to create an object and there are no free slots left in any heap page, Ruby runs the garbage collector to see if it can free any slots. If it cannot find a free slot after running the garbage collector, then Ruby will need to create a new heap page, and store the object in that new heap page.
+By using the object pool design pattern, Ruby reduces the performance and memory fragmentation issues that commonly occur when using
+malloc
+to allocate and free memory for small objects.
+The prototype design pattern
+Ruby is
+often
+considered to use a class-based object system, but it also supports a prototype-based object system. In a class-based object system, classes and objects (instances of classes) are separate concepts. Classes define the structure, or what types of values are contained in each instance of the class. Objects provide the values for each of those types. In a prototype-based system, there are no classes. Each new object is created by making a copy of an existing object and modifying it.
+Most Ruby users use its class-based object system. Ruby nudges you in the direction of using the class-based object by providing special syntax for creating classes:
+class Foo
+end
+If you ignore this syntax, however, Ruby basically treats the class-based object system and prototype-based object system the same way. You use the class-based object system by creating classes using
+Class.new
+, and instances of those classes by calling
+new
+on
+the resulting
+class:
+foo_class = Class.new
+foo_class.define_method(:bar) do
+2
+end
+foo_instance = foo_class.new
+foo_instance.bar
+# => 2
+You use the prototype-based object system by taking an empty object and cloning it, then modifying the clone, then creating clones of that object:
+foo_proto = Object.new
+foo_proto.define_singleton_method(:bar) do
+2
+end
+foo_clone = foo_proto.clone
+foo_clone.bar
+# => 2
+Ruby can support both a class-based object system and a prototype-based object system through the use of singleton classes. It even supports combining both the class-based
+object system and
+the prototype-based object systems:
+foo_class = Class.new
+foo_class.define_method(:bar) do
+2
+end
+foo_class_clone = foo_class.clone
+foo_class_clone_instance = foo_class_clone.new
+foo_class_clone_clone = foo_class_clone_instance.clone
+foo_class_clone_clone.bar
+# => 2
+Being able to support both class-based object systems and prototype-based object systems is a huge advantage of Ruby, and the design of some Ruby libraries, such as Sequel, is only possible by using a mix of the two. In Sequel, each database adapter has its own
+Sequel::Dataset
+subclass (the class-based object system), and
+Sequel::Dataset
+instances are frozen and use
+clone
+to create modified copies of instances, including
+copies of the
+dataset's singleton class (the prototype-based object system).
+The private class data design pattern
+The
+private class data
+design pattern reduces the exposure of class-level data so that it cannot be manipulated. Ruby has built-in support for this design pattern using class instance variables:
+class Foo
+@bar = 1
+end
+Unless encapsulation is deliberately broken through the use of
+instance_variable_get
+,
+instance_variable_set
+, or calling a method such as
+class_eval
+, the
+@bar
+instance variable is private to this class. It is not available to other objects, to instances of the class, or subclasses of the class.
+For methods of the class that should only be accessed by the class itself, you can use
+private_class_method
+:
+class Foo
+def self.bar
+2
+end
+private_class_method :bar
+end
+Similarly, unless encapsulation is deliberately broken via
+Kernel#send
+, this method is not callable by other objects or instances of the class. However, it is available to subclasses of the class. Preventing subclasses of the class from calling the method is possible, but does not happen by default. If you want to prevent a subclass from calling the method, you can do so by checking the value of
+self
+inside the method:
+class Foo
+def self.bar
+raise TypeError, "not Foo" unless Foo == self
+2
+end
+private_class_method :bar
+end
+For constants of the class that should be private, you can use
+private_constant
+:
+class Foo
+BAR = 3
+private_constant :BAR
+end
+Unless
+encapsulation
+is deliberately broken via
+Module#const_get
+, this constant is not accessible by other objects or instances of the class. However, it is accessible by subclasses of the class, and there isn't a way in Ruby to prevent subclasses from accessing it inside the subclass.
+The proxy design pattern
+The proxy
+pattern involves
+creating wrapper objects for objects and calling methods on those wrapper objects. The wrapper, or proxy, objects, can add useful behavior, such as metrics (the number of calls for each method), caching, or only exposing a subset of the object's methods.
+Ruby provides two standard libraries that implement the proxy pattern in a couple of different ways. As you learned in
+Chapter 4
+,
+Methods and Their Arguments
+, the
+forwardable
+library can be used to proxy specific methods to other objects:
+require 'forwardable'
+class Proxy
+extend Forwardable
+def initialize(value)
+@value = value
+end
+def_delegator :@value, :to_s
+end
+Proxy.new(1).to_s
+# => "1"
+forwardable
+is
+useful for
+wrappers that only wrap a subset of the target object's methods. However, if you want to wrap all or almost all of a target object's methods, it is tedious to implement that with
+forwardable
+.
+For wrapping all or almost all of a target object's methods, Ruby has a separate standard library,
+delegate
+. With the
+delegate
+library, you can use the
+SimpleDelegator
+class to return a proxy object that delegates all methods to the target object, other than those methods defined in the
+SimpleDelegator
+class:
+require 'delegate'
+class Proxy2 < SimpleDelegator
+def add_3
+self + 3
+end
+end
+Proxy2.new(1).add_3
+# => 4
+However,
+SimpleDelegator
+subclasses can wrap any object, not just specific types of objects, so they aren't as useful when you want to deal with proxies for specific types of objects. For more specific proxy types, you can use
+Kernel#DelegateClass
+, which is also added by the
+delegate
+library:
+class HashProxy < DelegateClass(Hash)
+def size_squared
+size ** 2
+end
+end
+HashProxy.new(a: 1, b: 2, c: 3).size_squared
+# => 9
+In this
+section, you've learned that
+Ruby implements the object pool design pattern internally. You've also learned that Ruby offers either core class or standard library support for the prototype, private class data, and proxy design patterns. In the next section, you'll learn how to implement the singleton design pattern in Ruby.
+Handling cases where there can be only one
+In cases
+where an application using
+your library should only have a single instance of the object, you usually would reach for the singleton design pattern. Ruby actually has a standard library for the singleton pattern, appropriately named
+singleton
+. This library defines the
+Singleton
+module, which you can include in other classes to turn those classes into singletons. A class that includes
+Singleton
+no longer has a public
+new
+method, since you should not be creating multiple instances. Instead, it
+provides a class method
+named
+instance
+, which returns the only instance of the class:
+require 'singleton'
+class OnlyOne
+include Singleton
+def foo
+:foo
+end
+end
+only1 = OnlyOne.instance
+only2 = OnlyOne.instance
+only1.equal?(only2)
+# => true
+The
+singleton
+library does implement the singleton pattern. So why wasn't it discussed in the previous section, since it is a standard library? This is because, due to the expressive power of Ruby, there is rarely a reason to use it. If you have an existing object where it makes sense to keep the methods, it is better to define the methods as singleton methods on that object or to extend the object with a module that includes the methods. If you need to have a separate object to store the methods, it is usually better in Ruby to instead create an
+Object
+instance as a constant:
+OnlyOne = Object.new
+Then, to define behavior for that object, you would do the same thing you do for every other object in Ruby, which is to define methods directly on this object:
+def OnlyOne.foo
+:foo
+end
+One of the other aspects of the standard singleton design pattern is called
+lazy initialization
+, where
+the singleton instance is not created until access to it is first created by calling the method to access the instance. The implementation of singletons via constants doesn't support this directly, but you can implement this in Ruby using
+autoload
+. To use
+autoload
+for lazy initializing, you would put the assigning and setup of the singleton in its own file, and then set Ruby to autoload that file on the first reference to the constant:
+Object.autoload :OnlyOne, 'only_one'
+One advantage
+of the autoload approach for
+lazy initialization over using the singleton library (without autoload) is that you pay no memory penalty for the singleton definition if the constant is not accessed. However, as you'll learn about in
+Chapter 17
+,
+Robust Web Application Security
+, the use of
+autoload
+is problematic in environments that implement filesystem access limiting after application initialization.
+Note that you can use
+autoload
+even if using the
+singleton
+library, as the lazy initialization approach used by
+autoload
+is orthogonal to the lazy initialization approach used by the
+singleton
+library.
+In this section, you learned why it is better to implement the
+singleton
+pattern using a standard object as opposed to using the
+singleton
+standard library. In the next section, you'll learn about using the null object pattern in Ruby, which has been recommended by some Ruby programmers in recent years.
+Dealing with nothing
+The null
+object
+pattern has gained increased popularity in some parts of the Ruby community in recent years. With the null object pattern, when you deal with another object that may or may not be available, instead of using
+nil
+to represent the case where the other object is not available, you use a separate object that implements the same methods.
+As an example of this, let's say you are writing an internal application for a company, and you need to represent employees using an
+Employee
+class. For each employee, you are tracking the
+name
+,
+position
+,
+phone
+, and
+supervisor
+of the employee:
+class Employee
+attr_reader :name
+attr_reader :position
+attr_reader :phone
+def initialize(name, position, phone, supervisor)
+@name = name
+@position = position
+@phone = phone
+@supervisor = supervisor
+end
+There is
+a
+common need to print information about the employee, such as the employee's name, position, and phone number, and their supervisor's name, position, and phone number:
+def employee_info
+<<~END
+Name: #{@name}
+Position: #{@position}
+Phone: #{@phone}
+Supervisor Name: #{@supervisor.name}
+Supervisor Position: #{@supervisor.position}
+Supervisor Phone: #{@supervisor.phone}
+END
+end
+end
+Then we
+can check that this works the way we expect, assuming
+the employee has a supervisor:
+supervisor = Employee.new("Juan Manuel", "CEO",
+"246-011-0642", nil)
+subordinate = Employee.new("Aziz Karim", "CTO",
+"707-405-9260", supervisor)
+print subordinate.employee_info
+# Name: Aziz Karim
+# Position: CTO
+# Phone: 707-405-9260
+# Supervisor Name: Juan Manuel
+# Supervisor Position: CEO
+# Supervisor Phone: 246-011-0642
+Unfortunately, this does not work if the employee does not have a supervisor:
+print supervisor.employee_info
+# NoMethodError
+This is because the
+employee_info
+method tries to call the
+name
+method on
+@supervisor
+, and
+@supervisor
+is
+nil
+. Ruby has built-in support for skipping method calls on
+nil
+values using the lonely operator  (
+&.
+). One way to work around the issue is to use the lonely operator when calling any method on an object that may be
+nil
+:
+class Employee
+def employee_info
+<<~END
+Name: #{@name}
+Position: #{@position}
+Phone: #{@phone}
+Supervisor Name: #{@supervisor&.name}
+Supervisor Position: #{@supervisor&.position}
+Supervisor Phone: #{@supervisor&.phone}
+END
+end
+end
+This
+allows
+you to call
+employee_info
+on an
+Employee
+instance even if the employee doesn't have a supervisor:
+print supervisor.employee_info
+# Name: Juan Manuel
+# Position: CEO
+# Phone: 246-011-0642
+# Supervisor Name:
+# Supervisor Position:
+# Supervisor Phone:
+One issue with this approach of using the lonely operator is that you need to remember to add it to every method call on the object that may be
+nil
+. If you forget one place, you have a
+NoMethodError
+waiting to be raised. If that sounds problematic, then the null object pattern is right up your alley.
+With the null object pattern, instead of using
+nil
+for the missing object, you use a separate object that supports the same API as the missing object. In this case, to implement the null object pattern, you could add a
+NullEmployee
+class that uses an empty string for the name, position, and phone, shown as follows:
+class NullEmployee
+def name
+""
+end
+def position
+""
+end
+def phone
+""
+end
+end
+In order
+to
+implement the null object pattern correctly, both of the following conditions must be met:
+The null object needs to implement the same methods as the missing object.
+Calling methods on the null object should return objects of the same type as calling the same methods on the missing object, assuming the same arguments are passed.
+The
+name
+,
+position
+, and
+phone
+methods shown previously meet these criteria, because the
+Employee
+class returns strings for these methods, and so does the
+NullEmployee
+class.
+We can test out this null object by explicitly passing a
+NullEmployee
+instance as the supervisor when the employee doesn't have a supervisor:
+supervisor = Employee.new("Juan Manuel", "CEO",
+"246-011-0642",
+NullEmployee.new)
+Then we can test that the
+Employee#employee_info
+method works correctly with the
+NullEmployee
+instance, even when using the original
+employee_info
+method that didn't use the lonely operator:
+print supervisor.employee_info
+# Name: Juan Manuel
+# Position: CEO
+# Phone: 246-011-0642
+# Supervisor Name:
+# Supervisor Position:
+# Supervisor Phone:
+We're
+actually missing something here, and that is
+that
+NullEmployee
+doesn't implement the
+employee_info
+method, in violation of the null object pattern. However, since there is no method you can call to get a
+NullEmployee
+object, that's not currently a problem. However, as soon as you add a
+supervisor
+method to
+Employee
+, you have this issue:
+Employee.attr_reader :supervisor
+If we wanted to implement
+employee_info
+in
+NullEmployee
+, we could actually define it the same way as we define the
+Employee#employee_info
+method. However, that just leads to duplication. For this and similar reasons, it's often recommended to make the null object class and the actual object class both be subclasses of the same abstract class. If we want to do that, we can create an
+AbstractEmployee
+class almost exactly the same way we created the
+Employee
+class. It defines the same attributes and
+employee_info
+method:
+class AbstractEmployee
+attr_reader :name
+attr_reader :position
+attr_reader :phone
+def employee_info
+<<~END
+Name: #{@name}
+Position: #{@position}
+Phone: #{@phone}
+Supervisor Name: #{@supervisor.name}
+Supervisor Position: #{@supervisor.position}
+Supervisor Phone: #{@supervisor.phone}
+END
+end
+end
+Employee
+can
+be a subclass of
+AbstractEmployee
+, with
+an
+initialize
+method the same as it was defined previously:
+class Employee < AbstractEmployee
+attr_reader :supervisor
+def initialize(name, position, phone, supervisor)
+@name = name
+@position = position
+@phone = phone
+@supervisor = supervisor
+end
+end
+Similarly, you can define the
+NullEmployee
+class to be a subclass of
+AbstractEmployee
+, but instead of defining the methods separately, we can just override
+initialize
+to set the null object values. A simple approach would be to do the following:
+class NullEmployee < AbstractEmployee
+def initialize
+@name = ''
+@position = ''
+@phone = ''
+@supervisor = NullEmployee.new
+end
+end
+This has
+an
+advantage over the previous approach that did not subclass from
+AbstractEmployee
+, and that is that the
+name
+,
+position
+, and
+phone
+methods return the same object every time you call them on the same object, so the following code works the same way on both
+Employee
+and
+NullEmployee
+:
+employee.phone << "x1008"
+Unfortunately, there's a problem with this approach, and that is it actually causes a
+SystemStackError
+:
+NullEmployee.new
+# SystemStackError
+This is because calling
+NullEmployee.new
+ends up calling
+NullEmployee.new
+recursively until the stack is exhausted. To prevent this approach, you need to define
+supervisor
+as a separate method:
+class NullEmployee
+def initialize
+@name = ''
+@position = ''
+@phone = ''
+end
+def supervisor
+@supervisor ||= NullEmployee.new
+end
+end
+This
+allows
+you to create a
+NullEmployee
+instance without raising an exception:
+null_employee = NullEmployee.new
+Unfortunately, you still can't call
+employee_info
+on the null employee without an exception being raised:
+null_employee.employee_info
+# NoMethodError
+This is due to the same issue we had before the null object pattern was introduced, and that is because the null employee's supervisor is
+nil
+. One way to work around this would be to switch the
+employee_info
+method to call the
+supervisor
+method instead of accessing the
+@supervisor
+instance variable. However, that approach will make all calls to
+employee_info
+slower, even in
+Employee
+. We could have different implementations of
+employee_info
+in both
+Employee
+and
+NullEmployee
+, but that leads to duplication. A third approach, probably the best way to handle this, would be to override
+employee_info
+in
+NullEmployee
+, load the supervisor, then call
+super
+:
+class NullEmployee
+def employee_info
+supervisor
+super
+end
+end
+With that change, you can call
+employee_info
+on the null employee, finally implementing the null object pattern correctly:
+null_employee.employee_info
+# Name:
+# Position:
+# Phone:
+# Supervisor Name:
+# Supervisor Position:
+# Supervisor Phone:
+Even
+though
+it took a while to set up, you can see the advantage of the null object pattern, in that you don't have to use the lonely operator when calling methods, and everything still works. You can confidently call methods on the employee, and it doesn't matter whether the employee is an
+Employee
+instance or a
+NullEmployee
+instance, everything still works.
+Knowing the advantages of the null object pattern, does it make sense to use a null object instead of
+nil
+for all cases where you are dealing with missing data? In general, no, it does not. The null object pattern is only suited to specific cases such as the previous one, where you want to be able to treat the absence of an object the same as the presence of an object.
+Let's say you had a smarter version of
+employee_info
+that only included the supervisor's information if there was a supervisor. First, you can simplify the code by extracting a
+specific_employee_info
+method that only prints information for a specific employee:
+class Employee
+def specific_employee_info
+<<~END
+Name: #{@name}
+Position: #{@position}
+Phone: #{@phone}
+END
+end
+Then you
+can override
+employee_info
+to call
+the
+specific_employee_info
+method on both the current
+employee
+and the
+supervisor
+if the supervisor exists, or just the employee if it does not:
+def employee_info
+if @supervisor
+specific_employee_info +
+@supervisor.specific_employee_info
+else
+specific_employee_info
+end
+end
+end
+This results in cleaner output if the employee doesn't have a
+supervisor
+:
+supervisor = Employee.new("Juan Manuel", "CEO",
+"246-011-0642", nil)
+supervisor.employee_info
+# Name: Juan Manuel
+# Position: CEO
+# Phone: 246-011-0642
+In this case, where you actually care whether you have a real employee or a null employee, the null object pattern adds complexity instead of removing complexity. If you were using the null object pattern, you need to use a more complex construction of checking whether the supervisor is actually an object you expect:
+class Employee
+def employee_info
+if @supervisor.is_a?(Employee)
+specific_employee_info +
+@supervisor.specific_employee_info
+else
+specific_employee_info
+end
+end
+end
+In general, if
+you have even a small percentage of cases where
+you are checking for a real object or a null object, you should avoid the null object pattern, and just use the lonely operator to guard calls against the missing object. The null object pattern should only be used if you can always or almost always treat the null object as a real object.
+The other issue with using the null object pattern instead of
+nil
+is the null object pattern tends to be much slower.
+nil
+is an immediate object in Ruby and does not consume any memory, while each null object needs to be allocated before use and garbage collected after use. It's possible to mitigate this issue by using a shared null object, but then the null object needs to be frozen, and that can make it not work the same way as an unfrozen version of a regular object. In general, it is best to avoid the null object pattern in performance-sensitive code, even if it would otherwise be a good fit.
+In this section, you learned about applying the null object design pattern to Ruby. In the next section, you'll learn about applying the visitor pattern.
+Visiting objects
+The visitor pattern
+is most commonly used when you have many objects of separate classes that you need to handle in some manner. You have a class called a visitor that processes, or visits, each object and does something with the object. Often when using the visitor pattern, you actually have multiple different types of operations that all need to deal with the same objects, so you have multiple visitor classes. However, you do not want to add methods for each visitor class to each of those separate classes. After all, while it is possible to define methods on any class in Ruby, it's generally considered bad practice to define methods on classes that are not part of your library, unless that is the sole purpose of your library.
+The visitor pattern is a way around the problem of defining per-visitor methods in each class that is being visited. A classic approach to the visitor pattern results in a ton of complexity and still requires adding a method to the classes being visited. Since you should probably avoid that, you decide to implement a modified visitor pattern. With this modified pattern, the visitor class handles the method dispatch instead of relying on the class being visited.
+One approach to implementing the visitor pattern in Ruby is to have a single
+visit
+method that uses a
+case
+expression to dispatch each type of supported object to a specific private method. We'll call this example class
+ArbitraryVisitor
+, since the visiting class just performs some arbitrary actions:
+class ArbitraryVisitor
+def visit(obj)
+case obj
+when Integer
+visit_integer(obj)
+when String
+visit_string(obj)
+when Array
+visit_array(obj)
+else
+raise ArgumentError, "unsupported object visited"
+end
+end
+Then you can
+define those private methods for the behavior you want for each object being visited:
+private
+def visit_integer(obj)
+obj ** obj
+end
+def visit_string(obj)
+obj + obj.reverse
+end
+def visit_array(obj)
+obj.size
+end
+end
+Then you can make sure
+ArbitraryVisitor
+works:
+av = ArbitraryVisitor.new
+av.visit(4)
+# => 256
+av.visit("palindrome")
+# => "palindromeemordnilap"
+av.visit([:a, :b, :c])
+# => 3
+The main advantage of this approach is that it is simple and works well for small
+case
+expressions. Unfortunately, as
+case
+expressions are linear in nature, they don't scale well to a large number of different patterns. However, up to about 20 or so patterns, it is probably fine.
+When you
+have a very large number of patterns, it makes sense to switch to a different approach. One such approach stores the methods to dispatch to in a hash keyed by the class itself. Assuming you want the same behavior as the
+ArbitraryVisitor
+class, you can create a
+HashedArbitraryVisitor
+class to show how to implement this approach:
+class HashedArbitraryVisitor < ArbitraryVisitor
+DISPATCH = {
+Integer => :visit_integer,
+String => :visit_string,
+Array => :visit_array,
+}.freeze
+def visit(obj)
+if meth = DISPATCH[obj.class]
+send(meth, obj)
+else
+raise ArgumentError, "unsupported object visited"
+end
+end
+end
+This approach works fine if all objects are direct instances of those classes, and not instances of subclasses of those classes. However, since it calls the
+class
+method on the object, it violates the Liskov substitution principle that you learned about in
+Chapter 2
+,
+Designing Useful Custom Classes
+:
+hav = HashedArbitraryVisitor.new
+hav.visit([:a, :b, :c])
+# => 3
+hav.visit(Class.new(Array)[:a, :b, :c])
+# ArgumentError
+In order to get
+it to work with instances of subclasses, you can use a
+while
+loop until you find an appropriate class:
+class HashedArbitraryVisitor
+def visit(obj)
+klass = obj.class
+if meth = DISPATCH[klass]
+send(meth, obj)
+else
+while klass = klass.superclass
+if meth = DISPATCH[klass]
+return send(meth, obj)
+end
+end
+raise ArgumentError, "unsupported object visited"
+end
+end
+end
+With that change, you can implement the Liskov substitution principle and support subclass instances:
+hav = HashedArbitraryVisitor.new
+hav.visit([:a, :b, :c])
+# => 3
+hav.visit(Class.new(Array)[:a, :b, :c])
+# => 3
+There are variations
+to the hash approach. One updates the hash storing the methods for each new class it finds that is not already in the hash, speeding up method lookup access for future instances of the same class. This approach requires you to use a mutex when accessing the hash in order to support thread safety. Another approach uses methods such as
+visit_Array
+,
+visit_String
+, and
+visit_Integer
+, and calls methods based on the name of the class. This basically uses the internal hash table of method names to support the method dispatching, and in some cases can perform faster.
+In this section, you've learned a couple of approaches to implementing the visitor pattern, and some issues with each approach. In the next section, you'll learn about implementing the adapter and strategy patterns in Ruby.
+Adapting and strategizing
+The adapter
+and strategy patterns
+are often thought of as separate patterns, but in Ruby, they are almost the same pattern, and the naming mostly depends on how the pattern is being applied. The adapter pattern is used for cases where you have one interface that you want to use, but you need to deal with various other objects that implement a different interface. With the adapter pattern, you write an adapter with the interface you want to use that wraps the objects that use a different interface. The strategy pattern is almost the same, except that instead of wrapping an object with a different interface, it implements a different approach for the same type of operation.
+Let's say you want to implement a database library that needs to connect to multiple databases. You want the database library to use the
+execute
+method for calling an SQL query on each database and getting results back. However, the driver for database
+M
+uses the method
+exec
+, the driver for database
+P
+uses
+execute_query
+, and the driver for database
+S
+uses
+exec_sql
+. To unify the interface, you want to have your database library use separate adapter classes. You first implement a base
+Adapter
+class that
+initializes the adapter with
+the underlying driver connection object:
+class Adapter
+def initialize(conn)
+@conn = conn
+end
+end
+Then you add subclasses for each adapter:
+class Adapter::M < Adapter
+def execute(sql)
+@conn.exec(sql)
+end
+end
+class Adapter::P < Adapter
+def execute(sql)
+@conn.execute_query(sql)
+end
+end
+class Adapter::S < Adapter
+def execute(sql)
+@conn.exec_sql(sql)
+end
+end
+By using the
+adapter pattern, you've
+allowed your database library to consistently use the
+execute
+method for executing database queries, regardless of what the underlying database driver actually uses. This makes it easy to add support for a new driver, by subclassing the
+Adapter
+class and overriding the
+execute
+method as appropriate.
+The strategy pattern is almost the same as the adapter pattern, except that you don't wrap another object. Instead, you provide different implementations, or strategies, for performing the same operation.
+For example, as you continue to develop your database library, you realize that not all databases support the same types of operations. For example, some databases support inserting multiple rows in a single
+INSERT
+statement, and some do not. If the database doesn't support inserting multiple rows in a single
+INSERT
+statement, you need to use a different strategy, which is to issue separate
+INSERT
+statements per row inserted. You can implement these separate strategies the same way you implemented the adapter pattern. First, you start with a base
+MultiInsert
+class that is initialized with the table name and the rows, which should be an enumerable of enumerables:
+class MultiInsert
+def initialize(table, rows)
+@table = table
+@rows = rows
+end
+end
+Just like the adapter pattern, you have a separate subclass per strategy, with the implementation for that strategy. The multiple queries strategy is simpler to implement, so you implement that first:
+class MultiInsert::MultipleQueries < MultiInsert
+def format_sqls
+prefix = "INSERT INTO #{@table} VALUES ("
+@rows.map do |row|
+["#{prefix}#{row.join(', ')})"]
+end
+end
+end
+The single
+query approach is more
+complex, at least if you want to implement it for high performance, so you implement that next:
+class MultiInsert::SingleQuery < MultiInsert
+def format_sqls
+sql = "INSERT INTO #{@table} VALUES "
+first_row, *rows = @rows
+sql << "(#{first_row.join(', ')})"
+rows.each do |row|
+sql << ", (#{row.join(', ')})"
+end
+[sql]
+end
+end
+This allows you to pick the appropriate strategy for each database:
+MultiInsert::MultipleQueries.new('a', [[1], [2]]).
+format_sqls
+# => [["INSERT INTO a VALUES (1)"],
+#     ["INSERT INTO a VALUES (2)"]]
+MultiInsert::SingleQuery.new('a', [[1], [2]]).
+format_sqls
+# => ["INSERT INTO a VALUES (1), (2)"]
+In a lot of cases, you
+can mix the adapter and
+strategy patterns, since different adapters may require different strategies. For example, your
+Adapter
+class can expose a
+multi_insert
+method, which accepts the table and rows. You can call
+multi_insert_strategy
+to get the strategy class to use, then create an instance of it, and then call
+format_sqls
+to execute each SQL statement:
+class Adapter
+def multi_insert(table, rows)
+sqls = multi_insert_strategy.
+new(table, rows).
+format_sqls
+sqls.each do |sql|
+execute(sql)
+end
+end
+end
+Maybe all databases support the multiple query strategy, but only database
+P
+supports the faster single query strategy. In that case, your default for
+multi_insert_strategy
+in the main
+Adapter
+class is
+MultiInsert::MultipleQueries
+:
+class Adapter
+def multi_insert_strategy
+MultiInsert::MultipleQueries
+end
+end
+You can override the
+multi_insert_strategy
+method in
+Adapter::P
+to use the faster
+MultiInsert::SingleQuery
+method:
+class Adapter::P
+def multi_insert_strategy
+MultiInsert::SingleQuery
+end
+end
+In this
+section, you've learned about
+implementing the adapter and strategy patterns, how they are similar, and how to integrate the use of the two strategies.
+Summary
+In this chapter, you've learned about many design patterns and how they apply to Ruby. You've learned that some design patterns are built into Ruby, and others are implemented by core classes and standard libraries. You've also learned how best to implement the singleton, null object, visitor, adapter, and strategy patterns in Ruby. With this knowledge, you are now better able to apply these design patterns correctly in your libraries and make them more maintainable. Additionally, you may be able to recognize and remove inappropriate use of these design patterns from your libraries, also making them more maintainable.
+In the next chapter, the last chapter of
+Section 2
+, you'll learn about optimizing your library.
+Questions
+What design pattern does Ruby's garbage collector use?
+How do you implement lazy evaluation if using the constant approach to implementing the singleton pattern?
+When is it not a good idea to implement the null object pattern?
+Why would you want to use the hash approach to the visitor pattern instead of the case approach?
+What's the significant difference between the adapter and strategy patterns?

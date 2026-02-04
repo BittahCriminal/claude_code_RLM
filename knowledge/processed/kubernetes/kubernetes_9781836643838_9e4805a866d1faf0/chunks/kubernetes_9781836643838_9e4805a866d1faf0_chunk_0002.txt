@@ -1,0 +1,2978 @@
+lable nodes.
+We finished by exploring other relevant autoscalers, including the Descheduler, CPA, and CPVA. While these tools serve specific purposes and can enhance cluster efficiency in certain scenarios, they are not replacements for core data plane autoscalers.
+As we move forward, remember that the ultimate goal is to maintain an efficient Kubernetes cluster. Whether you choose CAS, Karpenter, or a combination of different autoscaling tools, the focus should always be on optimizing resource utilization, reducing costs, and ensuring that your applications have the resources they need to perform optimally. In the next chapter, we’ll focus on Karpenter to close the Kubernetes autoscaling loop. So let’s get into it.
+Get This Book’s PDF Version and Exclusive Extras
+Scan the QR code (or go to
+packtpub.com/unlock
+). Search for this book by name, confirm the edition, and then follow the steps on the page.
+Note
+: Keep your invoice handy. Purchases made directly from Packt don’t require one.
+
+8
+Node Autoscaling with Karpenter — Part 1
+In the previous chapters, you already explored node autoscaling concepts and some of the tooling available to manage node groups. Now, you’ll take a closer look at how Karpenter works behind the scenes and why it has become a popular choice to improve resource utilization and reduce operational overhead. Karpenter leverages real-time scheduling simulations and direct integration with cloud provider APIs. This allows it to launch right-sized nodes exactly when they are needed—and remove them just as efficiently when they’re not.
+Throughout this chapter, you’ll be introduced to the foundational components that make Karpenter work. You’ll learn how to define a
+NodeClass
+, configure
+NodePools
+to shape provisioning behavior, and understand the role of
+NodeClaims
+in representing and tracking newly launched capacity. You’ll also explore Karpenter’s bin-packing strategy, scheduling logic, and how it integrates with Kubernetes concepts such as tolerations, affinities, and topology constraints to make intelligent decisions.
+In addition to theory and architecture, this chapter includes a hands-on section where you’ll deploy Karpenter in an Amazon EKS environment, configure the necessary IAM permissions and networking resources, and see how it responds to a simple scheduling scenario. You’ll observe how Karpenter reacts to unscheduled pods, selects from a wide range of instance types, and uses its simulation engine to ensure the efficient placement of workloads.
+We will be covering the following main topics in this chapter:
+What is Karpenter?
+History of Karpenter
+Karpenter resources
+Launching nodes
+Deploying Karpenter
+Hands-on lab: Autoscaling with Karpenter
+Workload scheduling constraints
+By the end of this chapter, you’ll understand not only how Karpenter works but also how to properly configure
+NodePools
+and set workload constraints to influence scheduling and provisioning. All of this with only one mission in mind: to help you prepare to build more elastic, cost-effective, and responsive Kubernetes clusters using Karpenter.
+Technical requirements
+For this chapter, you’ll continue using an AWS EKS cluster. To avoid any problems, it’s recommended to spin down any previous cluster you’ve created and instead create a new one from the template you’ll find in this chapter. This is going to be the cluster you’ll use from now on. You don’t need to install any additional tools, since most of the commands are going to run using
+kubectl
+and
+helm
+. You can find the YAML manifests for all resources you’re going to create in this chapter in the
+chapter08
+folder from the book’s GitHub repository, which you already cloned in
+Chapter 1
+.
+What is Karpenter?
+Even though
+we started to explore Karpenter in the previous chapter, let’s formalize what this project is about. Karpenter is an open source, flexible node provisioning tool for Kubernetes that automatically launches right-sized compute resources (
+nodes
+) in response to unschedulable pods. When new pods are scheduled, as you can see in
+Figure 8.1
+, the cluster might not have the capacity to host all the new pods. In this example, the cluster only has the capacity to host two new pods.
+Figure 8.1 – New pods are pending, but there won’t be enough capacity to schedule
+This is where Karpenter’s controller comes in. As illustrated in
+Figure 8.2
+, Karpenter observes the actual scheduling requirements of pods to decide with more precision which nodes to launch that will fulfill the demand of workloads that the cluster’s existing capacity cannot accommodate. If a pod requires specific CPU architecture or memory constraints, or must run in particular Availability Zones, Karpenter considers all these factors in its decision-making process. However, it’s worth mentioning that
+Karpenter works in tandem with the Kubernetes schedulers; it takes a step ahead, but it doesn’t schedule pods
+.
+Figure 8.2 – Karpenter takes action and launches a new node
+Notice
+how in
+Figure 8.2
+, Karpenter launched a smaller node to fit only two pods, and as a result, no resources were wasted. If there were more than two unscheduled pods, Karpenter would have launched a bigger node with the intention that every time a new node is launched, it is as efficient as possible. We’ll dive deeper into how Karpenter launches nodes and how you can influence it later in this chapter.
+To launch only the capacity that a workload needs, Karpenter implements a
+simulation-based approach
+. Karpenter runs scheduling simulations to ensure its decisions will lead to optimal pod placement. It doesn’t just consider the immediate needs of pending pods but also pod constraints such as affinity rules,
+topology spread constraints
+(
+TSCs
+), and node selectors. This forward-thinking approach helps prevent unnecessary node launches and reduces cluster churn.
+Karpenter is very good at launching nodes, but as pods come and go, the cluster ends up having fragmentation within node resources. To reduce fragmentation, Karpenter can optimize the cost of nodes you have in the cluster with consolidation capabilities. When it notices that pods could be packed more efficiently, it can intelligently redistribute workloads to reduce costs while maintaining application availability. This consolidation process works hand in hand with its provisioning logic to ensure clusters remain both efficient and stable over time.
+Lastly, Karpenter
+integrates with cloud providers such as AWS, Azure, and GCP (for some, the integration is still in beta). For instance, in AWS, Karpenter can work with hundreds of different instance types, understanding their different characteristics and pricing models, and defers to EC2 to launch the best available type.
+So, at a very high level, that’s what Karpenter is and how it works. But before we dive deeper into the key concepts of Karpenter and how it helps you build efficient Kubernetes clusters, let’s explore how it works in AWS so that you can understand why Karpenter started in the first place.
+How does Karpenter work in AWS?
+In the
+previous chapter, we spent some time exploring how CAS works in more depth and what the best practices are for building efficient clusters. You learned that to use CAS in EKS,
+you need to define a set of node groups in advance
+that your applications will use. Recall
+that a
+node group
+is an abstraction of an EC2 Auto Scaling group. Think of it as different t-shirt sizes, types, and textures. Most likely, not all applications in the cluster will benefit from using the exact same node types. Some applications require a lot of resources, others require special storage technology, and some might need to use GPUs. In fact, some applications require so much capacity that diversification becomes critical. All this diversity in your cluster will look like the cluster in
+Figure 8.3
+with different predefined node groups.
+Figure 8.3 – An EKS cluster with different types of node groups
+As you
+can imagine, as your cluster grows, the complexity of managing such clusters will increase as well. Moreover, you need to remember that even though you can reduce the number of nodes by using multiple instance types, these instance types should have similar specifications in terms of CPU and memory. This is because when CAS scales the node group, it only uses the first instance type in the list to simulate how much to increase or decrease the desired capacity by. As a consequence, you could end up wasting resources by launching bigger nodes or constraining applications by launching smaller nodes. In short, CAS lacks granular control over instance type launches.
+Karpenter takes a different approach. It doesn’t use EC2 Auto Scaling groups, removing the need to create node groups in advance. Instead, Karpenter has direct control over which instance type it launches by using the EC2 Fleet API in instant mode. The instance types it sends aren’t necessarily homogeneous, which will result in a cluster with instances of different types and sizes, and that’s good in terms of efficiency. This means that it makes a synchronous one-time request to EC2 to launch the capacity it needs, and only what it needs. If the request fails, Karpenter tries with another list of instance types.
+In
+Figure 8.4
+, you can see that the cluster ends up having instances with different types and sizes.
+Figure 8.4 – An EKS cluster with instances of different types and sizes
+It’s important
+that you keep in mind the instance type diversification you can get with Karpenter as it changes how you manage your cluster and your applications. You could say that
+CAS uses an infrastructure-first approach
+where you define the types of node groups the cluster will have, and the applications are the ones that adapt to this type of capacity, whereas
+Karpenter uses an application-first approach
+where the applications specify what type of capacity they need, and you only need to define sane constraints for the instance types that Karpenter could launch. We’ll come back to this when diving deeper into how Karpenter launches nodes, but before that, let’s explore when Karpenter started and what its current status is.
+Migration from CAS
+If you’re currently using CAS and are considering transitioning to Karpenter, the Karpenter docs site includes a migration guide with step-by-step instructions at
+https://karpenter.sh/docs/getting-started/migrating-from-cas/
+.
+History of Karpenter
+Karpenter was
+created by AWS in response to the challenges mentioned in the previous section. In 2019, the AWS EKS team approached the Kubernetes Autoscaling
+Special Interest Group
+(
+SIG
+) to
+discuss how to integrate CAS better with the EC2 API. Then, in 2020, based on the Autoscaling SIG’s recommendations to explore these new ideas in a separate project, AWS initiated the Karpenter project on GitHub. In November 2021, AWS announced Karpenter v0.5 as
+generally available
+(
+GA
+). This
+is the version where Karpenter introduced the ability to provision right-sized EC2 instances in response to changing application loads, addressing the need for improved application availability and resource utilization in Kubernetes clusters.
+Since its initial release, Karpenter has seen substantial growth and evolution. The project quickly gained traction within the Kubernetes community, becoming one of the top 10 most popular AWS open source projects on GitHub with 7.4k+ GitHub stars. It attracted contributions from over 200 developers and fostered discussions among 1,500+ community members on Kubernetes’ Slack.
+Recognizing the project’s potential beyond AWS, in May 2023, AWS contributed the vendor-neutral core of Karpenter to
+the
+Cloud Native Computing Foundation
+(
+CNCF
+) through the Kubernetes Autoscaling SIG. This move aimed to facilitate additional cloud provider implementations and broaden the project’s scope. In October 2023, Karpenter graduated to beta status, reflecting its maturity and stability.
+In early 2024, Karpenter v1.0.0 was released, marking its graduation from beta. The beta version introduced APIs such as
+NodePool
+and
+EC2NodeClass
+, and in v1, these had minor modifications with the aim of committing to maintain backward compatibility in future 1.0 minor releases.
+Today, Karpenter has become a Kubernetes-native node life cycle manager. It’s been widely adopted by various companies (the AWS provider on GitHub has a list of company names under the
+ADOPTERS.md
+file), helping them improve application availability, reduce operational overhead, and increase cost efficiency in their Kubernetes clusters.
+Karpenter resources
+Before we dive
+deeper into Karpenter, you need to know the basic elements that you’ll be interacting with all the time. Karpenter’s functionality is largely defined and controlled through a set of custom resources that extend the Kubernetes API. These
+CustomResourceDefinitions
+(
+CRDs
+) are
+central to how Karpenter interacts with both the Kubernetes cluster and the underlying cloud infrastructure. In this section, we’ll explore the key CRDs that form the backbone of Karpenter’s operations:
+NodeClass
+,
+NodePool
+, and
+NodeClaims
+.
+NodeClass
+handles
+cloud provider-specific configurations such as subnet selections and security group settings, among other settings that we’ll explore later.
+NodePool
+defines the boundaries of what Karpenter can do, similar to managed node groups in EKS, but with more flexibility. In
+NodePool
+, you specify everything from allowed instance types to required labels and taints to maintenance windows. The third element that Karpenter creates to represent a node in the cloud provider is
+NodeClaims
+, which is an immutable resource that Karpenter uses to keep track and manage the life cycle of a node. As a user, you’ll find it useful to learn more about the status of a node. Let’s explore these in more detail.
+NodeClass
+NodeClass
+serves
+as Karpenter’s abstraction for cloud provider-specific configurations. This CRD is designed to handle all the infrastructure-specific details that Karpenter needs to understand when launching new nodes in your cloud environment. When Karpenter decides to launch a new node, it references the
+NodeClass
+object. While Karpenter works across different cloud providers through its cloud provider interface, each provider implements its own version of
+NodeClass
+. For AWS, as seen in
+Figure 8.5
+, this manifests as
+EC2NodeClass
+, which encapsulates all AWS-specific configuration details required for launching EC2 instances.
+Figure 8.5 – A NodeClass implementation for AWS is called EC2NodeClass
+In the context of AWS,
+EC2NodeClass
+defines
+components such as the following:
+Subnet(s), defining Availability Zones where Karpenter can launch nodes
+Security group(s) that will be applied to launched instances
+AMI specifications, defining what image will be used when launching nodes
+Other parameters needed, such as tags or user data
+Here’s a simple
+example of an
+EC2NodeClass
+definition:
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  role: "NodeIAMRoleName"
+  amiSelectorTerms:
+    - alias: "bottlerocket@1.34.0"
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: "kubernetes-autoscaling"
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: "kubernetes-autoscaling"
+Notice the
+selector
+paradigm used in the previous
+EC2NodeClass
+, which is an API construct inspired by the label selectors in Kubernetes. The use of these selectors provides the benefit of aiding in Region expansion. If you follow a similar tagging convention across Regions,
+EC2NodeClass
+doesn’t need to be changed, unlike when using AWS resource IDs.
+Let me explain in more detail each of the previous settings:
+role
+: This is where you set the IAM role name that the new EC2 instance will use to interact with AWS, which mainly will be used to connect to the EKS cluster,
+IAM roles for service accounts
+(
+IRSA
+), and
+Pod Identity. This configuration is immutable after creation.
+amiSelectorTerms
+: This is where you select which
+Amazon Machine Images
+(
+AMIs
+) your
+instances can use based on tags, ID, owner, and so on. EC2NodeClasses are multi-arch by default, so you can select multiple AMIs to ensure you can launch instance types across all architectures.
+subnetSelectorTerms
+: Similar to the previous one, this is where you set attributes such as tags or IDs to select which subnets Karpenter can use to launch nodes. This comes in handy when you need to extend the network CIDR by adding more subnets without having to modify the
+EC2NodeClass
+object.
+securityGroupsSelectorTerms
+: Similar to the previous one, this is where you set the attributes to select which security groups Karpenter uses to attach to the nodes.
+There are other
+configurations available that we will be exploring as we progress through the book. If you want to know what all the possible configurations are, you can go to the official Karpenter
+docs site (
+https://karpenter.sh/docs
+) to learn more about it. For now, let’s continue with the next CRD.
+NodePool
+NodePool
+defines
+the constraints for node provisioning. Without
+NodePool
+, Karpenter won’t be able to launch nodes. Cloud providers such as AWS offer several compute options (purchase model, capabilities, types, categories, etc.), as per
+Figure 8.6
+, and you could say that they define the universe for compute. If a cloud provider offers the universe, you can think of
+NodePool
+as the definition of a planet with a prescriptive set of options that Karpenter has available from the universe (cloud providers) when making decisions about launching new nodes.
+Figure 8.6 – NodePool with most common properties
+But it’s not just
+about compute options. In
+NodePool
+, you can specify a set of constraints that must be met by any node that Karpenter launches. For instance, you could define constraints such as taints, startup taints, and labels for
+nodeSelectors
+or affinities. When there are unschedulable pods, Karpenter will look at the pod’s scheduling constraints, such as
+nodeSelectors
+,
+podAffinity
+,
+nodeAffinity
+,
+tolerations
+, and resource requests (to choose the proper node size). The aim is for Karpenter to match the pod’s constraints with a
+NodePool
+, and launch the node(s) that
+kube-scheduler
+will use to schedule the pending pods.
+If Karpenter can’t find a match between pods and NodePools, pods will remain unschedulable
+.
+Unlike CAS, you don’t need to have too many
+NodePools
+to get instance-type diversification. In fact, the fewer the better as Karpenter will have to scan fewer
+NodePools
+to find a match.
+NodePools
+have a field called
+weight
+to describe order preferences. This allows Karpenter to use one
+NodePool
+before another. For example, if there’s a match with multiple
+NodePools
+, Karpenter will pick the one with the highest weight. Also, if there are equal weights, then it picks
+the first
+NodePool
+in alphabetical order, but this is not guaranteed since the behavior is non-deterministic. Therefore, the recommendation is to avoid overlapping
+NodePools
+with the same weight. Multiple
+NodePools
+are recommended when you want to configure soft-tenancy, split ratios, or priority mechanisms, which we’ll discuss in more detail in
+Chapter 9
+and
+Chapter 12
+.
+If you’ve been working with AWS and have been using node groups, the
+NodePool
+concept should feel familiar. However,
+NodePools
+offer more flexibility and fine-grained control than managed node groups. Remember, in AWS, Karpenter doesn’t use Amazon EC2 Auto Scaling groups but makes a call to the EC2 Fleet API, and this is why you have more control.
+In the context of AWS,
+NodePool
+defines constraints as follows:
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: default
+spec:
+  template:
+    spec:
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["c", "m", "r"]
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ["4"]
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+      expireAfter: 720h
+      terminationGracePeriod: 24h
+  limits:
+    cpu: 1000
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
+Let me explain each of the
+settings:
+requirements
+: This setting is perhaps one of the most important ones in
+NodePool
+. Here, you define the set of constraints for which instance types Karpenter can launch. From the example, you can see that this
+NodePool
+is going to launch only on-demand Linux nodes with an x86 CPU architecture (or
+amd64
+), from multiple instance categories (
+c
+,
+m
+, or
+r
+), and from the third generation onward. Most of these requirements are self-explanatory, but we’ll dive deeper into this topic in the
+NodePool requirements
+section.
+nodeClassRef
+: This is where you define which
+NodeClass
+is associated with this
+NodePool
+.
+expireAfter
+: This is the duration of time for a node. Once this time expires, the node will be deleted by Karpenter, and the draining process will begin. You might want to set this value to reduce problems with having long-running nodes, such as memory leaks. However, if you want to disable this functionality (i.e., for stateful workloads such as Elasticsearch), you can define a
+Never
+value instead.
+terminationGracePeriod
+: This is a duration value that you can set to force a node to be terminated once the draining process starts. This setting is useful in cases where you might not want pods to block the drain/termination of your nodes. For instance, pods can still be running due to a
+restricted
+pod disruption budget
+(
+PDB
+) or the
+do-not-disrupt
+annotation (we’ll explore this possibility later in this chapter), but you might want to configure a grace period to force its deletion (after the draining process).
+limits
+: This is
+where you define the maximum number of resources a
+NodePool
+can manage. As Karpenter could launch a diverse set of nodes, especially in terms of size, instead of specifying a number of nodes, you set a total number of resources, such as CPUs, memory, or even GPUs. The values you can have here depend on the cloud provider. Karpenter will take this value into consideration when choosing instance types. Once the limit has been reached, Karpenter won’t launch additional nodes.
+disruption
+: This is where you define how Karpenter can terminate (or disrupt) a node. We’ll dive deeper into this topic later in this chapter. But for now, you can see that in this example, nodes will be removed when they’re empty or replaced with smaller ones when Karpenter considers that there’s an opportunity to reduce costs.
+Similar to
+EC2NodeClass
+, in a
+NodePool
+, there are other constraints available that are worth exploring. So, let’s explore the most important section in
+NodePool
+, the
+requirements
+section.
+NodePool requirements
+You
+already explored the most basic
+NodePool
+manifest, and we briefly talked about the
+requirements
+section. Remember, here is where you define some of the constraints that Karpenter will consider when launching a node. You could think of this section as
+the set of attributes a node will have
+.
+The set of requirements you define in a
+NodePool
+are the ones Karpenter will consider to match them with a pod. If there’s an intersection match between the pod and
+NodePool
+(as long as there are no negations with the
+NotIn
+operator), a node will be launched—in other words, if there’s compatibility. For instance, in the previous example, we had this requirement:
+- key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["c", "m", "r"]
+If a pod has a
+nodeSelector
+with a fixed instance type such as
+t4.xlarge
+, Karpenter won’t use this
+NodePool
+to launch a node since there’s no match. As a result, the pod will remain unschedulable until the cluster has capacity available or Karpenter has a
+NodePool
+that supports this instance type. Even though this example is specific for the instance category in AWS, you can also use the same match logic for other Kubernetes well-known labels.
+These are a set of standardized, predefined labels that provide metadata about nodes, such as their operating system (
+kubernetes.io/os
+), architecture (
+kubernetes.io/arch
+), or instance type (
+node.kubernetes.io/instance-type
+).
+In addition to these labels, Karpenter will also use cloud-specific labels such as the following:
+Instance generation (
+karpenter.k8s.aws/instance-generation
+)
+Instance family (
+karpenter.k8s.aws/instance-family
+)
+Instance size (
+karpenter.k8s.aws/instance-size
+)
+Instance CPU (
+karpenter.k8s.aws/instance-cpu
+)
+Instance memory (
+karpenter.k8s.aws/instance-memory
+)
+Note
+To get the full list of well-known Kubernetes labels, make sure you check the Kubernetes official docs at
+https://kubernetes.io/docs/reference/labels-annotations-taints/
+. For a full list of the labels that Karpenter uses, you can go here:
+https://karpenter.sh/docs/concepts/scheduling/#well-known-labels
+. It’s worth checking the instance type reference doc as well:
+https://karpenter.sh/docs/reference/instance-types/
+.
+Additionally, when
+you specify any of these requirements, as you’ve seen, you can use operators such as
+In
+,
+NotIn
+,
+Exists
+,
+DoesNotExist
+,
+Gt
+(greater than), and
+Lt
+(lower than). For instance, you could have a requirement to launch nodes that aren’t (
+NotIn
+) the
+small
+instance size or that at least have (
+Gt
+) four vCPUs. The less restrictive you are, the more options you give Karpenter to decide which instance type is best for your workload(s). Keep in mind that the values for each requirement are an array, so even if you’re going to need only one value, it needs to be configured as an array of one value.
+General recommendations
+While you have
+a lot of flexibility in configuring the set of constraints that
+NodePool
+can have, you might also feel overwhelmed. But don’t worry too much about it. The mindset you need to have when setting
+NodePool
+constraints is to only constrain the
+NodePool
+with the requirements you need. Keep in mind that Karpenter will always try to launch the best node possible in terms of cost and efficiency. However, there are certain requirements that Karpenter recommends including and being intentional about.
+Note
+At the time of writing this book, Karpenter limits the number of requirements to 100 that you can have in a
+NodePool
+. This limit includes both the
+requirements
+section (including well-known and user-defined labels) and the metadata labels you could use in a
+NodePool
+for workload constraint or affinity purposes.
+Let’s explore
+deeper the most common and important requirements in a
+NodePool
+.
+karpenter.k8s.aws/instance-category
+Here’s where you define the instance categories that
+NodePool
+can use. The implementation details vary depending on the cloud provider, but in the case of AWS, this refers to the instance categories. Notice that in the previous example, this constraint has three categories configured:
+c
+,
+m
+, and
+r
+, which are the ones that generally work with most workloads (unless you have a very specific performance need). I want you to pay close attention to this requirement as it’s one of the places where Karpenter shines.
+Instead of having to specify specific instance types (there are hundreds), you’re telling Karpenter that you’re flexible to use any of the instance types from those families
+. Based on the unscheduled pods, Karpenter will decide which instance types are good candidates and will let the cloud provider API decide which instance type to use. We’ll dive much deeper into this flow in the next section.
+karpenter.k8s.aws/instance-generation
+When you use this label, you’re telling Karpenter which generations you’d like to use (or not) from the “universe” of instance types a cloud provider has to offer. In the previous example, the
+NodePool
+is going to use only the instance types from a generation greater than (
+Gt
+) the fourth generation. Most deployments of Karpenter I’ve seen have constrained generations to some degree.
+However, you might want to have a balance between flexibility and performance; therefore, after doing some tests with your application, you might decide to use only the latest three generations. Keep in mind that by being more restrictive, the range of instance types Karpenter and the cloud provider have to choose from will be reduced. So, make sure you do proper testing, and ensure your applications can make the most of the underlying nodes to provide a better price-performance ratio.
+karpenter.sh/capacity-type
+Along with instance
+categories and generations you can configure, you also have the ability to constrain the purchase model. For instance, in AWS, you have the option to choose
+reserved
+,
+spot
+, and/or
+on-demand
+. As you configure an array of values, you can specify one, two, or all of them. In the previous
+NodePool
+example, Karpenter will only launch
+on-demand
+instances of whichever instance type it ends up using. Keep in mind that Karpenter has a strict ordering to capacity types built into its simulation logic.
+When you have all types, Karpenter will prioritize
+reserved
+, as this is the reserved capacity that you’ve already paid for (in AWS, this refers
+to the
+On-Demand Capacity Reservations
+(
+ODCR
+) or
+Amazon EC2 Capacity Blocks for ML
+). This is followed
+by
+spot
+, which is spare capacity offered with steep discounts, and then
+on-demand
+, which you could consider as the listing price.
+In AWS, the capacity type value will be sent to the EC2 Fleet API to launch EC2 instances. If the capacity type is
+reserved
+or
+on-demand
+, Karpenter will specify an allocation strategy to the EC2 Fleet API of
+lowest-price
+. EC2 Fleet will try to launch the lowest-priced instance type from the list of instance type options passed by Karpenter. If the capacity type is
+spot
+, Karpenter will request to launch instances using the
+price-capacity-optimized
+strategy, which will try to find a relatively large capacity pool with lower prices based on the other instance type options passed in the request. Effectively, Karpenter allows the EC2 Fleet API to prioritize the best combination of capacity availability and price in all situations.
+kubernetes.io/arch
+In this label, you specify the CPU architecture of the nodes that Karpenter can launch. At the time of writing this book, you can configure only two values:
+amd64
+or
+arm64
+(if you’re not familiar with the
+amd64
+value, it’s also known as x86-64). It’s a 64-bit version of the x86 instruction set architecture developed by AMD, but it’s now used by Intel as well. Therefore, with this value, you’re saying you could use Intel or AMD instances. When you use the
+arm64
+value, Karpenter
+will launch instances with the ARM-based processors (also known as AArch64, ARMv8-A, etc.), and in the context of AWS, it will launch AWS Graviton instances.
+When you have both values, Karpenter will send them both to the cloud provider API. In the case of AWS, the EC2 Fleet API will follow the allocation strategy we mentioned before when exploring the capacity type requirement. If you decide to use both values, you need to make sure that your application can run on both architectures. We’ll dive deeper into this topic in
+Chapter 11
+.
+kubernetes.io/os
+When you use this label, you specify the operating system that the instances should have. Karpenter supports both
+linux
+and
+windows
+. For this requirement, it’s recommended that you only use one or the other as it will help you to simplify workload configuration too. In this book, we’ll focus only on Linux instances.
+As we progress through the book, we’ll continue exploring other sets of requirements you could use based on the use cases of the workloads running in the cluster. For now, let’s leave it there and move on to the next section to dive deep into
+NodeClaims
+.
+NodeClaim
+NodeClaims
+are
+immutable objects that Karpenter creates or deletes automatically to keep track of the status and manage the life cycle of a node. You don’t need to create or update a
+NodeClaim
+(you could but it’s not recommended); it’s merely a read-only resource that you’ll typically use to review the status of a node. A
+NodeClaim
+is created after Karpenter has made a scheduling decision, and Karpenter will send a request to the cloud provider to launch a new node. The
+NodeClaim
+allows Karpenter to reconcile the result of the scheduling request to launch the
+CloudProvider
+request. You’ll see here all the requirements and constraints that have been determined through the scheduling simulation process, which we’ll dive deeper into in the next section.
+Figure 8.7 – Karpenter interacting with all its components to launch nodes
+As you can see in
+Figure 8.7
+, when pods stay pending because there are no suitable nodes available, Karpenter evaluates these unschedulable pods against the existing
+NodePools
+and
+NodeClasses
+to find a compatible pairing (
+1
+). It then calculates the optimal
+NodeClaim
+that can fulfill the pod
+requirements and any other queued workloads (
+2
+). This
+NodeClaim
+is created in the Kubernetes cluster and initiates the life cycle process of the node. Using the
+NodeClaim
+specifications, Karpenter talks to the cloud provider (i.e., AWS) to launch an actual EC2 instance (
+3
+). As the cloud provider provisions the instance (
+4
+), Karpenter monitors its progress, watching for the instance to register itself with the cluster (
+5
+). The process continues until the node has successfully initialized.
+Even though you won’t need to create
+NodeClaims
+, it is important that you understand why they exist as you’ll see them being referenced several times when inspecting the Karpenter controller logs. For instance, you’ll see that a
+NodeClaim
+is created right after Karpenter notices that there are unscheduled pods, and if you describe this object, you’ll see which instance types were considered to launch a node. Furthermore, you’ll be interacting with these objects for troubleshooting purposes to find out why a node hasn’t been launched. For example, when you explore the events in these objects, you’ll learn more about why nodes couldn’t be launched, registered, or initialized.
+Now it’s time to explore how Karpenter decides which nodes to launch, and what considerations it is making to help you run efficient Kubernetes clusters.
+Launching nodes
+When
+Karpenter notices unschedulable pods, it doesn’t immediately rush to launch new nodes. Instead, it employs a batching and scheduling
+process that aims to optimize resource utilization while maintaining Kubernetes scheduling rules. In this section, you’re going to explore how Karpenter makes decisions about infrastructure provisioning, so that you understand why I’ve been giving you recommendations such as instance type diversification.
+There are four major elements that make Karpenter’s node-launching process work:
+Scheduling
+Batching
+Bin-packing
+Launching the request
+Let’s dive deep into each of these elements to understand how Karpenter brings new nodes into your cluster.
+1. Scheduling
+As you
+already know, Karpenter works in tandem with
+kube-scheduler
+; it basically takes one step ahead to reduce the time pods are unscheduled. In other words, while
+kube-scheduler
+is responsible for allocating existing capacity, Karpenter steps in when that capacity is exhausted. When
+kube-scheduler
+can’t find a suitable node for a pod, it marks it as unschedulable—this is Karpenter’s trigger.
+Figure 8.8 – kube-scheduler decides where to schedule the pod
+As you can imagine, the Kubernetes scheduling process is complex. Both
+kube-scheduler
+and Karpenter must consider numerous factors: resource requests, tolerations, node selectors, and TSCs, among others. Karpenter uses these factors to ensure its launch decisions align with
+your workload’s requirements. In
+Figure 8.8
+, a node was available to schedule the pod to, but how does Karpenter decide which and how many nodes to launch if pods remain unscheduled? To answer this, let’s explore the next phase.
+2. Batching
+Once
+Karpenter is triggered, its expanding batch window mechanism begins. This means that when pending pods begin arriving, Karpenter watches their timing carefully. It employs an expanding window algorithm that balances between quick launches and efficient bin-packing. As per
+Figure 8.9
+, the algorithm uses two key time values: a 1-second idle period and a maximum window of 10 seconds. When pods arrive within less than a second of each other, Karpenter keeps expanding the window, up to that 10-second maximum, to optimize node launches. These two settings can be changed through Karpenter’s global settings as environment variables:
+BATCH_IDLE_DURATION
+and
+BATCH_MAX_DURATION
+. However, I wouldn’t recommend that you change them unless you fully understand the implications.
+For example, you might want to extend the time Karpenter should wait for more pods to arrive, but it will take more time to launch a node.
+Figure 8.9 – Karpenter launching nodes for batches of pods
+Now, consider
+this scenario, as per
+Figure 8.9
+: if 8 pods arrive within 10 seconds, Karpenter might launch just 1 node for all of them, maximizing bin-packing and reducing infrastructure costs (
+3
+). However, if those same eight pods arrive spaced just slightly more than one second apart, you might end up with eight different nodes launched independently, leading to inefficiency.
+If new pods keep arriving continuously, Karpenter will keep expanding the batch window, but only up to the maximum batch duration you have configured. It’s worth mentioning that pod scale-ups are often correlated, which makes pod batching particularly effective. When this maximum window expires, Karpenter closes the current batch, schedules node provisioning with whatever pods are currently in that batch and then starts a new batching window for any subsequent pods that continue to arrive. This batching strategy enables Karpenter to find a balance between launching capacity quickly and packing the pods efficiently onto fewer nodes, minimizing resource waste and scaling delays.
+3. Bin-packing
+Karpenter’s
+scheduling process uses the bin-packing algorithm to launch the smallest number of nodes possible. More specifically, it uses
+the
+first-fit-decreasing
+(
+FFD
+) bin-packing algorithm, where items are first sorted in descending order by size, and then each item is placed into the first bin where it fits. Let’s explore how Karpenter is implementing this algorithm.
+Bin-packing starts with Karpenter getting the entire universe of possible instance types from the cloud provider. These instance types are then sorted by cost, as Karpenter aims to optimize for actual cost. Then, Karpenter sorts pods by their resource requests in descending order, first by CPU, then by memory. Each pod is assigned to the first compatible instance type that has enough capacity to accommodate it, as per
+Figure 8.10
+. Karpenter creates virtual nodes (scheduling nodes) during its scheduling simulation. Each of these virtual nodes maintains a full list of compatible instance types that could potentially satisfy its requirements.
+Figure 8.10 – Karpenter’s bin-packing process considering pod constraints
+As Karpenter adds pods to a virtual node, the constraints change, and the list of compatible instance types may shrink. This is because the bin-packing process intersects all requirements from pods and
+NodePool
+definitions and considers DaemonSets that will need to be scheduled for every new node. For example, if you add a pod that requires ARM architecture, suddenly all x86-only instance types are removed from that virtual node’s list of possibilities. Or if the combined CPU and memory requirements grow too large, smaller instance types
+are filtered out. This dynamic filtering of instance types is what makes the bins “resizable”—they aren’t fixed in size like traditional bin-packing problems, but rather adjust based on the accumulating requirements of the pods being packed into them. If Karpenter can launch one node, it generally will, unless pods have constraints such as TSCs causing Karpenter to launch more than one node. Karpenter aims to launch nodes considering cost, but it also needs to consider what
+kube-scheduler
+will do when the nodes are available in the cluster.
+As you can tell by now, the dynamic nature of Kubernetes clusters brings a significant challenge to Karpenter’s bin-packing process. The cluster state is in constant flux, with pods being created or deleted, and nodes potentially facing disruptions. This volatility means that by the time Karpenter decides on and launches new nodes, the cluster’s needs may have already shifted. To address this, Karpenter makes quick, heuristic-based decisions and acts on them rapidly. While this approach may not yield perfect results in every instance, it allows for continuous optimization. Over time, this strategy ensures that your cluster’s efficiency and resource utilization steadily improve, adapting to the dynamic nature of your workloads.
+4. Launching the request
+Once
+Karpenter has determined its bin-packing and scheduling simulation decisions, it moves to the actual launch request. This is where Karpenter’s cloud provider integration comes into action. Remember that Karpenter might end up making more than one request; it will depend on the pod and
+NodePool
+constraints if more than one node is going to be needed. Once the request is fulfilled, Karpenter doesn’t stop there with managing the node(s). Karpenter has logic to ensure that nodes that fail to launch are cleaned up properly, and it does some checks before it considers a node fully “ready to go.”
+Let’s be more specific
+with an example so that you have a better idea of what happens next. For instance, in AWS, Karpenter aims to maintain a highly diverse set of instance types, including larger instance types, to increase variety in the diversified list. This list is passed to the EC2 Fleet API, and it’s EC2’s allocation strategy that’s in charge of which instance type ends up being chosen. Remember, if it’s
+on-demand
+or
+reserved
+, Karpenter will use the
+lowest-price
+allocation strategy, which will launch the instance type from the list with the lowest price. And if it’s
+spot
+, Karpenter will use the
+price-capacity-optimized
+allocation strategy, which will launch the instance types with the highest spare capacity available while trying to get the lowest prices. At some point in time, you might end up with a cluster with a variety of different instance types and sizes, as per
+Figure 3.11
+.
+Figure 8.11 – An EKS cluster with different instance types
+Now that we’ve
+explored in more detail how Karpenter works, let’s explore how to get started with Karpenter. We’ll start with what’s required to deploy Karpenter.
+Deploying Karpenter
+In a nutshell, to
+start using Karpenter, you first need to deploy two components:
+The Karpenter controller
+The CRDs we’ve explored previously
+Regardless of where you’re hosting your Kubernetes cluster, these are the main components you need, as long as there’s a Karpenter provider such as AWS, Azure, or GCP. At the time of writing this book, Karpenter doesn’t have an on-premises provider.
+In this book, we’ll continue using AWS as the cloud provider to run Kubernetes. If you’re using any other cloud provider that Karpenter supports, the details on how to deploy each of the Karpenter
+components will vary and will be specific to that provider. However, there is one aspect that will remain the same: you need a set of nodes to host the Karpenter controller replicas. In essence, the deployment flow will be like this:
+Create a Kubernetes cluster.
+Create worker nodes to host the Karpenter controller.
+Let Karpenter provision worker nodes from now on.
+There are two important aspects when you deploy Karpenter:
+Node management
+Permissions for the Karpenter controller pods
+First, the nodes that will host the Karpenter controller will need to be managed by someone else rather than Karpenter itself. This means that you need to plan how to scale these nodes (added complexity), or if you want to keep them static, to only run Karpenter in these nodes (simple but manual). Additionally, for high-availability reasons, it’s recommended to have two replicas of the Karpenter controller. One replica acts as the leader, using a typical leader-election algorithm. Moreover, you might also decide to use these nodes to host pods from the
+kube-system
+namespace.
+In AWS, as per
+Figure 8.12
+, this means that you need to have one managed node group (
+1
+). Alternatively, to simplify this setup, you have the option to
+use
+AWS Fargate
+for EKS (
+2
+), which is a compute option managed by AWS where you pay only for the resources that your pods need, and AWS takes care of the autoscaling and patching of the underlying nodes. Additionally, AWS offers the EKS Auto Mode option (
+3
+) to let AWS automatically manage compute, storage, and networking of a Kubernetes cluster. With EKS Auto Mode, you’ll have the Karpenter controller running in the control plane and managed by AWS.
+However, consider
+that if you have EKS Auto Mode and self-managed Karpenter, they will fight with each other to launch nodes if you aren’t careful.
+Figure 8.12 – Different ways to deploy the Karpenter controller in AWS
+Second, the Karpenter controller pods need to be able to launch and manage nodes with all the resources they need (disks, networking, etc.), register them into the cluster, and interact with other cloud resources.
+For instance, in AWS, the Karpenter controller requires a dedicated IAM policy with permissions that allow it to provision and manage EC2 instances. At a minimum, this includes permissions to launch and terminate instances (
+ec2:RunInstances
+and
+ec2:TerminateInstances
+), create and manage launch templates and fleets (
+ec2:CreateFleet
+and
+ec2:CreateLaunchTemplate
+), and tag resources during provisioning (
+ec2:CreateTags
+).
+We haven’t dived very
+deep into other specific activities that Karpenter performs. But, for instance, the Karpenter controller must also be able to get details about various EC2 resources—for example, subnets, security groups, instance types, access
+to
+AWS Systems Manager
+(
+SSM
+) parameters and EC2 instance pricing data. Moreover, Karpenter needs the ability to pass a node IAM role to instances (
+iam:PassRole
+), create and manage instance profiles, and read cluster metadata via
+eks:DescribeCluster
+. To handle instance life cycle events (e.g., spot interruption warnings), it consumes messages from
+an Amazon
+Simple Queue Service
+(
+SQS
+) queue that must be populated by
+EventBridge
+rules. All
+of these permissions should be scoped to the EKS cluster where Karpenter is running.
+Typically, you don’t need to worry much about the building blocks for deploying Karpenter along with all the configurations we just explored, as cloud providers such as AWS and Azure already provide resources to help you get started quickly. In the next section, you’ll do a hands-lab that helps you get started with Karpenter in AWS.
+Hands-on lab: Autoscaling with Karpenter
+In the
+previous chapter, you deployed CAS and 60 pods to see how CAS reacted
+when there were unscheduled pods. Nodes were added automatically via CAS by modifying the Auto Scaling group to the desired number of nodes. If you didn’t do that lab, don’t worry; it’s not required for this lab. Here, we’re going to do something similar to see how Karpenter works.
+Creating a fresh EKS cluster
+Go back to
+your terminal and make sure you’re in the
+/chapter08
+folder from the book’s GitHub repository. In here, you’ll find a
+terraform
+folder that includes the scripts you’ll be using to create an EKS cluster with Karpenter and other addons.
+To make this step easier, destroy any previous EKS cluster you’ve created in this book by running the
+cleanup.sh
+script. You’ll start with a fresh EKS cluster. Once you have no cluster running, start over with the files in this chapter by running the following command:
+$ sh bootstrap.sh
+Wait around 15 minutes for the cluster to be up and running. At this stage, Terraform will create an EKS cluster with a managed node group for only the Karpenter controller pods (which we’ll deploy later). When the script has finished creating the cluster, update your
+kubeconfig
+file to connect to the cluster by running this command (change the
+eu-west-1
+Region if you’re using a different one):
+$ aws eks --region eu-west-1 update-kubeconfig --name kubernetes-autoscaling
+You can confirm that you’re able to interact with the cluster by running this command:
+$ kubectl get pods --all-namespaces
+You should be able to see the list of all pods running in the cluster.
+Deploying a sample application
+The
+cluster you’ve created in the previous step has a managed group with a label to host only critical addons, such as the Karpenter controller pods, like this:
+labels = {
+        "CriticalAddonsOnly" = "true"
+      }
+We’ve done this
+for two reasons:
+The cluster needs to provide at least two nodes to run the Karpenter pods as they have a required
+topologySpreadConstraints
+to make sure that Karpenter can’t schedule two pods to the same zone. So, we had to create a node group using multiple Availability Zones.
+We want all other pods to run on nodes created by Karpenter and not in these nodes. We’ll use
+nodeSelectors
+to make sure this happens.
+So now, if we deploy the sample application to the cluster using a
+nodeSelector
+with an
+intent=apps
+label, what do you think will happen? Let’s give it a try. Run the following command to deploy a sample application:
+$ kubectl apply -f montecarlopi.yaml
+List the pods running using this command:
+$ kubectl get pods
+You’ll see that the sample application pod is stuck with a
+Pending
+status, as the existing nodes can’t host this pod. You should see an output similar to this:
+NAME                READY   STATUS    RESTARTS   AGE
+montecarlo-pi-...   0/1     Pending   0          3m50s
+We’re forcing this to happen, but this is the same behavior you’ll see when your application is scaling out because HPA is adding more replicas, and there’s a point when the cluster doesn’t have the
+capacity to run any additional pods. This is the moment when we need Karpenter to help us add the nodes needed to run the unschedulable pods. Leave the sample application in that state. Let’s deploy and configure Karpenter next.
+Deploying Karpenter
+As you’ve learned
+in a previous section, to deploy Karpenter, you need to deploy the CRDs and the Karpenter controller, configure the pod’s permissions, and have at least one default
+NodePool
+. To help you get started quickly, we’ve created a
+karpenter.tf.txt
+file in the
+chapter08/terraform
+folder from the book’s GitHub repository, using the Terraform AWS modules. This way, we’ll let the module deploy the IAM role with the proper permissions, configure security access, and create any other resources, such as the SQS queue to manage node disruptions.
+So, to deploy Karpenter, remove the
+.txt
+extension from the
+karpenter.tf.txt
+file and run the bootstrap script again. Here are the commands you need to run:
+$ cd chapter08/terraform
+$ mv karpenter.tf.txt karpenter.tf
+$ sh bootstrap.sh
+Wait around three minutes, and then run the following command to verify that the Karpenter controller pods are up and running:
+$ kubectl get pods -n karpenter
+The Karpenter controller pods should have a
+Running
+status, but if you list the sample application pods, they’re still going to have a
+Pending
+status. This is because to see Karpenter in action, you need to have a
+NodePool
+deployed to the cluster that matches the pod’s constraints. So, let’s deploy a default
+NodePool
+and
+EC2NodeClass
+.
+Deploying a default NodePool and EC2NodeClass
+You’re going to
+deploy the same objects that we explored in the previous sections. The only difference is that in
+EC2NodeClass
+, we
+now have to define the name of the IAM role and the tags that Karpenter will use to select the subnets and security groups.
+Go back to the root of the
+chapter08
+folder and run the following command:
+$ kubectl apply -f nodepool.yaml
+Confirm that the objects have been created by running this command:
+$ kubectl get nodepool,ec2nodeclass
+You should see a default
+NodePool
+and a default
+EC2NodeClass
+listed.
+As soon as these objects were created, Karpenter matched the constraints from the unschedulable pods with the default
+NodePool
+. You can confirm this by reading the logs from the Karpenter controller. To do so, let’s create an alias, since you’ll be reading the Karpenter controller logs frequently. Run this command:
+$ alias kl='kubectl -n karpenter logs -l app.kubernetes.io/name=karpenter --all-containers=true -f --tail=20'
+Then, simply run this command to read the most recent logs from Karpenter:
+$ kl
+Notice what the logs would say, for instance,
+found provisionable pod(s)
+,
+referring to the moment when Karpenter was triggered because there were unscheduled pods. You should also find a
+message such as
+computed new nodeclaim(s) to fit pod(s)
+, referring to the moment when Karpenter finished the
+bin-packing process, and then a message with
+created nodeclaim
+referring to the moment when Karpenter created the
+NodeClaim
+object. But let me pause here a bit. That log line includes the list of instance types, as well as the total CPU and memory requests that Karpenter used to filter which instance types were good candidates (which will be sent to the EC2 API Fleet API):
+"requests":{"cpu":"1050m","memory":"512Mi","pods":"4"}
+But why is it considering
+1050m
+CPU in total if the sample application is requesting only
+900m
+CPU? This is what the sample application has:
+...
+        resources:
+          requests:
+            cpu: 900m
+            memory: 512Mi
+          limits:
+            memory: 512Mi
+...
+Well, Karpenter also considers the DaemonSets that will be deployed in the new node. In this particular setup, the cluster is going to deploy
+kube-proxy
+,
+aws-node
+, and the
+eks-pod-identity-agent
+pods in addition to the sample application. So, when you’re defining the
+NodePool
+constraints, consider that there are going to be extra pods and processes (i.e.,
+kubelet
+) that will be scheduled into the nodes.
+Let’s confirm that Karpenter created the
+NodeClaim
+object by running this command:
+$ kubectl get nodeclaim
+You should get an output similar to this one:
+NAME   TYPE      CAPACITY  ZONE       NODE      READY AGE
+def... c6a.large on-demand eu-west-1c ip-10-... True  5m
+Notice that just
+with
+this output, we already have valuable information about the node that Karpenter launched. You now know that the node was launched by the
+default
+NodePool
+, and that it’s an
+on-demand
+EC2 instance of type
+c6a.large
+in the
+eu-west-1c
+Availability Zone. Remember, because it’s an
+on-demand
+instance, Karpenter used the
+lowest-price
+allocation strategy when calling the EC2 Fleet API. When I ran this lab, the
+c6a.large
+instance type was the one with the lowest price. You could describe the
+NodeClaim
+by running this command:
+$ kubectl describe nodeclaim
+You should be able to see the values Karpenter used to make the call to the EC2 Fleet API. For instance, you can see the full list of instance types that were considered:
+...
+  Requirements:
+    Key:       node.kubernetes.io/instance-type
+    Operator:  In
+    Values:
+      c3.large
+      c4.large
+      c5.large
+      c5.xlarge
+      c5a.large
+      c5a.xlarge
+      c5ad.large
+...
+Once the
+node is registered to the cluster and ready, it becomes a candidate to schedule pods. This means that the unschedulable pod that caused this node to be launched should have been scheduled by
+kube-scheduler
+into this node. Let’s confirm that by listing the pods:
+$ kubectl get pods -o wide
+As expected, the
+pod that had a
+Pending
+status now has a
+Running
+status. Also, since we added the
+-o wide
+parameter to the preceding command, you should be able to confirm that the pod was indeed scheduled to the new node that Karpenter launched. You can do this by matching the IP address you get here with the one you got when listing
+NodeClaims
+.
+Removing the sample application
+To finish
+this lab, make sure you’re still in the
+chapter08
+directory in the terminal, and let’s remove the sample application by running this command:
+$ kubectl delete -f montecarlopi.yaml
+You should see no pods running, and in a matter of 10 seconds, Karpenter will start removing the node as there are no pods running in it anymore. You can describe the
+NodeClaim
+again, and you should see an output like this in the
+Events
+section:
+...
+  ...  Node is deleting or marked for deletion
+  ...  Disrupting NodeClaim: Empty/Delete
+  ...  Instance is terminating
+...
+We’ve removed a lot of information just to focus on the messages I wanted you to see. We’ll be covering this behavior in more detail in the next chapter. But for now, you can see that as soon as Karpenter
+noticed that the node was empty, it cordoned the node so that
+kube-scheduler
+can’t schedule any other pods in this node, as it’s about to be terminated. Then, the Karpenter finalizer was triggered to terminate the EC2 instance.
+All of this happened because
+NodePool
+has the following configuration:
+...
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 1m
+...
+This cleanup process takes a few minutes. So, three or four minutes after you removed the pod, the node should have been removed from the cluster. By doing so, Karpenter will help you to keep an efficient Kubernetes cluster as long as the constraints in your workloads permit. We’ll continue exploring this in more detail in the following chapter.
+For now, let’s move on to the next section to learn how you can influence scheduling decisions by adding constraints to your pods.
+Workload scheduling constraints
+When you
+deploy workloads on Kubernetes with
+Karpenter, you can specify a variety of scheduling constraints in your pod specs to control
+where
+and
+how
+those pods will run. These constraints ensure that your pods are scheduled on nodes that meet certain requirements, such as specific hardware specs, specific zones, or co-location (or separation) from other pods. As you’ve learned in a previous section, Karpenter honors these constraints to decide what nodes to provision for these pending pods.
+Scheduling happens
+through
+layered constraints
+: the
+cloud provider defines broad limits (the universe of all available instance types, zones, etc.), then you define
+NodePool
+constraints (nodes that Karpenter can create), and finally, you define your pod’s scheduling constraints. Keep in mind that a pod’s constraints must fall within the requirements set by the
+NodePool
+, else pods will remain unschedulable. The following sections describe the major workload scheduling constraints you can use, how they work, and how Karpenter takes them into account when scaling your cluster. Even if you’re not new to many of these concepts, don’t skip it, as we’ll explore how Karpenter behaves under certain scenarios.
+Node selector
+Sometimes you
+need to pin a workload to a certain category of nodes—for example, to a specific Availability Zone or a machine type with special hardware. Kubernetes offers the
+nodeSelector
+field as a straightforward way to constrain pods to nodes with a particular label.
+nodeSelector
+is essentially a key-value filter: the pod will only schedule on a node that has a matching label. For instance, if you know you want a pod to run in the AWS
+eu-west-1a
+Availability Zone, you could add a
+nodeSelector
+in the pod spec:
+spec:
+  nodeSelector:
+    topology.kubernetes.io/zone: "eu-west-1a"
+You can use any node label here—either well-known labels provided by Kubernetes (such as the zone, Region, instance type, operating system, etc.) or custom labels that you set on certain nodes. Common examples include selecting by
+kubernetes.io/os: linux
+for operating system-specific workloads, or a custom label such as
+environment: prod
+to place pods on
+production-designated nodes.
+When Karpenter is deciding how to schedule a pending pod with a
+nodeSelector
+, it will attempt to launch a node that carries the requested label. In practice, you set up a
+NodePool
+with certain labels on the nodes that Karpenter will create. You
+must
+define custom labels while well-known labels will automatically be configured for you. You can check the Karpenter docs (
+https://karpenter.sh/docs/concepts/scheduling/#well-known-labels
+) to see the complete list of well-known labels. For example, as per the previous example, you can configure a
+NodePool
+that assigns the
+environment: prod
+label to all nodes, matching the
+nodeSelector
+we used before. The following
+NodePool
+snippet includes this custom label:
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+...
+spec:
+  template:
+    metadata:
+      labels:
+        environment: prod
+    spec:
+...
+It’s important that the label in your
+nodeSelector
+is actually configured on some
+NodePool
+or existing nodes; if it’s an arbitrary label that no current or potential node has, the pod will remain unschedulable. Notice that
+nodeSelector
+is a hard requirement—the scheduler (and Karpenter) won’t
+ignore it. So, use it when you absolutely know the node must have that label. If you need more flexibility, such as a preference rather than a strict requirement, or a set of possible values, Kubernetes provides node affinity, which we will discuss next.
+Node affinity
+Node affinity
+is
+an advanced form of specifying node constraints within a pod, allowing expressions and soft preferences. It lives under the
+affinity
+field in the pod spec, and there are two types of node affinity:
+requiredDuringSchedulingIgnoredDuringExecution
+: Acts like a mandatory rule (similar to
+nodeSelector
+, but supports operators such as
+In
+,
+NotIn
+,
+Exists
+,
+NotExists
+, etc., and multiple conditions)
+preferredDuringSchedulingIgnoredDuringExecution
+: Acts as a
+preference
+—the scheduler will try to put the pod on a node that meets the criteria, but if none is available, it can schedule the pod elsewhere (unlike a required rule, which would block scheduling if not met)
+With node affinity, you define one or more
+nodeSelectorTerms
+, each with one or more match expressions. Each term is effectively a list of label conditions that a node must satisfy for the pod to schedule on it (it’s worth mentioning that Karpenter borrowed the node selector API for the
+NodePool
+requirements, and it adheres to it strictly). For example, suppose you prefer running a batch job on spot instances in either the
+eu-west-1a
+or
+eu-west-1b
+Availability Zone, but you can tolerate running with on-demand instances if no spot capacity is available. You might express that in a pod as follows:
+spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: "topology.kubernetes.io/zone"
+                operator: In
+                values: ["eu-west-1a", "eu-west-1b"]
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+            - key: "karpenter.sh/capacity-type"
+              operator: In
+              values: ["spot"]
+In this
+snippet, the
+requiredDuringSchedulingIgnoredDuringExecution
+section ensures the node’s zone is either
+eu-west-1a
+or
+eu-west-1b
+. The
+preferredDuringSchedulingIgnoreDuringExecution
+adds a preference for nodes that have the
+karpenter.sh/capacity-type=spot
+label (a label Karpenter uses to denote spot instances). Because it’s a preference, the pod
+could
+still land on an on-demand node if no spot node in those zones is available—but the scheduler will score spot nodes higher.
+weight: 100
+just indicates the importance of this preference relative to other preferences (if any).
+Behind the scenes, Karpenter will treat the required affinity exactly like a
+nodeSelector
+constraint—it must find or create a node in one of the specified zones or else the pod can’t schedule. The preferred affinity is a bit different: Karpenter is aware of these preferences and will try to satisfy them when launching new nodes. In fact, Karpenter initially treats preferred affinities as if they were required when determining how to provision capacity for pending pods. It will attempt to launch a node that meets the zone requirement and is of the
+spot
+capacity type. If for some reason that’s impossible (say spot instances are at their limit or none of the allowed instance types are available as spot), then Karpenter will relax the preference and consider on-demand capacity to get the pod scheduled.
+This
+approach means that soft constraints can still influence Karpenter to create new nodes to satisfy your intent. It’s worth noting that this can sometimes lead to more nodes than you might expect if you use a lot of “preferred” rules—Karpenter will prefer to add nodes to meet the preference rather than consolidating into fewer nodes to save cost. If you find that pods aren’t bin-packed as tightly as expected, check whether a preferred affinity (or topology spread, which is discussed later) is causing Karpenter to deliberately spread out the pods by adding nodes.
+Note
+It’s important to call out again that Karpenter does not schedule pods, so there are sharp edges with preferred affinities since
+kube-scheduler
+gets the first chance at scheduling and may relax constraints before Karpenter has a chance to provision capacity for the pod.
+Moreover, use required affinities for things your pod absolutely cannot run without (specific hardware, compliance-related placement, etc.). Or use preferred affinities to give the scheduler a nudge in a certain direction (such as favoring cheaper spot instances or a particular zone for latency) while still allowing flexibility. Always ensure that your affinities align with the
+NodePools
+Karpenter can provision. For example, if you require a node label (as we saw in the previous example) that implies a certain instance type or zone, make sure a
+NodePool
+exists that covers that criterion. If you accidentally require an instance type or label that Karpenter isn’t configured to provide, the pod will remain pending indefinitely. It’s worth mentioning that Karpenter will still inform the user through events on the pod why this pod isn’t schedulable in Karpenter’s eyes as well.
+Pod affinity and pod anti-affinity
+Node selectors
+and node affinity deal with node labels, but sometimes the scheduling logic needs to consider other pods.
+Pod affinity
+and
+anti-affinity
+let you express rules about placing pods relative to other pods. This is useful for workload clustering or separation strategies. For example, you might want certain pods to run on the same host or zone as a particular service for data locality and latency needs—that’s pod affinity. Or you might need to ensure that two replicas of the same application never run on the same node to avoid a single point of failure—that’s pod anti-affinity.
+Pod affinity/anti-affinity rules live under
+spec.affinity
+as well, in the
+podAffinity
+and
+podAntiAffinity
+sections. Like node affinity, they have
+requiredDuringSchedulingIgnoredDuringExecution
+and
+preferredDuringSchedulingIgnoredDuringExecution
+modes. A
+required
+pod affinity means “do not schedule this pod
+unless
+there is an existing pod(s) with certain characteristics in the specified topology domain.” A
+required
+podAntiAffinity
+means “do not schedule this pod
+if
+there is another pod with certain characteristics in the specified domain.” The “topology domain” could be a node (identified by hostname), a zone, a Region, or any label you choose to indicate a domain of failure or locality.
+Let’s see an example of pod anti-affinity. Imagine a deployment of a web service with three replicas, where we want to ensure that no two replicas end up on the same node. We can add a required pod anti-affinity on the hostname (node) to repel pods from each other, like this:
+spec:
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app: web
+        topologyKey: "kubernetes.io/hostname"
+Here, we assume that each pod in the deployment has the
+app: web
+label. The rule says: “when scheduling a pod with the
+app: web
+label, do not place it on a node (
+topologyKey: kubernetes.io/hostname
+) that already has any pod with
+app: web
+.” This guarantees that all three replicas will be on separate nodes or not scheduled at all. If we had used
+preferredDuringSchedulingIgnoredDuringExecution
+instead,
+kube-scheduler
+would
+try
+to separate them but would still allow placing multiple on one node if no alternative existed.
+Now, let’s
+see an example of
+podAffinity
+. Consider a scenario with a backend and a frontend pod, where the frontend strongly benefits from being on the same Availability Zone as the backend (perhaps to minimize network latency). We could use a required
+podAffinity
+to ensure the frontend only schedules in a zone that already has a backend pod, like this:
+spec:
+  affinity:
+    podAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: "system"
+                operator: In
+                values: ["backend"]
+        topologyKey: "topology.kubernetes.io/zone"
+This rule (based on the example) says the pod will only schedule in a zone where there is at least one pod with the
+system=backend
+label. If no such pod is running anywhere, then this pod won’t schedule. In practice, required pod affinities are common when you have a set of pods that
+should always co-locate (such as a caching sidecar that must be on the same node as the main app, though Kubernetes now has better ways to handle that via DaemonSets, StatefulSets, or actual container sidecars within a pod). Preferred pod affinity could be used as a gentle hint, for example, “try to put my analytics pods in the same zone as the database for performance, but it’s okay if not.”
+From Karpenter’s perspective, pod affinity and anti-affinity are additional constraints that influence scheduling. Moreover, pod anti-affinity rules do not scale well since scheduling simulations now need to understand all existing pods in the cluster and their anti-affinities. If a pod cannot schedule due to a required anti-affinity (for instance, all current nodes have a conflicting pod), Karpenter will provision a new node to satisfy that rule. In our three-replica web service example, once each existing node has one pod, if we add one more pod, the fourth pod would remain pending—Karpenter would then launch another node so it can run without violating the one-per-node anti-affinity.
+Similarly, with required pod affinity, if the rule specifies that a certain pod must be present, Karpenter can’t do much unless that other pod is already running somewhere. Moreover, with pod affinity, if there are no pods running somewhere, Kubernetes will allow that first pod to go
+anywhere
+. Then, following pods must abide by the affinity constraint based on that previous pod scheduling. If it is running but just in a different topology (e.g., backend is in the
+eu-west-1a
+Availability Zone and none in
+eu-west-1b
+, so the frontend can only schedule in
+eu-west-1a
+), Karpenter will ensure to only create nodes in the allowed zone. Pod affinity/anti-affinity can also be set to preferred; as with node affinity, Karpenter will attempt to fulfill preferred affinities by launching nodes in a way that satisfies the preference (treating them as required initially). This means if you have a soft rule to spread two services apart, Karpenter might still add nodes to keep them apart for you. Use these features to ensure high-availability and co-location policies for your apps. Just be mindful that overly
+strict rules might cause pods to stay pending if the conditions can’t be met, and overly loose (preferred) rules might lead to extra nodes being launched to satisfy preferences.
+Tolerations and taints
+While affinities and node selectors help attract pods to certain
+nodes,
+taints
+do
+the opposite: they repel pods from nodes unless the pod explicitly declares it can tolerate the taint. Taints
+are set on nodes (for example, via Karpenter’s
+NodePool
+configuration or manually on a node), and a pod can include a matching
+toleration
+to
+indicate that it’s okay to schedule there. This mechanism is often used to dedicate nodes to specific workloads or to isolate certain tasks. For instance, you might taint a group of GPU nodes with
+nvidia.com/gpu=true:NoSchedule
+to ensure that no pods land on those GPU nodes unless they actually need a GPU. Only pods that add a toleration for
+nvidia.com/gpu:NoSchedule
+will be allowed onto those nodes.
+A toleration in a pod spec looks like this:
+spec:
+  tolerations:
+    - key: "nvidia.com/gpu"
+      operator: "Exists"
+      effect: "NoSchedule"
+This toleration means: “I tolerate any taint with the
+nvidia.com/gpu
+key and the
+NoSchedule
+effect, regardless of value.” If the GPU nodes are tainted as in our example (the
+nvidia.com/gpu
+key and the
+NoSchedule
+effect), then this pod will be allowed to schedule on them (assuming it meets other criteria, such as resource requests, etc.). Typically, you would pair this with a resource request for a GPU as well (and possibly a
+nodeSelector/affinity
+for instance types that have GPUs), to fully express that the pod needs a GPU node, but also to make sure that workloads that do not need a GPU don’t get scheduled on an instance that is going to be way more expensive than it needs.
+Additionally, some
+workloads apply taints to nodes very early in their life cycle to signal that the node is not yet
+ready to run regular workloads. For example, CNI plugins or other system agents might temporarily add taints while performing initialization tasks. These taints are meant to be cleared automatically once the setup is complete, ensuring that user pods are only scheduled onto nodes that are fully prepared.
+If your environment adds these kind of taints automatically, make sure you add equivalent
+startupTaints
+in your
+NodePool
+. This alignment makes Karpenter aware that the taints are expected and temporary. Without
+startupTaints
+in the
+NodePool
+spec, Karpenter may misinterpret the additional taint as a permanent scheduling barrier, concluding that the node is unusable and launching excess capacity unnecessarily.
+From Karpenter’s perspective, taints are another type of node constraint.
+NodePools
+can be configured with certain taints on all nodes they create. If a pod doesn’t tolerate those taints, Karpenter will not consider that
+NodePool
+for provisioning a new node for the pod. In other words, the pod’s tolerations must cover
+NodePool
+'s taints in order for Karpenter to use it. For example, if you have a “spot”
+NodePool
+that taints its nodes with
+spot-instance=true:NoSchedule
+, only pods that include a matching toleration will ever get scheduled onto those spot nodes. This is a common pattern to segregate workloads: critical pods might
+not
+have that toleration (so they stick to on-demand nodes), while cost-sensitive pods do tolerate it (allowing them to run on cheaper spot nodes).
+It’s worth noting that tolerations by themselves do not
+schedule
+a pod onto a tainted node; they simply
+allow
+it. If a pod has a toleration for a taint, it can land on a node with that taint, but it could just as easily run on an untainted node if one is available and fits other constraints. So, if you intend to
+force
+a pod onto a certain set of nodes, you might use a combination of taints/tolerations and another constraint, such as a node affinity or
+nodeSelector
+for a
+label that only those tainted nodes have. Taints
+and tolerations are best used to implement broad exclusion policies. For example, you might taint all “prod” nodes with
+environment=prod:NoSchedule
+and ensure only pods that are labeled as prod (and have a toleration) go there, while dev/test pods have no toleration and thus get scheduled on other nodes.
+Note
+A common mistake is to taint
+NodePool
+’s nodes and forget to add the corresponding toleration to the workload’s pod spec. This results in the pod remaining unschedulable (
+kube-scheduler
+will keep it pending because it doesn’t tolerate the node’s taint), and Karpenter will not launch nodes for it unless there are other compatible pending pods. The pod will only schedule once it tolerates the taint or if it finds an untainted node. Always double-check that for any taint applied via Karpenter, the workloads meant for those nodes have matching tolerations.
+Topology spread constraints
+As your application
+scales, you
+often want to ensure that its pods are spread out to minimize the risk of failures and optimize resource usage. TSCs allow you to declaratively specify how pods should be distributed across failure domains or other topology domains (such as zones, nodes, or even custom labels). This is a more generalized and powerful mechanism than anti-affinity. Instead of just saying “not on the same node,” you can say “try to keep the difference in the number of pods between zones to no more than X.”
+A TSC is defined in the pod spec under
+topologySpreadConstraints
+. You specify a label selector to group the pods of interest, usually all pods of your application. Then, define
+topologyKey
+, which
+is the node label defining the domain to spread across. Next comes
+maxSkew
+, which is the allowed difference between the domain with the most pods and the one with the fewest. Finally, we have a
+whenUnsatisfiable
+policy, which can be either
+DoNotSchedule
+or
+ScheduleAnyway
+. If
+whenUnsatisfiable
+is
+DoNotSchedule
+, the
+kube-scheduler
+will refuse to schedule a pod that would violate the
+maxSkew
+value—essentially making the spreading rule a hard requirement. If it’s
+ScheduleAnyway
+, the
+kube-scheduler
+will still
+try to spread the pods, but it won’t hold the pod back if the condition can’t be satisfied; the pod will be scheduled and the imbalance allowed (the constraint is treated as a preference).
+Let’s illustrate this with an example. Suppose you have a deployment of an application with the
+app: web
+label, and you want to ensure that the replicas are balanced across Availability Zones and also across spot/on-demand capacity types for resiliency and cost savings. You might use two TSCs, like this:
+...
+    spec:
+      topologySpreadConstraints:
+        - topologyKey: "topology.kubernetes.io/zone"
+          maxSkew: 1
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: web
+        - topologyKey: "karpenter.sh/capacity-type"
+          maxSkew: 2
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: web
+...
+The first constraint ensures that the difference in the number of pods between any two zones does not exceed
+1
+. It’s marked as
+DoNotSchedule
+, which means Kubernetes will strictly enforce it: a new pod will wait (remain pending) if scheduling it would cause a larger skew in zone
+distribution than allowed. The second constraint tries to balance pods across the three capacity types (
+reserved
+,
+spot
+, and
+on-demand
+) that Karpenter can use. Here we allow a slightly larger skew of
+2
+and use
+ScheduleAnyway
+, so it’s a soft rule—the scheduler will attempt to distribute evenly between spot and on-demand nodes, but if the
+spot
+capacity type isn’t available, it won’t prevent pods from running (they’ll just all go to the other type).
+How does
+Karpenter handle these? Karpenter is topology-aware. If a pod is pending because a TSC can’t be satisfied with the current nodes, Karpenter will try to fix that by provisioning a new node in the required domain. For example, if you have six pods to spread across three zones, but all current nodes (and thus all running pods) are in
+eu-west-1a
+, new pods will remain unschedulable due to the
+DoNotSchedule
+constraint until nodes exist in the other two zones. Karpenter will observe this and, assuming your
+NodePool
+allows it, launch nodes in
+eu-west-1b
+and
+eu-west-1c
+to meet the distribution goal.
+Each topology domain that’s required but currently missing can trigger Karpenter to launch nodes that satisfy the constraint.
+Scheduling nuances and minDomains for topology spread
+Be mindful
+of the
+DoNotSchedule
+constraint. If no nodes exist in a required topology domain and Karpenter isn’t allowed to provision there (because
+NodePool
+excludes certain zones or capacity types), pods can remain indefinitely pending. Always make sure your
+NodePools
+cover the topology domains you’re targeting. Node labels are only considered as options if they match the node affinity of the pods. That’s important to call out since it ensures that if a pod can’t schedule in a zone because of a node affinity, that zone won’t be used for topology calculations.
+For example, if
+your pod defines a topology spread across three zones, either the
+NodePool
+must span those three zones or you must configure one
+NodePool
+per zone. It’s important to note that the Kubernetes scheduler only operates based on nodes currently available in the cluster and is unaware of all possible topology domains defined by the cloud provider. This means if there are only nodes in two zones at scheduling time, even though a third zone is possible, the scheduler may continue to place pods only across those two zones while satisfying max skew constraints. For example, if there are two nodes—one in
+eu-west-1a
+and one in
+eu-west-1b
+—and a zonal TSC is applied with a max skew of 1, the scheduler will evenly balance pods between these two nodes. Meanwhile, Karpenter might later provision a node in a third zone (
+eu-west-1c
+), but until that node exists, the scheduler cannot schedule pods there.
+To guarantee that the scheduler actually spreads across all three, you should also set
+minDomains=3
+, which communicates the minimum number of distinct zones required. Without
+minDomains
+, the scheduler will simply use whatever zones are available, even if it is fewer than intended. Similarly, for capacity type spreading, if your
+NodePool
+supports only on-demand capacity, pods will not run on spot instances. In scenarios where
+ScheduleAnyway
+is used, Kubernetes may still schedule pods despite skew across domains.
+Additionally, there are a few nuanced points to consider. If topology spread is combined with zonal volume claims (such as EBS), Karpenter may add extra zonal affinity constraints when provisioning. This can change how the scheduler interprets the spread and potentially lead to skewed distributions. In these cases, using the
+nodeAffinity
+policy setting can help. You can instruct the scheduler to ignore node affinity generated from volumes when calculating TSCs, allowing pods to continue spreading as intended.
+Kubernetes itself may also place more pods on the first available node if others are still initializing, which
+can create a temporary imbalance even when spread constraints are technically satisfied. For smaller workloads, this is another case where
+minDomains
+helps, since it enforces distribution across the intended number of domains rather than relying solely on pod count (as explained before).
+In general, TSCs help you to spread pods across zones to reduce the blast radius during outages, and to spread across capacity types to improve resilience and cost savings. Karpenter responds dynamically to these constraints and preferences, and if necessary, provisions additional nodes to optimize the distribution.
+PersistentVolume topology and zonal placement
+Not all
+scheduling constraints
+come directly from the pod spec. When your pod uses persistent storage (
+PersistentVolumeClaims
+, or
+PVCs
+), the storage itself can impose scheduling constraints, usually in the form of topology requirements. For example, on AWS, an EBS volume exists in a single Availability Zone. If a pod claims an EBS PersistentVolume that’s in the
+eu-west-1b
+Availability Zone, Kubernetes will
+force
+that pod to run on a node in
+eu-west-1b
+(this happens via an automatic node affinity on the pod based on the volume’s
+NodeAffinity
+or the
+StorageClass
+topology). This is crucial to understand for stateful workloads: even
+if you didn’t explicitly put a zone constraint on the pod, the system will do so because the data is only accessible in that zone. Karpenter detects these implicit storage constraints and accounts for them when provisioning nodes.
+For dynamically provisioned volumes using the
+WaitForFirstConsumer
+binding mode (a common setting in storage classes for EBS, etc.), the volume isn’t created until the pod is scheduled. In such cases,
+kube-scheduler
+(and Karpenter) knows the set of possible zones (from
+allowedTopologies
+in the storage class), but the volume can be placed in any one of them. Karpenter helps break this chicken-and-egg situation. When a pod with an unbound PVC is pending, Karpenter will look at the storage class and PVC to determine the possible zones. It might choose one of the allowed zones (often at random or based on where other pods are to maybe balance) and provision a node in that zone to host the pod. Once that node comes up and the pod is bound to it, the CSI driver will create the volume in that same zone and attach it. Essentially, Karpenter proactively picks a zone for your storage by bringing up compute there. This leads to faster scheduling for stateful pods on fresh volumes.
+If the
+volume
+already exists (for instance, a
+StatefulSet
+pod being rescheduled with an existing PVC bound to a PersistentVolume in a specific zone), Karpenter will read the PersistentVolume’s node affinity and restrict itself to that zone when launching a replacement node. It recognizes that “this pod
+must
+run in zone X because its data resides there” and so it won’t create a node in any other zone for it. This prevents scenarios where Karpenter might otherwise waste time launching an unsuitable node.
+As a user, you don’t need to manually set any node affinity for PersistentVolumes—Kubernetes and Karpenter handle it. But you should ensure that your Karpenter configuration covers the necessary zones for your storage. If you use volumes in every Availability Zone of a Region, it’s best to allow Karpenter to launch nodes in all those Availability Zones (or use multiple
+NodePools
+accordingly). If you accidentally restrict Karpenter’s
+NodePools
+to a subset of zones, and a volume is created in a different zone, Karpenter won’t be able to launch a new node, leading to a stuck pod.
+Storage topology is an often-invisible constraint that Karpenter does account for. By using
+WaitForFirstConsumer
+and broad zone coverage, you enable Karpenter to dynamically place stateful workloads in the right zone when scaling out.
+Requesting specific hardware
+There
+are times when your workloads require particular hardware characteristics—for example, GPUs for AI/ML workloads, ARM64-based processors, or local NVMe storage for high I/O operations in workloads such as caches or databases. To help you with this, Karpenter allows you to explicitly steer provisioning toward specific hardware by using constraints and well-known labels in your workloads and
+NodePools
+.
+Let’s first talk about AI/ML workloads that will require the use
+of
+GPU nodes
+. First, you will need to create a dedicated
+NodePool
+that restricts instance types to those with GPUs and add a taint to keep other pods off these expensive nodes. For example, you might limit a
+NodePool
+to P3 instances and taint them with
+nvidia.com/gpu: true
+with a
+NoSchedule
+configuration. This ensures that only pods that explicitly request GPU nodes and tolerate the taint will be scheduled by the
+kube-scheduler
+on those nodes.
+For instance, you’d need to define a
+NodePool
+like this:
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpus
+spec:
+  template:
+    spec:
+      requirements:
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["p3.8xlarge", "p3.16xlarge"]
+      taints:
+        - key: nvidia.com/gpu
+          value: "true"
+          effect: NoSchedule
+In this example, any new node will be a P3 instance with GPUs, and it carries a taint. A pod that needs this type of compute capacity must explicitly request a GPU node (e.g.,
+resources.requests["nvidia.com/gpu"]
+) and include a toleration for
+nvidia.com/gpu
+to be scheduled on these nodes. When such a pod is pending, Karpenter will automatically consider
+only instance types that provide GPUs, ensuring the chosen node has the required hardware.
+Note: Avoid over-restricting instance types
+While the preceding example demonstrates instance-type restriction, we recommend using such constraints
+only when workloads have strict compatibility requirements or performance expectations
+. For instance, an ML job requiring GPU acceleration, or a latency-sensitive service that must run on the latest generation of compute-optimized instances (e.g., C7g), is a good candidate for instance-type constraints. In most cases, allowing Karpenter a wider selection of compatible types results in better availability, cost-efficiency, and resilience. In general, leave the workloads to decide which granular restrictions they want and avoid putting as many restrictions as possible in the
+NodePools
+.
+Another example is to request a specific node that includes local storage for workloads that requires a high speed I/O disk. Karpenter can work with well-known labels to request hardware capabilities that aren’t standard Kubernetes resources.
+For instance, you can require instances with local NVMe SSDs by using the
+karpenter.k8s.aws/instance-local-nvme
+label in a pod. You can do this by specifying a node affinity for this label (e.g., the
+Exists
+operator) to indicate that it needs an instance with ephemeral NVMe storage, as in this code snippet:
+...
+ affinity:
+   nodeAffinity:
+     requiredDuringSchedulingIgnoredDuringExecution:
+       nodeSelectorTerms:
+         - matchExpressions:
+             - key: "karpenter.k8s.aws/instance-local-nvme"
+               operator: "Exists"
+...
+Similarly, a
+NodePool
+could include a requirement on this label to force all its nodes to have local disks.
+Additionally, if
+you need a minimum size for the disk, the
+Gt
+operator can be used. For example, you can use
+karpenter.k8s.aws/instance-local-nvme > 99
+to require at least 100 GB of local SSD. This way, Karpenter will only consider instance types that offer the required disk capacity. Keep in mind that you need to ensure that your
+NodeClass
+is configured to mount and use the instance store.
+Similarly, you can leverage labels to request nodes with specialized hardware attributes beyond CPU, memory, or GPUs. Examples include enhanced network performance capabilities, custom accelerators such as FPGAs, or storage-optimized hardware. Specifying these labels in your
+NodePool
+requirements ensures that nodes with the desired traits are provisioned. Correspondingly, as we explored before, pod affinity or
+nodeSelector
+configurations allow workloads to be scheduled onto these specialized nodes, enabling efficient use of unique hardware resources tailored to specific application needs.
+Note
+Kubernetes allows pods to request ephemeral storage as a schedulable resource, which represents temporary disk space on a node. However, Karpenter cannot fully map these requests to the actual physical ephemeral storage capacity of nodes when that capacity depends on specialized local hardware—such as instance store or NVMe disks—unless specifically configured for it. This creates a gap: pods may request ephemeral storage, but Karpenter might provision nodes without sufficient underlying local storage to meet those requests, potentially causing scheduling failures or inefficient resource use.
+Because of this limitation, relying solely on ephemeral storage requests for node provisioning decisions can be insufficient. Instead, users should express special hardware needs explicitly through
+NodePool
+labels and pod affinity or toleration rules to guide Karpenter’s scheduling. Over-provisioning other resources, such as CPU or memory, can also act as a proxy to influence node selection when ephemeral storage is critical. Additionally, isolating
+NodePools
+with unique hardware by taints and matching pod tolerations helps prevent general workloads from consuming these specialized nodes unintentionally.
+minValues
+The
+minValues
+feature
+allows you to
+specify a
+minimum diversity of options
+for certain
+NodePool
+constraints. This is especially useful when working with EC2 spot instances where you want to ensure that Karpenter has multiple instance types or families to increase diversification.
+When you include
+minValues
+in
+NodePool
+'s
+requirements
+, you’re telling Karpenter’s scheduler that the
+NodeClaim
+must offer at least a specified number of unique values for that requirement key. For example, you might require at least 2 different instance categories, 5 different instance families, and 15 total instance types to choose from. You can encode these requirements as follows:
+...
+requirements:
+  - key: karpenter.k8s.aws/instance-category
+    operator: In
+    values: ["c", "m", "r"]
+    minValues: 2      
+  - key: karpenter.k8s.aws/instance-family
+    operator: Exists
+    minValues: 5      
+  - key: node.kubernetes.io/instance-type
+    operator: Exists
+    minValues: 15
+...
+In this snippet, Karpenter
+will only consider that
+NodePool
+for provisioning if it can find at least that many distinct options that satisfy the pod’s constraints. This prevents the
+NodePool
+from launching nodes if it would be limited to too few instance choices (thereby promoting instance type diversity). In other words,
+minValues
+is
+a tool for increasing resilience in spot-based environments by avoiding overly narrow pools, not an all-or-nothing gatekeeper.
+Additionally, Karpenter supports a configurable
+min-values-policy
+that can relax the strict enforcement of
+minValues
+. When set to
+BestEffort
+, Karpenter will gradually reduce the
+minValues
+constraints if the full diversity cannot be met, allowing scheduling to proceed as long as some permutation of the requirements is satisfied. This behavior helps prevent scheduling failures or excessive delays in clusters with limited instance options, while still encouraging diversity when possible. The default policy remains
+Strict
+, which enforces full
+minValues
+compliance or skips the
+NodePool
+.
+If a pending pod meets
+NodePool
+'s basic requirements (labels, taints, etc.) but the
+NodePool
+cannot satisfy the
+minValues
+diversity for a key under the
+Strict
+policy, Karpenter will skip that
+NodePool
+for the scheduling attempt and fall back to another
+NodePool
+that meets the pod’s needs. With the
+BestEffort
+relaxation policy, Karpenter reduces strictness to allow scheduling with partial diversity, minimizing skips and helping prevent pods from remaining unschedulable. Thus,
+minValues
+primarily guides pod placement toward
+NodePools
+with greater resource diversity rather than blocking cluster scaling entirely.
+Note
+You can apply
+minValues
+to multiple requirements. If the same label key appears with multiple constraints, Karpenter uses the highest
+minValues
+value among them as the effective minimum. For instance, if you have two requirements on
+instance-family
+(one with
+minValues: 5
+and another with
+minValues: 3
+),
+kube-scheduler
+will require at least five distinct families for that
+NodePool
+to be considered.
+Be mindful
+that
+minValues
+is a
+relatively new (alpha at the time of writing this book) feature in Karpenter. While it can prevent suboptimal scheduling, setting the values too high could also prevent any nodes from launching if your environment doesn’t actually have that many options. Always test with realistic values that reflect how many distinct instance types or zones you expect to be available for a given
+NodePool
+.
+NodePool weights
+When you have
+multiple
+NodePools
+in a cluster, it’s possible that a given pod could match more than one
+NodePool
+. The
+NodePool
+weight
+is a priority mechanism that influences which
+NodePool
+Karpenter will choose to provision a new node from. In effect, you can rank
+NodePools
+so that Karpenter tries your preferred capacity first. This is useful for implementing cluster-wide default node preferences,
+fallback pools
+, or
+cost optimization strategies (e.g., prefer spot but fall back to on-demand). The weight is defined by an integer (
+spec.weight
+in the
+NodePool
+) between 0 and 100, where higher values mean higher priority. If a pod is compatible with multiple
+NodePools
+, Karpenter will select the
+NodePool
+with the greatest weight (ignoring the relative cost of instances).
+A common pattern is to designate one
+NodePool
+as the “default” for generic workloads, and others as specialized or fallback pools. For example, you might have a broad on-demand
+NodePool
+and a
+separate spot
+NodePool
+. By giving the spot
+NodePool
+a higher weight, you tell Karpenter to attempt
+spot capacity first for any pod that could use either. If that
+NodePool
+cannot satisfy the scheduling for that pod (e.g., no spot availability or it hits a defined limit), Karpenter will then consider the lower-weight (on-demand) pool. Weights can also prioritize using reserved instances or particular hardware first. We’ll see this in practice in
+Chapter 11
+and
+Chapter 12
+.
+It’s important to understand that weights override Karpenter’s cost-based decisions. Normally, Karpenter chooses the cheapest instance type that meets the requirements (with a few edge cases, such as having capacity constraints). But if you use weights, you are explicitly telling it to favor one
+NodePool
+over others
+regardless of cost
+. For example, if a more expensive instance type has a higher weight than a cheap spot pool, Karpenter will pick the reserved instance pool every time for matching pods, even if the spot option could save money. Only use weights when you intend to prioritize certain capacity sources or configurations above pure price optimization.
+Summary
+This chapter explored how Karpenter redefines node autoscaling by shifting the focus from infrastructure-first to application-first provisioning. Rather than relying on predefined node groups, Karpenter provisions nodes on demand based on unschedulable pods, helping reduce excess capacity and simplify cluster operations.
+You were introduced to the key building blocks of Karpenter:
+NodeClasses
+, which, in the context of AWS, defines infrastructure settings such as AMIs and subnets;
+NodePools
+, which shape provisioning behavior and constraints; and
+NodeClaims
+, which represent the life cycle of provisioned nodes. With these components in place, Karpenter helps you to have a highly flexible, responsive, autoscaled cluster for nodes that fits a wide variety of workload profiles—from general-purpose applications to resource-intensive batch jobs or GPU-bound processes.
+Importantly, this chapter also clarified two common misconceptions about how Karpenter works. First, Karpenter does not schedule pods—that responsibility remains entirely with
+kube-scheduler
+. Karpenter simply ensures that appropriate nodes are available when pods cannot be scheduled due to insufficient capacity. Second, Karpenter does not scale based on CPU or memory utilization metrics. Instead, it reacts to unschedulable pods and simulates scheduling outcomes to provision just enough capacity to fit them efficiently. You’d use tools such as KEDA or HPA to scale pods, which would inevitably cause you to have unschedulable pods at some point.
+In the next chapter, you’ll learn about other important features in Karpenter, such as consolidation, disruption, and drift.
+Get This Book’s PDF Version and Exclusive Extras
+Scan the QR code (or go to
+packtpub.com/unlock
+). Search for this book by name, confirm the edition, and then follow the steps on the page.
+Note
+: Keep your invoice handy. Purchases made directly from Packt don’t require one.
+
+9
+Node Autoscaling with Karpenter — Part 2
+In the previous chapter, you got to know how Karpenter works in much more detail, and the most important aspects when using Karpenter. One in particular is that Karpenter works in tandem with
+kube-scheduler
+. We also explored how to define flexible, well-scoped
+NodePools
+and how to configure your workloads so that Karpenter can provision the right capacity based on application needs. But launching the right nodes is only part of the story. You also need to adapt to changes over time, reduce inefficiencies, and maintain alignment with the evolving state of your cluster and infrastructure policies.
+In this chapter, we’ll shift our focus from provisioning toward disruption and termination controllers. We’ll explore how Karpenter replaces nodes that are no longer needed, and the handling of spot interruptions or node expirations. You’ll learn that Karpenter not only does an efficient job when launching nodes but also when removing or replacing them. You’ll learn the differences between voluntary and involuntary disruptions, and how Karpenter uses simulation logic to make these decisions safe.
+Finally, we’ll introduce a very powerful feature to help you with day 2 operations:
+NodePool disruption budgets
+(
+NDBs
+), a critical feature that lets you throttle node changes based on rate, scope, and schedule. The features and topics we’ll explore in this chapter will give you the control needed to make Karpenter work safely in production environments while still delivering on cost and efficiency goals.
+By the end of this chapter, you’ll not only understand how Karpenter disruption works, but also how to apply best practices around
+NodePool
+and
+NodeClass
+configuration, workload constraint design, and integration with existing EKS setups. All of this with only one mission in mind: to help you prepare to build more elastic, cost-effective, and responsive Kubernetes clusters using Karpenter.
+We will be covering the following main topics:
+Removing nodes
+Disruption
+NodePool disruption budgets
+Karpenter best practices
+Technical requirements
+For this chapter, you’ll continue using an Amazon EKS cluster. To avoid any problems, it’s recommended to turn down any previous cluster you created, and instead create a new one from the template you’ll find in this chapter. This is going to be the cluster you’ll use from now on. You don’t need to install any additional tools, as most of the commands are going to be run with
+kubectl
+and
+helm
+. You can find the YAML manifests for all resources you’re going to create in this chapter in the
+chapter08
+folder from the book’s GitHub repository, which you already cloned in
+Chapter 1
+.
+Removing nodes
+In
+Chapter 8
+, we explored how Karpenter launches nodes. However, it’s important to highlight that Karpenter consolidates the entire node lifecycle—from identifying optimization opportunities to executing coordinated shutdowns—within a unified system that interacts directly
+with both Kubernetes and cloud provider APIs. This architectural approach enables sophisticated decision-making about
+when
+and
+how
+to reclaim capacity while maintaining strict guarantees around workload availability and infrastructure cleanliness.
+This chapter explores Karpenter’s lifecycle management through two interconnected systems: the disruption controller, which implements the strategic logic for node selection and budget enforcement, and the termination controller, which orchestrates the complex choreography of graceful shutdown, encompassing pod eviction, infrastructure cleanup, and cloud resource termination. These mechanisms provide the foundation for what we’ll explore later in more depth regarding consolidation strategies, drift detection, and disruption budget implementations.
+Let’s explore in more detail how Karpenter controls flow when removing nodes.
+Control flow architecture
+Karpenter’s lifecycle management operates through a well-defined control. At its core, Karpenter sets
+a Kubernetes finalizer on each node and
+NodeClaim
+it provisions—this finalizer acts as a synchronization primitive, blocking deletion of the
+node
+object at the API level while the termination controller completes its shutdown sequence.
+Disruption can be triggered through three pathways: automatically by the disruption controller executing methods such as consolidation or drift, manually through user-initiated deletion (
+kubectl delete node
+), or by external systems that send
+delete
+requests to
+node
+objects. Regardless of origin, all disruption flows converge on the same graceful termination process.
+Let’s explore these two controllers in more detail.
+Disruption controller
+Karpenter’s
+disruption controller continuously evaluates whether nodes in your cluster should be removed or replaced. It follows
+a sequential process, checking one disruption reason at a time. It first checks whether nodes need updates due to configuration changes, then looks for opportunities to reduce costs.
+For each node it evaluates, the controller follows these steps:
+Identifies and prioritizes candidates
+based on whether they qualify for removal. Some nodes might be completely empty, others might be running workloads that could fit elsewhere, and still others might have outdated configurations that no longer match what you’ve specified.
+Validates evictability
+by checking whether pods on the candidate node have blocking conditions. Pods with
+karpenter.sh/do-not-disrupt
+annotations or blocking PDBs will cause the controller to skip that node and revisit it in future iterations.
+Enforces disruption budgets
+by consulting the
+NodePool
+'s configured NDB. If too many nodes in that pool are already being disrupted, the controller defers action to maintain cluster stability.
+Simulates scheduling
+for all evictable pods on the candidate node to determine whether replacement capacity is needed. This simulation runs against the current cluster state, accounting for topology constraints, affinity rules, and resource requirements.
+Pre-spins replacement nodes
+based on the simulation results, launching them in parallel with the disruption process to minimize workload downtime. If replacement nodes fail to initialize, the controller removes disruption taints and restarts the evaluation process.
+Initiates deletion
+by setting the node’s
+DeletionTimestamp
+, which triggers the termination controller
+while the disruption controller moves on to evaluate the next candidate.
+Karpenter
+continuously works through disruption opportunities while respecting both cluster-wide and workload-specific constraints. Now, let’s explore how the termination controller works.
+Termination controller
+Once the disruption controller decides that a node should be removed, the termination controller
+takes over to handle the actual shutdown. In
+Figure 9.1
+, you can see that the termination flow is divided into six phases. When a
+node is marked for deletion, Kubernetes sets a
+DeletionTimestamp
+on the
+node
+object. Normally, this would immediately remove the node from the API, but Karpenter’s finalizer prevents that from happening.
+This lock gives the termination controller time to safely move workloads off the node, disconnect infrastructure dependencies, and properly terminate the underlying cloud instance. Without this mechanism, running
+kubectl delete node
+would simply remove the
+node
+object from Kubernetes while leaving the EC2 instance running—creating an orphaned resource that continues to cost money.
+Figure 9.1 – Termination controller workflow
+Let’s walk
+through each of these phases to
+understand how Karpenter ensures nodes are removed safely and completely.
+Phase 1: Taint application and scheduling prevention
+Termination starts by adding the
+karpenter.sh/disrupted:NoSchedule
+taint to the node. This
+immediately prevents the Kubernetes scheduler from placing new pods on the terminating node, ensuring that the disruption surface doesn’t expand during the drain process. This taint remains in place throughout the entire shutdown sequence.
+Phase 2: Selective pod eviction considering PDBs
+Rather than
+forcefully deleting pods, Karpenter uses the Kubernetes Eviction API to initiate graceful shutdown. This API-driven approach triggers the pod’s
+terminationGracePeriodSeconds
+countdown and respects PDBs, ensuring that applications have adequate time to complete in-flight requests, flush buffers, and close connections cleanly. We’ll explore in depth with a hands-on lab in
+Chapter 12
+.
+Not all pods are evicted during this phase; the termination controller ignores these:
+DaemonSet
+pods are excluded from eviction because they represent cluster-level system services—log shippers, monitoring agents, network plugins, and security tools. By allowing these pods to continue running until the final moments of node termination, Karpenter ensures that observability and networking remain intact throughout the drain. This means that pod eviction events, drain progress, and any application-level errors during shutdown are properly captured and forwarded to your monitoring systems.
+Static pods managed directly by
+kubelet
+(not through the API server) are similarly ignored, as they follow their own lifecycle, independent of cluster control planes.
+Pods that tolerate the
+karpenter.sh/disrupted:NoSchedule
+disruption taint are allowed to remain, enabling workloads that explicitly opt into disruption tolerance to continue running during the transition.
+Succeeded or failed pods that have already completed their lifecycle don’t require eviction and are skipped.
+The controller
+monitors pod eviction progress continuously. If all workload pods successfully evict, the drain phase completes and the process advances. However, if PDBs block eviction indefinitely—or if pods have the
+karpenter.sh/do-not-disrupt
+annotation—the controller waits unless
+terminationGracePeriod
+has been configured on the owning
+NodeClaim
+.
+Phase 3: Load balancer connection draining
+When a pod backing a load balancer or Ingress service terminates, the Kubernetes service controller
+updates the load balancer’s target group, removing the node’s endpoints.
+However, active connections to those endpoints may still be processing requests. Cloud provider load balancers implement connection draining, which keeps the target registered but stops routing new connections to it while existing connections complete. For AWS Application Load Balancers and Network Load Balancers, this delay is configurable (typically, 300 seconds by default), providing a buffer for long-lived HTTP requests or database connections to finish cleanly.
+Karpenter’s termination logic waits for the Kubernetes eviction process to complete before proceeding to infrastructure termination, which indirectly ensures that load balancer updates have propagated and connection draining windows have been respected. This coordination prevents connection resets that would manifest otherwise as
+5XX
+errors or client timeouts. We’ll also explore this in
+Chapter 12
+.
+Phase 4: Persistent volume detachment
+When a pod with mounted volumes is evicted,
+kubelet
+begins its termination sequence, which includes
+unmounting the volume from the filesystem and detaching it at the API level.
+Karpenter’s termination process waits for the node to be fully drained—meaning all evictable pods have been removed and their associated volumes have been safely unmounted and detached—before terminating the underlying instance. This prevents scenarios where an instance is terminated while volumes are still attached, which could result in volumes becoming stuck in the “detaching” state or, worse, data corruption if writes are in flight during forceful detachment.
+Once volumes are cleanly detached, they become available for attachment to replacement pods running on other nodes, enabling stateful workloads to resume operation with their data intact.
+Phase 5: NodeClaim termination and cloud resource cleanup
+With all
+pods evicted and infrastructure dependencies cleanly disconnected, the termination controller proceeds to delete the underlying
+NodeClaim
+. For AWS environments, this triggers the termination of the EC2 instance through direct API calls.
+During this phase, the controller monitors for an edge case: if the
+NodeClaim
+is deleted by an external process (perhaps manual cleanup or a cloud provider event), Karpenter detects the missing
+NodeClaim
+and immediately removes the finalizer from the
+node
+object, allowing Kubernetes to complete the deletion without waiting for termination steps that can no longer occur.
+Phase 6: Finalizer removal and deletion completion
+Once
+the cloud provider confirms that the instance has been terminated (or if the
+NodeClaim
+was already deleted), the termination controller removes the finalizer from the
+node
+object. This signals to the Kubernetes API server that all cleanup is complete, and the
+node
+object is finally deleted from
+etcd
+, concluding the termination sequence.
+This termination workflow shows how Karpenter maintains complete control over node lifecycle execution. With this understanding of how nodes are safely removed, we can now examine why and when the disruption controller triggers these actions, exploring the specific scenarios that drive consolidation, the configuration changes that cause drift, and the budget mechanisms that control the pace of disruption across your cluster.
+Disruption
+After exploring how Karpenter gracefully terminates a node, we can now continue with what drives these node removals. Karpenter not only provisions nodes but also actively manages their lifecycle to
+maintain an efficient and up-to-date data plane. Any intentional termination of a node is known as a
+disruption
+. Disruptions can occur for various reasons: scaling down unused capacity, consolidating workloads onto fewer nodes, replacing nodes that have drifted from the desired configuration, handling voluntary node deletions, or responding to involuntary events such as spot interruptions.
+As you will see in
+Figure 9.2
+, Karpenter categorizes these disruptions into two types:
+Involuntary disruptions
+: These
+are terminations that can’t be
+avoided and require immediate action, such as EC2 spot interruptions, health events, or node expiration for compliance reasons. These disruptions have time constraints that force Karpenter to react quickly to replace nodes.
+Voluntary disruptions
+: These
+disruptions, in contrast, are actions
+that Karpenter proactively initiates to optimize the cluster, such as consolidation or drift, where there is no immediate urgency to terminate nodes. For voluntary disruptions, Karpenter respects PDBs and will not take action against critical applications that cannot be safely disrupted.
+Figure 9.2 – Karpenter can disrupt nodes voluntarily or involuntarily
+With voluntary disruptions, Karpenter simulates evictions, respects PDBs, and launches replacement nodes as needed. Involuntary disruptions, however, occur without warning, which means Karpenter cannot preemptively simulate evictions or coordinate replacements. Instead, it focuses on rapidly draining the affected node and rescheduling pods to maintain availability. EC2 spot interruptions falls into this category, as there’s nothing you can do to stop a node from being terminated after receiving the interruption signal. You also have
+expireAfter
+, which is a mechanism Karpenter uses to maintain node freshness and manage risk in spot-heavy environments. We’ll explore this feature later in this chapter.
+Regardless of
+the disruption type, Karpenter adds a Kubernetes finalizer to each node it manages. This ensures that the node is properly drained before termination, even in cases of manual deletion. The finalizer blocks deletion of the
+node
+object while Karpenter’s termination controller safely taints and drains the node before removing the underlying
+NodeClaim
+, ensuring a consistent termination flow in all scenarios
+Having covered how Karpenter manages node termination across disruption scenarios, let’s shift our focus to how consolidation helps to optimize resource usage within the cluster.
+Consolidation
+Before we dive into how consolidation works in Karpenter, let’s take a step back and explore how Karpenter
+handles underutilization. As you know, Kubernetes schedules pods onto nodes based on scheduling constraints and resource availability at the moment of placement. However, once a pod is running,
+kube-scheduler
+doesn’t go back later to see whether that pod could be packed more efficiently on a different node. Over time, as you scale workloads up and down and nodes come and go, the cluster’s pod distribution can drift from optimal, often leaving nodes underutilized and driving up costs, as shown in
+Figure 9.3
+. Karpenter’s
+consolidation
+feature tackles this by continuously re-evaluating how pods are spread across the cluster and
+actively consolidating
+them onto the fewest, most cost-efficient nodes needed.
+Figure 9.3 – After a scale-down event, nodes can be overprovisioned
+Karpenter effectively simulates pod evictions on a regular cadence to find for consolidation opportunities, rather than relying on periodic polling intervals. When Karpenter determines that workloads can be shifted to fewer or more cost-effective nodes, it will launch replacements as needed before beginning node deprovisioning. The eligibility for deprovisioning is determined by evaluating factors such as PDBs, whether pods have been initialized, and readiness constraints. Once a node is selected for consolidation, Karpenter taints it with
+karpenter.sh/disrupted:NoSchedule
+to prevent new pods from being placed during the transition.
+Before it evicts
+any pod, it verifies through simulation that the pod
+can
+be rescheduled onto another node. In other words, Karpenter makes sure that there’s capacity elsewhere for every pod on a node before that node is disrupted. Furthermore, you can configure an NDB to define how many nodes in a
+NodePool
+can be disrupted at the same time (similar to a Deployment’s
+maxUnavailable
+). We’ll dive deep into this later on.
+Let’s go a bit deeper into how consolidation works by exploring which inefficiencies in a cluster Karpenter can remediate:
+Remove empty nodes
+: If a node isn’t running any application pods (only
+DaemonSet
+pods or static pods), it’s considered empty. These nodes contribute no useful work, so Karpenter will terminate them to eliminate waste, shown as the third node in
+Figure 9.4
+. It ignores
+DaemonSet
+pods when evaluating emptiness, since these run on every node by design. These nodes can be removed in parallel since they don’t need replacements.
+Figure 9.4 – Karpenter is removing the third node as it doesn’t have pods running
+Eliminate underutilized nodes
+: If a node’s running pods could all fit onto other existing nodes, Karpenter will consolidate the nodes by terminating them, as shown in
+Figure 9.5
+. This is similar to defragmenting the cluster; it frees up an entire node by packing its pods elsewhere. In practice, you might see scenarios where three half-used nodes
+can be consolidated into one fully-used node after Karpenter’s consolidation, dramatically reducing the number of active nodes (and costs).
+Figure 9.5 – Karpenter is forcing a node to be empty for optimization purposes
+Note
+Karpenter does multi-node consolidation by looking at two or more underutilized nodes that could be replaced by a single node. If Karpenter finds that the combined pods from Node A and Node B would fit on
+one
+new instance (and that instance would be cheaper than A+B), it will attempt to consolidate those together. This “many-to-one” consolidation uses a heuristic to choose likely node combinations without trying every possible mix.
+Downsize to cheaper instances
+: In cases where a node isn’t completely empty but is oversized for its current load, Karpenter can replace it with a cheaper instance type. For example, if the workload is running on a
+4xlarge
+instance type, Karpenter might provision a
+2xlarge
+or Spot Instance type, and migrate the pods there. You can see this in
+Figure 9.6
+. This ensures that you’re not paying for more capacity when unnecessary.
+Figure 9.6 – Karpenter has forced the third node to be replaced with a smaller one
+Note
+If you’re using Spot capacity, Karpenter also supports Spot-to-Spot consolidation through a feature gate that you need to enable. You can check how to do it in the Karpenter docs (
+https://karpenter.sh/docs/reference/settings/#feature-gates
+). However, it won’t replace a Spot node with a cheaper Spot Instance unless it is able to submit an EC2 API Fleet request with at least 15 viable instance types. This safeguard helps ensure that replacement capacity is truly available and reduces the chance of running into capacity shortages during consolidation.
+By default, consolidation is enabled and will consider both completely empty nodes and generally underutilized
+nodes for removal. You can control its behavior through the
+spec.disruption
+settings on your
+NodePool
+. For example, you could configure the
+consolidationPolicy
+field to
+WhenEmpty
+(only consolidate completely empty nodes) or
+WhenEmptyOrUnderutilized
+(the default, which also consolidates underutilized nodes). A corresponding
+consolidateAfter
+field defines how long Karpenter should wait after pods churn—pods are added or removed from a node—before treating that node as a consolidation candidate. This delay prevents thrashing—a situation where nodes are added and removed so frequently that the cluster becomes unstable or inefficient.
+For instance, if a node’s pods just terminated, Karpenter will wait the
+consolidateAfter
+duration to see whether new pods land there before deciding the node is truly idle. This prevents cases where, for example, you have a job orchestrator that needs time after old jobs finish to provision new jobs to the node. We can set
+consolidateAfter
+to a high enough value to allow this orchestrator to react, ensuring that Karpenter doesn’t terminate a node and then immediately have to relaunch one when the new job launches. A sample
+NodePool
+configuration might look like this:
+...
+spec:
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 1m 
+...
+In the preceding configuration snippet,
+consolidationPolicy
+is set to
+WhenEmptyOrUnderutilized
+, which means Karpenter will consider nodes for consolidation when they
+are underutilized. The
+consolidateAfter
+field is set to
+1m
+, indicating that Karpenter waits for one minute after pods schedule or leave a node before evaluating it for consolidation.
+With this behavior configured, it is important to understand what happens when Karpenter skips consolidation, and the implications for cluster management and resource optimization.
+What happens when Karpenter skips consolidation?
+Although Karpenter seeks to optimize node usage, it won’t just consolidate every node. There might be times when you’d expect Karpenter to run consolidation, but it won’t happen. Several conditions can cause Karpenter to skip a node entirely during its consolidation evaluation. This behavior is intentional and helps avoid disrupting workloads that are difficult—or unsafe—to move. Let’s see which conditions can make Karpenter skip consolidation.
+Pod disruption budgets (PDBs)
+Just in case you’re not familiar, PDBs are Kubernetes policies that limit how many pods of an application
+can be voluntarily evicted at once, ensuring availability during disruptions. Karpenter honors PDBs when attempting to evict pods. If evicting a pod from a node would violate its PDB (for example, exceeding
+maxUnavailable
+or dropping below
+minAvailable
+), Karpenter skips that node entirely. No consolidation occurs unless all pods on the node can be evicted safely within their budgets. To help with visibility, Karpenter emits events on the node to explain this, often in the following form:
+Unconsolidatable – pdb <namespace>/<name> prevents pod evictions
+Affinity constraints
+Karpenter’s consolidation respects both required and preferred inter-pod affinity and anti-affinity constraints; however, it handles them each differently. For
+required
+affinity/anti-affinity constraints, Karpenter won’t consolidate a node if doing so would violate these hard requirements. In such cases, the node is considered unconsolidatable and skipped entirely from consolidation.
+For the
+purposes of consolidation, Karpenter treats preferred affinity and anti-affinity constraints like required constraints. In the scheduling simulation, Karpenter evaluates pod placement options in this order:
+Existing nodes honoring the preferred constraint
+New nodes honoring the constraint
+Existing and new nodes ignoring the constraint
+This means Karpenter will often choose to launch new capacity with the
+preferred
+constraints before consolidating existing capacity without them. While Karpenter tries to honor these preferences to avoid node churn and prevent immediate consolidation after node launch, the prevention of immediate consolidation actually results from the scheduling and consolidation producing consistent decisions based on the same inputs. If both provisioning and consolidation ignored preferences, additional churn could occur. Preferred constraints can reduce consolidation effectiveness because Karpenter may avoid disrupting nodes to keep preferences intact, even when
+kube-scheduler
+could fit pods elsewhere, ignoring these preferences.
+In other words, preferred constraints act as strong guidelines that Karpenter tries to respect during consolidation decisions, while required constraints are absolute blockers. If no existing or new node(s) can satisfy the required scheduling constraints, the pod is considered unmovable, and the entire node is excluded from consolidation.
+Note
+Since v1.6, Karpenter provides a configurable setting called
+PREFERENCE_POLICY
+that controls how preferred constraints are handled during both provisioning and consolidation decisions. By default, this is set to
+Respect
+, meaning Karpenter honors preferred affinity/anti-affinity rules and
+ScheduleAnyways
+topology spread constraints to avoid node churn and maintain workload distribution preferences.
+However, you can set
+PREFERENCE_POLICY=Ignore
+to allow more aggressive consolidation that disregards these preferences. This setting affects both scheduling and consolidation phases. During consolidation, Karpenter will ignore preferred constraints when making optimization decisions, potentially allowing more cost-effective node arrangements. During provisioning, Karpenter’s scheduler will also ignore preferences when creating new nodes for pending pods. It is important to
+note that this behavior can result in non-deterministic outcomes, regardless of the setting, because
+kube-scheduler
+only works with the nodes it sees at any given moment. For example, even with
+PreferencePolicy=Respect
+, a newly registered node might not yet be visible to
+kube-scheduler
+, leading it to place pods densely on fewer nodes. This can trigger immediate consolidation of empty nodes based on timing and scheduling loops rather than strict affinity rules.
+karpenter.sh/do-not-disrupt annotation
+Both pods and nodes can be marked with the
+karpenter.sh/do-not-disrupt: "true"
+annotation. When present, Karpenter will ignore the node for voluntary disruptions such as consolidation
+or drift. Starting in v1, expiration will still forcefully drain and terminate the node even if this annotation is set, though the annotation is respected during the drain process itself. This annotation is a useful override to temporarily pin critical workloads, and it can also serve as a valuable debugging tool when investigating node-related issues by preventing disruption during that time. Excessive use of this annotation, however, can reduce Karpenter’s overall effectiveness in optimizing the cluster.
+Insufficient available capacity
+It’s important to clarify what Karpenter considers “underutilized.” Unlike CAS, which uses
+usage-based
+metrics, Karpenter evaluates underutilization purely by comparing the current cost of a
+node against the potential cost of a replacement node that could run the same workloads more efficiently.
+Even if a node meets this cost-based underutilization criteria, consolidation will only occur if Karpenter finds viable placement for all of the node’s pods. As of this writing, Karpenter will only consolidate one or more nodes into a single replacement node. If a consolidation action would result in two or more nodes—even if their combined cost would be lower—Karpenter won’t perform it, since this could lead to unpredictable scheduling results that might actually make the cluster more expensive.
+If the simulation fails to fit one or more pods due to hard constraints, taints, affinity rules, or resource limitations, Karpenter aborts the consolidation for that node. When consolidation is skipped, you can view the reasoning through events on the node:
+Unconsolidatable - can't replace with a lower-priced node
+These events help you debug why expected consolidations aren’t occurring.
+NodePool disruption budget limits
+At the
+NodePool
+level, Karpenter supports NDBs to throttle how many nodes can be disrupted
+at once. Even if a node qualifies for consolidation, it will be skipped if acting on it would exceed the
+NodePool
+'s configured disruption budget. We’ll explore this in more detail later in the dedicated section for NDBs.
+Generally, consolidation keeps your cluster lean by continuously right-sizing capacity to match current demand, working hand in hand with Karpenter’s scaling-up logic.
+Next, let’s see consolidation in action through a hands-on lab.
+Hands-on lab: Consolidating nodes after scaling events
+We just looked at how consolidation works, but let’s see how Karpenter either removes a node, replaces it
+with the cheaper one, or forces a restructure of pods in the cluster.
+If you have your EKS cluster up and running, skip this step. Otherwise, if you turned down the EKS cluster to save costs, let’s bring it up again by running the following commands:
+$ cd /chapter08/terraform
+$ sh bootstraph.sh
+To get started with this lab, open your terminal and go to the
+/chapter09
+folder:
+$ cd chapter09
+Confirm that you have the latest version of the default
+NodePool
+that you created in the previous chapter by running this command:
+$ kubectl apply -f nodepool.yaml
+Note the
+disruption
+block in the
+NodePool
+:
+...
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 0s
+...
+With this configuration in place, the
+NodePool
+will consolidate nodes when Karpenter notices there’s an opportunity to consolidate nodes into fewer or smaller ones. To see this quickly, we’re asking Karpenter to react quickly with
+consolidateAfter: 0s
+.
+In all labs in this chapter, you’ll spend quite some time reading Karpenter logs. To make this task easier, let’s create an alias in the terminal by running this command:
+$ alias kl='kubectl -n karpenter logs -l app.kubernetes.io/name=karpenter --all-containers=true -f --tail=20'
+Next time you run
+kl
+in the terminal, you’ll effectively be following the last 20 lines of the Karpenter controller pods in real time.
+To see
+consolidation in action, we first need to launch a few pods. Let’s deploy the Monte Carlo PI app, which, for now, is only requesting three replicas. For this lab, we’ll be increasing the CPU and memory for the pods to make it easier to predict the size of each node launched. Run this command:
+$ kubectl apply -f montecarlopi.yaml
+Wait around three or four minutes until you see that the pods are running. Keep running this command until you see the pods with a
+Running
+status:
+$ kubectl get pods,nodeclaims
+Now, let’s scale the application up to 10 replicas and wait for Karpenter to create an additional node for the new pods. Having two nodes will allow us to see consolidation in action. Run this command:
+$ kubectl scale deployment montecarlo-pi --replicas 10
+Wait again for about three to four minutes until you see all the pods with a
+Running
+status.
+Note
+To simplify this lab, we’re doing a manual scaling operation of the workloads. But in a production environment, we would use KEDA to scale the workload.
+At this point, you should have two nodes launched by Karpenter to host the 10 replicas of your application. We got two nodes, one with a
+c6a.xlarge
+instance type and another one with a
+c6a.2xlarge
+instance type. You can confirm this by running this command:
+$ kubectl get nodeclaims
+So far, we’ve seen that Karpenter does a good job launching only the nodes it needs. It first launched an
+xlarge
+node, and when you scaled the deployment to add more replicas, it launched
+2xlarge
+to fulfill the demand. But Karpenter doesn’t stop at just provisioning. It does a very good job when you scale down your replicas too. To see this in action, let’s scale down the deployment to six replicas. Run these commands:
+$ kubectl scale deployment montecarlo-pi --replicas 6
+$ kl
+Pay close attention to the log messages; the interesting ones are these:
+disrupting node(s)
+, meaning that Karpenter identified an opportunity to make the cluster more efficient, and in the same log line, you’ll see this:
+"reason":"underutilized","decision":"delete","disrupted-node-count":0,"pod-count":3
+. Notice that Karpenter decided to delete a node impacting only three pods. Why delete a node? Because you removed four pods, Karpenter decided that the best option was to evict three pods from the
+xlarge
+node, so that
+kube-scheduler
+will schedule them in the
+2xlarge
+node. This leaves the
+xlarge
+node empty, giving a valid reason to be deleted.
+tainted node
+, meaning that as soon as Karpenter marked this node to be deleted, it put a taint so no other pods could be scheduled in this node, since it’s about to be removed.
+deleted node
+and
+deleted nodeclaim
+, meaning that once the node is empty, Karpenter deleted the node along with its respective
+NodeClaim
+.
+As you can see, Karpenter was easily able to determine how to make the cluster more efficient and
+took only a single action to do it, reducing application disruption. We’ll dive deeper into how you can control and reduce the downtime of your application in
+Chapter 12
+. For now, let’s continue with the next experiment.
+Press
+Ctrl
++
+C
+to exit the command you had running to read the Karpenter logs. Now, let’s scale down the number of replicas to
+3
+. Run these commands:
+$ kubectl scale deployment montecarlo-pi --replicas 3
+$ kl
+Let’s understand what Karpenter did by reading the logs. The important bits are these:
+Same as before, the first log you see is that Karpenter is disrupting a node. But this time, notice that the decision is different since it’s replacing the node:
+"reason":"underutilized","decision":"replace","disrupted-node-count":1,"replacement-node-count":1,"pod-count":3
+. You only had one node, so Karpenter couldn’t force evictions of pods to move them around. Therefore, the best available option was to launch a smaller node, an
+xlarge
+node, as the
+2xlarge
+node was now too big. You can see that right after this log line, Karpenter started to launch the replacement node. Only after this new node was ready did Karpenter start the removal process of the
+2xlarge
+node.
+tainted node
+, meaning that as soon as the new node was ready, Karpenter put a taint in the disrupted node so no other pods could be scheduled in this node as it is about to be removed.
+deleted node
+and
+deleted nodeclaim
+, meaning that once the disrupted node is empty, Karpenter deleted the node along with its respective
+NodeClaim
+.
+This is awesome! But remember that Karpenter can also replace a node with a cheaper purchase option, such as an EC2 Spot Instance. So, let’s see that in action.
+Press
+Ctrl
++
+C
+to exit the command you had running to read the Karpenter logs. Then, scale the deployment to 10 replicas again:
+$ kubectl scale deployment montecarlo-pi --replicas 10
+Wait around
+three or four minutes, and now you should have two nodes again. Note that these two nodes are
+on-demand
+instances. This is because the default
+NodePool
+only supports
+on-demand
+as the
+karpenter.sh/capacity-type
+requirement.
+Modify the
+nodepool.yaml
+file so that it also supports Spot Instances, like this:
+...
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand","spot"]
+...
+Apply this change by running the following commands:
+$ kubectl apply -f nodepool.yaml
+$ kl
+This time, we’re not going to get into the details of these log lines; note that Karpenter took the two existing
+on-demand
+instances that you had and replaced them with
+spot
+instances. Based on the logs you read, notice that Karpenter takes the same approach as before when replacing a node. First, Karpenter launches the new node, and only when the new node is ready does the removal of the disrupted node start.
+Press
+Ctrl
++
+C
+to exit the command you had running to read the Karpenter logs. Now, check again the nodes you have; you’ll see that all nodes are Spot Instances. Run this command:
+$ kubectl get nodeclaims
+To finish with this lab, run this command to delete all pods:
+$ kubectl delete -f montecarlopi.yaml
+If you wait
+about two minutes, you’ll see that Karpenter has removed the nodes it launched as they were empty. Again, this is consolidation in action.
+As you can see, Karpenter does a very good job working in tandem with
+kube-scheduler
+to launch only the nodes needed for your applications. When you have consolidation enabled, it does a very good job at removing empty nodes, replacing them with cheaper nodes, and even forcing pod evictions to make a better use of the existing nodes in the cluster. All these actions are taken to ensure that you have an efficient data plane while reducing application pod disruption. Now, let’s continue exploring other disruption features in Karpenter, such as drift.
+Drift
+Kubernetes follows a reconciliation paradigm where controllers continuously work to align the actual state of resources with their desired state as defined in configuration manifests. This ensures that systems remain consistent and self-healing even when changes occur.
+Karpenter applies
+this same reconciliation approach to node management through
+drift
+detection. While consolidation is about removing excess capacity, drift is about maintaining desired state. Drift detection in Karpenter will replace nodes that no longer match the current specifications defined in your Karpenter configs (
+NodePools
+and any associated
+NodeClasses
+or AWS settings). Think of it as Karpenter’s way of doing rolling upgrades or reconciling configuration changes to ensure that your cluster converges to the new desired state.
+For example, if you update
+EC2NodeClass
+to use a new AMI, as shown in
+Figure 9.7
+, or a different instance type, the already-running nodes are now “drifted” from what you desire. Karpenter can detect that and gradually recycle those nodes so that your cluster converges to the new state.
+Figure 9.7 – After updating EC2NodeClass, the existing node configurations have drifted
+What causes drift?
+Drift can be triggered not only by user changes to your node specifications but also by external factors
+that cause the actual state of resources to diverge from what your Karpenter configurations point to, let’s explore a few scenarios that cause drift:
+New AMIs
+: If a new version of an AMI is released, your existing nodes will drift. Let’s say you’ve configured your
+EC2NodeClass
+object(s) to select an AMI version by tag. When a new AMI becomes available, all existing nodes on the old AMI will be considered drifted. Karpenter will detect that the node’s image ID doesn’t match the newly desired image and mark the node as drifted. In other words, AMI drift is an automated node upgrade mechanism. From the application’s perspective, drift-based replacement is a rolling upgrade of the nodes.
+For example, say you upgraded your EKS cluster from 1.31 to 1.32 and updated your
+NodeClass
+to use the 1.32 AMI. Karpenter will start replacing the old 1.31 nodes with new 1.32 nodes, respecting any PDB and/or NDB limits. This can greatly simplify node management in EKS. You don’t have to manually cordon and drain nodes or use a separate upgrade tool. Karpenter effectively does it for you, driven by the declarative changes you make to its specs.
+Instance families or hardware changes
+: If you modify the allowed instance types or other capacity constraints in your
+NodePool
+, some nodes might fall out of spec. For instance, if you previously allowed the
+m7
+family and now switch to only allow
+c7
+, any running
+m7
+nodes are no longer compliant. Karpenter will treat those nodes as drifted and replace them with the new instance type. Conversely, expanding the set of instance families usually does not drift existing nodes as long as they still satisfy the new requirements. For example, going from
+only m7
+to
+m7 or c7
+does not immediately replace the
+m7
+nodes, since they’re still valid in the broader set.
+Networking or security changes
+: On your
+NodeClass
+, you might update which subnets or security groups Karpenter should use for new nodes. For subnets, since instances belong to only one subnet, a node won’t be considered drifted as long as its current subnet is still included in
+subnetSelectorTerms
+. In other words, simply changing the
+set of allowed subnets won’t immediately cause drift if the node’s subnet remains valid. However, security groups work differently. Because multiple security groups can be attached to a node and they enforce security constraints, any change to the security group selectors causes Karpenter to consider all nodes with the old security group configuration as drifted. Karpenter will then roll these nodes to ensure they have the updated security groups.
+Kubernetes version
+: If you upgrade your clusters to a new Kubernetes version, you’ll likely want nodes on the new version as well. Karpenter doesn’t explicitly check the
+kubelet
+version on nodes, but if you use the
+"alias"
+field in
+EC2NodeClass
+to select AMIs, drift detection will catch when the alias points to a new AMI version and trigger node replacement. Similarly, if you adjust static fields in the
+NodePool
+or
+NodeClass
+such as labels or taints, those changes propagate only to new nodes. One thing Karpenter doesn’t consider for drift are changes to purely “behavioral” settings that don’t reflect in the node itself. For example, tweaking a
+NodePool
+'s disruption budget or weight won’t mark nodes as drifted because those settings aren’t going to affect the configuration of the node.
+Now that we explored what changes can cause nodes to drift from their desired state, let’s explore how Karpenter detects this drift and initiates node replacement accordingly.
+How drift is detected
+Let’s dive a
+bit deeper into how drift works. Karpenter employs a mechanism analogous to Kubernetes Deployments’
+pod-template
+hash. Each
+NodePool
+(and
+NodeClass
+) gets an annotation that is a hash of the node template spec. Whenever the
+NodePool
+'s relevant fields change, the hash will change. Karpenter compares this to a similar hash stored on each
+NodeClaim
+to see whether a node’s configuration is out of date. If there’s a mismatch, meaning the node’s spec no longer matches the
+NodePool
+'s desired spec, Karpenter marks that node (
+NodeClaim
+) with a drifted condition.
+You can observe this in the
+NodeClaim
+object description or in Karpenter’s logs. Karpenter’s drift detection is continuous. So, as soon as you push a new AMI into the config, nodes will get flagged as drifted almost immediately. There are some special-case rules to avoid false positives. As noted, if a new
+spec broadens an option (such as adding an instance family), Karpenter won’t count existing nodes as drifted if they still fit within the new parameters. But any change that truly renders the node’s attributes non-compliant will trigger drift.
+Managing drift carefully
+While drift automation is powerful, it needs to be managed. A naive configuration might unintentionally
+cause all your nodes to drift at once. A classic example is using an AMI selector that always grabs the “latest” image. The moment a new AMI is released (which could be in the middle of a business day), every node suddenly becomes outdated. Karpenter would then proceed to replace nodes as allowed by budgets. In a large cluster, even a controlled rollout could mean many pods restarting.
+To avoid uncontrolled AMI drift, I recommend that you pin a specific AMI ID, use a version alias (non-latest), or use a manually updated tag, so that you decide when to initiate the drift replacement. In other words, you might test a new AMI, then update the
+NodePool
+'s AMI selector during a maintenance window so that drift happens on your schedule. If you do rely on an automated latest AMI, be sure that your NDB only allows a few nodes to be updated at once so you don’t replace too many nodes at the same time. The goal is to reap the benefits of drift (automatic node updates) without surprising downstream effects.
+Another tip is that you can disable or defer drift if needed. In earlier versions of Karpenter, drift was behind a feature gate. In Karpenter v1.x, it’s on by default; however, you can still effectively pause drift actions by adjusting the
+NodePool
+drift budget to zero or using the
+do-not-disrupt
+controls mentioned.
+Some teams, for instance, relax drift’s budget or remove
+do-not-disrupt
+annotations to let Karpenter roll the nodes. This approach gives a mix of automation and control.
+In summary, drift handling ensures that nodes don’t live indefinitely with old configurations. Whether it’s applying critical security patches via new AMIs, migrating to different instance families, or just keeping nodes in sync with your latest provisioning rules, Karpenter will ensure that you are always converging on your desired state.
+Combined with consolidation, drift means Karpenter not only scales your cluster on demand but also continuously improves and refreshes it in line with your infrastructure changes. Overall, Karpenter’s disruption features (scale-down, consolidation, and drift) make it a full lifecycle manager for nodes in Kubernetes. It not only launches the right nodes for new pods, but also manages and optimizes those nodes continuously.
+Now, let’s see drift in action with a hands-on lab.
+Hands-on lab: Drifted nodes after updating AMI
+To see how Karpenter reacts when a node drifts from its desired configuration, we’ll do an update to
+the default
+EC2NodeClass
+. In
+Chapter 12
+, you’ll practice upgrading a cluster to see how drift helps you with major updates. For this chapter, the idea is that you can see its value in a simple lab. So, let’s go back to your terminal.
+Similar to the consolidation hands-on lab, if you already have your EKS cluster up and running, continue with this lab. Otherwise, go back to the consolidation lab and follow the initial steps to create the EKS cluster and deploy a default
+NodePool
+and
+EC2NodeClass
+, and then come back to this lab.
+Before we see nodes drift, we need to have nodes running, and to have nodes running, we need to have pods running. So, let’s deploy the Monte Carlo app by running this command:
+$ kubectl apply -f montecarlopi.yaml
+Wait around three or four minutes until you see three pods and one node running:
+$ kubectl get pods,nodeclaims
+Pay close attention to the
+EC2NodeClass
+definition in the
+nodepool.yaml
+file:
+...
+  amiSelectorTerms:
+    - alias: "bottlerocket@1.34.0"
+...
+Bottlerocket v1.34.0 is not the latest version. So, let’s make sure the nodes we’re running have a more recent version. Change the version in the default
+EC2NodeClass
+by updating the
+nodepool.yaml
+file to this:
+...
+  amiSelectorTerms:
+    - alias: "bottlerocket@1.38.0"
+...
+Apply this change by running the following commands:
+$ kubectl apply -f nodepool.yaml
+$ kl
+Note
+If the
+kl
+command didn’t work, go back to the consolidation lab to recreate the alias.
+Pay close
+attention to the log messages; the interesting ones are these:
+disrupting node(s)
+, meaning that Karpenter identified that the node has drifted from its desired configuration. In the same log line, you’ll see this:
+"reason":"drifted","decision":"replace","disrupted-node-count":1,"replacement-node-count":1,"pod-count":3
+. As you expect, it’s a very similar behavior from when Karpenter is running consolidation to disrupt a node, but this time, the reason is different.
+Karpenter immediately started to launch a new node that matches the desired configuration from
+EC2NodeClass
+. You can see that the log lines reflect these actions by reading the log messages:
+"created nodeclaim"
+,
+"launched nodeclaim"
+,
+"registered nodeclaim"
+, and
+"initialized nodeclaim"
+.
+Finally, the disrupted node is tainted (
+"tainted node"
+). So, no new pods are scheduled here. And when the node is empty, Karpenter deletes the node (
+"deleted node"
+) and its respective
+NodeClaim
+(
+"deleted nodeclaim"
+).
+As you can see, Karpenter was able to notice very quickly that the running nodes drifted from their desired configuration.
+Press
+Ctrl
++
+C
+to exit the command you had running to read the Karpenter logs. To confirm that the new node is actually running with the desired Bottlerocket version, run this command to see only the
+OS-IMAGE
+column from Karpenter nodes:
+$ kubectl get nodes -l karpenter.sh/nodepool -o custom-columns=OS-IMAGE:.status.nodeInfo.osImage
+You should see an output similar to this one:
+OS-IMAGE
+Bottlerocket OS 1.38.0 (aws-k8s-1.32)
+To finish with this lab, let’s remove the Monte Carlo app with this command:
+$ kubectl delete -f montecarlopi.yaml
+In this lab, you were able to see drift in action by updating the AMI to a more up-to-date version. Karpenter was able to identify this change, and immediately started to roll-out a new node with the new desired configuration.
+Great! So that
+covers our need for upgrading our nodes, but what about nodes that have no configuration change and would live on the node for months otherwise? How do we make sure that these nodes stay healthy, in compliance with our security requirements, and avoid data fragmentation problems. For that, we have node expiration. Let’s explore that feature.
+Expiring nodes
+The
+expireAfter
+setting in a
+NodePool
+defines the maximum lifetime for any node provisioned by that pool. Once a node’s uptime exceeds this configured duration, Karpenter will initiate its
+deprovisioning process, even if the node is healthy and in use. It’s worth mentioning that this is an involuntary disruption because it cannot be deferred or throttled with NDBs. The primary use cases for
+expireAfter
+include avoiding long-lived Spot instances that may be more susceptible to interruption.
+A common example would be setting
+expireAfter: 720h
+(30 days) to ensure nodes don’t persist indefinitely in the cluster. You can specify durations in a Go duration format (e.g.,
+30m
+,
+6h
+,
+7d
+, or
+720h
+). When the configured expiry time is reached, Karpenter initiates the deprovisioning flow, honoring PDBs and performing a drain unless blocked. By default, the expiration will just initiate the drain, but the drain can occur effectively indefinitely. To enforce an absolute maximum node lifetime, pair
+expireAfter
+with
+terminationGracePeriod
+in
+NodePool
+. This sets a hard limit for graceful shutdown before the node is forcefully removed. For example, if nodes must never exceed 30 days, you can set
+expireAfter
+to 28 days and
+terminationGracePeriod
+to 2 days, ensuring that no node exceeds 30 days in the cluster. Karpenter will begin draining when expiration is hit, and after the grace period elapses, any remaining pods are forcibly terminated, and the node is deleted.
+Note that, unlike the other disruption fields,
+expireAfter
+is part of the node template spec. Also, you need to be aware that changing the
+expireAfter
+value in a
+NodePool
+does not update existing nodes. Instead, it marks them as
+drifted
+, triggering Karpenter to gradually replace them with nodes that conform to the new policy. Also note that workloads protected by strict PDBs or that use the
+karpenter.sh/do-not-disrupt: "true"
+annotation may block or delay expiration-based terminations. This is why setting
+terminationGracePeriod
+may be useful. As such, you need to carefully coordinate these constraints in environments that rely on regular node turnover to manage cost, performance, or compliance.
+While
+expireAfter
+makes sure that nodes are eventually replaced based on age, it doesn’t control how that termination impacts a workload. The
+terminationGracePeriod
+setting was introduced to allow users to enforce a hard timeout on this draining process—mainly to prevent nodes from getting stuck indefinitely, which can be common in development environments or
+with misconfigured PDBs. Once the specified termination grace period elapses, remaining pods are forcibly deleted and the node is removed, regardless of PDBs or annotations. While this provides a safety valve for stuck workloads, in production environments, it’s generally recommended to monitor and manually remediate drains instead of relying heavily on this automated cap.
+I’ve mentioned
+terminationGracePeriod
+a couple of times, but let’s explore it in more detail next.
+Graceful node termination
+By default, Karpenter always performs graceful draining when a node is deprovisioned for voluntary reasons (expiration, consolidation, or drift), it waits for workloads to terminate cleanly before
+proceeding with forceful removal. No pods are aggressively killed unless configured otherwise—graceful shutdown is the baseline.
+Kubernetes itself includes a pod-level field,
+terminationGracePeriodSeconds
+(defaulting to 30 seconds), which controls how long
+kubelet
+will wait for a pod to exit cleanly after receiving a termination signal. Karpenter’s
+terminationGracePeriod
+on the
+NodePool
+works at the node level, setting the maximum amount of time allowed for all draining to complete before force-terminating the node (and any remaining pods).
+Picture a workload that needs to flush metrics, close connections, or write final logs before exiting. Without any buffer, those shutdown routines may be cut short, leading to data loss, failed user requests, or noisy alerts. Karpenter solves this by allowing you to configure
+terminationGracePeriod
+on your
+NodePool
+: a window of time that Karpenter will wait after initiating the shutdown process, before forcefully terminating the node. During this period, Karpenter drains the node, honoring PDBs, letting
+kubelet
+gracefully stop the running pods.
+For example, you might configure a
+NodePool
+with
+terminationGracePeriod: 300s
+, giving workloads up to 5 minutes to exit cleanly. That might sound like a lot, but for some stateful, latency-sensitive apps, or long-running jobs that you don’t want to be constantly interrupted; it’s what could make the difference between a graceful shutdown and an outage. As said before, this setting becomes especially important when combined with involuntary mechanisms such as
+expireAfter
+, where termination isn’t driven by workload optimization but by enforced policy. It’s your last line of defense in giving pods a chance to shut down on their own terms.
+While
+terminationGracePeriod
+controls
+how
+a node is terminated, it doesn’t really allow you to say
+when
+a node is
+terminated, including describing how many nodes can be disrupted at once. That’s where NDBs come in: providing a broader policy to limit the scope of voluntary disruptions across the cluster.
+NodePool disruption budgets
+In the previous section, we introduced NDBs, which help you control how aggressively Karpenter can disrupt nodes in your cluster. Not all applications can tolerate frequent node terminations. NDBs, configured in the
+disruption
+section of a NodePool, allow you to throttle voluntary
+disruptions—including consolidation of empty or underutilized nodes and drift-based reprovisioning. You can configure these budgets to completely block terminations, control the rate at which nodes are disrupted (both as percentages and absolute numbers), and even establish maintenance windows that restrict when disruptions can occur. NDBs help you maintain the stability and availability of a cluster by ensuring that cost optimization activities don’t overwhelm your workloads with excessive node churn.
+By default, if you do not configure any budgets, Karpenter will apply a built-in budget that limits disruptions to 10% of the NodePool at any time, like this:
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: default
+spec:
+...
+  disruption:
+    budgets:
+      - nodes: "10%"
+In other words, Karpenter will only disrupt up to 10% of the nodes concurrently for voluntary disruptions, as shown in
+Figure 9.8
+. For example, in a
+NodePool
+of 20 nodes where a drift operation is going to cause a disruption, this budget permits Karpenter to disrupt 2 nodes at a time.
+Figure 9.8 – An NDB to allow disruption up to 10% at a time
+It’s important to emphasize that NDBs only control voluntary disruptions; they do not block involuntary or
+forceful disruptions such as node expiration, AWS interruption signals (such as spot interruptions), or manual node deletion. Those will proceed regardless of any configured budgets. You should think of NDBs as a mechanism to limit the rate and impact of voluntary optimizations on your workloads while maintaining cluster efficiency.
+Moreover, when you configure an NDB, Karpenter determines how many nodes it may disrupt at once by first counting all nodes owned by the
+NodePool
+, then subtracting any nodes already being deleted or marked
+NotReady
+. This is a key safety feature—by including nodes in a bad or
+NotReady
+state, NDBs help prevent the roll-out of further disruptions when issues are detected. For example, if a problematic AMI causes node instability, the NDB will restrict further node replacements until you can investigate and remediate. This mechanism works in tandem with PDBs, which will also halt disruption of nodes if application readiness or stability is impacted by a change ensuring both node and pod level safeguards.
+If you specify a percentage, such as
+nodes: "20%"
+, Karpenter computes the allowed disruptions as
+roundup(total_nodes * 0.2) – total_deleting – total_notready
+. For example, on a 10-node pool, up to 2 nodes may be disrupted concurrently. If, instead, you specify a fixed number, such as
+nodes: "5"
+, Karpenter uses
+5 – total_deleting – total_notready
+, regardless of pool size. Whether you choose a percentage or an absolute count depends on whether you want your disruption limit to scale with cluster size or remain a constant ceiling.
+But you can do more with NDBs, including setting time windows and increasing their granularity. Let’s explore how to configure time windows to allow disruptions in a
+NodePool
+.
+Disruptions by schedule
+In addition to controlling how many nodes can be disrupted, you can also configure when these nodes
+can be disrupted. NDBs support scheduling rules so that budgets can be time-bound. To do so, you need to configure a schedule along with a duration, allowing you to define time windows during which a particular budget is in effect. Say, for example, that you want to configure a budget that completely blocks disruptions during business hours (say from 9 AM to 5 PM) or you want to only allow node upgrades to occur on a certain day of the week (such as Monday).
+In order to properly configure Karpenter to handle these requirements, you need to describe your requirements in terms of blocking operations, when Karpenter
+can’t
+perform certain actions. You describe the starting point for the budget with the
+schedule
+field and then describe how long from that point that the budget should last with the
+duration
+field. Effectively, Karpenter will treat the budget as active starting at the scheduled time and lasting for the specified duration. Outside that window, that budget does not apply, though other budgets could. To make the schedule configuration easier, you can use standard cron syntax (like you did with KEDA cron scaling rules in
+Chapter 5
+) or macros such as
+@daily
+. Just keep in mind that time zones are not supported. Karpenter evaluates the cron times in
+Coordinated Universal Time
+(
+UTC
+).
+To understand this configuration better, let’s use a practical example. Following the previous example, where we want to pause disruption during weekdays from 9 AM to 5 PM (in UTC), the configuration will look like this:
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: default
+spec:
+  ...
+  disruption:
+    budgets:
+      - nodes: "0"
+        schedule: "0 9 * * 1-5"
+        duration: 8h
+As you can see from this configuration, it’s using
+nodes: "0"
+, meaning no nodes can be disrupted during the scheduled window. The cron expression
+0 9 * * 1-5
+translates to “at minute 0 of hour 9, every Monday through Friday.” Combined with
+duration: 8h
+, this covers the 09:00 to 17:00 UTC time on weekdays, as shown
+Figure 9.9
+.
+Figure 9.9 – A budget rule blocking voluntary disruptions during working hours
+During that period, if Karpenter needs to voluntarily disrupt a node, it will be paused because the allowed
+disruptions for nodes is
+0
+. After 17:00 (UTC) on weekdays and on weekends, this particular budget no longer applies. This kind of schedule ensures that scale-downs due to consolidation won’t happen when you expect high user traffic, but can catch up after hours.
+Note
+Keep in mind that if you apply
+nodes: "0"
+without a schedule, Karpenter will never voluntarily terminate nodes. Make sure this is really what you want; often, it’s better to use
+0
+in a time-limited window, rather than blocking all disruptions indefinitely.
+Disruption by reasons
+Besides being able to configure how many nodes and at what times those nodes can be disrupted, you can
+be more granular by configuring
+which
+reasons nodes can be disrupted. NDB rules can target specific
+disruption reasons
+. Karpenter categorizes voluntary disruptions by the following reasons:
+"Empty"
+(a node has no schedulable pods),
+"Underutilized"
+(a node is underutilized per consolidation logic), or
+"Drifted"
+(a node configuration is out-of-sync with the
+NodePool
+specification). You can limit budgets to only apply to certain reasons via the
+reasons
+field.
+This simple configuration is very powerful. For instance,
+reasons
+become useful when you might allow a higher disruption
+X
+reason, but a very low-rate disruption for a different
+Y
+reason or when you want to completely block consolidation of underutilized nodes during the day, but always want to allow empty nodes to be deleted. If a budget’s
+reasons
+list is omitted, it applies to all disruption reasons by default, and this is the configuration we’ve been using in all the previous examples.
+Let’s see what
+this configuration will look on a
+NodePool
+. Suppose we want to allow a higher disruption rate for drifted nodes (since we care a lot about applying security patches). To do this, we can define a budget as follows:
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: default
+spec:
+  ...
+  disruption:
+    budgets:
+      - nodes: "25%"
+        reasons:
+          - "Drifted"
+...
+In this
+NodePool
+, the first budget says that up to 25% of the
+NodePool
+can be disrupted only if the nodes are
+Drifted
+. It’s worth saying that you can specify more than one reason for a budget. But because we’re only using one reason, and
+Underutilized
+is being left out here, that means there is never any budget constraining it and it’s still wide open. It’s important to recognize that if there is no budget with a matching reason for a
+disruption
+method, then that
+disruption
+method can disrupt as many nodes as it wants at one time.
+Suppose the
+NodePool
+has launched 40 nodes; 25% means that it will allow Karpenter to disrupt 10 nodes at a time. If the
+NodePool
+is small (e.g., 8 nodes, where 25% is 2), then 2 empty/drifted nodes can be disrupted.
+Multiple disruptions budgets
+Let’s take
+NDBs to the next level. Within NDBs, you can combine multiple budgets on the same
+NodePool
+to create layered controls. If multiple budgets are defined, the most restrictive budget wins, since Karpenter takes the minimum allowed disruptions across all applicable budgets.
+A common pattern is to use a percentage budget to scale with cluster size and an absolute budget as a hard ceiling. For example, you can combine
+nodes: "20%"
+with
+nodes: "5"
+. In a small cluster, the 20% might be under 5 nodes, but in a large cluster, it might be higher.
+"5"
+ensures you never disrupt more than 5 at once.
+Layered budgets can also mix always-on and scheduled rules. For instance, you might have an always-on budget of 10% for general use, and an additional budget of
+"0"
+during a nightly backup window to prevent disruption at that specific time. Again, Karpenter will always enforce the most conservative budget applicable, so layering gives you fine-grained control.
+What about adding
+reasons
+to the mix? When Karpenter is about to disrupt a node for a specific reason, it will evaluate all budgets that either apply to that reason or apply to all reasons, and then enforce the lowest allowed disruption count among those applicable budgets. This
+means you can define overlapping budgets (some global, some reason-specific), and Karpenter will always respect the tightest constraint for the given scenario.
+Let’s add an extra budget to the example we used in the previous section. In addition to the 25% budget for
+Empty
+or
+Drifted
+nodes, you also want to keep tighter control on underutilized nodes. We can define separate budgets as follows:
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: default
+spec:
+  ...
+  disruption:
+    budgets:
+      - nodes: "25%"
+        reasons:
+          - "Empty"
+          - "Drifted"
+      - nodes: "5"
+Same as before, the first budget says that up to 25% of the
+NodePool
+can be disrupted if the nodes are either
+Empty
+or
+Drifted
+. The second budget (with no reasons specified) acts as a global cap of five nodes for
+any
+disruption.
+For an
+Empty
+or
+Drifted
+node, Karpenter considers both budgets: the 25% budget (specific to that reason) and the global “5 nodes” budget. It will allow disruptions up to the most restrictive of the two. So, if the
+NodePool
+has 40 nodes, 25% would allow 10 nodes; the second budget allows 5. Thus, Karpenter will only disrupt 5 empty/drifted nodes at a time (the minimum of 10 and 5). If the
+NodePool
+is small (e.g., 8 nodes, where 25% is 2), then at most 2 empty/drifted nodes can be disrupted (minimum of 2 and 5).
+For an underutilized node, only the second budget applies (since we didn’t list
+"Underutilized"
+in the first budget’s reasons). That means underutilized nodes are limited to five at a time in this example. If we hadn’t provided the second budget at all, underutilized nodes would
+fall back to the default 10% budget (unless you specifically removed it). So, always ensure that each reason you care about is covered by at least one budget, or include a catch-all budget.
+NDBs help manage node disruptions at the cost of slowing down automated consolidation and drift actions. Make sure to tailor your NDBs to balance this trade-off. Critical workloads and time periods could benefit from strict budgets, whereas non-critical workloads could benefit from the increased consolidation and drift agility that loose budgets enable.
+Let’s now see NDBs in action.
+Hands-on lab: Disruption budgets
+Suppose you’re introducing Karpenter to your cluster. Even though consolidation and drift are features that you’d like to use, you first need to gain some confidence with Karpenter; thus you want to
+start by controlling
+when
+Karpenter can voluntarily disrupt your nodes. As you progress in your journey of efficiency, you’ll start to be more flexible with consolidation, but want to block any drift operation. You plan to perform upgrades manually and on demand in the short-term. How would you implement this approach? By using NDBs! Let’s see how.
+Similar to the consolidation and drift hands-on labs, if you already have your EKS cluster up and running, continue with this lab. Otherwise, go back to the consolidation lab and follow the initial steps to create the EKS cluster and deploy a default
+NodePool
+and
+EC2NodeClass
+. Then, come back to this lab.
+Let’s start by exploring the
+NodePool
+'s
+disruption
+section in the
+nodepool.yaml
+file. Notice that you won’t find any budget configuration. This means that it’s going to use the default configuration of disrupting 10% of nodes at once. But you’re new to Karpenter, so you want to start by blocking
+any
+disruption operation. How do you block these disruptions? By defining a
+0
+budget.
+To simplify these changes, there’s another file:
+nodepool.disruption.yaml
+. The main change we’d like to focus on is the budget section. It looks like this:
+...
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 0s
+    budgets:
+      - nodes: "0"
+...
+Apply this change by running the following command:
+$ kubectl apply -f nodepool.disruption.yaml
+Next, deploy the Monte Carlo app by running this command so we can have some nodes to play around with:
+$ kubectl apply -f montecarlopi.yaml
+Wait around
+three or four minutes until you see three pods and one node running:
+$ kubectl get pods,nodeclaims
+Now, let’s scale the application to 10 replicas to get a second node:
+$ kubectl scale deployment montecarlo-pi --replicas 10
+Wait around three to four minutes for this new node and pods to be ready. At this point, you should have two nodes launched by Karpenter to host the 10 replicas of your application. In my case, I got two nodes, one with a
+c6a.xlarge
+instance type and another one with a
+c6a.2xlarge
+instance type.
+Now that we have the setup we wanted, let’s scale the app down to three replicas:
+$ kubectl scale deployment montecarlo-pi --replicas 3
+If you remember what happened in the consolidation lab at this point, Karpenter should move all pods to the
+2xlarge
+node and remove the
+xlarge
+node. However, check the events from the default
+NodePool
+by running this command:
+$ kubectl describe nodepool default
+You’ll see that the last event has the following message:
+No allowed disruptions for disruption reason Underutilized due to blocking budget
+. And if you check the number of nodes and
+NodeClaims
+again, you’ll still see the
+2xlarge
+and
+xlarge
+nodes. So, the disruption budget we configured worked. It blocked all voluntary disruptions, such as consolidation, from happening.
+Now, we’d like to allow some consolidation actions to occur, but don’t want Karpenter to go crazy and start consolidating all of our nodes at once. Let’s open up the budget a bit to allow
+some
+disruptions to occur. Change the budget section of the
+nodepool.disruption.yaml
+file to look like this:
+...
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 0s
+    budgets:
+      - nodes: "25%"
+...
+This will give some budget to Karpenter to continue with consolidation. So, let's apply this change by running these commands:
+$ kubectl apply -f nodepool.disruption.yaml
+$ kl
+You should see the
+"
+message":"disrupting node(s)"
+log message. Karpenter will continue removing the
+xlarge
+node, forcing all pods to now be scheduled in the
+2xlarge
+node. Let’s assume that by
+doing this experiment, you are now more confident in your application being disrupted by consolidation. So, you’re going to leave that budget the way that it is, at 25%. But, you still don’t want Karpenter performing drift operations for you; you want to conduct those manually. Right now, we haven’t specified a reason for our budget, meaning the budget applies to all voluntary disruptions. So, we need to apply a second budget to block drift operations.
+To achieve this, your
+nodepool.disruption.yaml
+file should look like this:
+...
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 0s
+    budgets:
+      - nodes: "25%"
+      - nodes: "0"
+        reasons:
+          - "Drifted"
+...
+With these budgets configured, you’re blocking drift disruptions, but allowing any other disruption by removing 25% (rounded up) of the nodes at once. Let’s apply this change by running this command:
+$ kubectl apply -f nodepool.disruption.yaml
+Now, let’s reduce the number of replicas to
+3
+to force Karpenter to replace the existing
+2xlarge
+node with a smaller one:
+$ kubectl scale deployment montecarlo-pi --replicas 3
+You can go and monitor the Karpenter logs by running the
+kl
+command, but you don’t need to. Wait around
+three to four minutes, and you’ll see that Karpenter ran consolidation by replacing the existing node with a smaller one.
+Let’s see whether the budget for drift is working. Notice that the default
+NodePool
+reverted the change you made before by upgrading the Bottlerocket version to v1.38.0:
+...
+  amiSelectorTerms:
+    - alias: "bottlerocket@1.34.0"
+...
+Change the
+node.disruption.yaml
+file to use the v1.38.0 version by replacing the
+34
+number with
+38
+. Then, apply the change by running this command:
+$ kubectl apply -f nodepool.disruption.yaml
+Describe the default
+Nodepool
+by running this command:
+$ kubectl describe nodepool default
+You should see that the last event is showing the message:
+No allowed disruptions for disruption reason Drifted due to blocking budget
+. As you can see, the multiple budget configuration worked as expected. If you wanted to resume the drift operation, you would simply need to give enough budget to the drift rule.
+To finish with this lab, let’s remove the Monte Carlo app with this command:
+$ kubectl delete -f montecarlopi.yaml
+In this lab, you were able to see multiple NDBs in action by progressively adding one by one after you understood the impact of each budget. You also tested each rule, even when you had multiple budgets. So, make sure you follow this approach when adding more budgets in your production clusters. Test each budget independently, but also make sure you test the interactions between the budgets when you combine them. NDBs can be very powerful, but they can also inherently inhibit Karpenter from achieving the goal of making the cluster as efficient as possible.
+NDBs are the tool
+that Karpenter provides you to control disruption of nodes, but Kubernetes already has PDBs to control disruption of applications, so a natural question arises: How are these two budget concepts intended to work together? Well, let’s explore what combining these two concepts actually looks like in practice.
+Working with PDBs
+When you combine PDBs and NDBs, it becomes crucial to understand their complementary roles. PDBs operate
+at the application level, and they are Kubernetes policies that guarantee that a minimum number, or percentage, of pods should remain available during voluntary evictions, preventing an entire deployment or replica set from losing too many replicas at once. Conversely, NDBs are platform-level controls within Karpenter that regulate how many nodes may be drained concurrently for reasons such as emptiness, underutilization, or drift.
+In practice, Karpenter always respects PDBs when draining nodes, which means that it won’t evict pods if doing so would violate a PDB. Therefore, those pods block further termination of that node until the PDB’s conditions are met. However, PDBs by themselves do not prevent Karpenter from starting to drain several nodes at the same time, as long as the pods on each node can be safely evicted individually. NDBs fill this gap by enforcing a global cap on concurrent node disruptions, ensuring that Karpenter never floods the cluster with too many parallel drains, even when each node passes its PDB check.
+To integrate both controls effectively, align your NDB settings with your applications’ PDBs and redundancy requirements. In practice, NDBs are most valuable as a platform-level safety net to limit simultaneous node disruptions across the fleet, regardless of whether every application has a properly configured PDB. For example, if multiple applications lack PDBs, setting an NDB such as
+nodes: "10%"
+or a fixed ceiling ensures that too many nodes are not drained or replaced at once, protecting platform-wide stability even in the absence of granular application safeguards.
+Conversely, highly scalable stateless workloads might comfortably sustain a 20% disruption budget. Always define PDBs for critical applications. Where pods or nodes must never be voluntarily disrupted, add the
+karpenter.sh/do-not-disrupt: "true"
+annotation. This layered strategy—using NDBs to limit overall node churn, PDBs to safeguard application pods, and
+do-not-disrupt
+annotations for immovable components—ensures both cluster stability and efficient resource optimization.
+But there’s another edge case. When you use Spot instances, keep in-mind that spot interruptions are involuntary and impose a short time limit (usually two minutes in AWS) on pod evictions. While Kubernetes and Karpenter respect PDBs during the drain, AWS will forcefully terminate the instance after the notification period, meaning that pods will be killed even if budgets would otherwise block disruption indefinitely. There’s nothing you can do to stop that disruption. Involuntary disruptions can affect a node at any time, triggering immediate
+pod evictions regardless of your budgets. So, configure PDBs narrowly for critical workloads, and set NDBs conservatively (for example,
+nodes: "1"
+) so that Karpenter never voluntarily drains more than one node at once.
+However, even with a one-node NDB in place, there remains a risk that you could get several interruptions that could breach your PDB’s minimum availability threshold. Since PDBs don’t block involuntary disruptions, losing more than two nodes would drop your running pods below the required count, violating the PDB and potentially causing application downtime. To mitigate this risk, consider increasing your replica count so that your PDB can tolerate multiple simultaneous failures. But this needs to be based on your risk tolerance.
+Let’s move on to the next section to explore best practices for Karpenter.
+Karpenter best practices
+To maximize both efficiency and reliability when using Karpenter, let’s explore a layered approach you
+could take across your
+NodePools
+,
+EC2NodeClasses
+, and your workloads. This is based on many customer interactions, and frequently asked questions on either GitHub or other public channels such as Slack.
+NodePools
+At the
+NodePool
+level, and at the workload (or pod) level to some extent, these are the practices I’d
+recommend you consider when using Karpenter to scale
+your data plane. Keep in mind that even though Karpenter is focused only on scaling nodes, you can influence how Karpenter launches nodes from the pod constraints:
+Keep NodePool count manageable
+: Aim to have a small number of
+NodePools
+whenever possible. Don’t overcomplicate the setup if not needed. Over-dividing by team, environment, or use case can make management harder and reduce Karpenter’s flexibility. If you’re transitioning from CAS, it’s fine to start with multiple
+NodePools
+to mimic old node group behavior. But in the long term, refactor your setup into fewer, more generic
+NodePools
+. I’ve seen other companies follow a simple and scalable pattern like this:
+One flexible
+default
+NodePool
+for general workloads, with broad instance type
+and capacity settings. The last thing you want is to have a pending pod waiting for the cluster to provide capacity.
+One dedicated system
+NodePool
+for infrastructure-critical workloads (e.g., CNI, CoreDNS). You might want to have special needs in terms of disruptions or be less aggressive with upgrades of the nodes.
+For workload-specific
+NodePools
+, divide by workload type, such as batch jobs versus web applications, or those with unique hardware/software needs like GPUs or performance sensitive.
+Limit scheduling constraints
+: Only define scheduling constraints (e.g., zone, instance type, and capacity type) when all your workloads explicitly require it. Karpenter works best when it has maximum flexibility to select optimal instance types. The more restrictive your
+NodePool
+, the more likely Karpenter will struggle to find matching capacity.
+Avoid over-specifying instance types
+: While it’s tempting to specify a single preferred instance type, this limits Karpenter’s ability to balance cost and availability. Let it choose from a broad list of compatible instances by setting requirements such as instance categories (
+c
+,
+m
+,
+r
+, etc.) rather than exact types.
+Minimize NodePool requirements for cost optimization
+: If your goal is to allow Karpenter to consolidate aggressively and maintain lean infrastructure, avoid unnecessary affinities or topologies with, or soft preferences in your workload specs. Over-constrained requirements force Karpenter to keep underutilized nodes active longer than necessary.
+Enforce NodePool resource limits
+: To control spending, cap the total CPU and memory per
+NodePool
+using limits in a
+NodePool
+. You can also steer Karpenter to use reserved
+capacity first by defining capacity type priorities. This
+protects your bill by preventing overscaling or excessive use of nodes.
+Let’s explore the recommendations for
+NodeClass
+.
+NodeClass
+Even though
+we covered
+NodeClass
+for an AWS ecosystem, the following practices still
+apply regardless of the cloud provider you use, so make sure you do the following:
+Use a shared NodeClass
+: A
+NodeClass
+should reflect the baseline infrastructure config: AMIs, IAM roles, tags, subnets, and security groups. Share the same
+NodeClass
+across multiple
+NodePools
+when workloads have similar infrastructure needs.
+Use a tag-based discovery for subnets and security groups
+: Prefer selectors using tags over static IDs. Tag your subnets and security groups (e.g.,
+karpenter.sh/discovery: my-cluster
+) and use selectors to match them. This allows portability between clusters or environments.
+Configure secure and minimal permissions
+: Always define the role in your
+NodeClass
+with least-privilege permissions. Use IMDSv2 with restricted hop limits to isolate instance metadata from workloads.
+Avoid uncontrolled AMI drift
+: Avoid using latest AMI versions in production. Pin to a specific AMI version to control rollouts and avoid unplanned disruptions. We’ll dive deeper into the drift operation in the next chapter.
+Lastly, let’s explore the recommendations for your workloads.
+Workloads
+There are
+also some recommendations regarding the pods for your workloads:
+Consider defining PDBs
+: Even less critical workloads will benefit from some level of protection, but you should adjust the aggressiveness of each PDB based on the application’s criticality. For highly available or tolerant applications, a more permissive PDB may be appropriate, while stateful or mission-critical services should use stricter budgets. Karpenter’s eviction logic will always honor these constraints before draining any node. If you’re running Spot instances, consider the additional impact of involuntary disruptions when choosing your PDB settings.
+Annotate immovable pods or nodes with karpenter.sh/do-not-disrupt: “true”
+: For stateful workloads or licensed-software nodes that cannot survive eviction, this annotation ensures Karpenter never targets them for voluntary disruptions.
+Use taints/tolerations together with nodeSelector
+: If you need to tie workloads with a NodePool, combine
+nodeSelector
+with taints/tolerations for a deterministic scheduling. This combination ensures workloads land only on intended nodes and avoids unintended matches that can trigger new node provisioning.
+Always set resource requests to your pods
+: At this point, this should be crystal clear. But keep in mind that for Karpenter to scale nodes efficiently, pods must declare
+resources.requests
+for CPU and memory. Without them, you won’t have a deterministic result, and it will be hard to find out why your workloads are having problems or your nodes are not the ones you really need.
+And that’s it for now. You’ve explored the foundations of Karpenter. We spent quite some time covering
+how Karpenter works under the hood with the mission of helping you get the most out of it, and to understand why Karpenter ends up launching (or removing) certain nodes at a certain point in time.
+Summary
+This chapter was all about going from just launching nodes to running a production-grade Karpenter setup that can optimize and maintain itself without surprises. Specifically, you learned about how Karpenter handles node disruptions. We explained how Karpenter continuously simulates pod movement to consolidate capacity, and how it performs rolling node replacements to handle drift from the desired configuration. Finally, we covered how NDBs help you limit how many nodes can be voluntarily disrupted at once, letting you scale down, upgrade, or rebalance without losing control.
+You also reviewed a series of best practices to get the most out of Karpenter. These include using fewer, more flexible
+NodePools
+; avoiding unnecessary constraints in both
+NodePools
+and workloads (or pods); combining taints, tolerations, and node selectors for more deterministic scheduling (but only when strictly needed); and leveraging instance diversity to optimize for both cost and reliability.
+The most important things to remember are as follows:
+Karpenter doesn’t schedule pods or scale on resource utilization; it reacts to unscheduled pods.
+Consolidation and drift are powerful, but they can cause churn if left unchecked. If your workloads can’t handle this, it’s better to take a conservative approach.
+PDBs and NDBs are your primary safeguard for controlling that churn.
+You now have the tools to shape how Karpenter behaves, not just at the moment of need, but over time, ensuring your clusters stay lean, aligned, and predictable. Let’s continue on to the next chapter to discover how to operate and manage your Karpenter setup with monitoring and troubleshooting.
+Get This Book’s PDF Version and Exclusive Extras
+Scan the QR code (or go to
+packtpub.com/unlock
+). Search for this book by name, confirm the edition, and then follow the steps on the page.
+Note
+: Keep your invoice handy. Purchases made directly from Packt don’t require one.

@@ -43,10 +43,12 @@ class SourceFormat(Enum):
     WEBM = "webm"
     WAV = "wav"
     MP3 = "mp3"
+    WEB = "web"  # Web documentation
 
 
 class AgentDomain(Enum):
     """Available agent domains for knowledge mapping."""
+    # Existing domains
     PLATFORM_ENGINEERING = "platform-engineering"
     AZURE_ARCHITECTURE = "azure-architecture"
     AZURE_NETWORKING = "azure-networking"
@@ -55,6 +57,25 @@ class AgentDomain(Enum):
     CSHARP_ENGINEERING = "csharp-engineering"
     ARGOCD = "argocd"
     KUBERNETES = "kubernetes"
+    # New domains
+    SECURITY_OFFENSIVE = "security-offensive"
+    PROGRAMMING = "programming"
+    PYTHON_ENGINEERING = "python-engineering"
+    JAVASCRIPT_ENGINEERING = "javascript-engineering"
+    GO_ENGINEERING = "go-engineering"
+    RUBY_ENGINEERING = "ruby-engineering"
+    CPP_ENGINEERING = "cpp-engineering"
+    DATA_SCIENCE = "data-science"
+    LINUX_ADMINISTRATION = "linux-administration"
+    SOFTWARE_ARCHITECTURE = "software-architecture"
+    CLOUD_ARCHITECTURE = "cloud-architecture"
+    CRYPTOGRAPHY = "cryptography"
+    REVERSE_ENGINEERING = "reverse-engineering"
+    DATA_ENGINEERING = "data-engineering"
+    # Platform tools
+    KRATIX = "kratix"
+    DAGGER = "dagger"
+    RADIUS = "radius"
 
 
 # Video/audio formats that require transcription
@@ -78,6 +99,10 @@ class KnowledgeMetadata:
     duration_seconds: Optional[float] = None  # For video/audio
     transcription_model: Optional[str] = None  # For video/audio
     custom_metadata: Dict[str, Any] = field(default_factory=dict)
+    # Web documentation fields
+    source_url: Optional[str] = None  # Original URL for web docs
+    ttl_days: Optional[int] = None  # Time-to-live in days before refresh needed
+    expires_at: Optional[str] = None  # ISO timestamp when content expires
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -704,6 +729,120 @@ class KnowledgeImporter:
                     results.append(KnowledgeMetadata.from_dict(data))
 
         return results
+
+    def import_web_docs(
+        self,
+        url: str,
+        content: str,
+        agent: str | AgentDomain,
+        title: str,
+        tags: Optional[List[str]] = None,
+        ttl_days: int = 30,
+        chunk_size: int = 200000,
+        chunk_overlap: int = 1000,
+    ) -> KnowledgeMetadata:
+        """Import web documentation with TTL tracking.
+
+        Args:
+            url: Source URL of the documentation
+            content: Pre-fetched content (markdown/text)
+            agent: Target agent domain
+            title: Title for the documentation
+            tags: Optional tags for categorization
+            ttl_days: Days until content should be refreshed (default 30)
+            chunk_size: Size of each chunk in characters
+            chunk_overlap: Overlap between chunks
+
+        Returns:
+            KnowledgeMetadata for the imported content
+        """
+        # Normalize agent domain
+        if isinstance(agent, str):
+            try:
+                agent = AgentDomain(agent)
+            except ValueError:
+                raise ValueError(f"Unknown agent domain: {agent}")
+
+        # Generate ID from URL
+        url_hash = hashlib.sha256(url.encode()).hexdigest()[:16]
+        knowledge_id = f"{agent.value}_web_{url_hash}"
+
+        # Calculate expiration
+        expires_at = (datetime.now() + __import__('datetime').timedelta(days=ttl_days)).isoformat()
+
+        # Create metadata
+        metadata = KnowledgeMetadata(
+            id=knowledge_id,
+            source_file=url,
+            source_format=SourceFormat.WEB.value,
+            title=title,
+            agent_domain=agent.value,
+            tags=tags or [],
+            char_count=len(content),
+            checksum=hashlib.sha256(content.encode()).hexdigest(),
+            source_url=url,
+            ttl_days=ttl_days,
+            expires_at=expires_at,
+        )
+
+        # Chunk content
+        chunks = self._chunk_content(content, knowledge_id, chunk_size, chunk_overlap)
+        metadata.chunk_count = len(chunks)
+
+        # Save processed content
+        self._save_knowledge(metadata, content, chunks)
+
+        return metadata
+
+    def get_expired_knowledge(self, agent: Optional[str | AgentDomain] = None) -> List[KnowledgeMetadata]:
+        """Get list of knowledge entries that have expired TTL.
+
+        Args:
+            agent: Optional agent domain to filter by
+
+        Returns:
+            List of expired KnowledgeMetadata entries
+        """
+        all_knowledge = self.list_knowledge(agent)
+        now = datetime.now()
+        expired = []
+
+        for k in all_knowledge:
+            if k.expires_at:
+                try:
+                    expires = datetime.fromisoformat(k.expires_at)
+                    if now > expires:
+                        expired.append(k)
+                except ValueError:
+                    pass  # Invalid date format, skip
+
+        return expired
+
+    def delete_knowledge(self, knowledge_id: str) -> bool:
+        """Delete a knowledge entry by ID.
+
+        Args:
+            knowledge_id: The knowledge ID to delete
+
+        Returns:
+            True if deleted, False if not found
+        """
+        # Parse domain from ID (format: domain_name_hash)
+        parts = knowledge_id.split("_")
+        if len(parts) < 2:
+            return False
+
+        # Find the knowledge directory
+        for agent_dir in self.processed_dir.iterdir():
+            if not agent_dir.is_dir():
+                continue
+            knowledge_dir = agent_dir / knowledge_id
+            if knowledge_dir.exists():
+                import shutil
+                shutil.rmtree(knowledge_dir)
+                return True
+
+        return False
 
 
 # Convenience function for CLI usage

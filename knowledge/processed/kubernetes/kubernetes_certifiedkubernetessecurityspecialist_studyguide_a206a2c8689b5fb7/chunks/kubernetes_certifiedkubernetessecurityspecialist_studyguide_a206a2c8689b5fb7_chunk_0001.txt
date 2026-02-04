@@ -1,0 +1,5495 @@
+re that network calls cannot be made anymore.
+Prerequisite:
+This exercise requires the installation of the tools
+Vagrant
+and
+VirtualBox
+.
+Navigate to the directory
+app-a/ch04/seccomp
+of the checked-out GitHub repository
+bmuschko/cks-study-guide
+. Start up the VMs running the cluster using the command
+vagrant up
+. The cluster consists of a single control plane node named
+kube-control-plane
+, and one worker node named
+kube-worker-1
+. Once done, shut down the cluster using
+vagrant destroy -f
+.
+Create a seccomp profile file named
+audit.json
+that logs all syscalls in the standard seccomp directory. Apply the profile to the Pod named
+network-call
+running in the
+default
+namespace. Check the log file
+/var/log/syslog
+for log entries.
+Prerequisite:
+This exercise requires the installation of the tools
+Vagrant
+and
+VirtualBox
+.
+Create a new Pod named
+sysctl-pod
+with the image
+nginx:1.23.1
+. Set the sysctl parameters
+net.core.somaxconn
+to 1024 and
+debug.iotrace
+to
+1
+. Check on the status of the Pod.
+
+Chapter 5.
+Minimizing Microservice Vulnerabilities
+Application stacks operated in a Kubernetes cluster often follow a microservices architecture. The domain “minimize microservice vulnerabilities” covers governance and enforcement of security settings on the Pod level. We’ll touch on Kubernetes core features, as well as external tooling, that help with minimizing security vulnerabilities. Additionally, we’ll also talk about encrypted network communication between Pods running microservices.
+At a high level, this chapter covers the following concepts:
+Setting up appropriate OS-level security domains with security contexts, Pod Security Admission (PSA), and Open Policy Agent Gatekeeper
+Managing Secrets
+Using container runtime sandboxes, such as gVisor and Kata Containers
+Implementing Pod-to-Pod communication encryption via mutual Transport Layer Security (TLS)
+Setting Appropriate OS-Level Security Domains
+Both core Kubernetes and the Kubernetes ecosystem offer solutions for defining, enforcing, and governing security settings on the Pod and container level. This section will discuss security contexts, Pod Security Admission, and Open Policy Agent Gatekeeper. You will learn how to apply each of the features and tools using examples that demonstrate their importance to security. Let’s begin by setting up a scenario.
+Scenario: An Attacker Misuses root User Container Access
+By default, containers run with root privileges. A vulnerability in the application could grant an attacker
+root
+access to the container. The container’s root user is the same as the root user on the host machine. Not only can the attacker then inspect or modify the application, but they can also potentially install additional tooling that allows the attacker to break out of the container and step into host namespace with
+root
+permissions. The attacker could also copy sensitive data from the host’s filesystem to the container.
+Figure 5-1
+illustrates the scenario.
+Figure 5-1.
+An attacker misuses root user container access
+For that reason, running a container with the default root user is a bad idea. The next sections will explain how to declare a security context for the container that enforces the use of a non-root user or a specific user and/or group identifier. We’ll also discuss other security context settings relevant to shielding host access from the container.
+Understanding Security Contexts
+Kubernetes, as the container orchestration engine, can apply additional configuration to increase container security. You do so by defining a security context. A security context defines privilege and access control settings for a Pod or a container. The following list provides some examples:
+The user ID that should be used to run the Pod and/or container
+The group ID that should be used for filesystem access
+Granting a running process inside the container some privileges of the root user but not all of them
+The security context is not a Kubernetes primitive. It is modeled as a set of attributes under the directive
+securityContext
+within the Pod specification. Security settings defined on the Pod level apply to all containers running in the Pod; however, container-level settings take precedence. For more information on Pod-level security attributes, see the
+PodSecurityContext API
+. Container-level security attributes can be found in the
+SecurityContext API
+.
+Enforcing the Usage of a Non-Root User
+We’ll have a look at a use case to make the functionality more transparent. Some images, like the one for the open source reverse-proxy server nginx, must be run with the
+root
+user. Say you wanted to enforce that containers cannot be run as the
+root
+user as a means to support a more sensible security strategy. The YAML manifest file
+container-non-root-user-error.yaml
+shown in
+Example 5-1
+defines the security configuration specifically for a container. This security context only applies to this very container, but not others if you were to define more.
+Example 5-1.
+Enforcing a non-root user on an image that needs to run with the root user
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+non-root-error
+spec
+:
+containers
+:
+-
+image
+:
+nginx:1.23.1
+name
+:
+nginx
+securityContext
+:
+runAsNonRoot
+:
+true
+The container fails during the startup process with the status
+CreateContainer​Confi⁠gError
+. A look at the Pod’s event log reveals that the image tries to run with the
+root
+user. The configured security context does not allow it:
+$ kubectl apply -f container-non-root-user-error.yaml
+pod/non-root-error created
+$ kubectl get pod non-root-error
+NAME             READY   STATUS                       RESTARTS   AGE
+non-root-error   0/1     CreateContainerConfigError   0          9s
+$ kubectl describe pod non-root-error
+...
+Events:
+  Type     Reason     Age               From               Message
+  ----     ------     ----              ----               -------
+  Normal   Scheduled  24s               default-scheduler  Successfully \
+  assigned default/non-root to minikube
+  Normal   Pulling    24s               kubelet            Pulling image \
+  "nginx:1.23.1"
+  Normal   Pulled     16s               kubelet            Successfully \
+  pulled image "nginx:1.23.1" in 7.775950615s
+  Warning  Failed     4s (x3 over 16s)  kubelet            Error: container \
+  has runAsNonRoot and image will run as root (pod: "non-root-error_default \
+  (6ed9ed71-1002-4dc2-8cb1-3423f86bd144)", container: secured-container)
+  Normal   Pulled     4s (x2 over 16s)  kubelet            Container image \
+  "nginx:1.23.1" already present on machine
+There are alternative nginx container images available that are not required to run with the
+root
+user. An example is
+bitnami/nginx
+.
+Example 5-2
+shows the contents of the file
+container-non-root-user-success.yaml
+. The major change in this file is the value assigned to the
+spec.containers[].image
+attribute.
+Example 5-2.
+Enforcing a non-root user on an image that supports running with a user ID
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+non-root-success
+spec
+:
+containers
+:
+-
+image
+:
+bitnami/nginx:1.23.1
+name
+:
+nginx
+securityContext
+:
+runAsNonRoot
+:
+true
+Starting the container with the
+runAsNonRoot
+directive will work just fine. The container transitions into the “Running” status:
+$ kubectl apply -f container-non-root-user-success.yaml
+pod/non-root-success created
+$ kubectl get pod non-root-success
+NAME               READY   STATUS    RESTARTS   AGE
+non-root-success   1/1     Running   0          7s
+Let’s quickly check which user ID the container runs with. Shell into the container and run the
+id
+command. The output renders the user ID, the group ID, and the IDs of supplemental groups. The image
+bitnami/nginx
+sets the user ID to 1001 with the help of an instruction when the container image is built:
+$ kubectl exec non-root-success -it -- /bin/sh
+$ id
+uid=1001 gid=0(root) groups=0(root)
+$ exit
+Setting a Specific User and Group ID
+Many container images do not set an explicit user ID or group ID. Instead of running with the
+root
+default user, you can set the desired user ID and group ID to minimize potential security risks. The YAML manifest stored in the file
+container-user-id.yaml
+shown in
+Example 5-3
+sets the user ID to 1000 and the group ID to 3000.
+Example 5-3.
+Running the container with a specific user and group ID
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+user-id
+spec
+:
+containers
+:
+-
+image
+:
+busybox:1.35.0
+name
+:
+busybox
+command
+:
+[
+"sh"
+,
+"-c"
+,
+"sleep
+1h"
+]
+securityContext
+:
+runAsUser
+:
+1000
+runAsGroup
+:
+3000
+Creating the Pod will work without issues. The container transitions into the “Running” status:
+$ kubectl apply -f container-user-id.yaml
+pod/user-id created
+$ kubectl get pods user-id
+NAME      READY   STATUS    RESTARTS   AGE
+user-id   1/1     Running   0          6s
+You can inspect the user ID and group ID after shelling into the container. The current user is not allowed to create files in the
+/
+directory. Creating a file in the
+/tmp
+directory will work, as most users have the permissions to write to it:
+$ kubectl exec user-id -it -- /bin/sh
+/ $ id
+uid=1000 gid=3000 groups=3000
+/ $ touch test.txt
+touch: test.txt: Permission denied
+/ $ touch /tmp/test.txt
+/ $ exit
+Avoiding Privileged Containers
+Kubernetes establishes a clear separation between the container namespace and the host namespace for processes, network, mounts, user ID, and more. You can configure the container’s security context to gain privileges to certain aspects of the host namespace. Assume the following implications when using a privileged container:
+Processes within a container almost have the same privileges as processes on the host.
+The container has access to all devices on the host.
+The root user in the container has similar privileges to the
+root
+user on the host.
+All directories on the host’s filesystem can be mounted in the container.
+Kernel settings can be changed, e.g., by using the
+sysctl
+command
+.
+Using containers in privileged mode
+Configuring a container to use privileged mode should be a rare occasion. Most applications and processes running in a container do not need elevated privileges beyond the container namespace. Should you encounter a Pod that has been configured to use privileged mode, contact the team or developer in charge to clarify, as it will open a loophole for attackers to gain access to the host system.
+Let’s compare the behavior of a non-privileged container with one configured to run in privileged mode. First, we are going to set up a regular Pod, as shown in
+Example 5-4
+. No security context has been set on the Pod or container level.
+Example 5-4.
+A Pod with a container in non-privileged mode
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+non-privileged
+spec
+:
+containers
+:
+-
+image
+:
+busybox:1.35.0
+name
+:
+busybox
+command
+:
+[
+"sh"
+,
+"-c"
+,
+"sleep
+1h"
+]
+Create the Pod and ensure that it comes up properly:
+$ kubectl apply -f non-privileged.yaml
+pod/non-privileged created
+$ kubectl get pods
+NAME             READY   STATUS    RESTARTS   AGE
+non-privileged   1/1     Running   0          6s
+To demonstrate the isolation between the container namespace and host’s namespace, we’ll try to use the
+sysctl
+to change the hostname. As you can see in the output of the command, the container will clearly enforce the restricted privileges:
+$ kubectl exec non-privileged -it -- /bin/sh
+/ # sysctl kernel.hostname=test
+sysctl: error setting key 'kernel.hostname': Read-only file system
+/ # exit
+To make a container privileged, simply assign the value
+true
+to the security context attribute
+privileged
+. The YAML manifest in
+Example 5-5
+shows an example.
+Example 5-5.
+A Pod with a container configured to run in privileged mode
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+privileged
+spec
+:
+containers
+:
+-
+image
+:
+busybox:1.35.0
+name
+:
+busybox
+command
+:
+[
+"sh"
+,
+"-c"
+,
+"sleep
+1h"
+]
+securityContext
+:
+privileged
+:
+true
+Create the Pod as usual. The Pod should transition into the “Running” status:
+$ kubectl apply -f privileged.yaml
+pod/privileged created
+$ kubectl get pod privileged
+NAME         READY   STATUS    RESTARTS   AGE
+privileged   1/1     Running   0          6s
+You can now see that the same
+sysctl
+will allow you to change the hostname:
+$ kubectl exec privileged -it -- /bin/sh
+/ # sysctl kernel.hostname=test
+kernel.hostname = test
+/ # exit
+A container security context configuration related to privileged mode is the attribute
+allowPrivilegeEscalation
+. This attribute will allow a process running the container to gain more privileges than the parent process. The default value for the attribute is
+false
+, but if you see the attribute set to
+true
+, critically question its use. In most cases, you do not need the functionality.
+Scenario: A Developer Doesn’t Follow Pod Security Best Practices
+It is unfair to assume that developers of all trades and levels of seniority have extensive knowledge of Kubernetes features, especially the ones that apply to security best practices. In the previous section, we learned about the security context and which settings to avoid. Developers are probably unaware of those best practices without continued education and therefore may create Pods that use problematic security settings or none at all.
+Figure 5-2
+shows a developer creating a Pod in privileged mode enabled by a copied manifest found on the internet. An attacker will gladly use this setup to their advantage.
+Figure 5-2.
+A developer creates a Pod with enabled privileged mode
+This is where you, as the Kubernetes security specialist, come in. The Kubernetes ecosystem provides core features and external tooling for enforcing security standards for Pods so that objects without the right configuration will be rejected, or at least audited. The next section explores the Kubernetes core feature named Pod Security Admission.
+Understanding Pod Security Admission (PSA)
+Older versions of Kubernetes shipped with a feature called Pod Security Policies (PSP). Pod Security Policies are a concept that help with enforcing security standards for Pod objects. Kubernetes 1.21 deprecated Pod Security Policies and introduced the replacement functionality Pod Security Admission. PSA determines which Pod Security Standard (PSS) to follow. A PSS defines a range of security policies from highly restrictive to highly permissive.
+However, the Kubernetes release 1.25 completely removed Pod Security Policies. You may still see the feature listed in older versions of the CKS curriculum. We will only focus on Pod Security Admission in this book. PSA is enabled by default with Kubernetes 1.23; however, you will need to declare which Pods should adhere to the security standards. All you need to do to opt into the PSA feature is to add a label with a specific format to a namespace. All Pods in that namespace will have to follow the standards declared.
+The label consists of three parts: a prefix, a mode, and a level. The
+prefix
+always uses the hard-coded value
+pod-security.kubernetes.io
+followed by a slash. The
+mode
+determines the handling of a violation. Finally, the
+level
+dictates the degree of security standards to adhere to. An example of such a label could look as follows:
+metadata
+:
+labels
+:
+pod-security.kubernetes.io/enforce
+:
+restricted
+The mode allows for setting three different options, shown in
+Table 5-1
+.
+Table 5-1.
+Pod Security Admission modes
+Mode
+Behavior
+enforce
+Violations will cause the Pod to be rejected.
+audit
+Pod creation will be allowed. Violations will be appended to the audit log.
+warn
+Pod creation will be allowed. Violations will be rendered on the console.
+Table 5-2
+illustrates the security policies determined by the level set for the PSA.
+Table 5-2.
+Pod Security Admission levels
+Level
+Behavior
+privileged
+Fully unrestricted policy.
+baseline
+Minimally restrictive policy that covers crucial standards.
+restricted
+Heavily restricted policy following best practices for hardening Pods from a security perspective.
+See the
+Kubernetes documentation
+for details on the PSA, including usage examples.
+Enforcing Pod Security Standards for a Namespace
+Let’s apply a PSA to a Pod in the namespace
+psa
+.
+Example 5-6
+shows the definition of the namespace and the declaration of the relevant label. The label will enforce a PSS on the highest level of security standards.
+Example 5-6.
+A namespace enforcing the highest level of security standards
+apiVersion
+:
+v1
+kind
+:
+Namespace
+metadata
+:
+name
+:
+psa
+labels
+:
+pod-security.kubernetes.io/enforce
+:
+restricted
+Make sure that the Pod is created in the namespace
+psa
+.
+Example 5-7
+shows the YAML manifest for a simple Pod running the
+busybox
+image.
+Example 5-7.
+A Pod violating the PSA restrictions
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+busybox
+namespace
+:
+psa
+spec
+:
+containers
+:
+-
+image
+:
+busybox:1.35.0
+name
+:
+busybox
+command
+:
+[
+"sh"
+,
+"-c"
+,
+"sleep
+1h"
+]
+Violations will be rendered in the console upon running a command to create a Pod in the namespace. As you can see in the following, the Pod wasn’t allowed to be created:
+$ kubectl create -f psa-namespace.yaml
+namespace/psa created
+$ kubectl apply -f psa-violating-pod.yaml
+Error from server (Forbidden): error when creating "psa-pod.yaml": pods \
+"busybox" is forbidden: violates PodSecurity "restricted:latest": \
+allowPrivilegeEscalation != false (container "busybox" must set \
+securityContext.allowPrivilegeEscalation=false), unrestricted \
+capabilities (container "busybox" must set securityContext. \
+capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container \
+"busybox" must set securityContext.runAsNonRoot=true), seccompProfile \
+(pod or container "busybox" must set securityContext.seccompProfile. \
+type to "RuntimeDefault" or "Localhost")
+$ kubectl get pod -n psa
+No resources found in psa namespace.
+You need to configure the Pod’s security context settings to follow the very restrictive standards.
+Example 5-8
+shows an exemplary Pod definition that does not violate the Pod Security Standard.
+Example 5-8.
+A Pod following the PSS
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+busybox
+namespace
+:
+psa
+spec
+:
+containers
+:
+-
+image
+:
+busybox:1.35.0
+name
+:
+busybox
+command
+:
+[
+"sh"
+,
+"-c"
+,
+"sleep
+1h"
+]
+securityContext
+:
+allowPrivilegeEscalation
+:
+false
+capabilities
+:
+drop
+:
+[
+"ALL"
+]
+runAsNonRoot
+:
+true
+runAsUser
+:
+2000
+runAsGroup
+:
+3000
+seccompProfile
+:
+type
+:
+RuntimeDefault
+Creating the Pod object now works as expected:
+$ kubectl apply -f psa-non-violating-pod.yaml
+pod/busybox created
+$ kubectl get pod busybox -n psa
+NAME      READY   STATUS    RESTARTS   AGE
+busybox   1/1     Running   0          10s
+PSA is a built-in, enabled-by-default feature in Kubernetes version 1.23 or higher. It’s easy to adopt, allows for picking and choosing a suitable policy standard, and can be configured to enforce or just log violations.
+Unfortunately, PSA only applies to Pods with a predescribed set of policies. You cannot write your own custom rules, change the messaging, or mutate the Pod object should it not adhere to a PSS. In the next section, we are going to have a look at tooling that goes beyond the functionality of PSA.
+Understanding Open Policy Agent (OPA) and Gatekeeper
+Open Policy Agent (OPA)
+is an open source, general-purpose policy engine for enforcing rules. OPA is not specific to Kubernetes and can be used across other technology stacks. One of its benefits is the ability to define a policy in a very flexible fashion. You can write your own rules with the help of the query language named
+Rego
+. The validation logic written in Rego determines if the object is accepted or denied.
+Gatekeeper
+is an extension to Kubernetes that uses OPA. Gatekeeper allows for defining and enforcing custom policies for any kind of Kubernetes API primitive. Therefore, it is far more versatile than PSA but requires more intricate knowledge on how to craft those rules. Gatekeeper gets involved in the
+admission control
+stage discussed in
+“Processing a Request”
+. The following list of policies tries to give you an impression on what’s possible with Gatekeeper:
+Ensuring that all Service objects need to define a label with the key
+team
+Ensuring that all container images defined by Pods need to be pulled from a company-internal registry
+Ensuring that Deployments need to control at least three replicas
+At the time of writing, Gatekeeper allows for enforcing policies by rejecting object creation if requirements haven’t been met. Future versions of Gatekeeper might also provide a mechanism for mutating an object upon creation. For example, you may want to add specific label key-value pairs for any object created. The mutation would take care of adding those labels automatically.
+Installing Gatekeeper
+Installing Gatekeeper is relatively easy. All you need to do is to create a bunch of Kubernetes objects from a YAML manifest provided by the Gatekeeper project. You need to have cluster admin permissions to properly install Gatekeeper. The following command shows the
+kubectl
+command used to apply the latest release. For more information, see the
+installation manual
+:
+$ kubectl apply -f https://raw.githubusercontent.com/open-policy-agent/
+\
+gatekeeper/master/deploy/gatekeeper.yaml
+Gatekeeper objects have been installed in the namespace
+gatekeeper-system
+. Make sure that all Pods in the namespace transition into the “Running” status before trying to use Gatekeeper:
+$ kubectl get namespaces
+NAME                STATUS   AGE
+default             Active   29h
+gatekeeper-system   Active   4s
+...
+Implementing an OPA Policy
+We’ll use a specific use case as an example to demonstrate the moving parts required to define a custom OPA policy.
+“Using Network Policies to Restrict Pod-to-Pod Communication”
+explained how to assign a label to a namespace so that it can be selected from a network policy. At its core, our custom OPA policy will determine that namespaces need to define at least one label with the key
+app
+to signify the application hosted by the namespace.
+Gatekeeper requires us to implement two components for custom policy, the
+constraint template
+and the
+constraint
+. In a nutshell, the constraint template defines the rules with Rego and describes the schema for the constraint.
+Example 5-9
+shows a constraint template definition for enforcing a label assignment.
+Example 5-9.
+An OPA constraint template requiring the definition of at least a single label
+apiVersion
+:
+templates.gatekeeper.sh/v1
+kind
+:
+ConstraintTemplate
+metadata
+:
+name
+:
+k8srequiredlabels
+spec
+:
+crd
+:
+spec
+:
+names
+:
+kind
+:
+K8sRequiredLabels
+validation
+:
+openAPIV3Schema
+:
+type
+:
+object
+properties
+:
+labels
+:
+type
+:
+array
+items
+:
+type
+:
+string
+targets
+:
+-
+target
+:
+admission.k8s.gatekeeper.sh
+rego
+:
+|
+package k8srequiredlabels
+violation[{"msg": msg, "details": {"missing_labels": missing}}] {
+provided := {label | input.review.object.metadata.labels[label]}
+required := {label | label := input.parameters.labels[_]}
+missing := required - provided
+count(missing) > 0
+msg := sprintf("you must provide labels: %v", [missing])
+}
+Declares the kind to be used by the constraint.
+Specifies the validation schema of the constraint. In this case, we allow to pass in a property named
+labels
+that captures the required label keys.
+Uses Rego to check for the existence of labels and compares them to the list of required keys.
+The constraint is essentially an implementation of the constraint template. It uses the kind defined by the constraint template and populates the data provided by the end user. In
+Example 5-10
+, the kind is
+K8sRequiredLabels
+, which we defined in the constraint template. We are matching on namespaces and expect them to define
+the label
+with the key
+app
+.
+Example 5-10.
+An OPA constraint that defines the “data” for the policy
+apiVersion
+:
+constraints.gatekeeper.sh/v1beta1
+kind
+:
+K8sRequiredLabels
+metadata
+:
+name
+:
+ns-must-have-app-label-key
+spec
+:
+match
+:
+kinds
+:
+-
+apiGroups
+:
+[
+"
+"
+]
+kinds
+:
+[
+"
+Namespace
+"
+]
+parameters
+:
+labels
+:
+[
+"
+app
+"
+]
+Uses the kind defined by the constraint template.
+Defines the API resources the constraint template should apply to.
+Declares that the
+labels
+property expects the key
+app
+to exist.
+With the relevant YAML manifests in place, let’s create the objects for the constraint template and the constraint. Assume that the constraint template was written to the file
+constraint-template-labels.yaml
+and the constraint to the file
+constraint-ns-labels.yaml
+:
+$ kubectl apply -f constraint-template-labels.yaml
+constrainttemplate.templates.gatekeeper.sh/k8srequiredlabels created
+$ kubectl apply -f constraint-ns-labels.yaml
+k8srequiredlabels.constraints.gatekeeper.sh/ns-must-have-app-label-key created
+You can verify the validation behavior with a quick-to-run imperative command. The following command tries to create a new namespace without a label assignment. Gatekeeper will render an error message and prevent the creation of the object:
+$ kubectl create ns governed-ns
+Error from server (Forbidden): admission webhook "validation.gatekeeper.sh" \
+denied the request: [ns-must-have-app-label-key] you must provide labels: {"app"}
+Let’s make sure that we can actually create a namespace with the expected label assignment.
+Example 5-11
+shows the YAML manifest of such a namespace.
+Example 5-11.
+YAML manifest for namespace with a label assignment
+apiVersion
+:
+v1
+kind
+:
+Namespace
+metadata
+:
+labels
+:
+app
+:
+orion
+name
+:
+governed-ns
+The following command creates the object from the YAML manifest file named
+namespace-app-label.yaml
+:
+$ kubectl apply -f namespace-app-label.yaml
+namespace/governed-ns created
+This simple example demonstrated the usage of OPA Gatekeeper. You can find a lot of other examples in the
+OPA Gatekeeper Library
+. Despite it not being spelled out explicitly in the CKS curriculum, you may also want to check out the project
+Kyverno
+, which recently gained a lot of traction with the Kubernetes community.
+Managing Secrets
+No discussion on security features in Kubernetes would be complete without bringing up the topic of Secrets. I would assume that you are already well familiar with the API primitive Secret to define sensitive data and the different options for consuming it in a Pod. Given that this topic is already part of the CKA exam, I will not reiterate it here. For more information, see the relevant section in the
+Certified Kubernetes Administrator (CKA) Study Guide
+or the
+Kubernetes documentation
+. I talk about security aspects when consuming ConfigMaps and Secrets in a container in
+“Configuring a Container with a ConfigMap or Secret”
+.
+The CKS exam puts a stronger emphasis on more specialized aspects of Secret management. One of those scenarios, which we already touched on, was the handling of a Secret you can assign to a service account. Revisit
+“Creating a Secret for a service account”
+to refresh your memory on the topic. As we are not going to discuss all built-in Secret types here, you may want to read up on their purpose and creation in the relevant section of the
+Kubernetes documentation
+.
+The central location for storing Secrets key-value pairs is etcd. Let’s have a look at potential issues that may arise if an attacker gains access to Kubernetes backing store for cluster data.
+Scenario: An Attacker Gains Access to the Node Running etcd
+Where etcd runs is dependent on the
+topology of your Kubernetes cluster
+. For the purpose of this scenario, we’ll assume that etcd runs on the control plane node. Any data stored in etcd exists in unencrypted form, so access to the control plane node allows for reading Secrets in plain text.
+Figure 5-3
+shows an attacker gaining access to the control plane node and therefore the unencrypted Secrets in etcd.
+Figure 5-3.
+An attacker gains access to etcd to read Secrets
+One way to mitigate the situation is by encrypting the data stored in etcd. Access to etcd, either using
+etcdctl
+or by reading the etcd data from the filesystem, would not expose human-readable, sensitive information anymore.
+Accessing etcd Data
+We’ll start by showing how an attacker could read etcd data after being able to log into the control plane node. First, we need to create a Secret object to store in etcd. Use the following imperative command to create an entry:
+$ kubectl create secret generic app-config --from-literal=password=passwd123
+secret/app-config created
+We created a Secret with the key-value pair
+password=passwd123
+. Shell into the control plane node using SSH. You can easily use the etcd client tool
+etcdctl
+to read an entry from etcd.
+Using the etcd client tool etcdctl
+It’s very likely that you do not have
+etcdctl
+installed on the control plane node yet. Follow the
+installation manual
+to make the tool available. On Debian Linux, it can be installed with
+sudo apt install etcd-client
+. To authenticate against etcd, you will need to provide the mandatory command line options
+--cacert
+,
+--cert
+, and
+--key
+. You can find the corresponding values in the configuration file for the API server usually available at
+/etc/kubernetes/manifests/kube-apiserver.yaml
+. The parameters need to start with the prefix
+--etcd
+.
+The following command uses the mandatory CLI options to read the contents from the Secret object named
+app-config
+. The following output displays the file contents in hexadecimal format. While not 100% obvious, you can still identify the key-value pair in plain text from the output:
+$ sudo ETCDCTL_API=3 etcdctl --cacert=/etc/kubernetes/pki/etcd/ca.crt
+\
+--cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/
+\
+etcd/server.key get /registry/secrets/default/app-config | hexdump -C
+00000000  2f 72 65 67 69 73 74 72  79 2f 73 65 63 72 65 74  |/registry/secret|
+00000010  73 2f 64 65 66 61 75 6c  74 2f 61 70 70 2d 63 6f  |s/default/app-co|
+00000020  6e 66 69 67 0a 6b 38 73  00 0a 0c 0a 02 76 31 12  |nfig.k8s.....v1.|
+00000030  06 53 65 63 72 65 74 12  d9 01 0a b7 01 0a 0a 61  |.Secret........a|
+00000040  70 70 2d 63 6f 6e 66 69  67 12 00 1a 07 64 65 66  |pp-config....def|
+00000050  61 75 6c 74 22 00 2a 24  36 38 64 65 65 34 34 38  |ault".*$68dee448|
+00000060  2d 34 39 62 37 2d 34 34  32 66 2d 39 62 32 66 2d  |-49b7-442f-9b2f-|
+00000070  33 66 39 62 39 62 32 61  66 66 36 64 32 00 38 00  |3f9b9b2aff6d2.8.|
+00000080  42 08 08 97 f8 a4 9b 06  10 00 7a 00 8a 01 65 0a  |B.........z...e.|
+00000090  0e 6b 75 62 65 63 74 6c  2d 63 72 65 61 74 65 12  |.kubectl-create.|
+000000a0  06 55 70 64 61 74 65 1a  02 76 31 22 08 08 97 f8  |.Update..v1"....|
+000000b0  a4 9b 06 10 00 32 08 46  69 65 6c 64 73 56 31 3a  |.....2.FieldsV1:|
+000000c0  31 0a 2f 7b 22 66 3a 64  61 74 61 22 3a 7b 22 2e  |1./{"f:data":{".|
+000000d0  22 3a 7b 7d 2c 22 66 3a  70 61 73 73 77 6f 72 64  |":{},"f:password|
+000000e0  22 3a 7b 7d 7d 2c 22 66  3a 74 79 70 65 22 3a 7b  |":{}},"f:type":{|
+000000f0  7d 7d 42 00 12 15 0a 08  70 61 73 73 77 6f 72 64  |}}B.....password|
+00000100  12 09 70 61 73 73 77 64  31 32 33 1a 06 4f 70 61  |..passwd123..Opa|
+00000110  71 75 65 1a 00 22 00 0a                           |que.."..|
+In the next step, we’ll encrypt the Secret stored in etcd and then verify the existing entries with the same command.
+Encrypting etcd Data
+You can control how API data is encrypted in etcd with the help of the command line option
+--encryption-provider-config
+provided to the API server process. The value assigned to the parameter needs to point to a configuration file that defines an
+EncryptionConfiguration
+object. We’ll first create the configuration file and then configure the API server process to consume it.
+Generate a 32-byte random key and base64-encode it. The value is needed to configure a so-called provider in the encryption configuration:
+$ head -c 32 /dev/urandom | base64
+W68xlPT/VXcOSEZJvWeIvkGJnGfQNFpvZYfT9e+ZYuY=
+Next up, we’ll use the base64-encoded key and assign it to a provider in the encryption configuration, as shown in
+Example 5-12
+. Save the contents in the file
+/etc/kubernetes/enc/enc.yaml
+.
+Example 5-12.
+YAML manifest for encryption configuration
+apiVersion
+:
+apiserver.config.k8s.io/v1
+kind
+:
+EncryptionConfiguration
+resources
+:
+-
+resources
+:
+-
+secrets
+providers
+:
+-
+aescbc
+:
+keys
+:
+-
+name
+:
+key1
+secret
+:
+W68xlPT/VXcOSEZJvWeIvkGJnGfQNFpvZYfT9e+ZYuY=
+-
+identity
+:
+{
+}
+Defines the API resource to be encrypted in etcd. We are only encrypting Secrets data here.
+The base64-encoded key assigned to an AES-CBC encryption provider.
+Edit the manifest at
+/etc/kubernetes/manifests/kube-apiserver.yaml
+, the YAML manifest that defines how to run an API server in a Pod. Add the parameter
+--encryption-provider-config
+, and define the Volume and its mountpath for the configuration file as the following shows:
+$ sudo vim /etc/kubernetes/manifests/kube-apiserver.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    kubeadm.kubernetes.io/kube-apiserver.advertise-address.endpoint: \
+    192.168.56.10:6443
+  creationTimestamp: null
+  labels:
+    component: kube-apiserver
+    tier: control-plane
+  name: kube-apiserver
+  namespace: kube-system
+spec:
+  containers:
+  - command:
+    - kube-apiserver
+    - --encryption-provider-config=/etc/kubernetes/enc/enc.yaml
+    volumeMounts:
+    ...
+    - name: enc
+      mountPath: /etc/kubernetes/enc
+      readonly: true
+  volumes:
+  ...
+  - name: enc
+    hostPath:
+      path: /etc/kubernetes/enc
+      type: DirectoryOrCreate
+...
+The Pod running the API server should automatically restart. This process may take a couple of minutes. Once fully restarted, you should be able to query for it:
+$ kubectl get pods -n kube-system
+NAME                           READY   STATUS    RESTARTS   AGE
+...
+kube-apiserver-control-plane   1/1     Running   0          69s
+New Secrets will be encrypted automatically. Existing Secrets need to be updated. You can run the following command to perform an update on Secrets across all namespaces. This includes the Secret named
+app-config
+in the
+default
+namespace:
+$ kubectl get secrets --all-namespaces -o json | kubectl replace -f -
+...
+secret/app-config replaced
+Running the
+etcdctl
+command we used before will reveal that the
+aescbc
+provider has been used to encrypt the data. The password value cannot be read in plain text anymore:
+$ sudo ETCDCTL_API=3 etcdctl --cacert=/etc/kubernetes/pki/etcd/ca.crt
+\
+--cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/
+\
+etcd/server.key get /registry/secrets/default/app-config | hexdump -C
+00000000  2f 72 65 67 69 73 74 72  79 2f 73 65 63 72 65 74  |/registry/secret|
+00000010  73 2f 64 65 66 61 75 6c  74 2f 61 70 70 2d 63 6f  |s/default/app-co|
+00000020  6e 66 69 67 0a 6b 38 73  3a 65 6e 63 3a 61 65 73  |nfig.k8s:enc:aes|
+00000030  63 62 63 3a 76 31 3a 6b  65 79 31 3a ae 26 e9 c2  |cbc:v1:key1:.&..|
+00000040  7b fd a2 74 30 24 85 61  3c 18 1e 56 00 a1 24 65  |{..t0$.a<..V..$e|
+00000050  52 3c 3f f1 24 43 9f 6d  de 5f b0 84 32 18 84 47  |R<?.$C.m._..2..G|
+00000060  d5 30 e9 64 84 22 f5 d0  0b 6f 02 af db 1d 51 34  |.0.d."...o....Q4|
+00000070  db 57 c8 17 93 ed 9e 00  ea 9a 7b ec 0e 75 0c 49  |.W........{..u.I|
+00000080  6a e9 97 cd 54 d4 ae 6b  b6 cb 65 8a 5d 4c 3c 9c  |j...T..k..e.]L<.|
+00000090  db 9b ed bc ce bf 3c ef  f6 2e cb 6d a2 53 25 49  |......<....m.S%I|
+000000a0  d4 26 c5 4c 18 f3 65 bb  a8 4c 0f 8d 6e be 7b d3  |.&.L..e..L..n.{.|
+000000b0  24 9b a8 09 9c bb a3 f9  53 49 78 86 f5 24 e7 10  |$.......SIx..$..|
+000000c0  ad 05 45 b8 cb 31 bd 38  b6 5c 00 02 b2 a4 62 13  |..E..1.8.\....b.|
+000000d0  d5 82 6b 73 79 97 7e fa  2f 5d 3b 91 a0 21 50 9d  |..ksy.~./];..!P.|
+000000e0  77 1a 32 44 e1 93 9b 9c  be bf 49 d2 f9 dc 56 23  |w.2D......I...V#|
+000000f0  07 a8 ca a5 e3 e7 d1 ae  9c 22 1f 98 b1 63 b8 73  |........."...c.s|
+00000100  66 3f 9f a5 6a 45 60 a7  81 eb 32 e5 42 4d 2b fd  |f?..jE`...2.BM+.|
+00000110  65 6c c2 c7 74 9f 1d 6a  1c 24 32 0e 7a 94 a2 60  |el..t..j.$2.z..`|
+00000120  22 77 58 c9 69 c3 55 72  e8 fb 0b 63 9d 7f 04 31  |"wX.i.Ur...c...1|
+00000130  00 a2 07 76 af 95 4e 03  0a 92 10 b8 bb 1e 89 94  |...v..N.........|
+00000140  45 60 01 45 bf d7 95 df  ff 2e 9e 31 0a           |E`.E.......1.|
+0000014d
+For more details on encrypting etcd data, refer to the
+Kubernetes documentation
+. There, you will find additional information on other encryption providers, how to rotate the decryption key, and the process to consider for a high-availability (HA) cluster setup.
+Understanding Container Runtime Sandboxes
+Containers run in a container runtime isolated from the host environment. The process or application running in the container can interact with the kernel by making syscalls. Now, we can have multiple containers (as controlled by Pods) running on a single Kubernetes cluster node and therefore the same kernel. Under certain conditions, vulnerabilities can lead to a situation where a process running a container can “break out” of its isolated environment and access another container running on the same host machine. A
+container runtime sandbox
+runs side-by-side with the regular container runtime but adds an additional layer of security by tightening process isolation.
+There are a couple of use cases where using a container runtime sandbox may make sense. For example, your Kubernetes cluster handles the workload of different customers with the same infrastructure, a so-called multi-tenant environment. Another reason for wanting to rely on stronger container isolation is that you may not trust the process or application running in a container image, as should be the case if you pulled the container image from a public registry and you can’t verify the creator or its runtime behavior.
+Scenario: An Attacker Gains Access to Another Container
+In this scenario, we are confronted with a developer that pulls a container image from a public registry, as referenced by a Pod. The container has not been scanned for security vulnerabilities. An attacker can push a new tag of the container image executing malicious code. After instantiating a container from the image, the malicious code running in the kernel group of container 1 can access the process running in container 2. As you can see in
+Figure 5-4
+, both containers use the same kernel of the host system.
+Figure 5-4.
+An attacker gains access to another container
+Generally speaking, it’s not a good idea to blindly trust public container images. One way to ensure that such a container image runs with more isolation is the container runtime sandbox. The next section will introduce you to two implementations, both of which are explicitly mentioned by the curriculum.
+Available Container Runtime Sandbox Implementations
+In this book, we’ll only want to talk about two container runtime sandbox implementations,
+Kata Containers
+and
+gVisor
+. Kata containers achieves container isolation by running them in a lightweight virtual machine. gVisor takes a different approach. It effectively implements a Linux kernel that runs on the host system. Therefore, syscalls are not shared anymore across all containers on the host system.
+A deeper discussion on the feature sets or specific use cases for those container runtime sandbox implementations goes beyond the scope of this book. We’ll simply learn how to use one solution as an example, gVisor, and how to tie it into Kubernetes. Have a look at the talk
+“Kata Containers and gVisor: a Quantitative Comparison”
+for an in-depth comparison.
+Installing and Configuring gVisor
+The following
+instructions
+describe the steps required to install gVisor on Linux using the
+apt
+package manager. You will want to repeat those steps on all host machines declared as worker nodes. For the exam, you will not be expected to install gVisor or Kata Containers. You can assume that the container runtime sandbox has already been installed and configured.
+Start by installing the dependencies for gVisor with the following command:
+$ sudo apt-get update &&
+\
+sudo apt-get install -y
+\
+apt-transport-https
+\
+ca-certificates
+\
+curl
+\
+gnupg
+Next, configure the key used to sign archives and the repository. As you can see in the following commands, gVisor is hosted on Google storage:
+$ curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/
+\
+keyrings/gvisor-archive-keyring.gpg
+$ echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/
+\
+gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases
+\
+release main" | sudo tee /etc/apt/sources.list.d/gvisor.list > /dev/null
+gVisor includes an Open Container Initiative (OCI) runtime called runsc. The runsc runtime integrates with tools like Docker and Kubernetes to run container runtime sandboxes. The following command installs the executable from the repository:
+$ sudo apt-get update && sudo apt-get install -y runsc
+Let’s assume we are using containerd as the container runtime. You need to add some configuration to containerd to make it aware of runsc. You can find similar instructions for other container runtimes in the gVisor documentation:
+$ cat <<EOF | sudo tee /etc/containerd/config.toml
+version = 2
+[plugins."io.containerd.runtime.v1.linux"]
+  shim_debug = true
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+  runtime_type = "io.containerd.runc.v2"
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+  runtime_type = "io.containerd.runsc.v1"
+EOF
+Finally, restart containerd to let the changes take effect:
+$ sudo systemctl restart containerd
+We successfully installed gVisor and can now configure Pods to use it.
+Creating and Using a Runtime Class
+It’s a two-step approach to use a container runtime sandbox in a Pod. First, you need to create a runtime class. A RuntimeClass is a Kubernetes API resource that defines the configuration of the container runtime.
+Example 5-13
+shows a YAML manifest of a container runtime that points to runsc as the handler we set in the containerd configuration file earlier.
+Example 5-13.
+YAML manifest for defining a runtime class using runsc handler
+apiVersion
+:
+node.k8s.io/v1
+kind
+:
+RuntimeClass
+metadata
+:
+name
+:
+gvisor
+handler
+:
+runsc
+We can now reference the runtime class name,
+gvisor
+, in the configuration of a Pod.
+Example 5-14
+shows a Pod definition that assigns the runtime class using the attribute
+spec.runtimeClassName
+.
+Example 5-14.
+YAML manifest for a Pod using a runtime class
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+nginx
+spec
+:
+runtimeClassName
+:
+gvisor
+containers
+:
+-
+name
+:
+nginx
+image
+:
+nginx:1.23.2
+Create the runtime class and Pod object using the
+apply
+command:
+$ kubectl apply -f runtimeclass.yaml
+runtimeclass.node.k8s.io/gvisor created
+$ kubectl apply -f pod.yaml
+pod/nginx created
+You can verify that the container is running with the container runtime sandbox. Simply execute the
+dmesg
+command to examine the kernel ring buffer. The output from the command should mention gVisor, as shown in the following:
+$ kubectl exec nginx -- dmesg
+[    0.000000] Starting gVisor...
+[    0.123202] Preparing for the zombie uprising...
+[    0.415862] Rewriting operating system in Javascript...
+[    0.593368] Reading process obituaries...
+[    0.741642] Segmenting fault lines...
+[    0.797360] Daemonizing children...
+[    0.831010] Creating bureaucratic processes...
+[    1.313731] Searching for needles in stacks...
+[    1.455084] Constructing home...
+[    1.834278] Gathering forks...
+[    1.928142] Mounting deweydecimalfs...
+[    2.109973] Setting up VFS...
+[    2.157224] Ready!
+Understanding Pod-to-Pod Encryption with mTLS
+In
+“Using Network Policies to Restrict Pod-to-Pod Communication”
+, we talked about Pod-to-Pod communication. One of the big takeaways was that every Pod can talk to any other Pod by targeting its virtual IP address unless you put a more restrictive network policy in place. The communication between two Pods is unencrypted by default.
+TLS provides encryption for network communication, often in conjunction with the HTTP protocol. That’s when we talk about using the HTTPS protocol for calls to web pages from the browser. As part of the authentication process, the client offers its client certificate to the server for proving its identity. The server does not authenticate the client, though.
+When loading a web page, the identity of the client, in this case the browser, usually doesn’t matter. The important part is that the web page proves its identity. Mutual TLS (mTLS) is like TLS, but both sides have to authenticate. This approach has the following benefits. First, you achieve secure communication through encryption. Second, you can verify the client identity. An attacker cannot easily impersonate another Pod.
+Scenario: An Attacker Listens to the Communication Between
+Two Pods
+An attacker can use the default, unencrypted Pod-to-Pod network communication behavior to their advantage. As you can see in
+Figure 5-5
+, an attacker doesn’t even need to break into a Pod. They can simply listen to the Pod-to-Pod communication by impersonating the sending or the receiving side, extract sensitive information, and then use it for more advanced attack vectors.
+Figure 5-5.
+An attacker listens to Pod-to-Pod communication
+You can mitigate the situation by setting up mTLS. The next section will briefly touch on the options for making that happen.
+Adopting mTLS in Kubernetes
+The tricky part about implementing mTLS in a Kubernetes cluster is the management of certificates. As you can imagine, we’ll have to deal with a lot of certificates when implementing a microservices architecture. Those certificates are usually generated by an official certificate authority (CA) to ensure that they can be trusted. Requesting a certificate involves sending a certificate signing request (CSR) to the CA. If the CA approves the request, it creates the certificate, then signs and returns it. It’s recommended to assign short lifespans to a certificate before it needs to be re-issued again. That process is called certificate rotation.
+It’s somewhat unclear to what degree of detail the CKS exam requires you to understand mTLS. The general process of requesting and approving a certificate is described in the
+Kubernetes documentation
+.
+In most cases, Kubernetes administrators rely on a Kubernetes service mesh to implement mTLS instead of implementing it manually. A Kubernetes service mesh, such as Linkerd or Istio, is a tool for adding cross-cutting functionality to your cluster, like observability and security.
+Another option is to use transparent encryption to ensure that traffic doesn’t go on the wire unencrypted. Some of the popular CNI plugins, such as
+Calico
+and
+Cilium
+, have added support for
+WireGuard
+. WireGuard is an open source, lightweight, and secure Virtual Private Network (VPN) solution that doesn’t require the configuration or management of encryption keys or certificates. Many teams prefer WireGuard over a service mesh as it is easier to manage.
+Services meshes and WireGuard are out of scope for the exam.
+Summary
+It’s important to enforce security best practices for Pods. In this chapter, we reviewed different options. We looked at security contexts and how they can be defined on the Pod and container level. For example, we can configure a security context for a container to run with a non-root user and prevent the use of privileged mode. It’s usually the responsibility of a developer to define those settings. The Pod Security Admission is a Kubernetes feature that takes Pod security settings one step further. You can centrally configure a Pod such that it needs to adhere to certain security standards. The configured security standard can either be enforced, audited, or just logged to standard output. Gatekeeper is an open source project that implements the functionality of the Open Policy Agent for Kubernetes. Not only can you govern the configuration for Pod objects, you can also apply policies to other kinds of objects during creation time.
+Key-value pairs defined by Secrets are stored in etcd in plain text. You should configure encryption for etcd to ensure that attackers cannot read sensitive data from it. To enable encryption, create a YAML manifest for an EncryptionConfiguration, which you would then pass to the API server process with the command line option
+--encryption-provider-config
+.
+Container runtime sandboxes help with isolating processes and applications to a stronger degree than the regular container runtime. The projects Kata Containers and gVisor are implementations of such a container runtime sandbox and can be installed and configured to work with Kubernetes. We tried gVisor. After installing and configuring gVisor, you will need to create a RuntimeClass object that points to runsc. In the Pod configuration, point to the RuntimeClass object by name.
+Pod-to-Pod communication is unencrypted and unauthenticated by default. Mutual TLS makes the process more secure. Pods communicating with one another need to provide certificates to prove their identity. Implementing mTLS for a cluster with hundreds of microservices is a tedious task. Each Pod running a microservice needs to employ an approved certificate from a Client Authority. Services meshes help with adding mTLS as a feature to a Kubernetes cluster.
+Exam Essentials
+Practice the use of core Kubernetes features and external tools to govern security settings.
+In the course of this chapter, we looked at OS-level security settings and how to govern them with different core features and external tooling. You need to understand the different options, their benefits and limitations, and be able to apply them to implement contextual requirements. Practice the use of security contexts, Pod Security Admission, and Open Policy Agent Gatekeeper. The Kubernetes ecosystem offers more tooling in this space. Feel free to explore those on your own to expand your horizon.
+Understand how etcd manages Secrets data.
+The CKA exam already covers the workflow of creating and using Secrets to inject sensitive configuration data into Pods. I am assuming that you already know how to do this. Every Secret key-value pair is stored in etcd. Expand your knowledge of Secret management by learning how to encrypt etcd so that an attacker with access to a host running etcd isn’t able to read information in plain text.
+Know how to configure the use of a container runtime sandbox.
+Container runtime sandboxes help with adding stricter isolation to containers. You will not be expected to install a container runtime sandbox, such as Kata Containers or gVisor. You do need to understand the process for configuring a container runtime sandbox with the help of a RuntimeClass object and how to assign the RuntimeClass to a Pod by name.
+Gain awareness of mTLS.
+Setting up mTLS for all microservices running in a Pod can be extremely tedious due to certificate management. For the exam, understand the general use case for wanting to set up mTLS for Pod-to-Pod communication. You are likely not expected to actually implement it manually, though. Production Kubernetes clusters use services meshes to provide mTLS as a feature.
+Sample Exercises
+Solutions to these exercises are available in the
+Appendix
+.
+Create a Pod named
+busybox-security-context
+with the container image
+busybox:1.28
+that runs the command
+sh -c sleep 1h
+. Add a Volume of type
+emptydir
+and mount it to the path
+/data/test
+. Configure a security context with the following attributes:
+runAsUser: 1000
+,
+runAsGroup: 3000
+, and
+fsGroup: 2000
+. Furthermore, set the attribute
+allowPrivilegeEscalation
+to
+false
+.
+Shell into the container, navigate to the directory
+/data/test
+, and create the file named
+hello.txt
+. Check the group assigned to the file. What’s the value? Exit out of the container.
+Create a Pod Security Admission (PSA) rule. In the namespace called
+audited
+, create a Pod Security Standard (PSS) with the level
+baseline
+that should be rendered to the console.
+Try to create a Pod in the namespace that violates the PSS and produces a message on the console log. You can provide any name, container image, and security configuration you like. Will the Pod be created? What PSA level needs to be configured to prevent the creation of the Pod?
+Install Gatekeeper on your cluster. Create a Gatekeeper ConstraintTemplate object that defines the minimum and maximum number of replicas controlled by a ReplicaSet. Instantiate a Constraint object that uses the ConstraintTemplate. Set the minimum number of replicas to 3 and the maximum number to 10.
+Create a Deployment object that sets the number of replicas to 15. Gatekeeper should not allow the Deployment, ReplicaSet, and Pods to be created. An error message should be rendered. Try again to create the Deployment object but with a replica number of 7. Verify that all objects have been created successfully.
+Configure encryption for etcd using the
+aescbc
+provider. Create a new Secret object of type
+Opaque
+. Provide the key-value pair
+api-key=YZvkiWUkycvspyGHk3fQRAkt
+. Query for the value of the Secret using etcdctl. What’s the encrypted value?
+Navigate to the directory
+app-a/ch05/gvisor
+of the checked-out GitHub repository
+bmuschko/cks-study-guide
+. Start up the VMs running the cluster using the command
+vagrant up
+. The cluster consists of a single control plane node named
+kube-control-plane
+and one worker node named
+kube-worker-1
+. Once done, shut down the cluster using
+vagrant destroy -f
+.
+gVisor has been installed in the VM
+kube-worker-1
+. Shell into the VM and create a RuntimeClass object named
+container-runtime-sandbox
+with runsc as the handler. Then create a Pod with the name
+nginx
+and the container image
+nginx:1.23.2
+and assign the RuntimeClass to it.
+Prerequisite:
+This exercise requires the installation of the tools
+Vagrant
+and
+VirtualBox
+.
+
+Chapter 6.
+Supply Chain Security
+Earlier chapters primarily focused on securing the Kubernetes cluster and its components, the OS infrastructure used to run cluster nodes, and the operational aspects for running workload on a cluster node with existing container images. This chapter takes a step back and drills into the process, best practices, and tooling for designing, building, and optimizing container images.
+Sometimes, you do not want to create your own container image but instead consume an existing one produced by a different team or company. Scanning container images for known vulnerabilities in a manual or automated fashion should be part of your vetting process before using them to run your workload. We’ll talk through some options relevant to the CKS exam used to identify, analyze, and mitigate security risks for pre-built container images.
+At a high level, this chapter covers the following concepts:
+Minimizing base image footprint
+Securing the supply chain
+Using static analysis of user workload
+Scanning images for known vulnerabilities
+Minimizing the Base Image Footprint
+The process for building a container image looks straightforward on the surface level; however, the devil is often in the details. It may not be obvious to someone new to the topic to refrain from building a container image that is unnecessarily too large in size, riddled with vulnerabilities, and not optimized for container layer caching. We’ll address all of those aspects in the course of this chapter with the help of the container engine Docker.
+Scenario: An Attacker Exploits Container Vulnerabilities
+One of the first decisions you have to make when defining a Dockerfile is the selection of a base image. The base image provides the operating system and additional dependencies, and it may expose shell access.
+Some of the base images you can choose from on a public registry like Docker Hub are large in size and will likely contain functionality you don’t necessarily need to run your application inside of it. The operating system itself, as well as any dependencies available with the base image, can expose vulnerabilities.
+In
+Figure 6-1
+, the attacker was able to figure out details about the container by gaining access to it. Those vulnerabilities can now be used as a launching pad for more advanced attacks.
+Figure 6-1.
+An attacker exploits container image vulnerabilities
+It is recommended to use a base image with a minimal set of functionality and dependencies. The next couple of sections will explain the methods for creating a more optimized base image that’s faster to build, quicker to download from a container registry, and that will ultimately lead to a smaller attack surface simply by reducing the bloat. The next sections will touch on the most important techniques. You can find a more detailed list of best practices for writing Dockerfiles in the
+Docker documentation
+.
+Picking a Base Image Small in Size
+Some container images can have a size of a gigabyte or even more. Do you really need all the functionality bundled with such a container image? Unlikely. Thankfully, many container producers upload a wide range of variations of their container images for the same release. One of those variations is an
+alpine
+image, a small, lightweight, and less vulnerable Linux distribution. As you can see in the following output, the downloaded
+alpine
+container image with the tag
+3.17.0
+only has a size of 7.05MB:
+$ docker pull alpine:3.17.0
+...
+$ docker image ls alpine
+REPOSITORY   TAG       IMAGE ID       CREATED       SIZE
+alpine       3.17.0    49176f190c7e   3 weeks ago   7.05MB
+The
+alpine
+container image comes with an
+sh
+shell you can use to troubleshoot the process running inside of the container. You can use the following command to open an interactive shell in a new container:
+$ docker run -it alpine:3.17.0 /bin/sh
+/ # exit
+While runtime troubleshooting functionality can be useful, offering a shell as part of a container image increases the size of it and potentially opens the door for attackers. Additionally, the more software there is inside of a container image, the more vulnerabilities it will have.
+You can further reduce the container image size and the attack surface by using a
+distroless image
+offered by Google. The following command downloads the latest tag of the container image
+gcr.io/distroless/static-debian11
+and renders its details. The size of the container image is only 2.34MB:
+$ docker pull gcr.io/distroless/static-debian11
+...
+$ docker image ls gcr.io/distroless/static-debian11:latest
+REPOSITORY                          TAG       IMAGE ID       CREATED      \
+  SIZE
+gcr.io/distroless/static-debian11   latest    901590160d4d   53 years ago \
+  2.34MB
+A distroless container image does not ship with any shell, which you can observe by running the following command:
+$ docker run -it gcr.io/distroless/static-debian11:latest /bin/sh
+docker: Error response from daemon: failed to create shim task: OCI runtime \
+create failed: runc create failed: unable to start container process: exec: \
+"/bin/sh": stat /bin/sh: no such file or directory: unknown.
+Kubernetes offers the concept of ephemeral containers for troubleshooting distroless containers. Those containers are meant to be disposable and can be deployed for troubleshooting minimal containers that would usually not allow opening a shell. Discussing ephemeral containers is out of scope of this book, but you can find more information about them in the
+Kubernetes documentation
+.
+Using a Multi-Stage Approach for Building Container Images
+As a developer, you can decide to build the application code as part of the instructions in a Dockerfile. This process may include compiling the code and building a binary that should become the entry point of the container image. Having all the necessarily tools and dependencies available to implement the process will automatically blow up the size of the container image, plus you won’t need those dependencies at runtime anymore.
+The idea of a
+multi-stage build in Docker
+is that you separate the build stage from the runtime stage. As a result, all dependencies needed in the build stage will be discarded after the process has been performed and therefore do not end up in the final container image. This approach leads to a much smaller container image size by removing all the unnecessary cruft.
+While we won’t go into the details of crafting and fully understanding multi-stage Dockerfile, I want to show you the differences on a high level. We’ll start by showing you a Dockerfile that builds and tests a simple program using the programming language Go, as shown in
+Example 6-1
+. In essence, we are using a
+base image
+that includes Go 1.19.4. The Go runtime provides the
+go
+executes, which we’ll invoke to execute the tests and build the binary of the application.
+Example 6-1.
+Building and testing a Go program using a Go base image
+FROM
+golang:1.19.4-alpine
+WORKDIR
+/app
+COPY
+go.mod
+.
+COPY
+go.sum
+.
+RUN
+go
+mod
+download
+COPY
+.
+.
+RUN
+CGO_ENABLED
+=
+0
+go
+test
+-v
+RUN
+go
+build
+-o
+/go-sample-app
+.
+CMD
+[
+"/go-sample-app"
+]
+Uses a Go base image
+Executes the tests against the application code
+Builds the binary of the Go application
+You can produce the image using the
+docker build
+command, as shown in the following:
+$ docker build . -t go-sample-app:0.0.1
+...
+The size of the result container image is pretty big, 348MB, and there’s a good reason for it. It includes the Go runtime, even though we don’t actually need it anymore when starting the container. The
+go build
+command produced the binary that we can run as the container’s entry point:
+$ docker images
+REPOSITORY      TAG     IMAGE ID       CREATED          SIZE
+go-sample-app   0.0.1   88175f3ab0d3   44 seconds ago   358MB
+Next up, we’ll have a look at the multi-stage approach. In a multi-stage Dockerfile, you define at least two stages. In
+Example 6-2
+, we specify a stage aliased with
+build
+to run the tests and build the binary, similarly to what we’ve done earlier. A second stage copies the binary produced by the stage
+build
+into a dedicated directory; however, it uses the
+alpine
+base image to run it. When running the
+docker build
+command, the stage
+build
+will not be included in the final container image anymore.
+Example 6-2.
+Building and testing a Go program as part of a multi-stage Dockerfile
+FROM
+golang:1.19.4-alpine
+AS
+build
+RUN
+apk
+add
+--no-cache
+git
+WORKDIR
+/tmp/go-sample-app
+COPY
+go.mod
+.
+COPY
+go.sum
+.
+RUN
+go
+mod
+download
+COPY
+.
+.
+RUN
+CGO_ENABLED
+=
+0
+go
+test
+-v
+RUN
+go
+build
+-o
+./out/go-sample-app
+.
+FROM
+alpine:3.17.0
+RUN
+apk
+add
+ca-certificates
+COPY
+--from
+=
+build
+/tmp/go-sample-app/out/go-sample-app
+/app/go-sample-app
+CMD
+[
+"/app/go-sample-app"
+]
+Uses a Go base image for building and testing the program in the stage named
+build
+.
+Executes the tests against the application code.
+Builds the binary of the Go application.
+Uses a much smaller base image for running the application in a container.
+Copies the application binary produced in the
+build
+stage and uses it as the command to run when the container is started.
+The resulting container image size is significantly smaller when using the
+alpine
+base image, only 12MB. You can verify the outcome by running the
+docker build
+command again and inspecting the size of the container image by listing it:
+$ docker build . -t go-sample-app:0.0.1
+...
+$ docker images
+REPOSITORY      TAG     IMAGE ID       CREATED          SIZE
+go-sample-app   0.0.1   88175f3ab0d3   44 seconds ago   12MB
+Not only did we reduce the size, we also reduced the attack surface by including fewer dependencies. You can further reduce the size of the container image by incorporating a distroless base image instead of the
+alpine
+base image.
+Reducing the Number of Layers
+Every Dockerfile consists of an ordered list of instructions. Only some instructions create a read-only layer in the resulting container image. Those instructions are
+FROM
+,
+COPY
+,
+RUN
+, and
+CMD
+. All other instructions will not create a layer as they create temporary intermediate images. The more layers you add to the container image, the slower will be the build execution time and/or the bigger will be the size of the container image. Therefore, you need to be cautious about the instructions used in your Dockerfile to minimize the footprint of the container image.
+It’s common practice to execute multiple commands in a row. You may define those commands using a list of
+RUN
+instructions on individual lines, as shown in
+Example 6-3
+.
+Example 6-3.
+A Dockerfile specifying multiple
+RUN
+instructions
+FROM
+ubuntu:22.10
+RUN
+apt-get
+update
+-y
+RUN
+apt-get
+upgrade
+-y
+RUN
+apt-get
+install
+-y
+curl
+Each
+RUN
+instruction will create a layer, potentially adding to the size of the container image. It’s more efficient to string them together with
+&&
+to ensure that only a single layer will be produced.
+Example 6-4
+shows an example of this optimization technique.
+Example 6-4.
+A Dockerfile specifying multiple
+RUN
+instructions
+FROM
+ubuntu:22.10
+RUN
+apt-get
+update
+-y
+&&
+apt-get
+upgrade
+-y
+&&
+apt-get
+install
+-y
+curl
+Using Container Image Optimization Tools
+It’s easy to forget about the optimization practices mentioned previously. The open source community developed a couple of tools that can help with inspecting a produced container image. Their functionalities provide useful tips for pairing down on unnecessary layers, files, and folders:
+DockerSlim
+DockerSlim will optimize and secure your container image by analyzing your application and its dependencies. You can find more information in the tool’s
+GitHub repository
+.
+Dive
+Dive is a tool for exploring the layers baked into a container image. It makes it easy to identify unnecessary layers, which you can further optimize on. The code and documentation for Dive are available in a
+GitHub repository
+.
+This is only the short list of container image optimization tools. In
+“Static Analysis of Workload”
+, we’ll have a look at other tools that focus on the static analysis of Dockerfiles and Kubernetes manifests.
+Securing the Supply Chain
+A supply chain automates the process of producing a container image and operating it in a runtime environment, in this case Kubernetes. We already touched on a couple of tools that can be integrated into the supply chain to support the aspect of container image optimization. In this section, we’ll expand on practices that target security aspects. Refer to the book
+Container Security
+by Liz Rice (O’Reilly) to learn more.
+Signing Container Images
+You can sign a container image before pushing it to a container registry. Signing can be achieved with the
+docker trust sign
+command, which adds a signature to the container image, the so-called image digest. An image digest is derived from the contents of the container image and commonly represented in the form of SHA256. When consuming the container image, Kubernetes can compare the image digest with the contents of the image to ensure that it hasn’t been tampered with.
+Scenario: An Attacker Injects Malicious Code into a Container Image
+The Kubernetes component that verifies the image digest is the kubelet. If you configured the
+image pull policy
+to
+Always
+, the kubelet will query for the image digest from the container registry even though it may have downloaded and verified the container image before.
+An attacker can try to modify the contents of an existing container image, inject malicious code, and upload it to the container registry with the same tag, as shown in
+Figure 6-2
+. The malicious code running in the container could then send sensitive information to a third-party server accessible by the attacker.
+Figure 6-2.
+An attacker injects malicious code into a container image
+Image checksum validation is not automatic
+Image digest validation is an opt-in functionality in Kubernetes. When defining Pods, make sure you spell out the image digest explicitly for all container images.
+Validating Container Images
+In Kubernetes, you’re able to append the SHA256 image digest to the specification of a container. For example, this can be achieved with the attribute
+spec.containers[].image
+. The image digest is generally available in the container registry. For example,
+Figure 6-3
+shows the image digest for the container image
+alpine:3.17.0
+on Docker Hub
+. In this example, the image digest is
+sha256:c0d488a800e4127c334ad20d61d7bc21b4097540327217dfab52262adc02380c
+.
+Figure 6-3.
+The image digest of the
+alpine:3.17.0
+container image on Docker Hub
+Let’s see the image digest in action. Instead of using the tag,
+Example 6-5
+specifies the container image by appending the image digest.
+Example 6-5.
+A Pod using a valid container image digest
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+alpine-valid
+spec
+:
+containers
+:
+-
+name
+:
+alpine
+image
+:
+alpine@sha256:c0d488a800e4127c334ad20d61d7bc21b40 \
+97540327217dfab52262adc02380c
+command
+:
+[
+"/bin/sh"
+]
+args
+:
+[
+"-c"
+,
+"while
+true;
+do
+echo
+hello;
+sleep
+10;
+done"
+]
+Creating the Pod will work as expected. The image digest will be verified and the container transitions into the “Running” status:
+$ kubectl apply -f pod-valid-image-digest.yaml
+pod/alpine-valid created
+$ kubectl get pod alpine-valid
+NAME           READY   STATUS    RESTARTS   AGE
+alpine-valid   1/1     Running   0          6s
+Example 6-6
+shows the same Pod definition; however, the image digest has been changed so that it does not match with the contents of the container image.
+Example 6-6.
+A Pod using an invalid container image digest
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+alpine-invalid
+spec
+:
+containers
+:
+-
+name
+:
+alpine
+image
+:
+alpine@sha256:d006a643bccb6e9adbabaae668533c7f2e5 \
+111572fffb5c61cb7fcba7ef4150b
+command
+:
+[
+"/bin/sh"
+]
+args
+:
+[
+"-c"
+,
+"while
+true;
+do
+echo
+hello;
+sleep
+10;
+done"
+]
+You will see that Kubernetes can still create the Pod object but it can’t properly validate the hash of the container image. This results in the status “ErrImagePull.” As you can see from the event log, the container image couldn’t even be pulled from the container registry:
+$ kubectl get pods
+NAME             READY   STATUS         RESTARTS   AGE
+alpine-invalid   0/1     ErrImagePull   0          29s
+$ kubectl describe pod alpine-invalid
+...
+Events:
+  Type     Reason     Age   From               Message
+  ----     ------     ----  ----               -------
+  Normal   Scheduled  13s   default-scheduler  Successfully assigned default \
+  /alpine-invalid to minikube
+  Normal   Pulling    13s   kubelet            Pulling image "alpine@sha256: \
+  d006a643bccb6e9adbabaae668533c7f2e5111572fffb5c61cb7fcba7ef4150b"
+  Warning  Failed     11s   kubelet            Failed to pull image \
+  "alpine@sha256:d006a643bccb6e9adbabaae668533c7f2e5111572fffb5c61cb7fcba7ef4 \
+  150b": rpc error: code = Unknown desc = Error response from daemon: manifest \
+  for alpine@sha256:d006a643bccb6e9adbabaae668533c7f2e5111572fffb5c61cb7fcba7e \
+  f4150b not found: manifest unknown: manifest unknown
+  Warning  Failed     11s   kubelet            Error: ErrImagePull
+  Normal   BackOff    11s   kubelet            Back-off pulling image \
+  "alpine@sha256:d006a643bccb6e9adbabaae668533c7f2e5111572fffb5c61cb7fcba7ef415 \
+  0b"
+  Warning  Failed     11s   kubelet            Error: ImagePullBackOff
+Using Public Image Registries
+Whenever a Pod is created, the container runtime engine will download the declared container image from a container registry if it isn’t available locally yet. This runtime behavior can be further tweaked using the
+image pull policy
+.
+The prefix in the image name declares the domain name of the registry; e.g.,
+gcr.io/google-containers/debian-base:v1.0.1
+refers to the container image
+google-containers/debian-base:v1.0.1
+in the
+Google Cloud container registry
+, denoted by
+gcr.io
+. The container runtime will try to resolve it from
+docker.io
+, the
+Docker Hub container registry
+if you leave off the domain name in the container image declaration.
+Scenario: An Attacker Uploads a Malicious Container Image
+While it is convenient to resolve container images from public container registries, it doesn’t come without risks. Anyone with a login to those container registries can upload new images. Consuming container images usually doesn’t even require an account.
+As shown in
+Figure 6-4
+, an attacker can upload a container image containing malicious code to a public registry using stolen credentials. Any container referencing the container image from that registry will automatically run the malicious code.
+Figure 6-4.
+An attacker uploads a malicious container image
+On an enterprise level, you need to control which container registries you trust. It’s recommended to set up your own container registry within your company’s network, which you can fully control and govern. Alternatively, you can set up a private container registry in a cloud provider environment, not accessible by anyone else.
+One of the prominent binary repository managers you can choose from is
+JFrog Artifactory
+. The product fully supports storing, scanning, and serving container images. Any consumer of container images should only be allowed to pull images from your whitelisted container registry. All other container registries should be denied.
+Whitelisting Allowed Image Registries with OPA GateKeeper
+One way to govern container registry usage is with OPA Gatekeeper. We discussed the installation process and functionality of OPA Gatekeeper in
+“Understanding Open Policy Agent (OPA) and Gatekeeper”
+. Here, we’ll’ touch on the constraint template and constraint for allowing trusted container registries.
+Example 6-7
+shows the
+constraint template
+I got directly from the OPA Gatekeeper library. As input properties, the constraint template defines an array of strings
+representing
+the prefixes of container registries. The Rego rules verify not only the assigned container images for the attribute
+spec.containers[]
+but also
+spec.initContainers[]
+and
+spec.ephemeralContainers[]
+.
+Example 6-7.
+An OPA Gatekeeper constraint template for enforcing container registries
+apiVersion
+:
+templates.gatekeeper.sh/v1
+kind
+:
+ConstraintTemplate
+metadata
+:
+name
+:
+k8sallowedrepos
+annotations
+:
+metadata.gatekeeper.sh/title
+:
+"Allowed
+Repositories"
+metadata.gatekeeper.sh/version
+:
+1.0.0
+description
+:
+>-
+Requires container images to begin with a string from the specified list.
+spec
+:
+crd
+:
+spec
+:
+names
+:
+kind
+:
+K8sAllowedRepos
+validation
+:
+openAPIV3Schema
+:
+type
+:
+object
+properties
+:
+repos
+:
+description
+:
+The list of prefixes a container image is allowed to have.
+type
+:
+array
+items
+:
+type
+:
+string
+targets
+:
+-
+target
+:
+admission.k8s.gatekeeper.sh
+rego
+:
+|
+package k8sallowedrepos
+violation[{"msg": msg}] {
+container := input.review.object.spec.containers[_]
+satisfied := [good | repo = input.parameters.repos[_] ; \
+good = startswith(container.image, repo)]
+not any(satisfied)
+msg := sprintf("container <%v> has an invalid image repo <%v>, allowed \
+repos are %v", [container.name, container.image, input.parameters.repos])
+}
+violation[{"msg": msg}] {
+container := input.review.object.spec.initContainers[_]
+satisfied := [good | repo = input.parameters.repos[_] ; \
+good = startswith(container.image, repo)]
+not any(satisfied)
+msg := sprintf("initContainer <%v> has an invalid image repo <%v>, \
+allowed repos are %v", [container.name, container.image, \
+input.parameters.repos])
+}
+violation[{"msg": msg}] {
+container := input.review.object.spec.ephemeralContainers[_]
+satisfied := [good | repo = input.parameters.repos[_] ; \
+good = startswith(container.image, repo)]
+not any(satisfied)
+msg := sprintf("ephemeralContainer <%v> has an invalid image repo <%v>, \
+allowed repos are %v", [container.name, container.image, \
+input.parameters.repos])
+}
+The constraint shown in
+Example 6-8
+is in charge of defining which container registries we want to allow. You’d usually go with a domain name of a server hosted in your company’s network. Here, we are going to use
+gcr.io/
+for demonstration purposes.
+Example 6-8.
+An OPA Gatekeeper constraint assigning Google Cloud registry as trusted repository
+apiVersion
+:
+constraints.gatekeeper.sh/v1beta1
+kind
+:
+K8sAllowedRepos
+metadata
+:
+name
+:
+repo-is-gcr
+spec
+:
+match
+:
+kinds
+:
+-
+apiGroups
+:
+[
+""
+]
+kinds
+:
+[
+"Pod"
+]
+parameters
+:
+repos
+:
+-
+"gcr.io/"
+Let’s create both objects using the
+apply
+command:
+$ kubectl apply -f allowed-repos-constraint-template.yaml
+constrainttemplate.templates.gatekeeper.sh/k8sallowedrepos created
+$ kubectl apply -f gcr-allowed-repos-constraint.yaml
+k8sallowedrepos.constraints.gatekeeper.sh/repo-is-gcr created
+In the constraint, we didn’t specify a namespace that the rules should apply to. Therefore, they’ll apply across all namespaces in the cluster. The following commands verify that the whitelisting rules work as expected. The following command tries to create a Pod using the
+nginx
+container image from Docker Hub. The creation of the Pod is denied with an appropriate error message:
+$ kubectl run nginx --image=nginx:1.23.3
+Error from server (Forbidden): admission webhook "validation.gatekeeper.sh" \
+denied the request: [repo-is-gcr] container <nginx> has an invalid image \
+repo <nginx:1.23.3>, allowed repos are ["gcr.io/"]
+The next command creates a Pod with a container image from the Google Cloud container registry. The operation is permitted and the Pod object is created:
+$ kubectl run busybox --image=gcr.io/google-containers/busybox:1.27.2
+pod/busybox created
+$ kubectl get pods
+NAME      READY   STATUS      RESTARTS     AGE
+busybox   0/1     Completed   1 (2s ago)   3s
+Whitelisting Allowed Image Registries with the ImagePolicyWebhook Admission Controller Plugin
+Another way to validate the use of allowed image registries is to intercept a call to the API server when a Pod is about to be created. This mechanism can be achieved by enabling an admission controller plugin. Once configured, the logic of an admission controller plugin is automatically invoked when the API server receives the request, but after it could authenticate and authorize the caller. We already touched on the phases an API call has to go through in
+“Processing a Request”
+.
+The admission controller provides a way to approve, deny, or mutate a request before the request takes effect. For example, we can inspect the data sent with the API request to create a Pod, iterate over the assigned container images, and execute custom logic to validate the container image notation. If the container image doesn’t stick to the expected conventions, we can deny the creation of the Pod.
+Figure 6-5
+illustrates the high-level workflow.
+Figure 6-5.
+Intercepting a Pod-specific API call and handling it with a webhook
+The
+ImagePolicyWebhook
+admission controller plugin is one of the plugins we can configure for intercepting Kubernetes API calls. You can probably derive the plugin’s functionality from its name. It defines a policy for all defined container images in a Pod. To compare container images with the defined policy, the plugin calls off to a service external to Kubernetes via HTTPS, a webhook. The external service then makes the decision on how to validate the data. In the context of the admission controller plugin, the external service is also referred to as
+backend
+.
+Implementing the Backend Application
+The backend application can be implemented with a programming language of your choice. There are only three requirements it must fulfill:
+It’s a web application that can handle HTTPS requests.
+It can accept and parse JSON request payloads.
+It can send a JSON response payload.
+Implementing the backend application is not part of the CKS exam, but you can find a sample Go-based implementation in the
+GitHub repository
+of this book. Be aware that the code is not considered to be production-ready.
+The following commands demonstrate the runtime behavior of the application accessible at
+https://localhost:8080/validate
+. You can find an example request and response JSON body in the
+Kubernetes documentation
+.
+The following
+curl
+command calls the validation logic for the container image
+nginx:1.19.0
+. As you can see from the JSON response, the image is denied:
+$ curl -X POST -H "Content-Type: application/json" -k -d \'{"apiVersion":
+\
+"imagepolicy.k8s.io/v1alpha1", "kind": "ImageReview", "spec":
+\
+{"containers": [{"image": "nginx:1.19.0"}]}}' https://localhost:8080/validate
+{"apiVersion": "imagepolicy.k8s.io/v1alpha1", "kind": "ImageReview", \
+"status": {"allowed": false, "reason": "Denied request: [container 1 \
+has an invalid image repo nginx:1.19.0, allowed repos are [gcr.io/]]"}}
+The following
+curl
+command calls the validation logic for the container image
+gcr.io/nginx:1.19.0
+. As you can see from the JSON response, the image is allowed:
+$ curl -X POST -H "Content-Type: application/json"  -k -d '{"apiVersion":
+\
+"imagepolicy.k8s.io/v1alpha1", "kind": "ImageReview", "spec": {"containers":
+\
+[{"image": "gcr.io/nginx:1.19.0"}]}}' https://localhost:8080/validate
+{"apiVersion": "imagepolicy.k8s.io/v1alpha1", "kind": "ImageReview", \
+"status": {"allowed": true, "reason": ""}}
+Configuring the ImagePolicyWebhook Admission Controller Plugin
+For the exam, you are expected to understand how to “wire” the ImagePolicyWebhook admission controller plugin. This section will walk you through the process. First, you’ll need to create a configuration file for the admission controller so it knows what plugins to use and how it should behave at runtime. Create the file
+/etc/kubernetes/admission-control/image-policy-webhook-admission-config.yaml
+and populate it with the content shown in
+Example 6-9
+.
+Example 6-9.
+The admission controller configuration file
+apiVersion
+:
+apiserver.config.k8s.io/v1
+kind
+:
+AdmissionConfiguration
+plugins
+:
+-
+name
+:
+ImagePolicyWebhook
+configuration
+:
+imagePolicy
+:
+kubeConfigFile
+:
+/etc/kubernetes/admission-control/
+\
+imagepolicywebhook.kubeconfig
+allowTTL
+:
+50
+denyTTL
+:
+50
+retryBackoff
+:
+500
+defaultAllow
+:
+false
+Provides the configuration for the ImagePolicyWebhook plugin.
+Points to the configuration file used to configure the backend.
+Denies an API request if the backend cannot be reached. The default is true but setting it to false is far more sensible.
+Next, create the file referenced by the
+plugins[].configuration.imagePolicy.kubeConfigFile
+attribute. The contents of the file point to the HTTPS URL of the external service. It also defines the client certificate and key file, as well as the CA file on disk.
+Example 6-10
+shows the contents of the configuration file.
+Example 6-10.
+The image policy configuration file
+apiVersion
+:
+v1
+kind
+:
+Config
+preferences
+:
+{
+}
+clusters
+:
+-
+name
+:
+image-validation-webhook
+cluster
+:
+certificate-authority
+:
+/etc/kubernetes/admission-control/ca.crt
+server
+:
+https://image-validation-webhook:8080/validate
+contexts
+:
+-
+context
+:
+cluster
+:
+image-validation-webhook
+user
+:
+api-server-client
+name
+:
+image-validation-webhook
+current-context
+:
+image-validation-webhook
+users
+:
+-
+name
+:
+api-server-client
+user
+:
+client-certificate
+:
+/etc/kubernetes/admission-control/api-server-client.crt
+client-key
+:
+/etc/kubernetes/admission-control/api-server-client.key
+The URL to the backend service. Must use the HTTPS protocol.
+Enable the ImagePolicyWebhook admission controller plugin for the API server and point the admission controller to the configuration file. To achieve this, edit the configuration file of the API server, usually found at
+/etc/kubernetes/manifests/kube-apiserver.yaml
+.
+Find the command line option
+--enable-admission-plugins
+and append the value
+ImagePolicyWebhook
+to the existing list of plugins, separated by a comma. Provide the command line option
+--admission-control-config-file
+if it doesn’t exist yet, and set the value to
+/etc/kubernetes/admission-control/image-policy-webhook-admission-configuration.yaml
+. Given that the configuration file lives in a new directory, you will have to define it as a Volume and mount it to the container.
+Example 6-11
+shows the relevant options for the API server container.
+Example 6-11.
+The API server configuration file
+...
+spec
+:
+containers
+:
+-
+command
+:
+-
+kube-apiserver
+-
+--enable-admission-plugins=NodeRestriction,ImagePolicyWebhook
+-
+--admission-control-config-file=/etc/kubernetes/admission-control/ \
+image-policy-webhook-admission-configuration.yaml
+...
+volumeMounts
+:
+...
+-
+name
+:
+admission-control
+mountPath
+:
+/etc/kubernetes/admission-control
+readonly
+:
+true
+volumes
+:
+...
+-
+name
+:
+admission-control
+hostPath
+:
+path
+:
+/etc/kubernetes/admission-control
+type
+:
+DirectoryOrCreate
+...
+The Pod running the API server should automatically restart. This process may take a couple of minutes. Restart the kubelet service with the command
+sudo systemctl restart kubelet
+should the API server not come up by itself. Once fully restarted, you should be able to query for it:
+$ kubectl get pods -n kube-system
+NAME                           READY   STATUS    RESTARTS   AGE
+...
+kube-apiserver-control-plane   1/1     Running   0          69s
+Any API call that requests the creation of a Pod will now be routed to the backend. Based on the validation result, the creation of the object will be allowed or denied.
+Static Analysis of Workload
+Throughout this book, we talk about best practices for Dockerfiles and Kubernetes manifests. You can inspect those files manually, find undesired configurations, and fix them by hand. This approach requires a lot of intricate knowledge and is very tedious and error-prone. It is much more convenient and efficient to analyze workload files in an automated fashion with proper tooling. The list of commercial and open source tooling for static analysis is long. In this section, we are going to present the functionality of two options, Haskell Dockerfile Linter and Kubesec.
+On an enterprise level, where you have to process hundreds or even thousands of workload files, you’d do so with the help of a continuous delivery pipeline, as shown in
+Figure 6-6
+.
+Figure 6-6.
+An exemplary continuous delivery pipeline for Kubernetes
+Relevant static analysis tools can be invoked as a quality gate at an early stage of the pipeline even before a container image is built, pushed to a registry, or deployed to a Kubernetes cluster. For a deep dive on the principles and practices of continuous delivery, see the excellent book
+Continuous Delivery
+by Jez Humble and David Farley (Addison-Wesley Professional).
+Using Hadolint for Analyzing Dockerfiles
+Haskell Dockerfile Linter
+, also called hadolint in short, is a linter for Dockerfiles. The tool inspects a Dockerfile based on
+best practices
+listed on the Docker documentation page.
+Example 6-12
+shows an unoptimized Dockerfile for building a container image running a Go-based
+application.
+Example 6-12.
+An unoptimized Dockerfile
+FROM
+golang
+COPY
+main.go
+.
+RUN
+go
+build
+main.go
+CMD
+[
+"./main"
+]
+The Haskell Dockerfile Linter supports a mode of operation that lets you point the
+hadolint
+executable to a Dockerfile on disk. You can see the command execution that follows, including the discovered warning messages produced by the analysis:
+$ hadolint Dockerfile
+Dockerfile:1 DL3006 warning: Always tag the version of an image explicitly
+Dockerfile:2 DL3045 warning: `COPY` to a relative destination without \
+`WORKDIR` set.
+The output of the command suggests that you should assign a tag to the base image. The existing Dockerfile will pull the
+latest
+tag, which will resolve to the newest Go container image. This practice can result in an incompatibility between the Go runtime version and the application code. Defining a working directory for copying resources helps with keeping operating system-specific directories and files separate from application-specific directories and files.
+Example 6-13
+fixes the warning messages found by the Haskell Dockerfile Linter.
+Example 6-13.
+An optimized Dockerfile
+FROM
+golang:1.19.4-alpine
+WORKDIR
+/app
+COPY
+main.go
+.
+RUN
+go
+build
+main.go
+CMD
+[
+"./main"
+]
+Another execution against the modified Dockerfile leads to a successful exit code, and no additional warning messages will be rendered:
+$ hadolint Dockerfile
+The Dockerfile now follows best practices, as perceived by hadolint.
+Using Kubesec for Analyzing Kubernetes Manifests
+Kubesec
+is a tool for analyzing Kubernetes manifests. It can be executed as a binary, Docker container, admission controller plugin, and even as a plugin for
+kubectl
+. To demonstrate its use, we’ll set up a YAML manifest file
+pod-initial-kubesec-test.yaml
+, shown in
+Example 6-14
+as a starting point.
+Example 6-14.
+A Pod YAML manifest using initial security settings
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+kubesec-demo
+spec
+:
+containers
+:
+-
+name
+:
+kubesec-demo
+image
+:
+gcr.io/google-samples/node-hello:1.0
+securityContext
+:
+readOnlyRootFilesystem
+:
+true
+Upon inspecting the Pod configuration, you may already have some suggestions on what could be improved based on the content of the previous chapters. Let’s see what Kubesec is going to recommend.
+The simplest way to invoke Kubesec is to run the logic in a container with the help of Docker. The following command feeds the contents of the YAML manifest to the standard input stream. The result, formatted in JSON, renders a score, provides a human-readable message of the outcome, and advises on changes to be made:
+$ docker run -i kubesec/kubesec:512c5e0 scan /dev/stdin
+\
+< pod-initial-kubesec-test.yaml
+[
+  {
+    "object": "Pod/kubesec-demo.default",
+    "valid": true,
+    "message": "Passed with a score of 1 points",
+    "score": 1,
+    "scoring": {
+      "advise": [
+        {
+          "selector": ".spec .serviceAccountName",
+          "reason": "Service accounts restrict Kubernetes API access and \
+                     should be configured with least privilege"
+        },
+        {
+          "selector": ".metadata .annotations .\"container.apparmor.security. \
+                       beta.kubernetes.io/nginx\"",
+          "reason": "Well defined AppArmor policies may provide greater \
+                     protection from unknown threats. WARNING: NOT PRODUCTION \
+                     READY"
+        },
+        {
+          "selector": "containers[] .resources .requests .cpu",
+          "reason": "Enforcing CPU requests aids a fair balancing of \
+                     resources across the cluster"
+        },
+        {
+          "selector": ".metadata .annotations .\"container.seccomp.security. \
+                       alpha.kubernetes.io/pod\"",
+          "reason": "Seccomp profiles set minimum privilege and secure against \
+                     unknown threats"
+        },
+        {
+          "selector": "containers[] .resources .limits .memory",
+          "reason": "Enforcing memory limits prevents DOS via resource \
+                     exhaustion"
+        },
+        {
+          "selector": "containers[] .resources .limits .cpu",
+          "reason": "Enforcing CPU limits prevents DOS via resource exhaustion"
+        },
+        {
+          "selector": "containers[] .securityContext .runAsNonRoot == true",
+          "reason": "Force the running image to run as a non-root user to \
+                     ensure least privilege"
+        },
+        {
+          "selector": "containers[] .resources .requests .memory",
+          "reason": "Enforcing memory requests aids a fair balancing of \
+                     resources across the cluster"
+        },
+        {
+          "selector": "containers[] .securityContext .capabilities .drop",
+          "reason": "Reducing kernel capabilities available to a container \
+                     limits its attack surface"
+        },
+        {
+          "selector": "containers[] .securityContext .runAsUser -gt 10000",
+          "reason": "Run as a high-UID user to avoid conflicts with the \
+                     host's user table"
+        },
+        {
+          "selector": "containers[] .securityContext .capabilities .drop | \
+                       index(\"ALL\")",
+          "reason": "Drop all capabilities and add only those required to \
+                     reduce syscall attack surface"
+        }
+      ]
+    }
+  }
+]
+A touched-up version of the original YAML manifest can be found in
+Example 6-15
+. Here, we incorporated some of the recommended changes proposed by Kubesec.
+Example 6-15.
+A Pod YAML manifest using improved security settings
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+kubesec-demo
+spec
+:
+containers
+:
+-
+name
+:
+kubesec-demo
+image
+:
+gcr.io/google-samples/node-hello:1.0
+resources
+:
+requests
+:
+memory
+:
+"64Mi"
+cpu
+:
+"250m"
+limits
+:
+memory
+:
+"128Mi"
+cpu
+:
+"500m"
+securityContext
+:
+readOnlyRootFilesystem
+:
+true
+runAsNonRoot
+:
+true
+runAsUser
+:
+20000
+capabilities
+:
+drop
+:
+[
+"ALL"
+]
+Executing the same Docker command against the changed Pod YAML manifest will render an improved score and reduce the number of advised messages:
+$ docker run -i kubesec/kubesec:512c5e0 scan /dev/stdin
+\
+< pod-improved-kubesec-test.yaml
+[
+  {
+    "object": "Pod/kubesec-demo.default",
+    "valid": true,
+    "message": "Passed with a score of 9 points",
+    "score": 9,
+    "scoring": {
+      "advise": [
+        {
+          "selector": ".metadata .annotations .\"container.seccomp.security. \
+                       alpha.kubernetes.io/pod\"",
+          "reason": "Seccomp profiles set minimum privilege and secure against \
+                     unknown threats"
+        },
+        {
+          "selector": ".spec .serviceAccountName",
+          "reason": "Service accounts restrict Kubernetes API access and should \
+                     be configured with least privilege"
+        },
+        {
+          "selector": ".metadata .annotations .\"container.apparmor.security. \
+                       beta.kubernetes.io/nginx\"",
+          "reason": "Well defined AppArmor policies may provide greater \
+                     protection from unknown threats. WARNING: NOT PRODUCTION \
+                     READY"
+        }
+      ]
+    }
+  }
+]
+Scanning Images for Known Vulnerabilities
+One of the top sources for logging and discovering security vulnerabilities is
+CVE Details
+. The page lists and ranks known vulnerabilities (CVEs) by score. Automated tooling can identify the software components embedded in a container image, compare those with the central vulnerabilities database, and flag issues by their severity.
+One of the open source tools with this capability explicitly mentioned in the CKS curriculum is
+Trivy
+. Trivy can run in different modes of operation: as a command line tool, in a container, as a GitHub Action configurable in a continuous integration workflow, as a plugin for the IDE VSCode, and as a Kubernetes operator. For an overview of the available installation options and procedures, see the
+Trivy documentation
+. During the exam, you are not expected to install the tool. It will already be preconfigured for you. All you need to understand is how to run it and how to interpret and fix the found vulnerabilities.
+Say you installed the command line implementation of Trivy. You can check the version of Trivy with the following command:
+$ trivy -v
+Version: 0.36.1
+Vulnerability DB:
+  Version: 2
+  UpdatedAt: 2022-12-13 12:07:14.884952254 +0000 UTC
+  NextUpdate: 2022-12-13 18:07:14.884951854 +0000 UTC
+  DownloadedAt: 2022-12-13 17:09:28.866739 +0000 UTC
+As you can see in
+Figure 6-7
+, Trivy indicates the timestamp when a copy of known vulnerabilities has been downloaded from the central database. Trivy can scan container images in various forms. The subcommand
+image
+simply expects you to spell out the image name and tag, in this case
+python:3.4-alpine
+.
+Figure 6-7.
+Reporting generated by scanning a container image with Trivy
+The most important information in the output consists of the library that contains a specific vulnerability, its severity, and the minimum version to use that fixes the issue. Any found vulnerabilities with high or critical severity should be considered for a fix. If you do not have any control over the container image yourself, you can try to upgrade to a newer version.
+Summary
+Kubernetes primary objective is to run applications in containers in a scalable and secure fashion. In this chapter, we looked at the process, best practices, and tooling that help to ensure that a container image is produced that is small in size and that ships with as few known security vulnerabilities as possible.
+We reviewed some of the most efficient techniques to reduce the footprint of a container image to a minimum. Start by picking a small base image to start with. You can even go to the extreme and not provide a shell at all for additional gains in size reduction. If you are using Docker, you can leverage the multi-stage approach that lets you build the application inside of the container without bundling the compiler, runtime, and build tools necessary to achieve the goal.
+When consuming the container image in a Pod, make sure to only pull the container image from a trusted registry. It’s advisable to set up an in-house container registry to serve up container images, so that reaching out to public, internet-accessible registries becomes obsolete, to eliminate potential security risks. You can enforce the usage of a list of trusted container registries with the help of OPA Gatekeeper. Another measure of security can be enforced by using the SHA256 hash of a container image to validate its expected contents.
+The process of building and scanning a container image can be incorporated into a CI/CD pipeline. Third-party tools can parse and analyze the resource files of your deployable artifacts even before you build them. We looked at Haskell Dockerfile Linter for Dockerfiles and Kubesec for Kubernetes manifests. The other use case that needs to be covered on security aspects is consuming an existing container image built by an entity external to you as a developer, or your company. Before running a container image in a Kubernetes Pod, make sure to scan the contents for vulnerabilities. Trivy is one of those tools that can identify and report vulnerabilities in a container image to give you an idea of the security risks you are exposing yourself to in case you are planning to operate it in a container.
+Exam Essentials
+Become familiar with techniques that help with reducing the container image footprint.
+In this section, we described some techniques for reducing the size of a container image when building it. I would suggest you read the best practices mentioned on the Docker web page and try to apply them to sample container images. Compare the size of the produced container image before and after applying a technique. You can try to challenge yourself by reducing a container image to the smallest size possible while at the same time avoiding the loss of crucial functionality.
+Walk through the process of governing where a container image can be resolved from.
+OPA Gatekeeper offers a way to define the registries users are allowed to resolve container images from. Set up the objects for the constraint template and constraint, and see if the rules apply properly for a Pod that defines a main application container, an init container, and an ephemeral container. To broaden your exposure, also look at other products in the Kubernetes spaces that provide similar functionality. One of those products is
+Kyverno
+.
+Sign a container image and verify it using the hash.
+After building a container image, make sure to also create a digest for it. Publish the container image, as well as the digest, to a registry. Practice how to use the digest in a Pod definition and verify the behavior of Kubernetes upon pulling the container image.
+Understand how to configure the ImagePolicyWebhook admission controller plugin.
+You are not expected to write a backend for an ImagePolicyWebhook. That’s out of scope for the exam and requires knowledge of a programming language. You do need to understand how to enable the plugin in the API server configuration, though. I would suggest you practice the workflow even if you don’t have a running backend application available.
+Know how to fix warnings produced by static analysis tools.
+The CKS curriculum doesn’t prescribe a specific tool for analyzing Dockerfiles and Kubernetes manifests. During the exam, you may be asked to run a specific command that will produce a list of error and/or warning messages. Understand how to interpret the messages, and how to fix them in the relevant resource files.
+Practice the use of Trivy to identify and fix security vulnerabilities.
+The FAQ of the CKS lists the documentation page for Trivy. Therefore, it’s fair to assume that Trivy may come up in one of the questions. You will need to understand the different ways to invoke Trivy to scan a container image. The produced report will give a you clear indication on what needs to be fixed and the severity of the found vulnerability. Given that you can’t modify the container image easily, you will likely be asked to flag Pods that run container images with known vulnerabilities.
+Sample Exercises
+Solutions to these exercises are available in the
+Appendix
+.
+Have a look at the following Dockerfile. Can you identify possibilities for reducing the footprint of the produced container image?
+FROM
+node:latest
+ENV
+NODE_ENV
+development
+WORKDIR
+/app
+COPY
+package.json
+.
+RUN
+npm
+install
+COPY
+.
+.
+EXPOSE
+3001
+CMD
+[
+"node"
+,
+"app.js"
+]
+Apply Dockerfile best practices to optimize the container image footprint. Run the
+docker build
+command before and after making optimizations. The resulting size of the container image should be smaller but the application should still be functioning.
+Install Kyverno in your Kubernetes cluster. You can find installation instructions in the
+documentation
+.
+Apply the “Restrict Image Registries” policy described on the
+documentation page
+. The only allowed registry should be
+gcr.io
+. Usage of any other registry should be denied.
+Create a Pod that defines the container image
+gcr.io/google-containers/busybox:1.27.2
+. Creation of the Pod should fail. Create another Pod using the container image
+busybox:1.27.2
+. Kyverno should allow the Pod to be created.
+Define a Pod using the container image
+nginx:1.23.3-alpine
+in the YAML manifest
+pod-validate-image.yaml
+. Retrieve the digest of the container image from Docker Hub. Validate the container image contents using the SHA256 hash. Create the Pod. Kubernetes should be able to successfully pull the container image.
+Use Kubesec to analyze the following contents of the YAML manifest file
+pod.yaml
+:
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+hello-world
+spec
+:
+securityContext
+:
+runAsUser
+:
+0
+containers
+:
+-
+name
+:
+linux
+image
+:
+hello-world:linux
+Inspect the suggestions generated by Kubesec. Ignore the suggestions on seccomp and AppArmor. Fix the root cause of all messages so that another execution of the tool will not report any additional suggestions.
+Navigate to the directory
+app-a/ch06/trivy
+of the checked-out GitHub repository
+bmuschko/cks-study-guide
+. Execute the command
+kubectl apply -f setup.yaml
+.
+The command creates three different Pods in the namespace
+r61
+. From the command line, execute Trivy against the container images used by the Pods. Delete all Pods that have “CRITICAL” vulnerabilities. Which of the Pods are still running?
+
+Chapter 7.
+Monitoring, Logging, and Runtime Security
+The last domain of the curriculum primarily deals with detecting suspicious activity on the host and container level in a Kubernetes cluster. We’ll first define the term
+behavior analytics
+and how it applies to the realm of Kubernetes. With the theory out of the way, we’ll bring in the tool called Falco that can detect intrusion scenarios.
+Once a container has been started, its runtime environment can still be modified. For example, as an operator you could decide to shell into the container in order to manually install additional tools or write files to the container’s temporary filesystem. Modifying a container after it has been started can open doors to security risks. You will want to aim for creating
+immutable containers
+, containers that cannot be modified after they have been started. We’ll learn how to configure a Pod with the right settings to make its containers immutable.
+Last, we’ll talk about capturing logs for events that occur in a Kubernetes cluster. Those logs can be used for troubleshooting purposes on the cluster level, to reconstruct when and how the cluster configuration was changed such that it led to an undesired or broken runtime behavior. Log entries can also be used to trace an attack that may be happening right now as a means to enacting countermeasures.
+At a high level, this chapter covers the following concepts:
+Performing behavior analytics to detect malicious activities
+Performing deep analytical investigation and identification
+Ensuring immutability of containers at runtime
+Using audit logs to monitor access
+Performing Behavior Analytics
+Apart from managing and upgrading a Kubernetes cluster, the administrator is in charge of keeping an eye on potentially malicious activity. While you can perform this task manually by logging into cluster nodes and observing host- and container-level processes, it is a horribly inefficient undertaking.
+Behavior analytics
+is the process of observing the cluster nodes for any activity that seems out of the ordinary. An automated process helps with filtering, recording, and alerting events of specific interest.
+Scenario: A Kubernetes Administrator Can Observe Actions Taken by an Attacker
+An attacker gained access to a container by opening a shell running on a worker node to launch additional attacks throughout the Kubernetes cluster. An administrator can’t easily detect this event by manually checking each and every container.
+Figure 7-1
+illustrates the scenario.
+Figure 7-1.
+Malicious events recorded by behavior analytics tool
+The administrator decided to take matters in their own hands by installing a behavior analytics tool. The tool will continuously monitor certain events and record them almost instantaneously. The administrator now has an efficient mechanism for detecting intrusions and can act upon them.
+Among the behavior analytics tools relevant to the exam are
+Falco
+,
+Tracee
+, and
+Tetragon
+. In this book, we’ll only focus on Falco, as it is listed among the links of documentation pages available during the exam.
+Understanding Falco
+Falco helps with detecting threats by observing host- and container-level activity. Here are a few examples of events Falco could watch for:
+Reading or writing files at specific locations in the filesystem
+Opening a shell binary for a container, such as
+/bin/bash
+to open a bash shell
+An attempt to make a network call to undesired URLs
+Falco deploys a set of sensors that listen for the configured events and conditions. Each sensor consists of a set of rules that map an event to a data source. An alert is produced when a rule matches a specific event. Alerts will be sent to an output channel to record the event, such as standard output, a file, or an HTTPS endpoint. Falco allows for enabling more than one output channel simultaneously.
+Figure 7-2
+shows Falco’s high-level architecture.
+Figure 7-2.
+Falco’s high-level architecture
+Falco is a tool with a lot of features and configuration options. We won’t be able to discuss all features in this book, but I would suggest you spend some time on understanding Falco’s high-level concepts.
+Another great learning resource on Falco can be found on the Sysdig training portal webpage.
+“Falco 101”
+is a free video course that explains all the bells and whistles of the product. All you need to do to get started is sign up for an account. Moreover, I’d suggest giving the book
+Practical Cloud Native Security with Falco
+by Loris Degioanni and Leonardo Grasso (O’Reilly) a read. The content takes a beginner-friendly approach to learning Falco.
+Installing Falco
+Falco can be installed as a binary on the host system or as a DaemonSet object in Kubernetes. You can safely assume that Falco has been preinstalled for you in the exam environment. For more information on the installation process, have a look at the
+relevant portion
+of the Falco documentation. The following steps briefly explain the installation of the binary on an Ubuntu machine. Falco needs to be installed on all worker nodes of a Kubernetes cluster. Be aware that those instructions may change with a future version of Falco.
+First, you need to trust the Falco GPG key, configure the Falco-specific apt repository, and update the package list:
+$ curl -s https://falco.org/repo/falcosecurity-packages.asc | apt-key add -
+$ echo "deb https://download.falco.org/packages/deb stable main" | tee -a
+\
+/etc/apt/sources.list.d/falcosecurity.list
+$ apt-get update -y
+You then install the kernel header with the following command:
+$ apt-get -y install linux-headers-$(uname -r)
+Last, you need to install the Falco apt package with version 0.33.1:
+$ apt-get install -y falco=0.33.1
+Falco has been installed successfully and is running as a systemd service in the background. Run the following command to check on the status of the Falco service:
+$ sudo systemctl status falco
+● falco.service - Falco: Container Native Runtime Security
+     Loaded: loaded (/lib/systemd/system/falco.service; enabled; vendor preset: \
+             enabled)
+     Active: active (running) since Tue 2023-01-24 15:42:31 UTC; 43min ago
+       Docs: https://falco.org/docs/
+   Main PID: 8718 (falco)
+      Tasks: 12 (limit: 1131)
+     Memory: 30.2M
+     CGroup: /system.slice/falco.service
+             └─8718 /usr/bin/falco --pidfile=/var/run/falco.pid
+The Falco service should be in the “active” status. It is already monitoring events in your system.
+Configuring Falco
+The Falco service provides an operational environment for monitoring the system with a set of default rules. Those rules live in YAML files in the
+/etc/falco
+directory. The list of files and subdirectories in
+/etc/falco
+is as follows:
+$ tree /etc/falco
+/etc/falco
+├── aws_cloudtrail_rules.yaml
+├── falco.yaml
+├── falco_rules.local.yaml
+├── falco_rules.yaml
+├── k8s_audit_rules.yaml
+├── rules.available
+│   └── application_rules.yaml
+└── rules.d
+Of those files, I want to describe the high-level purpose of the most important ones.
+Falco configuration file
+The file named
+falco.yaml
+is the configuration file for the Falco process. It controls the channel that will be notified in case of an alert. A channel could be standard output or a file. Furthermore, the file defines the minimum log level of alerts to include in logs, and how to configure the embedded web server used to implement a health check for the Falco process. Refer to
+“Falco Configuration Options”
+for a full reference on all available options.
+Default rules
+The file named
+falco_rules.yaml
+defines a set of preinstalled rules. Falco considers those rules to be applied by default. Among them are checks for creating an alert when a shell to a container is opened or when a write operation is performed to a system directory. You can find other examples and their corresponding rule definitions on the
+“Rules Examples” page
+.
+Custom rules
+The file named
+falco_rules.local.yaml
+lets you define custom rules and override default rules. With a fresh installation of Falco, the file only contains commented-out rules to provide you with a starting point for adding your own rules. You can find
+guidance on writing custom rules
+in the Falco documentation.
+Kubernetes-specific rules
+The file
+k8s_audit_rules.yaml
+defines
+Kubernetes-specific rules
+in addition to logging system call events. Typical examples are “log an event when a namespace is deleted” or “log an event when a Role or ClusterRole object is created.”
+Applying configuration changes
+Modifying the contents of configuration files will not automatically propagate them to the Falco process. You need to restart the Falco service, as demonstrated by the following command:
+$ sudo systemctl restart falco
+Next up, we’ll trigger some of the events covered by Falco’s default rules. Each of those events will create an alert written to the configured channel. The initial setup of Falco routes messages to standard output.
+Generating Events and Inspecting Falco Logs
+Let’s see Falco alerts in action. One of the default rules added by Falco creates an alert whenever a user tries to open a shell to a container. We’ll need to perform this activity to see a log entry for it. To achieve that, create a new Pod named
+nginx
+, open a bash shell to the container, and then exit out of the container:
+$ kubectl run nginx --image=nginx:1.23.3
+pod/nginx created
+$ kubectl exec -it nginx -- bash
+root@nginx:/# exit
+Identify the cluster node the Pod runs on by inspecting its runtime details:
+$ kubectl get pod nginx -o jsonpath='{.spec.nodeName}'
+kube-worker-1
+This Pod is running on the cluster node named
+kube-worker-1
+. You will need to inspect the Falco logs on that machine to find the relevant log entry. You can inspect logged events by using the
+journalctl
+command directly on the
+kube-worker-1
+cluster node. The following command searches for entries that contain the keyword
+falco
+:
+$ sudo journalctl -fu falco
+...
+Jan 24 18:03:37 kube-worker-1 falco[8718]: 18:03:14.632368639: Notice A shell \
+was spawned in a container with an attached terminal (user=root user_loginuid=0 \
+nginx (id=18b247adb3ca) shell=bash parent=runc cmdline=bash pid=47773 \
+terminal=34816 container_id=18b247adb3ca image=docker.io/library/nginx)
+You will find that additional rules will kick in if you try to modify the container state. Say you’d installed the Git package using
+apt
+in the
+nginx
+container:
+root@nginx:/# apt update
+root@nginx:/# apt install git
+Falco added log entries for those system-level operations. The following output renders the alerts:
+$ sudo journalctl -fu falco
+Jan 24 18:55:48 ubuntu-focal falco[8718]: 18:55:05.173895727: Error Package \
+management process launched in container (user=root user_loginuid=0 \
+command=apt update pid=60538 container_id=18b247adb3ca container_name=nginx \
+image=docker.io/library/nginx:1.23.3)
+Jan 24 18:55:48 ubuntu-focal falco[8718]: 18:55:11.050925982: Error Package \
+management process launched in container (user=root user_loginuid=0 \
+command=apt install git-all pid=60823 container_id=18b247adb3ca \
+container_name=nginx image=docker.io/library/nginx:1.23.3)
+...
+In the next section, we’ll inspect the Falco rules that trigger the creation of alerts, and their syntax.
+Understanding Falco Rule File Basics
+A Falco rules file usually consists of three elements defined in YAML: rules, macros, and lists. You’ll need to understand those elements on a high level and know how to modify them to achieve a certain goal.
+Crafting your own Falco rules
+During the exam, you will likely not have to craft your own Falco rules. You’ll be provided with an existing set of rules. If you want to dive deeper into Falco rules, have a look at the relevant
+documentation page
+.
+Rule
+A
+rule
+is the condition under which an alert should be generated. It also defines the output message of the alert. An output message can consist of a hard-coded message and incorporate built-in variables. The alert is recorded on the
+WARNING
+log level.
+Example 7-1
+shows the YAML for a rule listening to events that try to access the machine’s camera from processes other than your traditional video-conferencing software, such as Skype or Webex.
+Example 7-1.
+A Falco rule that monitors camera access
+-
+rule
+:
+access_camera
+desc
+:
+a process other than skype/webex tries to access the camera
+condition
+:
+evt.type = open and fd.name = /dev/video0 and not proc.name in \
+(skype, webex)
+output
+:
+Unexpected process opening camera video device (command=%proc.cmdline)
+priority
+:
+WARNING
+Macro
+A
+macro
+is a reusable rule condition that helps with avoiding copy-pasting similar logic across multiple rules. Macros are useful if the rule file becomes lengthy and you want to improve on maintainability.
+Say you are in the process of simplifying a rules file. You notice that multiple rules use the same condition that listens for camera access.
+Example 7-2
+shows how to break out the logic into a macro.
+Example 7-2.
+A Falco macro defining a reusable condition
+-
+macro
+:
+camera_process_access
+condition
+:
+evt.type = open and fd.name = /dev/video0 and not proc.name in \
+(skype, webex)
+The macro can now be referenced by name in a rule definition, as shown in
+Example 7-3
+.
+Example 7-3.
+A Falco rule incorporating a macro
+-
+rule
+:
+access_camera
+desc
+:
+a process other than skype/webex tries to access the camera
+condition
+:
+camera_process_access
+output
+:
+Unexpected process opening camera video device (command=%proc.cmdline)
+priority
+:
+WARNING
+List
+A
+list
+is a collection of items that you can include in rules, macros, and other lists. Think of lists as an array in traditional programming languages.
+Example 7-4
+creates a list of process names associated with video-conferencing software.
+Example 7-4.
+A Falco list
+-
+list
+:
+video_conferencing_software
+items
+:
+[
+skype
+,
+webex
+]
+Example 7-5
+shows the usage of the list by name in a macro.
+Example 7-5.
+A Falco macro that uses a list
+-
+macro
+:
+camera_process_access
+condition
+:
+evt.type = open and fd.name = /dev/video0 and not proc.name in \
+(video_conferencing_software)
+Dissecting an existing rule
+The reason why Falco ships with default rules is to shorten the timespan to hit the ground running for a production cluster. Instead of having to come up with your own rules and the correct syntax, you can simply install Falco and benefit from best practices from the get-go.
+Let’s come back to one of the events we triggered in
+“Generating Events and Inspecting Falco Logs”
+. At the time of writing, I am using the Falco version 0.33.1. The rules file
+/etc/falco/falco_rules.yaml
+shipped with it contains a rule named “Terminal shell in container.” It observes the event of opening a shell to a container. You can easily find the rule by searching for a portion of the log message, e.g., “A shell was spawned in a container.”
+Example 7-6
+shows the syntax of the rule definition, as well as the annotated portions of the YAML.
+Example 7-6.
+A Falco rule that monitors shell activity to a container
+-
+macro
+:
+spawned_process
+condition
+:
+(evt.type
+in
+(execve,
+execveat)
+and
+evt.dir=<)
+-
+macro
+:
+container
+condition
+:
+(container.id
+!=
+host)
+-
+macro
+:
+container_entrypoint
+condition
+:
+(not
+proc.pname
+exists
+or
+proc.pname
+in
+(runc:[0:PARENT],
+\
+runc:[1:CHILD],
+runc,
+docker-runc,
+exe,
+docker-runc-cur))
+-
+macro
+:
+user_expected_terminal_shell_in_container_conditions
+condition
+:
+(never_true)
+-
+rule
+:
+Terminal
+shell
+in
+container
+desc
+:
+A
+shell
+was
+used
+as
+the
+entrypoint/exec
+point
+into
+a
+container
+with
+an
+\
+attached
+terminal.
+condition
+:
+>
+spawned_process and container
+and shell_procs and proc.tty != 0
+and container_entrypoint
+and not user_expected_terminal_shell_in_container_conditions
+output
+:
+>
+A shell was spawned in a container with an attached terminal (user=%user.name \
+user_loginuid=%user.loginuid %container.info
+shell=%proc.name parent=%proc.pname cmdline=%proc.cmdline pid=%proc.pid \
+terminal=%proc.tty container_id=%container.id image=%container.image.repository)
+priority
+:
+NOTICE
+tags
+:
+[
+container
+,
+shell
+,
+mitre_execution
+]
+Defines a macro, a condition reusable across multiple rules referenced by name.
+Specifies the name of the rule.
+The aggregated condition composed of multiple macros.
+The alerting message should the event happen. The message may use built-in fields to reference runtime value.
+Indicates how serious a violation of the rule it is.
+Categorizes the rule set into groups of related rules for ease of management.
+Sometimes you may want to change an existing rule. The next section will explain how to best approach overriding default rules.
+Overriding Existing Rules
+Instead of modifying the rule definition directly in
+/etc/falco/falco_rules.yaml
+, I’d suggest you redefine the rule in
+/etc/falco/falco_rules.local.yaml
+. That’ll help with falling back to the original rule definition in case you want to get rid of the modifications or if you make any mistakes in the process. The rule definition needs to be changed on all worker nodes of the cluster.
+The rule definition shown in
+Example 7-7
+overrides the rule named “Terminal shell in container” by changing the priority to
+ALERT
+and the output to a new format by incorporating
+built-in fields
+.
+Example 7-7.
+The modified rule that monitors shell activity to a container
+-
+rule
+:
+Terminal
+shell
+in
+container
+desc
+:
+A
+shell
+was
+used
+as
+the
+entrypoint/exec
+point
+into
+a
+container
+with
+an
+\
+attached
+terminal.
+condition
+:
+>
+spawned_process and container
+and shell_procs and proc.tty != 0
+and container_entrypoint
+and not user_expected_terminal_shell_in_container_conditions
+output
+:
+>
+Opened shell: %evt.time,%user.name,%container.name
+priority
+:
+ALERT
+tags
+:
+[
+container
+,
+shell
+,
+mitre_execution
+]
+Simplifies the log output rendered for a violation.
+Treats a violation of the rule with
+ALERT
+priority.
+After adding the rule to
+falco_rules.local.yaml
+, we need to let Falco pick up the changes. Restart the Falco service with the following command:
+$ sudo systemctl restart falco
+As a result, any attempt that shells into a container will be logged with a different output format and priority, as the following shows:
+$ sudo journalctl -fu falco
+...
+Jan 24 21:19:13 kube-worker-1 falco[100017]: 21:19:13.961970887: Alert Opened \
+shell: 21:19:13.961970887,<NA>,nginx
+In addition to overriding existing Falco rules, you can also define your own custom rules in
+/etc/falco/falco_rules.local.yaml
+. Writing custom rules is out of scope for this book, but you should find plenty of information on the topic in the Falco documentation.
+Ensuring Container Immutability
+Containers are mutable by default. After the container has been started, you can open a shell to it, install a patch for existing software, modify files, or make changes to its configuration. Mutable containers allow attackers to gain access to the container by downloading or installing malicious software.
+To counteract the situation, make sure that the container is operated in an immutable state. That means preventing write operations to the container’s filesystem or even disallowing shell access to the container. If you need to make any substantial changes to the container, such as updating a dependency or incorporating a new application feature, you should release a new tag of the container image instead of manually modifying the container itself. You’d then assign the new tag of the container image to the Pod without having to modify the internals directly.
+Scenario: An Attacker Installs Malicious Software
+Figure 7-3
+illustrates a scenario where an attacker gains access to a container using stolen credentials. The attacker downloads and installs malicious software given that the container allows write operations to the root filesystem. The malicious software keeps monitoring activities in the container; for example, it could parse the application logs for sensitive information. It may then send the information to a server outside of the Kubernetes cluster. Consequently, the data is used as a means to log into other parts of the system.
+Figure 7-3.
+An attacker shells into a container and installs malicious software
+In the next section, you’ll learn how to prevent the situation from happening by using a distroless container image, injecting configuration data with the help of a ConfigMap or Secret, and by configuring a read-only container filesystem. Those settings as a whole will make the container truly immutable.
+Using a Distroless Container Image
+Distroless container images have become increasing popular in the world of containers. They only bundle your application and its runtime dependencies, while at the same time removing as much of the operating system as possible, e.g., shells, package managers, and libraries. Distroless container images are not just smaller in size; they are also more secure. An attacker cannot shell into the container, and therefore the filesystem cannot be misused to install malicious software. Using distroless container images is the first line of defense in creating an immutable container. We already covered distroless container images in
+“Picking a Base Image Small in Size”
+. Refer to that section for more information.
+Configuring a Container with a ConfigMap or Secret
+It is best practice to use the same container image for different deployment environments, even though their runtime configurations may be different. Any environment-specific configuration, such as credentials, and connection URLs to other parts of the system, should be externalized. In Kubernetes, you can inject configuration data into a container with the help of a ConfigMap or Secret as environment variables or files mounted via Volumes.
+Figure 7-4
+shows the reuse of the same container image to configure a Pod in a development and production cluster. Configuration data specific to the environment is provided by a ConfigMap.
+Figure 7-4.
+Using the same container image across multiple environments
+Avoiding the creation of environment-specific container images simplifies the creation process, reduces the risk of introducing accidental security risks, and makes testing of the functionality easier. Injecting runtime values does not require changing the container after it has been started and therefore is key to making it immutable.
+When using Secrets as environment variables in a container, make sure to avoid accidentally logging the values to standard output, e.g., as a plain-text value when writing a log message. Anyone with access to the container logs would be able to parse them for Secrets values. As a spot check, identify the places in your application code where you use a Secret and assess their risk for exposure.
+To brush up on creating, configuring, and consuming ConfigMaps and Secrets, revisit the
+Kubernetes documentation
+.
+Configuring a Read-Only Container Root Filesystem
+Another aspect of container immutability is to prevent write access to the container’s filesystem. You can configure this runtime behavior by assigning the value
+true
+to the attribute
+spec.containers[].securityContext.readOnlyRootFilesystem
+.
+There are some applications that still require write access to fulfill their functional requirements. For example,
+nginx
+needs to write to the directories
+/var/run
+,
+/var/cache/nginx
+, and
+/usr/local/nginx
+. In combination with setting
+readOnlyRootFilesystem
+to
+true
+, you can declare Volumes that make those directories writable.
+Example 7-8
+shows the YAML manifest of an immutable container running nginx.
+Example 7-8.
+A container disallowing write access to the root filesystem
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+nginx
+spec
+:
+containers
+:
+-
+name
+:
+nginx
+image
+:
+nginx:1.21.6
+securityContext
+:
+readOnlyRootFilesystem
+:
+true
+volumeMounts
+:
+-
+name
+:
+nginx-run
+mountPath
+:
+/var/run
+-
+name
+:
+nginx-cache
+mountPath
+:
+/var/cache/nginx
+-
+name
+:
+nginx-data
+mountPath
+:
+/usr/local/nginx
+volumes
+:
+-
+name
+:
+nginx-run
+emptyDir
+:
+{}
+-
+name
+:
+nginx-data
+emptyDir
+:
+{}
+-
+name
+:
+nginx-cache
+emptyDir
+:
+{}
+Identify the filesystem read/write requirements of your application before creating a Pod. Configure write mountpaths with the help of Volumes. Any other filesystem path should become read-only.
+Using Audit Logs to Monitor Access
+It’s imperative for a Kubernetes administrator to have a record of events that have occurred in the cluster. Those records can help detect an intrusion in real-time, or they can be used to track down configuration changes for troubleshooting purposes.
+Audit logs
+provide a chronological view of events received by the API server.
+Scenario: An Administrator Can Monitor Malicious Events in Real Time
+Figure 7-5
+shows the benefits of monitoring Kubernetes API events. In this scenario, the attacker tries to make calls to the API server. Events of interest have been captured by the audit log mechanism. The administrator can view those events at any time, identify intrusion attempts, and take countermeasure.
+Figure 7-5.
+An attacker monitored by observing audit logs
+We only reviewed one of the use cases here, the one that applies to security concerns. The ability to trace company-internal API requests should not be underestimated. By reviewing audit logs, the administrator can provide guidance to application developers trying to create Kubernetes objects, or reconstruct configuration changes that may have led to faulty cluster behavior.
+Understanding Audit Logs
+Kubernetes can store records for events triggered by end users for any requests made to the API server or for events emitted by the control plane itself. Entries in the audit log exist in
+JSON Lines
+format and can consist of, but aren’t limited to, the following information:
+What event occurred?
+Who triggered the event?
+When was it triggered?
+Which Kubernetes component handled the request?
+The type of event and the corresponding request data to be recorded are defined by an
+audit policy
+. The audit policy is a YAML manifest specifying those rules and has to be provided  to the API server process.
+The
+audit backend
+is responsible for storing the recorded audit events, as defined by the audit policy. You have two configurable options for a backend:
+A log backend, which write the events to a file.
+A webhook backend, which sends the events to an external service via
+HTTP(S)—for
+example, for the purpose of integrating a centralized logging and monitoring system. Such a backend can help with debugging runtime issues like a crashed application.
+Figure 7-6
+puts together all the pieces necessary to configure audit logging. The following sections will explain the details of configuring them.
+Figure 7-6.
+The high-level audit log architecture
+Let’s have a deeper look at the audit policy file and its configuration options.
+Creating the Audit Policy File
+The audit policy file is effectively a YAML manifest for a
+Policy
+resource. Any event received by the API server is matched against the rules defined in the policy file in the order of definition. The event is logged with the declared audit level if a matching rule can be found.
+Table 7-1
+lists all available audit levels.
+Table 7-1.
+Audit levels
+Level
+Effect
+None
+Do not log events matching this rule.
+Metadata
+Only log request metadata for the event.
+Request
+Log metadata and the request body for the event.
+RequestResponse
+Log metadata, request, and response body for the event.
+Example 7-9
+shows an exemplary audit policy. The rules are specified as an array of items with the attribute named
+rules
+. Each rule declares a level, the resource type and API group it applies to, and an optional namespace.
+Example 7-9.
+Contents of an audit policy file
+apiVersion
+:
+audit.k8s.io/v1
+kind
+:
+Policy
+omitStages
+:
+-
+"
+RequestReceived
+"
+rules
+:
+-
+level
+:
+RequestResponse
+resources
+:
+-
+group
+:
+"
+"
+resources
+:
+[
+"
+pods
+"
+]
+-
+level
+:
+Metadata
+resources
+:
+-
+group
+:
+"
+"
+resources
+:
+[
+"
+pods/log
+"
+,
+"
+pods/status
+"
+]
+Prevents generating logs for all requests in the
+RequestReceived
+stage
+Logs Pod changes at
+RequestResponse
+level
+Logs specialized Pod events, e.g., log and status requests, at the
+Metadata
+level
+The previous audit policy isn’t very extensive but should give you an impression of its format. Refer to the
+Kubernetes documentation
+for additional examples and more details.
+Once the audit policy file has been created, it can be consumed by the API server process. Add the flag
+--audit-policy-file
+to the API server process in the file
+/etc/kubernetes/manifests/kube-apiserver.yaml
+. The value assigned to the parameter is the fully qualified path to the audit policy file.
+Next up, we’ll walk through the settings needed to configure audit logging for the API server for a file-based log backend and a webhook backend.
+Configuring a Log Backend
+To set up a file-based log backend, you will need to add three pieces of configuration to the file
+/etc/kubernetes/manifests/kube-apiserver.yaml
+. The following list summarizes the configuration:
+Provide two flags to the API server process: the flag
+--audit-policy-file
+points to the audit policy file; the flag
+--audit-log-path
+points to the log output file.
+Add a Volume mountpath for the audit log policy file and the log output
+directory.
+Add a Volume definition to the host path for the audit log policy file and the log output directory.
+Example 7-10
+shows the modified content of the API server configuration file.
+Example 7-10.
+Configuring the audit policy file and audit log file
+...
+spec
+:
+containers
+:
+-
+command
+:
+-
+kube-apiserver
+-
+--audit-policy-file=/etc/kubernetes/audit-policy.yaml
+-
+--audit-log-path=/var/log/kubernetes/audit/audit.log
+...
+volumeMounts
+:
+-
+mountPath
+:
+/etc/kubernetes/audit-policy.yaml
+name
+:
+audit
+readOnly
+:
+true
+-
+mountPath
+:
+/var/log/kubernetes/audit/
+name
+:
+audit-log
+readOnly
+:
+false
+...
+volumes
+:
+-
+name
+:
+audit
+hostPath
+:
+path
+:
+/etc/kubernetes/audit-policy.yaml
+type
+:
+File
+-
+name
+:
+audit-log
+hostPath
+:
+path
+:
+/var/log/kubernetes/audit/
+type
+:
+DirectoryOrCreate
+Provides the location of the policy file and log file to the API server process.
+Mounts the policy file and the audit log directory to the given paths.
+Defines the Volumes for the policy file and the audit log directory.
+The runtime behavior of the log backend can be further customized by passing additional flags to the API server process. For example, you can specify the maximum number of days to retain old audit log files by providing the flag
+--audit-log-maxage
+. Refer to the
+Kubernetes documentation
+to have a look at the complete list of flags.
+It’s time to produce some log entries. The following
+kubectl
+command sends a request to the API server for creating a Pod named
+nginx
+:
+$ kubectl run nginx --image=nginx:1.21.6
+pod/nginx created
+In the previous step, we configured the audit log file at
+/var/log/kubernetes/audit/audit.log
+. Depending on the rules in the audit policy, the number of entries may be overwhelming, which makes finding a specific event hard. A simple way to filter configured events is by searching for the value
+audit.k8s.io/v1
+assigned to the
+apiVersion
+attribute. The following command finds relevant log entries, one for the
+RequestResponse
+level, and another for the
+Metadata
+level:
+$ sudo grep 'audit.k8s.io/v1' /var/log/kubernetes/audit/audit.log
+...
+{"kind":"Event","apiVersion":"audit.k8s.io/v1","level":"RequestResponse", \
+"auditID":"285f4b99-951e-405b-b5de-6b66295074f4","stage":"ResponseComplete", \
+"requestURI":"/api/v1/namespaces/default/pods/nginx","verb":"get", \
+"user":{"username":"system:node:node01","groups":["system:nodes", \
+"system:authenticated"]},"sourceIPs":["172.28.116.6"],"userAgent": \
+"kubelet/v1.26.0 (linux/amd64) kubernetes/b46a3f8","objectRef": \
+{"resource":"pods","namespace":"default","name":"nginx","apiVersion":"v1"}, \
+"responseStatus":{"metadata":{},"code":200},"responseObject":{"kind":"Pod", \
+"apiVersion":"v1","metadata":{"name":"nginx","namespace":"default", \
+...
+{"kind":"Event","apiVersion":"audit.k8s.io/v1","level":"Metadata","auditID": \
+"5c8e5ecc-0ce0-49e0-8ab2-368284f2f785","stage":"ResponseComplete", \
+"requestURI":"/api/v1/namespaces/default/pods/nginx/status","verb":"patch", \
+"user":{"username":"system:node:node01","groups":["system:nodes", \
+"system:authenticated"]},"sourceIPs":["172.28.116.6"],"userAgent": \
+"kubelet/v1.26.0 (linux/amd64) kubernetes/b46a3f8","objectRef": \
+{"resource":"pods","namespace":"default","name":"nginx","apiVersion":"v1", \
+"subresource":"status"},"responseStatus":{"metadata":{},"code":200}, \
+...
+Configuring a Webhook Backend
+Configuring a webhook backend looks different from configuring a log backend. We need to tell the API server to send an HTTP(S) request to an external service instead of the file. The configuration to the external service, the webhook, and the credentials needed to authenticate are defined in a
+kubeconfig file
+, similarly to what we’ve done in
+“Configuring the ImagePolicyWebhook Admission Controller Plugin”
+.
+Add the flag
+--audit-webhook-config-file
+to the API server process in the file
+/etc/kubernetes/manifests/kube-apiserver.yaml
+, and point it to the location of the kubeconfig file. The flag
+--audit-webhook-initial-backoff
+defines the time to wait after the initial request to the external service before retrying. You will still have to assign the flag
+--audit-policy-file
+to point to the audit policy file.
+Summary
+Monitoring and logging events in a Kubernetes cluster is an important duty of every administrator. We used Falco to identify and filter security-related events. You learned about the purpose and syntax of the different configuration files and how to find relevant alerts in the logs.
+In addition to employing behavior analytics tools, you will want to set up audit logging for requests reaching the API server. Audit logging records configured events to a backend, either to a file on the control plane node or to an external service via an HTTP(S) call. We worked through the process of enabling audit logging for the API server process.
+A sensible step toward more secure containers is to make them immutable. An immutable container only supports a read-only filesystem, so that a potential attacker cannot install malicious software. Mount a Volume if the application running inside of the container needs to write data. Use a distroless container image to lock out attackers from being able to shell into the container.
+Exam Essentials
+Practice how to configure and operate Falco.
+Falco is definitely going to come up as a topic during the exam. You will need to understand how to read and modify a rule in a configuration file. I would suggest you browse through the syntax and options in more detail in case you need to write one yourself. The main entry point for running Falco is the command line tool. It’s fair to assume that it will have been preinstalled in the exam environment.
+Know how to identify immutable containers.
+Immutable containers are a central topic to this exam domain. Understand how to set the
+spec.containers[].securityContext.readOnlyRootFilesystem
+attribute for a Pod and how to mount a Volume to a specific path in case a write operation is required by the container process.
+Deeply understand audit log configuration options.
+Setting up audit logging consists of two steps. For one, you need to understand the syntax and structure of an audit policy file. The other aspect is how to configure the API server to consume the audit policy file, provide a reference to a backend, and mount the relevant filesystem Volumes. Make sure to practice all of those aspects hands-on.
+Sample Exercises
+Navigate to the directory
+app-a/ch07/falco
+of the checked-out GitHub repository
+bmuschko/cks-study-guide
+. Start up the VMs running the cluster using the command
+vagrant up
+. The cluster consists of a single control plane node named
+kube-control-plane
+and one worker node named
+kube-worker-1
+. Once done, shut down the cluster using
+vagrant destroy -f
+. Falco is already running as a systemd service.
+Inspect the process running in the existing Pod named
+malicious
+. Have a look at the Falco logs and see if a rule created a log for the process.
+Reconfigure the existing rule that creates a log for the event by changing the output to
+<timestamp>,<username>,<container-id>
+. Find the changed log entry in the Falco logs.
+Reconfigure Falco to write logs to the file at
+/var/logs/falco.log
+. Disable the standard output channel. Ensure that Falco appends new messages to the log file.
+Prerequisite:
+This exercise requires the installation of the tools
+Vagrant
+and
+VirtualBox
+.
+Navigate to the directory
+app-a/ch07/immutable-container
+of the checked-out GitHub repository
+bmuschko/cks-study-guide
+. Execute the command
+kubectl apply -f setup.yaml
+.
+Inspect the Pod created by the YAML manifest in the
+default
+namespace. Make relevant changes to the Pod so that its container can be considered immutable.
+Navigate to the directory
+app-a/ch07/audit-log
+of the checked-out GitHub repository
+bmuschko/cks-study-guide
+. Start up the VMs running the cluster using the command
+vagrant up
+. The cluster consists of a single control plane node named
+kube-control-plane
+and one worker node named
+kube-worker-1
+. Once done, shut down the cluster using
+vagrant destroy -f
+.
+Edit the existing audit policy file at
+/etc/kubernetes/audit/rules/audit-policy.yaml
+. Add a rule that logs events for ConfigMaps and Secrets at the
+Metadata
+level. Add another rule that logs events for Services at the
+Request
+level.
+Configure the API server to consume the audit policy file. Logs should be written to the file
+/var/log/kubernetes/audit/logs/apiserver.log
+. Define a maximum number of five days to retain audit log files.
+Ensure that the log file has been created and contains at least one entry that matches the events configured.
+Prerequisite:
+This exercise requires the installation of the tools
+Vagrant
+and
+VirtualBox
+.
+
+Appendix.
+Answers to Review Questions
+Chapter 2, “Cluster Setup”
+Create a file with the name
+deny-egress-external.yaml
+for defining the network policy. The network policy needs to set the Pod selector to
+app=backend
+and define the
+Egress
+policy type. Make sure to allow the port 53 for the protocols UDP and TCP. The namespace selector for the egress policy needs to use
+{}
+to select all namespaces:
+apiVersion
+:
+networking.k8s.io/v1
+kind
+:
+NetworkPolicy
+metadata
+:
+name
+:
+deny-egress-external
+spec
+:
+podSelector
+:
+matchLabels
+:
+app
+:
+backend
+policyTypes
+:
+-
+Egress
+egress
+:
+-
+to
+:
+-
+namespaceSelector
+:
+{}
+ports
+:
+-
+port
+:
+53
+protocol
+:
+UDP
+-
+port
+:
+53
+protocol
+:
+TCP
+Run the
+apply
+command to instantiate the network policy object from the YAML file:
+$ kubectl apply -f deny-egress-external.yaml
+A Pod that does not match the label selection of the network policy can make a call to a URL outside of the cluster. In this case, the label assignment is
+app=frontend
+:
+$ kubectl run web --image=busybox:1.36.0 -l app=frontend --port=80 -it
+\
+--rm --restart=Never -- wget http://google.com --timeout=5 --tries=1
+Connecting to google.com (142.250.69.238:80)
+Connecting to www.google.com (142.250.72.4:80)
+saving to /'index.html'
+index.html           100% |
+**| 13987 \
+0:00:00 ETA
+/'index.html' saved
+pod "web" deleted
+A Pod that does match the label selection of the network policy cannot make a call to a URL outside of the cluster. In this case, the label assignment is
+app=backend
+:
+$ kubectl run web --image=busybox:1.36.0 -l app=backend --port=80 -it
+\
+--rm --restart=Never -- wget http://google.com --timeout=5 --tries=1
+wget: download timed out
+pod "web" deleted
+pod default/web terminated (Error)
+First, see if the Dashboard is already installed. You can check the namespace the Dashboard usually creates:
+$ kubectl get ns kubernetes-dashboard
+NAME                   STATUS   AGE
+kubernetes-dashboard   Active   109s
+If the namespace does not exist, you can assume that the Dashboard has not been installed yet. Install it with the following command:
+$ kubectl apply -f https://raw.githubusercontent.com/kubernetes/
+\
+dashboard/v2.6.0/aio/deploy/recommended.yaml
+Create the ServiceAccount, ClusterRole, and ClusterRoleBinding. Make sure that the ClusterRole only allows listing Deployment objects. The following YAML manifest has been saved in the file
+dashboard-observer-user.yaml
+:
+apiVersion
+:
+v1
+kind
+:
+ServiceAccount
+metadata
+:
+name
+:
+observer-user
+namespace
+:
+kubernetes-dashboard
+---
+apiVersion
+:
+rbac.authorization.k8s.io/v1
+kind
+:
+ClusterRole
+metadata
+:
+annotations
+:
+rbac.authorization.kubernetes.io/autoupdate
+:
+"true"
+name
+:
+cluster-observer
+rules
+:
+-
+apiGroups
+:
+-
+'apps'
+resources
+:
+-
+'deployments'
+verbs
+:
+-
+list
+---
+apiVersion
+:
+rbac.authorization.k8s.io/v1
+kind
+:
+ClusterRoleBinding
+metadata
+:
+name
+:
+observer-user
+roleRef
+:
+apiGroup
+:
+rbac.authorization.k8s.io
+kind
+:
+ClusterRole
+name
+:
+cluster-observer
+subjects
+:
+-
+kind
+:
+ServiceAccount
+name
+:
+observer-user
+namespace
+:
+kubernetes-dashboard
+Create the objects with the following command:
+$ kubectl apply -f dashboard-observer-user.yaml
+Run the following command to create a token for the ServiceAccount. The option
+--duration 0s
+ensures that the token will never expire. Copy the token that was rendered in the console output of the command:
+$ kubectl create token observer-user -n kubernetes-dashboard
+\
+--duration 0s
+eyJhbGciOiJSUzI1NiIsImtpZCI6Ik5lNFMxZ1...
+Run the proxy command and open the link
+http://localhost:8001/api/v1/namespaces/kubernetes-dashboard/services/https:kubernetes-dashboard:/proxy
+in a browser:
+$ kubectl proxy
+Select the “Token” authentication method and paste the token you copied before. Sign into the Dashboard. You should see that only Deployment objects are listable (see
+Figure A-1
+).
+All other objects will say “There is nothing to display here.”
+Figure A-2
+renders the list of Pods.
+Figure A-1.
+The Dashboard view of Deployments is allowed
+Figure A-2.
+The Dashboard view of Pods is not permitted
+Download the API server binary with the following command:
+$ curl -LO "https://dl.k8s.io/v1.26.1/bin/linux/amd64/kube-apiserver"
+Next, download the SHA256 file for the same binary, but a different version. The following command downloads the file for version 1.23.1:
+$ curl -LO "https://dl.k8s.io/v1.23.1/bin/linux/amd64/
+\
+kube-apiserver.sha256"
+Comparing the binary file with the checksum file results in a failure, as the versions do not match:
+$ echo "$(cat kube-apiserver.sha256)  kube-apiserver" | shasum -a 256
+\
+--check
+kube-apiserver: FAILED
+shasum: WARNING: 1 computed checksum did NOT match
+Chapter 3, “Cluster Hardening”
+Create a private key using the
+openssl
+executable. Provide an expressive file name, such as
+jill.key
+. The
+-subj
+option provides the username (CN) and the group (O). The following command uses the username
+jill
+and the group named
+observer
+:
+$ openssl genrsa -out jill.key 2048
+$ openssl req -new -key jill.key -out jill.csr -subj
+\
+"/CN=jill/O=observer"
+Retrieve the base64-encoded value of the CSR file content with the following command. You will need it when creating a the CertificateSigningRequest object in the next step:
+$ cat jill.csr | base64 | tr -d "\n"
+LS0tLS1CRUdJTiBDRVJUSUZJQ0FURSBSRVFVRVNULS0tL...
+The following script creates a CertificateSigningRequest object:
+$ cat <<EOF | kubectl apply -f -
+apiVersion: certificates.k8s.io/v1
+kind: CertificateSigningRequest
+metadata:
+  name: jill
+spec:
+  request: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURSBSRVFVRVNULS0tL...
+  signerName: kubernetes.io/kube-apiserver-client
+  expirationSeconds: 86400
+  usages:
+  - client auth
+EOF
+Use the
+certificate approve
+command to approve the signing request and export the issued certificate:
+$ kubectl certificate approve jill
+$ kubectl get csr jill -o jsonpath=
+{.status.certificate}
+| base64
+\
+-d > jill.crt
+Add the user to the kubeconfig file and add the context for the user. The cluster name used here is
+minikube
+. It might be different for your Kubernetes
+environment:
+$ kubectl config set-credentials jill --client-key=jill.key
+\
+--client-certificate=jill.crt --embed-certs=true
+$ kubectl config set-context jill --cluster=minikube --user=jill
+Create the Role and RoleBinding. The following imperative commands assign the verbs
+get
+,
+list
+, and
+watch
+for Pods, ConfigMaps, and Secrets to the subject named
+observer
+of type
+group
+. The user
+jill
+is part of the group:
+$ kubectl create role observer --verb=create --verb=get --verb=list
+\
+--verb=watch --resource=pods --resource=configmaps --resource=secrets
+$ kubectl create rolebinding observer-binding --role=observer
+\
+--group=observer
+Switch to the user context:
+$ kubectl config use-context jill
+We’ll pick one permitted operation, listing ConfigMap objects. The user is authorized to map the call:
+$ kubectl get configmaps
+NAME               DATA   AGE
+kube-root-ca.crt   1      16m
+Listing nodes won’t be authorized. The user does not have the appropriate
+permissions:
+$ kubectl get nodes
+Error from server (Forbidden): nodes is forbidden: User "jill" cannot \
+list resource "nodes" in API group "" at the cluster scope
+Switch back to the admin context:
+$ kubectl config use-context minikube
+Create the namespace
+t23
+:
+$ kubectl create namespace t23
+Create the service account
+api-call
+in the namespace:
+$ kubectl create serviceaccount api-call -n t23
+Define a YAML manifest file with the name
+pod.yaml
+. The contents of the file define a Pod that makes an HTTPS GET call to the API server to retrieve the list of Services in the
+default
+namespace:
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+service-list
+namespace
+:
+t23
+spec
+:
+serviceAccountName
+:
+api-call
+containers
+:
+-
+name
+:
+service-list
+image
+:
+alpine/curl:3.14
+command
+:
+[
+'sh'
+,
+'-c'
+,
+'while
+true;
+do
+curl
+-s
+-k
+-m
+5
+\
+-H
+"Authorization:
+Bearer
+$(cat
+/var/run/secrets/\
+kubernetes.io/serviceaccount/token)"
+https://kubernetes.\
+default.svc.cluster.local/api/v1/namespaces/default/\
+services;
+sleep
+10;
+done'
+]
+Create the Pod with the following command:
+$ kubectl apply -f pod.yaml
+Check the logs of the Pod. The API call is not authorized, as shown in the following log output:
+$ kubectl logs service-list -n t23
+{
+  "kind": "Status",
+  "apiVersion": "v1",
+  "metadata": {},
+  "status": "Failure",
+  "message": "services is forbidden: User \"system:serviceaccount:t23 \
+              :api-call\" cannot list resource \"services\" in API \
+              group \"\" in the namespace \"default\"",
+  "reason": "Forbidden",
+  "details": {
+    "kind": "services"
+  },
+  "code": 403
+}
+Create the YAML manifest in the file
+clusterrole.yaml
+, as shown in the
+following:
+apiVersion
+:
+rbac.authorization.k8s.io/v1
+kind
+:
+ClusterRole
+metadata
+:
+name
+:
+list-services-clusterrole
+rules
+:
+-
+apiGroups
+:
+[
+""
+]
+resources
+:
+[
+"services"
+]
+verbs
+:
+[
+"list"
+]
+Reference the ClusterRole in a RoleBinding defined in the file
+rolebinding.yaml
+. The subject should list the service account
+api-call
+in the namespace
+t23
+:
+apiVersion
+:
+rbac.authorization.k8s.io/v1
+kind
+:
+RoleBinding
+metadata
+:
+name
+:
+serviceaccount-service-rolebinding
+subjects
+:
+-
+kind
+:
+ServiceAccount
+name
+:
+api-call
+namespace
+:
+t23
+roleRef
+:
+kind
+:
+ClusterRole
+name
+:
+list-services-clusterrole
+apiGroup
+:
+rbac.authorization.k8s.io
+Create both objects from the YAML manifests:
+$ kubectl apply -f clusterrole.yaml
+$ kubectl apply -f rolebinding.yaml
+The API call running inside of the container should now be authorized and be allowed to list the Service objects in the
+default
+namespace. As shown in the following output, the namespace currently hosts at least one Service object, the
+kubernetes.default
+Service:
+$ kubectl logs service-list -n t23
+{
+  "kind": "ServiceList",
+  "apiVersion": "v1",
+  "metadata": {
+    "resourceVersion": "1108"
+  },
+  "items": [
+     {
+       "metadata": {
+         "name": "kubernetes",
+         "namespace": "default",
+         "uid": "30eb5425-8f60-4bb7-8331-f91fe0999e20",
+         "resourceVersion": "199",
+         "creationTimestamp": "2022-09-08T18:06:52Z",
+         "labels": {
+           "component": "apiserver",
+           "provider": "kubernetes"
+       },
+       ...
+     }
+  ]
+}
+Create the token for the service account using the following command:
+$ kubectl create token api-call -n t23
+eyJhbGciOiJSUzI1NiIsImtpZCI6IjBtQkJzVWlsQjl...
+Change the existing Pod definition by deleting and recreating the live object. Add the attribute that disables automounting the token, as shown in the following:
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+service-list
+namespace
+:
+t23
+spec
+:
+serviceAccountName
+:
+api-call
+automountServiceAccountToken
+:
+false
+containers
+:
+-
+name
+:
+service-list
+image
+:
+alpine/curl:3.14
+command
+:
+[
+'sh'
+,
+'-c'
+,
+'while
+true;
+do
+curl
+-s
+-k
+-m
+5
+\
+-H
+"Authorization:
+Bearer
+eyJhbGciOiJSUzI1NiIsImtpZCI6Ij
+\
+BtQkJzVWlsQjl"
+https://kubernetes.default.svc.cluster.
+\
+local/api/v1/namespaces/default/services;
+sleep
+10;
+\
+done'
+]
+The API server will allow the HTTPS request performed with the token of the service account to be authenticated and authorized:
+$ kubectl logs service-list -n t23
+{
+  "kind": "ServiceList",
+  "apiVersion": "v1",
+  "metadata": {
+    "resourceVersion": "81194"
+  },
+  "items": [
+     {
+       "metadata": {
+         "name": "kubernetes",
+         "namespace": "default",
+         "uid": "30eb5425-8f60-4bb7-8331-f91fe0999e20",
+         "resourceVersion": "199",
+         "creationTimestamp": "2022-09-08T18:06:52Z",
+         "labels": {
+           "component": "apiserver",
+           "provider": "kubernetes"
+       },
+       ...
+     }
+  ]
+}
+The solution to this sample exercise requires a lot of manual steps. The following commands do not render their output.
+Open an interactive shell to the control plane node using Vagrant:
+$ vagrant ssh kube-control-plane
+Upgrade
+kubeadm
+to version 1.26.1 and apply it:
+$ sudo apt-mark unhold kubeadm && sudo apt-get update && sudo apt-get
+\
+install -y kubeadm=1.26.1-00 && sudo apt-mark hold kubeadm
+$ sudo kubeadm upgrade apply v1.26.1
+Drain the node, upgrade the kubelet and
+kubectl
+, restart the kubelet, and uncordon the node:
+$ kubectl drain kube-control-plane --ignore-daemonsets
+$ sudo apt-get update && sudo apt-get install -y
+\
+--allow-change-held-packages kubelet=1.26.1-00 kubectl=1.26.1-00
+$ sudo systemctl daemon-reload
+$ sudo systemctl restart kubelet
+$ kubectl uncordon kube-control-plane
+The version of the node should now say v1.26.1. Exit the node:
+$ kubectl get nodes
+$ exit
+Open an interactive shell to the first worker node using Vagrant. Repeat all of the following steps for the worker node:
+$ vagrant ssh kube-worker-1
+Upgrade
+kubeadm
+to version 1.26.1 and apply it to the node:
+$ sudo apt-get update && sudo apt-get install -y
+\
+--allow-change-held-packages kubeadm=1.26.1-00
+$ sudo kubeadm upgrade node
+Drain the node, upgrade the kubelet and
+kubectl
+, restart the kubelet, and uncordon the node:
+$ kubectl drain kube-worker-1 --ignore-daemonsets
+$ sudo apt-get update && sudo apt-get install -y
+\
+--allow-change-held-packages kubelet=1.26.1-00 kubectl=1.26.1-00
+$ sudo systemctl daemon-reload
+$ sudo systemctl restart kubelet
+$ kubectl uncordon kube-worker-1
+The version of the node should now say v1.26.1. Exit out of the node:
+$ kubectl get nodes
+$ exit
+Chapter 4, “System Hardening”
+Shell into the worker node with the following command:
+$ vagrant ssh kube-worker-1
+Identify the process exposing port 21. One way to do this is by using the
+lsof
+command. The command that exposes the port is
+vsftpd
+:
+$ sudo lsof -i :21
+COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
+vsftpd  10178 root    3u  IPv6  56850      0t0  TCP *:ftp (LISTEN)
+Alternatively, you could also use the
+ss
+command, as shown in the following:
+$ sudo ss -at -pn '( dport = :21 or sport = :21 )'
+State   Recv-Q   Send-Q   Local Address:Port \
+   Peer Address:Port   Process
+LISTEN  0   32   *:21 \
+   *:*   users:(("vsftpd",pid=10178,fd=3))
+The process
+vsftpd
+has been started as a service:
+$ sudo systemctl status vsftpd
+● vsftpd.service - vsftpd FTP server
+     Loaded: loaded (/lib/systemd/system/vsftpd.service; enabled; \
+             vendor preset: enabled)
+     Active: active (running) since Thu 2022-10-06 14:39:12 UTC; \
+             11min ago
+   Main PID: 10178 (vsftpd)
+      Tasks: 1 (limit: 1131)
+     Memory: 604.0K
+     CGroup: /system.slice/vsftpd.service
+             └─10178 /usr/sbin/vsftpd /etc/vsftpd.conf
+
+Oct 06 14:39:12 kube-worker-1 systemd[1]: Starting vsftpd FTP server...
+Oct 06 14:39:12 kube-worker-1 systemd[1]: Started vsftpd FTP server.
+Shut down the service and deinstall the package:
+$ sudo systemctl stop vsftpd
+$ sudo systemctl disable vsftpd
+$ sudo apt purge --auto-remove -y vsftpd
+Checking on the port, you will see that it is not listed anymore:
+$ sudo lsof -i :21
+Exit out of the node:
+$ exit
+Shell into the worker node with the following command:
+$ vagrant ssh kube-worker-1
+Create the AppArmor profile at
+/etc/apparmor.d/network-deny
+using the command
+sudo vim /etc/apparmor.d/network-deny
+. The contents of the file should look as follows:
+#include <tunables/global>
+
+profile network-deny flags=(attach_disconnected) {
+  #include <abstractions/base>
+
+  network,
+}
+Enforce the AppArmor profile by running the following command:
+$ sudo apparmor_parser /etc/apparmor.d/network-deny
+You cannot modify the existing Pod object in order to add the annotation for AppArmor. You will need to delete the object first. Write the definition of the Pod to a file:
+$ kubectl get pod -o yaml > pod.yaml
+$ kubectl delete pod network-call
+Edit the
+pod.yaml
+file to add the AppArmor annotation. For the relevant annotation, use the name of the container
+network-call
+as part of the key suffix and
+localhost/network-deny
+as the value. The suffix
+network-deny
+refers to the name of the AppArmor profile. The final content could look as follows after a little bit of cleanup:
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+network-call
+annotations
+:
+container.apparmor.security.beta.kubernetes.io/network-call
+:
+\
+localhost/network-deny
+spec
+:
+containers
+:
+-
+name
+:
+network-call
+image
+:
+alpine/curl:3.14
+command
+:
+[
+"sh"
+,
+"-c"
+,
+"while
+true;
+do
+ping
+-c
+1
+google.com;
+\
+sleep
+5;
+done"
+]
+Create the Pod from the manifest. After a couple of seconds, the Pod should transition into the “Running” status:
+$ kubectl create -f pod.yaml
+$ kubectl get pod network-call
+NAME           READY   STATUS    RESTARTS   AGE
+network-call   1/1     Running   0          27s
+AppArmor prevents the Pod from making a network call. You can check the logs to verify:
+$ kubectl logs network-call
+...
+sh: ping: Permission denied
+sh: sleep: Permission denied
+Exit out of the node:
+$ exit
+Shell into the worker node with the following command:
+$ vagrant ssh kube-worker-1
+Create the target directory for the seccomp profiles:
+$ sudo mkdir -p /var/lib/kubelet/seccomp/profiles
+Add the file
+audit.json
+in the directory
+/var/lib/kubelet/seccomp/profiles
+with the following content:
+{
+"defaultAction"
+:
+"SCMP_ACT_LOG"
+}
+You cannot modify the existing Pod object in order to add the seccomp configuration via the security context. You will need to delete the object first. Write the definition of the Pod to a file:
+$ kubectl get pod -o yaml > pod.yaml
+$ kubectl delete pod network-call
+Edit the
+pod.yaml
+file. Point the seccomp profile to the definition. The final content could look as follows after a little bit of cleanup:
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+network-call
+spec
+:
+securityContext
+:
+seccompProfile
+:
+type
+:
+Localhost
+localhostProfile
+:
+profiles/audit.json
+containers
+:
+-
+name
+:
+network-call
+image
+:
+alpine/curl:3.14
+command
+:
+[
+"sh"
+,
+"-c"
+,
+"while
+true;
+do
+ping
+-c
+1
+google.com;
+\
+sleep
+5;
+done"
+]
+securityContext
+:
+allowPrivilegeEscalation
+:
+false
+Create the Pod from the manifest. After a couple of seconds, the Pod should transition into the “Running” status:
+$ kubectl create -f pod.yaml
+$ kubectl get pod network-call
+NAME           READY   STATUS    RESTARTS   AGE
+network-call   1/1     Running   0          27s
+You should be able to find log entries for syscalls, e.g., for the
+sleep
+command:
+$ sudo cat /var/log/syslog
+Oct  6 16:25:06 ubuntu-focal kernel: [ 2114.894122] audit: type=1326 \
+audit(1665073506.099:23761): auid=4294967295 uid=0 gid=0 \
+ses=4294967295 pid=19226 comm="sleep" exe="/bin/busybox" \
+sig=0 arch=c000003e syscall=231 compat=0 ip=0x7fc026adbf0b \
+code=0x7ffc0000
+Exit out of the node:
+$ exit
+Create the Pod definition in the file
+pod.yaml
+:
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+sysctl-pod
+spec
+:
+securityContext
+:
+sysctls
+:
+-
+name
+:
+net.core.somaxconn
+value
+:
+"1024"
+-
+name
+:
+debug.iotrace
+value
+:
+"1"
+containers
+:
+-
+name
+:
+nginx
+image
+:
+nginx:1.23.1
+Create the Pod and then check on the status. You will see that the status is “SysctlForbidden”:
+$ kubectl create -f pod.yaml
+$ kubectl get pods
+NAME         READY   STATUS            RESTARTS   AGE
+sysctl-pod   0/1     SysctlForbidden   0          4s
+The event log will tell you more about the reasoning:
+$ kubectl describe pod sysctl-pod
+...
+Events:
+  Type     Reason           Age    From    \
+             Message
+  ----     ------           ----   ----    \
+             -------
+  Warning  SysctlForbidden  2m48s  kubelet \
+             forbidden sysctl: "net.core.somaxconn" \
+             not allowlisted
+Chapter 5, “Minimize Microservice Vulnerabilities”
+Define the Pod with the security settings in the file
+busybox-security-context.yaml
+. You can find the content of the following YAML manifest:
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+busybox-security-context
+spec
+:
+securityContext
+:
+runAsUser
+:
+1000
+runAsGroup
+:
+3000
+fsGroup
+:
+2000
+volumes
+:
+-
+name
+:
+vol
+emptyDir
+:
+{}
+containers
+:
+-
+name
+:
+busybox
+image
+:
+busybox:1.28
+command
+:
+[
+"sh"
+,
+"-c"
+,
+"sleep
+1h"
+]
+volumeMounts
+:
+-
+name
+:
+vol
+mountPath
+:
+/data/test
+securityContext
+:
+allowPrivilegeEscalation
+:
+false
+Create the Pod with the following command:
+$ kubectl apply -f busybox-security-context.yaml
+$ kubectl get pod busybox-security-context
+NAME                       READY   STATUS    RESTARTS   AGE
+busybox-security-context   1/1     Running   0          54s
+Shell into the container and create the file. You will find that the file group is 2000, as defined by the security context:
+$ kubectl exec busybox-security-context -it -- /bin/sh
+/ $ cd /data/test
+/data/test $ touch hello.txt
+/data/test $ ls -l
+total 0
+-rw-r--r--    1 1000     2000             0 Nov 21 18:29 hello.txt
+/data/test $ exit
+Specify the namespace named
+audited
+in the file
+psa-namespace.yaml
+. Set the PSA label with
+baseline
+level and the
+warn
+mode:
+apiVersion
+:
+v1
+kind
+:
+Namespace
+metadata
+:
+name
+:
+audited
+labels
+:
+pod-security.kubernetes.io/warn
+:
+baseline
+Create the namespace from the YAML manifest:
+$ kubectl apply -f psa-namespace.yaml
+You can produce an error by using the following Pod configuration in the file
+psa-pod.yaml
+. The YAML manifest sets the attribute
+hostNetwork: true
+, which is not allowed for the
+baseline
+level
+:
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+busybox
+namespace
+:
+audited
+spec
+:
+hostNetwork
+:
+true
+containers
+:
+-
+name
+:
+busybox
+image
+:
+busybox:1.28
+command
+:
+[
+"sh"
+,
+"-c"
+,
+"sleep
+1h"
+]
+Creating the Pod renders a warning message. The Pod will have been created nevertheless. You can prevent the creation of the Pod by configuring the PSA with the
+restricted
+level:
+$ kubectl apply -f psa-pod.yaml
+Warning: would violate PodSecurity "baseline:latest": host namespaces \
+(hostNetwork=true)
+pod/busybox created
+$ kubectl get pod busybox -n audited
+NAME      READY   STATUS    RESTARTS   AGE
+busybox   1/1     Running   0          2m21s
+You can install Gatekeeper with the following command:
+$ kubectl apply -f https://raw.githubusercontent.com/open-policy-agent/
+\
+gatekeeper/master/deploy/gatekeeper.yaml
+The Gatekeeper library describes a ConstraintTemplate for defining
+replica limits
+. Inspect the YAML manifest described on the page. Apply the manifest with the following command:
+$ kubectl apply -f https://raw.githubusercontent.com/open-policy-agent/
+\
+gatekeeper-library/master/library/general/replicalimits/template.yaml
+Now, define the Constraint with the YAML manifest in the file named
+replica-limits-constraint.yaml
+:
+apiVersion
+:
+constraints.gatekeeper.sh/v1beta1
+kind
+:
+K8sReplicaLimits
+metadata
+:
+name
+:
+replica-limits
+spec
+:
+match
+:
+kinds
+:
+-
+apiGroups
+:
+[
+"apps"
+]
+kinds
+:
+[
+"Deployment"
+]
+parameters
+:
+ranges
+:
+-
+min_replicas
+:
+3
+max_replicas
+:
+10
+Create the Constraint with the following command:
+$ kubectl apply -f replica-limits-constraint.yaml
+You can see that a Deployment can only be created if the provided number of replicas falls within the range of the Constraint:
+$ kubectl create deployment nginx --image=nginx:1.23.2 --replicas=15
+error: failed to create deployment: admission webhook \
+"validation.gatekeeper.sh" denied the request: [replica-limits] \
+The provided number of replicas is not allowed for deployment: nginx. \
+Allowed ranges: {"ranges": [{"max_replicas": 10, "min_replicas": 3}]}
+$ kubectl create deployment nginx --image=nginx:1.23.2 --replicas=7
+deployment.apps/nginx created
+Configure encryption for etcd, as described in
+“Encrypting etcd Data”
+. Next, create a new Secret with the following imperative command:
+$ kubectl create secret generic db-credentials
+\
+--from-literal=api-key=YZvkiWUkycvspyGHk3fQRAkt
+You can check the encrypted value of the Secret stored in etcd with the following command:
+$ sudo ETCDCTL_API=3 etcdctl --cacert=/etc/kubernetes/pki/etcd/ca.crt
+\
+--cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/
+\
+etcd/server.key get /registry/secrets/default/db-credentials | hexdump -C
+Open an interactive shell to the worker node using Vagrant:
+$ vagrant ssh kube-worker-1
+Define the RuntimeClass with the following YAML manifest. The contents have been stored in the file
+runtime-class.yaml
+:
+apiVersion
+:
+node.k8s.io/v1
+kind
+:
+RuntimeClass
+metadata
+:
+name
+:
+container-runtime-sandbox
+handler
+:
+runsc
+Create the RuntimeClass object:
+$ kubectl apply -f runtime-class.yaml
+Assign the name of the RuntimeClass to the Pod using the
+spec.runtimeClassName
+attribute. The nginx Pod has been defined in the file
+pod.yaml
+:
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+nginx
+spec
+:
+runtimeClassName
+:
+container-runtime-sandbox
+containers
+:
+-
+name
+:
+nginx
+image
+:
+nginx:1.23.2
+Create the Pod object. The Pod will transition into the status “Running”:
+$ kubectl apply -f pod.yaml
+$ kubectl get pod nginx
+NAME    READY   STATUS    RESTARTS   AGE
+nginx   1/1     Running   0          2m21s
+Exit out of the node:
+$ exit
+Chapter 6, “Supply Chain Security”
+The initial container image built with the provided Dockerfile has a size of 998MB. You can produce and run the container image with the following commands. Run a quick
+curl
+command to see if the endpoint exposed by the application can be reached:
+$ docker build . -t node-app:0.0.1
+...
+$ docker images
+REPOSITORY   TAG       IMAGE ID       CREATED         SIZE
+node-app     0.0.1     7ba99d4ba3af   3 seconds ago   998MB
+$ docker run -p 3001:3001 -d node-app:0.0.1
+c0c8a301eeb4ac499c22d10399c424e1063944f18fff70ceb5c49c4723af7969
+$ curl -L http://localhost:3001/
+Hello World
+One of the changes you can make is to avoid using a large base image. You could replace it with the
+alpine
+version of the node base image. Also, avoid pulling the
+latest
+image. Pick the Node.js version you actually want the application to run with. The following command uses a Dockerfile with the base image
+node:19-alpine
+, which reduces the container image size to 176MB:
+$ docker build . -t node-app:0.0.1
+...
+$ docker images
+REPOSITORY   TAG       IMAGE ID       CREATED          SIZE
+node-app     0.0.1     ef2fbec41a75   2 seconds ago    176MB
+You can install Kyverno using Helm or by pointing to the YAML manifest available on the project’s GitHub repository. We’ll use the YAML manifest here:
+$ kubectl create -f https://raw.githubusercontent.com/kyverno/
+\
+kyverno/main/config/install.yaml
+Set up a YAML manifest file named
+restrict-image-registries.yaml
+. Add the following contents to the file. The manifest represents a ClusterPolicy that only allows the use of container images that start with
+gcr.io/
+. Make sure to assign the value
+Enforce
+to the attribute
+spec.validationFailureAction
+:
+apiVersion
+:
+kyverno.io/v1
+kind
+:
+ClusterPolicy
+metadata
+:
+name
+:
+restrict-image-registries
+annotations
+:
+policies.kyverno.io/title
+:
+Restrict Image Registries
+policies.kyverno.io/category
+:
+Best Practices, EKS Best Practices
+policies.kyverno.io/severity
+:
+medium
+policies.kyverno.io/minversion
+:
+1.6.0
+policies.kyverno.io/subject
+:
+Pod
+policies.kyverno.io/description
+:
+>-
+Images from unknown, public registries can be of dubious quality \
+and may not be scanned and secured, representing a high degree of \
+risk. Requiring use of known, approved registries helps reduce \
+threat exposure by ensuring image pulls only come from them. This \
+policy validates that container images only originate from the \
+registry `eu.foo.io` or `bar.io`. Use of this policy requires \
+customization to define your allowable registries.
+spec
+:
+validationFailureAction
+:
+Enforce
+background
+:
+true
+rules
+:
+-
+name
+:
+validate-registries
+match
+:
+any
+:
+-
+resources
+:
+kinds
+:
+-
+Pod
+validate
+:
+message
+:
+"Unknown
+image
+registry."
+pattern
+:
+spec
+:
+containers
+:
+-
+image
+:
+"gcr.io/*"
+Apply the manifest with the following command:
+$ kubectl apply -f restrict-image-registries.yaml
+Run the following commands to verify that the policy has become active. Any container image definition that doesn’t use the prefix
+gcr.io/
+will be denied:
+$ kubectl run nginx --image=nginx:1.23.3
+Error from server: admission webhook "validate.kyverno.svc-fail" \
+denied the request:
+
+policy Pod/default/nginx for resource violation:
+
+restrict-image-registries:
+  validate-registries: 'validation error: Unknown image registry. \
+  rule validate-registries
+    failed at path /spec/containers/0/image/'
+$ kubectl run busybox --image=gcr.io/google-containers/busybox:1.27.2
+pod/busybox created
+Find the SHA256 hash for the image
+nginx:1.23.3-alpine
+with the search
+functionality
+of Docker Hub. The
+search result
+will lead you to the tag
+of the image. On
+top of the page, you should find the digest
+sha256:c1b9fe3c0c015486cf1e4a0ecabe78d05864475e279638e9713eb55f013f907f
+. Use the digest instead of the tag in the Pod definition. The result is the following YAML manifest:
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+nginx
+spec
+:
+containers
+:
+-
+name
+:
+nginx
+image
+:
+nginx@sha256:c1b9fe3c0c015486cf1e4a0ecabe78d05864475e279638 \
+e9713eb55f013f907f
+The creation of the Pod should work:
+$ kubectl apply -f pod-validate-image.yaml
+pod/nginx created
+$ kubectl get pods nginx
+NAME    READY   STATUS    RESTARTS   AGE
+nginx   1/1     Running   0          29s
+If you modify the SHA256 hash in any form and try to recreate the Pod, then Kubernetes would not allow you to pull the image.
+Running Kubesec in a Docker container results in a whole bunch of suggestions, as shown in the following output:
+$ docker run -i kubesec/kubesec:512c5e0 scan /dev/stdin < pod.yaml
+[
+  {
+    "object": "Pod/hello-world.default",
+    "valid": true,
+    "message": "Passed with a score of 0 points",
+    "score": 0,
+    "scoring": {
+      "advise": [
+        {
+          "selector": "containers[] .securityContext .capabilities \
+                       .drop | index(\"ALL\")",
+          "reason": "Drop all capabilities and add only those \
+                     required to reduce syscall attack surface"
+        },
+        {
+          "selector": "containers[] .resources .requests .cpu",
+          "reason": "Enforcing CPU requests aids a fair balancing \
+                     of resources across the cluster"
+        },
+        {
+          "selector": "containers[] .securityContext .runAsNonRoot \
+                       == true",
+          "reason": "Force the running image to run as a non-root \
+                     user to ensure least privilege"
+        },
+        {
+          "selector": "containers[] .resources .limits .cpu",
+          "reason": "Enforcing CPU limits prevents DOS via resource \
+                     exhaustion"
+        },
+        {
+          "selector": "containers[] .securityContext .capabilities \
+                       .drop",
+          "reason": "Reducing kernel capabilities available to a \
+                     container limits its attack surface"
+        },
+        {
+          "selector": "containers[] .resources .requests .memory",
+          "reason": "Enforcing memory requests aids a fair balancing \
+                     of resources across the cluster"
+        },
+        {
+          "selector": "containers[] .resources .limits .memory",
+          "reason": "Enforcing memory limits prevents DOS via resource \
+                     exhaustion"
+        },
+        {
+          "selector": "containers[] .securityContext \
+                       .readOnlyRootFilesystem == true",
+          "reason": "An immutable root filesystem can prevent malicious \
+                     binaries being added to PATH and increase attack \
+                     cost"
+        },
+        {
+          "selector": ".metadata .annotations .\"container.seccomp. \
+                       security.alpha.kubernetes.io/pod\"",
+          "reason": "Seccomp profiles set minimum privilege and secure \
+                     against unknown threats"
+        },
+        {
+          "selector": ".metadata .annotations .\"container.apparmor. \
+                       security.beta.kubernetes.io/nginx\"",
+          "reason": "Well defined AppArmor policies may provide greater \
+                     protection from unknown threats. WARNING: NOT \
+                     PRODUCTION READY"
+        },
+        {
+          "selector": "containers[] .securityContext .runAsUser -gt \
+                       10000",
+          "reason": "Run as a high-UID user to avoid conflicts with \
+                     the host's user table"
+        },
+        {
+          "selector": ".spec .serviceAccountName",
+          "reason": "Service accounts restrict Kubernetes API access \
+                     and should be configured with least privilege"
+        }
+      ]
+    }
+  }
+]
+The fixed-up YAML manifest could look like this:
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+hello-world
+spec
+:
+serviceAccountName
+:
+default
+containers
+:
+-
+name
+:
+linux
+image
+:
+hello-world:linux
+resources
+:
+requests
+:
+memory
+:
+"64Mi"
+cpu
+:
+"250m"
+limits
+:
+memory
+:
+"128Mi"
+cpu
+:
+"500m"
+securityContext
+:
+readOnlyRootFilesystem
+:
+true
+runAsNonRoot
+:
+true
+runAsUser
+:
+20000
+capabilities
+:
+drop
+:
+[
+"ALL"
+]
+Executing the
+kubectl apply
+command against the existing
+setup.yaml
+manifest will create the Pods named
+backend
+,
+loop
+, and
+logstash
+in the namespace
+r61
+:
+$ kubectl apply -f setup.yaml
+namespace/r61 created
+pod/backend created
+pod/loop created
+pod/logstash created
+You can check on them with the following command:
+$ kubectl get pods -n r61
+NAME       READY   STATUS    RESTARTS   AGE
+backend    1/1     Running   0          115s
+logstash   1/1     Running   0          115s
+loop       1/1     Running   0          115s
+Check the images of each Pod in the namespace
+r61
+using the
+kubectl describe
+command. The images used are
+bmuschko/nodejs-hello-world:1.0.0
+,
+alpine:3.13.4
+, and
+elastic/logstash:7.13.3
+:
+$ kubectl describe pod backend -n r61
+...
+Containers:
+  hello:
+    Container ID:   docker://eb0bdefc75e635d03b625140d1e \
+                    b229ca2db7904e44787882147921c2bd9c365
+    Image:          bmuschko/nodejs-hello-world:1.0.0
+    ...
+Use the Trivy executable to check vulnerabilities for all images:
+$ trivy image bmuschko/nodejs-hello-world:1.0.0
+$ trivy image alpine:3.13.4
+$ trivy image elastic/logstash:7.13.3
+If you look closely at the list of vulnerabilities, you will find that all images contain issues with “CRITICAL” severity. As a result, delete all Pods:
+$ kubectl delete pod backend -n r61
+$ kubectl delete pod logstash -n r61
+$ kubectl delete pod loop -n r61
+Chapter 7, “Monitoring, Logging, and Runtime Security”
+Shell into the worker node with the following command:
+$ vagrant ssh kube-worker-1
+Inspect the command and arguments of the running Pod named
+malicious
+. You will see that it tries to append a message to the file
+/etc/threat
+:
+$ kubectl get pod malicious -o jsonpath='{.spec.containers[0].args}'
+...
+spec:
+  containers:
+  - args:
+    - /bin/sh
+    - -c
+    - while true; do echo "attacker intrusion" >> /etc/threat; \
+      sleep 5; done
+...
+One of Falco’s default rules monitors file operations that try to write to the
+/etc
+directory. You can find a message for every write attempt in standard output:
+$ sudo journalctl -fu falco
+Jan 24 23:40:18 kube-worker-1 falco[8575]: 23:40:18.359740123: Error \
+File below /etc opened for writing (user=<NA> user_loginuid=-1 \
+command=sh -c while true; do echo "attacker intrusion" >> /etc/threat; \
+sleep 5; done pid=9763 parent=<NA> pcmdline=<NA> file=/etc/threat \
+program=sh gparent=<NA> ggparent=<NA> gggparent=<NA> \
+container_id=e72a6dbb63b8 image=docker.io/library/alpine)
+...
+Find the rule that produces the message in
+/etc/falco/falco_rules.yaml
+by searching for the string “etc opened for writing.” The rule looks as follows:
+-
+rule
+:
+Write below etc
+desc
+:
+an attempt to write to any file below /etc
+condition
+:
+write_etc_common
+output
+:
+"File
+below
+/etc
+opened
+for
+writing
+(user=%user.name
+\
+user_loginuid=%user.loginuid
+command=%proc.cmdline
+\
+pid=%proc.pid
+parent=%proc.pname
+pcmdline=%proc.pcmdline
+\
+file=%fd.name
+program=%proc.name
+gparent=%proc.aname[2]
+\
+ggparent=%proc.aname[3]
+gggparent=%proc.aname[4]
+\
+container_id=%container.id
+image=%container.image.repository)"
+priority
+:
+ERROR
+tags
+:
+[
+filesystem
+,
+mitre_persistence
+]
+Copy the rule to the file
+/etc/falco/falco_rules.local.yaml
+and modify the output definition, as follows:
+-
+rule
+:
+Write below etc
+desc
+:
+an attempt to write to any file below /etc
+condition
+:
+write_etc_common
+output
+:
+"%evt.time,%user.name,%container.id"
+priority
+:
+ERROR
+tags
+:
+[
+filesystem
+,
+mitre_persistence
+]
+Restart the Falco service, and find the changed output in the Falco logs:
+$ sudo systemctl restart falco
+$ sudo journalctl -fu falco
+Jan 24 23:48:18 kube-worker-1 falco[17488]: 23:48:18.516903001: \
+Error 23:48:18.516903001,<NA>,e72a6dbb63b8
+...
+Edit the file
+/etc/falco/falco.yaml
+to change the output channel. Disable standard output, enable file output, and point the
+file_output
+attribute to the file
+/var/log/falco.log
+. The resulting configuration will look like the
+following:
+file_output
+:
+enabled
+:
+true
+keep_alive
+:
+false
+filename
+:
+/var/log/falco.log
+stdout_output
+:
+enabled
+:
+false
+The log file will now append Falco log:
+$ sudo tail -f /var/log/falco.log
+00:10:30.425084165: Error 00:10:30.425084165,<NA>,e72a6dbb63b8
+...
+Exit out of the VM:
+$ exit
+Create the Pod named
+hash
+from the
+setup.yaml
+file. The command running in its container appends a hash to a file at
+/var/config/hash.txt
+in an infinite loop:
+$ kubectl apply -f setup.yaml
+pod/hash created
+$ kubectl get pod hash
+NAME   READY   STATUS    RESTARTS   AGE
+hash   1/1     Running   0          27s
+$ kubectl exec -it hash -- /bin/sh
+/ # ls /var/config/hash.txt
+/var/config/hash.txt
+To make the container immutable, you will have to add configuration to the existing Pod definition. You have to set the root filesystem to read-only access and mount a Volume to the path
+/var/config
+to allow writing to the file named
+hash.txt
+. The resulting YAML manifest could look as follows:
+apiVersion
+:
+v1
+kind
+:
+Pod
+metadata
+:
+name
+:
+hash
+spec
+:
+containers
+:
+-
+name
+:
+hash
+image
+:
+alpine:3.17.1
+securityContext
+:
+readOnlyRootFilesystem
+:
+true
+volumeMounts
+:
+-
+name
+:
+hash-vol
+mountPath
+:
+/var/config
+command
+:
+[
+"sh"
+,
+"-c"
+,
+"if
+[
+!
+-d
+/var/config
+];
+then
+mkdir
+-p
+\
+/var/config;
+fi;
+while
+true;
+do
+echo
+$RANDOM
+|
+md5sum
+\
+|
+head
+-c
+20
+>>
+/var/config/hash.txt;
+sleep
+20;
+done"
+]
+volumes
+:
+-
+name
+:
+hash-vol
+emptyDir
+:
+{}
+Shell into the control plane node with the following command:
+$ vagrant ssh kube-control-plane
+Edit the existing audit policy file at
+/etc/kubernetes/audit/rules/audit-policy.yaml
+. Add the rules asked about in the instructions. The content of the final audit policy file could look as follows:
+apiVersion
+:
+audit.k8s.io/v1
+kind
+:
+Policy
+omitStages
+:
+-
+"RequestReceived"
+rules
+:
+-
+level
+:
+RequestResponse
+resources
+:
+-
+group
+:
+""
+resources
+:
+[
+"pods"
+]
+-
+level
+:
+Metadata
+resources
+:
+-
+group
+:
+""
+resources
+:
+[
+"secrets"
+,
+"configmaps"
+]
+-
+level
+:
+Request
+resources
+:
+-
+group
+:
+""
+resources
+:
+[
+"services"
+]
+Configure the API server to consume the audit policy file by editing the file
+/etc/kubernetes/manifests/kube-apiserver.yaml
+. Provide additional options, as requested. The relevant configuration needed is as follows:
+...
+spec
+:
+containers
+:
+-
+command
+:
+-
+kube-apiserver
+-
+--audit-policy-file=/etc/kubernetes/audit/rules/audit-policy.yaml
+-
+--audit-log-path=/var/log/kubernetes/audit/logs/apiserver.log
+-
+--audit-log-maxage=5
+...
+volumeMounts
+:
+-
+mountPath
+:
+/etc/kubernetes/audit/rules/audit-policy.yaml
+name
+:
+audit
+readOnly
+:
+true
+-
+mountPath
+:
+/var/log/kubernetes/audit/logs/
+name
+:
+audit-log
+readOnly
+:
+false
+...
+volumes
+:
+-
+name
+:
+audit
+hostPath
+:
+path
+:
+/etc/kubernetes/audit/rules/audit-policy.yaml
+type
+:
+File
+-
+name
+:
+audit-log
+hostPath
+:
+path
+:
+/var/log/kubernetes/audit/logs/
+type
+:
+DirectoryOrCreate
+One of the logged resources is a ConfigMap on the
+Metadata
+level. The following command creates an exemplary ConfigMap object:
+$ kubectl create configmap db-user --from-literal=username=tom
+configmap/db-user created
+The audit log file will now contain an entry for the event:
+$ sudo cat /var/log/kubernetes/audit/logs/apiserver.log
+{"kind":"Event","apiVersion":"audit.k8s.io/v1","level":"Metadata", \
+"auditID":"1fbb409a-3815-4da8-8a5e-d71c728b98b1","stage": \
+"ResponseComplete","requestURI":"/api/v1/namespaces/default/configmaps? \
+fieldManager=kubectl-create\u0026fieldValidation=Strict","verb": \
+"create","user":{"username":"kubernetes-admin","groups": \
+["system:masters","system:authenticated"]},"sourceIPs": \
+["192.168.56.10"], "userAgent":"kubectl/v1.24.4 (linux/amd64) \
+kubernetes/95ee5ab", "objectRef":{"resource":"configmaps", \
+"namespace":"default", "name":"db-user","apiVersion":"v1"}, \
+"responseStatus":{"metadata": {},"code":201}, \
+"requestReceivedTimestamp":"2023-01-25T18:57:51.367219Z", \
+"stageTimestamp":"2023-01-25T18:57:51.372094Z","annotations": \
+{"authorization.k8s.io/decision":"allow", \
+"authorization.k8s.io/reason":""}}
+Exit out of the VM:
+$ exit

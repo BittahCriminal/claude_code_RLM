@@ -1,0 +1,5206 @@
+lti-variate time-series models.
+Further reading
+Vig, J., 2019,
+A Multiscale Visualization of Attention in the Transformer Model
+. ArXiv:
+https://arxiv.org/abs/1906.05714
+Kokhlikyan, N., Miglani, V., Martin, M., Wang, E., Alsallakh, B., Reynolds, J., Melnikov, A., Kliushkina, N., Araya, C., Yan, S., & Reblitz-Richardson, O., 2020,
+Captum: A unified and generic model interpretability library for PyTorch
+. ArXiv:
+https://arxiv.org/abs/2009.07896
+Tenney, I., Wexler, J., Bastings, J., Bolukbasi, T., Coenen, A., Gehrmann, S., Jiang, E., Pushkarna, M., Radebaugh, C., Reif, E., & Yuan, A., 2020,
+The Language Interpretability Tool: Extensible, Interactive Visualizations and Analysis for NLP Models.
+Conference on Empirical Methods in Natural Language Processing:
+https://arxiv.org/abs/2008.05122
+Learn more on Discord
+To join the Discord community for this book – where you can share feedback, ask the author questions, and learn about new releases – follow the QR code below:
+https://packt.link/inml
+
+9
+Interpretation Methods for Multivariate Forecasting and Sensitivity Analysis
+Throughout this book, we have learned about various methods we can use to interpret supervised learning models. They can be quite effective at assessing models while also uncovering their most influential predictors and their hidden interactions. But as the term supervised learning suggests, these methods can only leverage known samples and permutations based on these known samples’ distributions. However, when these samples represent the past, things can get tricky! As the Nobel laureate in physics Niels Bohr famously quipped, “Prediction is very difficult, especially if it’s about the future.”
+Indeed, when you see data points fluctuating in a time series, they may appear to be rhythmically dancing in a predictable pattern – at least in the best-case scenarios. Like a dancer moving to a beat, every repetitive movement (or frequency) can be attributed to seasonal patterns, while a gradual change in volume (or amplitude) is attributed to an equally predictable trend. The dance is inevitably misleading because there are always missing pieces of the puzzle that slightly shift the data points, such as a delay in a supplier’s supply chain causing an unexpected dent in today’s sales figures. To make matters worse, there are also unforeseen catastrophic once-in-a-decade, once-in-a-generation, or simply once-ever events that can radically make the somewhat understood movement of a time series unrecognizable, similar to a ballroom dancer having a seizure. For instance, in 2020, sales forecasts everywhere, either for better or worse, were rendered useless by COVID-19!
+We could call this an extreme outlier event, but we must recognize that models weren’t built to predict these momentous events because they were trained on almost entirely likely occurrences. Not predicting these unlikely yet most consequential events is why we shouldn’t place so much trust in forecasting models to begin with, especially without discussing certainty or confidence bounds.
+This chapter will examine a multivariate forecasting problem
+with
+Long Short-Term Memory
+(
+LSTM
+) models. We will first assess the models with traditional interpretation methods, followed by the
+Integrated Gradient
+method
+we learned about in
+Chapter 7
+,
+Visualizing Convolutional Neural Networks
+, to generate our model’s local attributions.
+But more importantly, we will understand the LSTM’s learning process and limitations better. We will then employ a prediction approximator method and SHAP’s
+KernelExplainer
+for both global and local interpretation. Lastly,
+forecasting and uncertainty are intrinsically linked
+, and
+sensitivity analysis
+is a family of methods designed to measure the uncertainty of the model’s output in relation to its input, so it’s very useful in forecasting scenarios. We will also study two such methods:
+Morris
+for
+factor prioritization
+and
+Sobol
+for
+factor fixing
+, which involves cost sensitivity.
+The following are the main topics we are going to cover:
+Assessing time series models with traditional interpretation methods
+Generating LSTM attributions with integrated gradients
+Computing global and local attributions with SHAP’s
+KernelExplainer
+Identifying influential features with factor prioritization
+Quantifying uncertainty and cost sensitivity with factor fixing
+Let’s begin!
+Technical requirements
+This chapter’s example uses the
+mldatasets
+,
+pandas
+,
+numpy
+,
+sklearn
+,
+tensorflow
+,
+matplotlib
+,
+seaborn
+,
+alibi
+,
+distython
+,
+shap
+, and
+SALib
+libraries. Instructions on how to install all these libraries can be found in this book’s preface.
+The code for this chapter is located here:
+https://packt.link/b6118
+.
+The mission
+Highway
+traffic congestion is a problem that’s affecting cities across the world. As the number of vehicles per capita steadily increases across the developing world with not enough road and parking infrastructure to keep up with it, congestion has been increasing at alarming levels. In the United States, the vehicle per capita statistic is among the highest in the world (838 per 1,000 people in 2019). For this reason, US cities represent 62 out of the 381 cities worldwide with at least a 15% congestion level.
+Minneapolis is one such city (see
+Figure 9.1
+) where that threshold was recently surpassed and keeps rising. To put this metropolitan area into context, congestion levels are extremely severe at above 50%, but moderate-level congestion (15-25%) is already a warning sign of bad congestion to come. It’s challenging to reverse congestion once it reaches 25% because any infrastructure improvement will be costly to implement without disrupting traffic even further. One of the worst congestion points is between the twin cities of Minneapolis and St. Paul throughout the Interstate 94 (I-94) highway, which congests alternate routes as commuters try to cut travel time. Knowing this, the mayors of both cities have obtained some federal funding to expand the highway:
+Figure 9.1: TomTom’s 2019 traffic index for Minneapolis
+The mayors want to be able to tout a completed expansion as a joint accomplishment to get reelected for a second term. However, they are well aware that a noisy, dirty, and obstructive expansion can be a big nuisance for commuters, so the construction project could backfire politically if it’s not made nearly invisible. Therefore, they have stipulated that the construction company prefabricates as much as possible elsewhere and assembles only during low-volume hours. These hours have less than 1,500 vehicles per hour. They can also only work on one direction of the highway at a time and only block no more than half of its lanes when they are working on it. To ensure compliance with these stipulations, they will fine the company if they are blocking more than a quarter of the highway any time that volume is above this threshold, at a rate of $15 per vehicle.
+In addition
+to that, if the construction crew are on-site blocking half the highway while traffic is over 1,500 vehicles per hour, it will cost them $5,000 a day. To put this into perspective, blocking during a typical peak hour could cost the construction company $67,000 per hour, plus the $5,000 daily fee! The local authorities will
+use
+Automated Traffic Recorder
+(
+ATR
+) stations along the route to monitor traffic volume, as well as local traffic police to register when lanes are getting blocked for construction.
+The project has been planned as a 2-year construction project; the first year will expand the westbound lanes on the I-94 route, while the second will expand the eastbound lanes. The on-site portion of the construction will only occur from May through October because snow is less likely to delay construction during these months. Throughout the rest of the year, they will focus on pre-fabrication. They will attempt to work weekdays only because the workers union negotiated generous overtime pay for weekends. Therefore, weekend construction will happen only if there are significant delays. However, the union agreed to work holidays May through October for the same rate.
+The construction company doesn’t want to take any risks! Therefore, they need a model to predict traffic for the I-94 route and, more importantly, to understand what factors create uncertainty and possibly increase costs. They have hired a machine learning expert to do this: you!
+The ATR data provided by the construction company includes hourly traffic volumes up to September 2018, as well as weather data at the same timescale. It only consists of the westbound lanes because that expansion will come first.
+The approach
+You have
+trained a
+stateful
+Bidirectional LSTM
+model with almost four years’ worth of data (October 2012 – September 2016). You reserved the last year for testing (September 2017–2018) and the prior year to that for validation (September 2016 –2017). This made sense because the combined testing and validation datasets align well with the highway expansion project’s expected conditions (March – November). You wondered about using other splitting schemes that leveraged only the data representative of these conditions, but you didn’t want to reduce the training data so drastically, and maybe they might need it for winter predictions after all. A
+look-back window defines how much past data a time series model has access to. You chose 168 hours (1 week) as the look-back window size. Given the stateful nature of the model, as the model moves forward in the training data, it can learn daily and weekly seasonality, as well as some trends and patterns that can only be observed across several weeks. You also trained another two models. You have outlined the following steps to meet the client’s expectations:
+With
+RMSE
+,
+regression plots
+,
+confusion matrices
+, and much more, you will access the models’ predictive performance and, more importantly, how the error is distributed.
+With
+integrated gradients
+, you will understand if you took the best modeling strategy since it can help you visualize each of the model’s pathways to a decision, and help you choose a model based on that.
+With
+SHAP’s
+KernelExplainer
+and a prediction approximation method, you will derive both a global and local understanding of what features matter to the chosen model.
+With
+Morris sensitivity analysis
+, you will identify
+factor prioritization
+, which ranks factors (in other words, features) by how much they can drive output variability.
+With
+Sobol sensitivity analysis
+, you will compute
+factor fixing
+, which helps determine what factors aren’t influential. It does this by quantifying the input factors’ contributions and interactions to the output’s variability. With this, you can understand what factors may have the most effect on potential fines and costs, thus producing a variance-based cost-sensitivity analysis.
+The preparation
+You can find the code for this example here:
+https://github.com/PacktPublishing/Interpretable-Machine-Learning-with-Python-2E/blob/main/09/Traffic_compact1.ipynb
+.
+Loading the libraries
+To run
+this example, you will need to install the following
+libraries:
+mldatasets
+to load the dataset
+pandas
+and
+numpy
+to manipulate the dataset
+tensorflow
+to load the model
+sklearn
+(scikit-learn),
+matplotlib
+,
+seaborn
+,
+alibi
+,
+distython
+,
+shap
+, and
+SALib
+to create and visualize the interpretations
+You should load all of them first:
+import
+math
+import
+os
+import
+mldatasets
+import
+pandas
+as
+pd
+import
+numpy
+as
+np
+from
+sklearn.preprocessing
+import
+MinMaxScaler
+from
+sklearn
+import
+metrics
+import
+tensorflow
+as
+tf
+from
+tensorflow
+import
+keras
+from
+tensorflow.keras.preprocessing.sequence
+import
+\ TimeseriesGenerator
+from
+keras.utils
+import
+get_file
+import
+matplotlib.pyplot
+as
+plt
+from
+matplotlib.colors
+import
+TwoSlopeNorm
+import
+seaborn
+as
+sns
+from
+alibi.explainers
+import
+IntegratedGradients
+from
+distython
+import
+HEOM
+import
+shap
+from
+SALib.sample
+import
+morris
+as
+ms
+from
+SALib.analyze
+import
+morris
+as
+ma
+from
+SALib.plotting
+import
+morris
+as
+mp
+from
+SALib.sample.saltelli
+import
+sample
+as
+ss
+from
+SALib.analyze.sobol
+import
+analyze
+as
+sa
+from
+SALib.plotting.bar
+import
+plot
+as
+barplot
+Let’s check that TensorFlow has loaded the right version by using the
+print(tf.__version__)
+command. It should be 2.0 or above.
+Understanding and preparing the data
+In the following snippet, we
+are loading the data into a DataFrame called
+traffic_df
+. Please note that the
+prepare=True
+parameter is important because it performs necessary tasks such as subsetting the DataFrame to the required timeframe, since October 2015, some interpolation, correcting holidays, and performing one-hot encoding:
+traffic_df = mldatasets.load(
+"traffic-volume-v2"
+, prepare=
+True
+)
+There should be over 52,000 records and 16 columns. We can verify this with
+traffic_df.info()
+. The output should check out. All the features are numerical and have no missing values, and the categorical features have already been one-hot encoded for us.
+The data dictionary
+There are
+only nine features, but they become 16 columns because of categorical encoding:
+dow
+: Ordinal; day of the week starting with Monday (between 0 and 6)
+hr
+: Ordinal; hour of the day (between 0 and 23)
+temp
+: Continuous; average temperature in Celsius (between-30 and 37)
+rain_1h
+: Continuous; mm of rainfall occurred in the hour (between 0 and 21)
+snow_1h
+: Continuous; cm of snow (when converted to liquid form) occurred in the hour (between 0 and 2.5)
+cloud_coverage
+: Continuous; percentage of cloud coverage (between 0 and 100)
+is_holiday
+: Binary; is the day a national or state holiday when it occurs Monday to Friday (1 for yes, 0 for no)?
+traffic_volume
+: Continuous; the target feature capturing traffic volume
+weather
+: Categorical; a short description of the weather during that hour (Clear | Clouds | Haze | Mist | Rain | Snow | Unknown | Other)
+Understanding the data
+The first step in understanding a time series problem is understanding the target variable. This is because it determines how you approach everything else, from data preparation to modeling. The target variable is likely to have a special relationship with time, such as a seasonal movement or a trend.
+Understanding weeks
+First, we can
+sample one 168-hour period from every season to understand the variance a bit better between days of the week, and then get an idea of how they could vary across seasons and holidays:
+lb =
+168
+fig, (ax0,ax1,ax2,ax3) = plt.subplots(
+4
+,
+1
+, figsize=(
+15
+,
+8
+))
+plt.subplots_adjust(top =
+0.99
+, bottom=
+0.01
+, hspace=
+0.4
+)
+traffic_df[(lb*
+160
+):(lb*
+161
+)].traffic_volume.plot(ax=ax0)
+traffic_df[(lb*
+173
+):(lb*
+174
+)].traffic_volume.plot(ax=ax1)
+traffic_df[(lb*
+186
+):(lb*
+187
+)].traffic_volume.plot(ax=ax2)
+traffic_df[(lb*
+199
+):(lb*
+200
+)].traffic_volume.plot(ax=ax3)
+The preceding code generates the plots shown in
+Figure 9.2
+. If you read them from left to right, you’ll see that they all start with Wednesday and end with Tuesday of the following week. Every day of the week starts and ends at a low point, with a high point in between. Weekdays tend to have two peaks corresponding to morning and afternoon rush hour, while weekends only have one mid-afternoon bump:
+Figure 9.2: Several sample weekly periods for traffic_volume representing each season
+There are
+some major outliers, such as Saturday October 31, which is basically Halloween and is not an official holiday. Also, February 2 (a Tuesday) was the beginning of a severe snowstorm, and the period in the late summer is much more chaotic than the other sample weeks. It turns out that in that year, the state fair occurred. Like Halloween, it’s not a federal or a regional holiday, but it’s important to note that the fairgrounds are located halfway between Minneapolis and St. Paul. You’ll also notice that on Friday July 29, there’s a midnight bump in traffic, which can be attributed to this being a big day for Minneapolis concerts.
+Trying to explain these inconsistencies while comparing periods in your time series is a good exercise as it helps you figure out what variables to add to your model, or at least know what is missing. In our case, we know our
+is_holiday
+variable doesn’t include days such as Halloween or the entire state fair week, nor do we have a variable for big music or sporting events. To produce a more robust model, it would be advisable to look for reliable external data sources and add more features that cover all these possibilities, not to mention validate the existing variables. For now, we will work with what we’ve got.
+Understanding days
+It is crucial
+for the highway expansion project to understand what traffic looks like for the average workday. The construction crew will be working on weekdays only (Monday to Friday) unless they experience delays, in which case they will also work weekends. We must also make a distinction between holidays and other weekdays because these are likely to be different.
+To this end, we will create a DataFrame (
+weekend_df
+) and engineer a new column (
+type_of_day
+) that codes hours as being part of a “Holiday,” “Weekday,” or “Weekend.” Then, we can group by this column and the
+hr
+column, and aggregate with
+mean
+and standard deviation (
+std
+). We can then
+pivot
+so that we have one column with the average and standard deviations traffic volumes for every
+type_of_day
+category, where the rows represent the hours of the day (
+hr
+). Then, we can plot the resulting DataFrame. We can create intervals with the standard deviations:
+weekend_df = traffic_df[
+    [
+'hr'
+,
+'dow'
+,
+'is_holiday'
+,
+'traffic_volume'
+]].copy()
+weekend_df[
+'type_of_day'
+] = np.where(
+    weekend_df.is_holiday ==
+1
+,
+'Holiday'
+,
+    np.where(weekend_df.dow >=
+5
+,
+'Weekend'
+,
+'Weekday'
+)
+)
+weekend_df = weekend_df.groupby(
+[
+'type_of_day'
+,
+'hr'
+]) [
+'traffic_volume'
+]
+    .agg([
+'mean'
+,
+'std'
+])
+    .reset_index()
+    .pivot(index=
+'hr'
+, columns=
+'type_of_day'
+, values=[
+'mean'
+,
+'std'
+]
+)
+weekend_df.columns = [
+''
+.join(col).strip().replace(
+'mean'
+,
+''
+)\
+for
+col
+in
+weekend_df.columns.values
+]
+fig, ax = plt.subplots(figsize=(
+15
+,
+8
+))
+weekend_df[[
+'Holiday'
+,
+'Weekday'
+,
+'Weekend'
+]].plot(ax=ax)
+plt.fill_between(
+    weekend_df.index,
+    np.maximum(weekend_df.Weekday -
+2
+* weekend_df.std_Weekday,
+0
+),
+    weekend_df.Weekday +
+2
+* weekend_df.std_Weekday,
+    color=
+'darkorange'
+,
+    alpha=
+0.2
+)
+plt.fill_between(
+    weekend_df.index,\
+    np.maximum(weekend_df.Weekend -
+2
+* weekend_df.std_Weekend,
+0
+),
+    weekend_df.Weekend +
+2
+* weekend_df.std_Weekend,
+    color=
+'green'
+,
+    alpha=
+0.1
+)
+plt.fill_between(
+    weekend_df.index,\
+    np.maximum(weekend_df.Holiday -
+2
+* weekend_df.std_Holiday,
+0
+),
+    weekend_df.Holiday +
+2
+* weekend_df.std_Holiday,
+    color=
+'cornflowerblue'
+,
+    alpha=
+0.1
+)
+The
+preceding snippet results in the following plot. It represents the hourly average, but there’s quite a bit of variation, which is why the construction company is proceeding with caution. There are horizontal lines that have been plotted representing each of the thresholds:
+5,300 for full capacity.
+2,650 for half-capacity, after which the construction company will get fined the daily amount specified.
+1,500 is the no-construction threshold, after which the construction company will get fined the hourly amount specified.
+They only want to work Monday to Friday during the hours that are typically below the 1,500 threshold. These five hours would be 11 p.m. (the day before) to 5 a.m. If they had to work weekends, this schedule would typically be delayed until 1 a.m. and end at 6 a.m. There’s considerably less variance during weekdays, so it’s understandable why the construction company is adamant about only working weekdays. During these hours, holidays appear to be similar to weekends, but holidays tend to vary even more than weekends, which is potentially even more problematic:
+Figure 9.3: The average hourly traffic volume for holidays, weekdays, and weekends, with intervals
+Usually, for
+a project like this, you would explore the predictor variables to the extent we have done with the target. This book is about model interpretation, so we will learn about the predictors by interpreting the models. But before we get to the models, we must prepare the data for them.
+Data preparation
+The first
+data preparation step is to split it into train, validation, and test sets. Please note that the test dataset comprises the last 52 weeks (
+2184
+hours), while
+the validation dataset comprises the 52 weeks before that, so it starts at
+4368
+and ends
+2184
+hours before the last row of the DataFrame:
+train = traffic_df[:-
+4368
+]
+valid = traffic_df[-
+4368
+:-
+2184
+]
+test = traffic_df[-
+2184
+:]
+Now that the DataFrame has been split, we can plot it to ensure that its parts are split as intended. We can do so with the following code:
+plt.plot(train.index.values, train.traffic_volume.values,
+          label=
+'
+train'
+)
+plt.plot(valid.index.values, valid.traffic_volume.values,
+           label=
+'validation'
+)
+plt.plot(test.index.values, test.traffic_volume.values,
+          label=
+'test'
+)
+plt.ylabel(
+'Traffic Volume'
+)
+plt.legend()
+The
+preceding code produces
+Figure 9.4
+. It shows that almost 4 years of data was allocated for the training dataset, and a year to validate and test each. We won’t reference the validation dataset from this point on during this exercise because it was only instrumental during training to assess the model’s predictive performance after every epoch.
+Figure 9.4: Time series split into train, validation, and test sets
+The next
+step is to min-max normalize the data. We are doing this because larger values lead to slower learning for all neural networks in general and LSTMs are very prone to
+exploding and vanishing gradients
+. Relatively uniform and small numbers can help counter these problems. We will discuss this later in this chapter, but basically, the network becomes either numerically unstable or ineffective at reaching a global minimum.
+We can min-max normalize with
+MinMaxScaler
+from the
+scikit
+package. For now, all we will do is
+fit
+the scaler so that we can use them whenever we need them. We will create a scaler for our target (
+traffic_volume
+) called
+y_scaler
+and another for the rest of the variables (
+X_scaler
+) with the entire dataset, so that transformations are consistent no matter what part you are using, be it
+train
+,
+valid
+, or
+test
+. All the
+fit
+process does is save the formula to make each variable fit between zero and one:
+y_scaler = MinMaxScaler()
+y_scaler.fit(traffic_df[[
+'traffic_volume'
+]])
+X_scaler = MinMaxScaler()
+X_scaler.fit(traffic_df.drop([
+'traffic_volume'
+], axis=
+1
+))
+Now, we will
+transform
+both our train and test datasets with our scaler, creating
+y
+and
+X
+pairs for each:
+y_train = y_scaler.transform(train[['traffic_volume']])
+X_train = X_scaler.transform(train.drop(['traffic_volume'], axis=1))
+y_test = y_scaler.transform(test[['traffic_volume']])
+X_test = X_scaler.transform(test.drop(['traffic_volume'], axis=1))
+However, for
+a time series model, the
+y
+and
+X
+pairs we
+created aren’t useful because each observation is a timestep. And each timestep is more than the features that occur for that timestep, but to a certain extent what happens before it, called lags. For instance, say if we predict traffic based on 168 lagged observations, for every label, we will need the previous 168 hours of each feature. Therefore, you have to generate an array for every timestep, as well as its lags. Fortunately,
+keras
+has a function called
+TimeseriesGenerator
+that takes your
+X
+and
+y
+and produces a generator that feeds the data to your model. You must
+specify a certain
+length
+, which is the number of lagged observations (also known as the
+lookback window
+). The default
+batch_size
+is one, but we are using 24 because the client prefers to get forecasts 24 hours at a time, and also training and inference are much faster with a larger batch size.
+Naturally, when you need to forecast tomorrow, you will need tomorrow’s weather, but you can complete the timesteps with weather forecasts:
+gen_train = TimeseriesGenerator(
+    X_train,
+    y_train,
+    length=lb,
+    batch_size=
+24
+)
+gen_test = TimeseriesGenerator(
+    X_test,
+    y_test,
+    length=lb,
+    batch_size=
+24
+)
+print
+(
+"gen_train:%s×%s→%s"
+% (
+len
+(gen_train),
+    gen_train[
+0
+][
+0
+].shape, gen_train[
+0
+][
+1
+].shape)
+)
+print
+(
+"gen_test:%s×%s→%s"
+% (
+len
+(gen_test),
+    gen_test[
+0
+][
+0
+].shape, gen_test[
+0
+][
+1
+].shape)
+)
+The preceding snippet outputs the dimensions of the training generator (
+gen_train
+) and the testing generator (
+gen_test
+), which use a length of 168 hours and a batch size of 24:
+gen_train:  1454 ×   (24, 168, 15)   →   (24, 1)
+gen_test:   357  ×   (24, 168, 15)   →   (24, 1)
+Any model
+that was trained with a 1-week look-back window and 24-hour batch size will need this generator. Each generator is a list of tuples
+corresponding to each batch. Index 0 of this tuple is the
+X
+feature array, while index 1 is the
+y
+label array. Therefore, the first number output is the length of the list, which is the number of batches. The dimensions of the
+X
+and
+y
+array follow.
+For instance,
+gen_train
+has 1,454 batches, and each batch has 24 timesteps, with a length of 168 and 15 features. The shape of the predicted labels expected from these 24 timesteps is
+(24,1)
+.
+Lastly, before moving forward with handling models and stochastic interpretation methods, let’s attempt to make things more reproducible by initializing our random seeds:
+rand =
+9
+os.environ[
+'PYTHONHASHSEED'
+]=
+str
+(rand)
+tf.random.set_seed(rand)
+np.random.seed(rand)
+Loading the LSTM model
+We can quickly
+load the model and output its summary like this:
+model_name =
+'LSTM_traffic_168_compact1.hdf5'
+model_path = get_file(
+    model_name,
+'https://github.com/PacktPublishing/Interpretable-\
+Machine-Learning-with-Python-2E/blob/main/models/{}?raw=true'
+.
+format
+(model_name)
+)
+lstm_traffic_mdl = keras.models.load_model(model_path)
+lstm_traffic_mdl.summary()
+As you
+can tell by the summary that’s produced by the preceding snippet, the model starts with a
+bidirectional LSTM
+layer
+with an output of
+(24, 168)
+. 24 corresponds to the batch size, while 168 means that there’s not one but two 84-unit LSTMs going in opposite directions and meeting in the middle. It has a
+dropout
+of 10%, and then a
+dense
+layer with a single ReLu-activated unit. The ReLu ensures that all the predictions are over zero since negative traffic volume makes no sense:
+Model: "LSTM_traffic_168_compact1"
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+Bidir_LSTM (Bidirectional)   (24, 168)                 67200     
+_________________________________________________________________
+Dropout (Dropout)            (24, 168)                 0         
+_________________________________________________________________
+Dense (Dense)                (24, 1)                   169       
+=================================================================
+Total params: 67,369
+Trainable params: 67,369
+Non-trainable params: 0
+_________________________________________________________________
+Now, let’s assess the
+LSTM_traffic_168_compact1
+model using traditional interpretation methods.
+Assessing time series models with traditional interpretation methods
+A
+time series regressor model can be evaluated as you would evaluate any regression model; that is, using
+metrics derived
+from the
+mean squared error
+or the
+R-squared
+score. There are, of course, cases in which you will need to use a metric with medians, logs, deviances, or absolute values. These models don’t require any of this.
+Using standard regression metrics
+The
+evaluate_reg_mdl
+function
+can evaluate the model, output some standard regression metrics, and plot them. The parameters for this model are the fitted model (
+lstm_traffic_mdl
+),
+X_train
+(
+gen_train
+),
+X_test
+(
+gen_test
+),
+y_train
+, and
+y_test
+.
+Optionally, we
+can specify a
+y_scaler
+so that the model is evaluated with the labels’ inverse transformed, which
+makes the plot and
+root mean square error
+(
+RMSE
+) much easier to interpret. Another optional parameter that is very much necessary, in this case, is
+y_truncate=True
+because our
+y_train
+and
+y_test
+are of larger dimensions than the predicted labels. This discrepancy happens because the first prediction occurs several timesteps after the first timestep in the dataset due to the look-back window. Therefore, we would need to deduct these timesteps from
+y_train
+in order to match the length of
+gen_train
+.
+We will now evaluate both models with the following code. To observe the prediction’s progress as it happens, we will use
+predopts={"verbose":1}
+.
+y_train_pred, y_test_pred, y_train, y_test =\
+    mldatasets.evaluate_reg_mdl(lstm_traffic_mdl,
+        gen_train,
+        gen_test,
+        y_train,
+        y_test,
+        scaler=y_scaler,
+        y_truncate=
+True
+,
+        predopts={
+"verbose"
+:
+1
+}
+)
+The preceding snippet produced the plot and metrics shown in
+Figure 9.5
+. The
+regression plot
+is, essentially, a scatter plot of the observed versus predicted traffic volumes, fitted to a linear regression model to show how well they match. These plots show that the model tends to predict zero traffic when it’s substantially higher. Besides that, there are a number of extreme outliers, but it fits relatively well with a test RMSE of 430 and only a slightly better train RMSE:
+Figure 9.5: Predictive performance evaluations for the “LSTM_traffic_168_compact1” model
+We can also
+evaluate the model by comparing observed versus predicted traffic. It would be helpful to
+break down the error by the hour and type of day too. To this end, we can create DataFrames with these values – one for each model. But first, we must truncate the DataFrame (
+-y_test_pred.shape[0]
+) so that it matches the length of the predictions array, and we won’t need all the columns, so we are providing indexes for only those we are interested in:
+traffic_volume
+is #7 but we also will want
+dow
+(#0),
+hr
+(#1), and
+is_holiday
+(#6). We will rename
+traffic_volume
+to
+actual_traffic
+and create a new column called
+predicted_traffic
+with our predictions. Then, we will engineer a
+type_of_day
+column, as we
+did previously, which tells us if it’s a holiday, weekday, or weekend. Finally, we can drop the
+dow
+and
+is_holiday
+columns since we won’t need them:
+evaluate_df = test.iloc[-y_test_pred.shape[
+0
+]:,[
+0
+,
+1
+,
+6
+,
+7
+]]
+    .rename(columns={
+'traffic_volume'
+:
+'actual_traffic'
+}
+)
+evaluate_df[
+'predicted_traffic'
+] = y_test_pred
+evaluate_df[
+'type_of_day'
+] = np.where(
+    evaluate_df.is_holiday ==
+1
+,
+'Holiday'
+,
+    np.where(evaluate_df.dow >=
+5
+,
+'Weekend'
+,
+'Weekday'
+)
+)
+evaluate_df.drop([
+'dow'
+,
+'is_holiday'
+], axis=
+1
+, inplace=
+True
+)
+You can
+quickly review the contents of the DataFrames by simply running a cell with
+evaluate_df
+. It should have 4 columns.
+Predictive error aggregations
+It may be that some days
+and times of day are more prone to predictive errors. To get a better sense of how these errors are distributed across time, we can plot RMSE on an hourly basis segmented by
+type_of_day
+. To do this, we must first define an
+rmse
+function and then group each of the models’ evaluated DataFrames by
+type_of_day
+and
+hr
+and use the
+apply
+function to aggregate using the
+rmse
+function. We can then pivot to ensure that each
+type_of_day
+has a column with the RMSEs on an hourly basis. We can then average these columns and store them in a series:
+def
+rmse
+(
+g
+):
+    rmse = np.sqrt(
+    metrics.mean_squared_error(g[
+'actual_traffic'
+],
+                               g[
+'predicted_traffic'
+])
+    )
+return
+pd.Series({
+'rmse'
+: rmse})
+evaluate_by_hr_df = evaluate_df.groupby([
+'type_of_day'
+,
+'hr'
+])
+    .apply(rmse).reset_index()
+    .pivot(index=
+'hr'
+, columns=
+'type_of_day'
+, values=
+'
+rmse'
+)
+mean_by_daytype_s = evaluate_by_hr_df.mean(axis=
+0
+)
+Now that
+we have DataFrames with the hourly RMSEs for holidays, weekdays, and weekends, as well as the average for these “types” of day, we can plot them using the
+evaluate_by_hr
+DataFrame. We will also create dotted horizontal lines with the averages for each
+type_of_day
+from the
+mean_by_daytype
+pandas
+series:
+evaluate_by_hr_df.plot()
+ax = plt.gca()
+ax.set_title(
+'Hourly RMSE distribution'
+, fontsize=
+16
+)
+ax.set_ylim([
+0
+,
+2500
+])
+ax.axhline(
+    y=mean_by_daytype_s.Holiday,
+    linewidth=
+2
+,
+    color=
+'cornflowerblue'
+,
+    dashes=(
+2
+,
+2
+)
+)
+ax.axhline(
+    y=mean_by_daytype_s.Weekday,
+    linewidth=
+2
+,
+    color=
+'darkorange'
+,
+    dashes=(
+2
+,
+2
+)
+)
+ax.axhline(
+    y=mean_by_daytype_s.Weekend,
+    linewidth=
+2
+,
+    color=
+'
+green'
+,
+    dashes=(
+2
+,
+2
+)
+)
+The preceding code generated the plot shown in
+Figure 9.6
+. As we can see, the model has a high RMSE for holidays. However, the model could be overestimating the traffic volume, and overestimating is not as bad as underestimating in this particular use case because underestimating can lead to annoying commuters with traffic delays and additional costs from fines:
+Figure 9.6: Hourly RMSE segmented by type_of_day for the “LSTM_traffic_168_compact1” model
+Evaluating the model like a classification problem
+Indeed, just like
+classification problems can have false positives and false negatives and one is more costly than the other, you can frame any regression problem with concepts such as underestimation and overestimation. This framing is especially useful when one is more costly than the other. If you have clearly defined thresholds, as we have for this project, you can evaluate any regression problem as you would a classification one. We will assess it with a confusion matrix with half-capacity and no-construction thresholds. To accomplish this, we can use
+np.where
+to get binary arrays for when the actuals and predictions surpass each threshold. We can then use the
+compare_confusion_matrices
+function to compare the confusion matrices for the model:
+actual_over_half_cap = np.where(evaluate_df[
+'
+actual_traffic'
+] >\
+2650
+,
+1
+,
+0
+)
+pred_over_half_cap = np.where(evaluate_df[
+'predicted_traffic'
+] >\
+2650
+,
+1
+,
+0
+)
+actual_over_nc_thresh = np.where(evaluate_df[
+'actual_traffic'
+] >\
+1500
+,
+1
+,
+0
+)
+pred_over_nc_thresh = np.where(evaluate_df[
+'predicted_traffic'
+] >\
+1500
+,
+1
+,
+0
+)
+mldatasets.compare_confusion_matrices(
+    actual_over_half_cap,
+    pred_over_half_cap,
+    actual_over_nc_thresh,
+    pred_over_nc_thresh,
+'Over Half-Capacity'
+,
+'Over No-Construction Threshold'
+)
+The preceding snippet produced the confusion matrices shown in
+Figure 9.7
+.
+Figure 9.7: Confusion matrices for going over half and the no-construction threshold for the “LSTM_traffic_168_compact1” model
+We
+are most interested in the percentage of false negatives (bottom-left quadrant) because predicting no traffic beyond the threshold when, in fact, it did rise above it, will lead to a steep fine. On the other hand, the cost of false positives is in preemptively leaving the construction site when traffic didn’t rise above the threshold after all. It’s better to be safe than sorry, though! If you compare false negatives for the “no-construction” threshold (0.85%), it’s less than a third of that of the half-capacity threshold (3.08%). Ultimately, what matters most is the no-construction threshold because the idea is to stop construction before it gets close to half-capacity.
+Now that we have leveraged traditional methods to understand the model’s decisions, let’s move on to some more advanced model-agnostic methods.
+Generating LSTM attributions with integrated gradients
+We first
+learned about
+integrated gradients
+(
+IG
+) in
+Chapter 7
+,
+Visualizing Convolutional Neural Networks
+. Unlike the
+other gradient-based attribution methods studied in that
+chapter, path-integrated gradients is not contingent on convolutional layers, nor is it limited to classification problems.
+In fact, since it computes the gradients of the output concerning the inputs averaged along the path, the input and output could be anything! It is common to use integrated gradients
+with
+Convolutional Neural Networks
+(
+CNNs
+) and
+Recurrent Neural Networks
+(
+RNNs
+), like the one we
+are interpreting in this chapter. Frankly, when you see an IG LSTM example online, it has an embedding layer and is an NLP classifier, but IG could be used very effectively for LSTMs that even process sounds or genetic data!
+The integrated gradient explainer and the explainers that we will use moving forward can access any part of the traffic dataset. First, let’s create a generator for all of it:
+y_all = y_scaler.transform(traffic_df[[
+'traffic_volume'
+]])
+X_all = X_scaler.transform(
+    traffic_df.drop([
+'traffic_volume'
+], axis=
+1
+)
+)
+gen_all = TimeseriesGenerator(
+    X_all, y_all, length=lb, batch_size=
+24
+)
+Integrated gradients is a local interpretation method. So, let’s get a few sample “instances of interest” we can interpret. We know holidays may require specialized logic, so let’s see if our model picks up on the importance of
+is_holiday
+for one example (
+holiday_afternoon_s
+). Also, mornings are a concern, especially mornings with a larger than average rush hour because of weather conditions, so we have one example for that (
+peak_morning_s
+). Lastly, a hot day might have more traffic, especially on a weekend (
+hot_Saturday_s
+):
+X_df = traffic_df.drop([
+'traffic_volume'
+], axis=
+1
+\
+    ).reset_index(drop=
+True
+)
+holiday_afternoon_s = X_df[
+    (X_df.index >=
+43800
+) & (X_df.dow==
+0
+) &\
+    (X_df.hr==
+16
+) &(X_df.is_holiday==
+1
+)
+].tail(
+1
+)
+peak_morning_s = X_df[
+    (X_df.index >=
+43800
+) & (X_df.dow==
+2
+) &\
+    (X_df.hr==
+8
+) & (X_df.weather_Clouds==
+1
+) & (X_df.temp<
+20
+)
+].tail(
+1
+)
+hot_Saturday_s = X_df[
+    (X_df.index >=
+43800
+) & (X_df.dow==
+5
+) &\
+    (X_df.hr==
+12
+) & (X_df.temp>
+29
+) & (X_df.weather_Clear==
+1
+)
+].tail(
+1
+)
+Now that
+we have created some
+instances, let’s instantiate our explainers.
+IntegratedGradients
+from the
+alibi
+package only requires a deep learning model, but it is recommended to set a number of steps (
+n_steps
+) for the integral approximation and
+internal_batch_size
+. We will instantiate an explainer for our model:
+ig = IntegratedGradients(
+    lstm_traffic_mdl, n_steps=
+25
+, internal_batch_size=
+24
+)
+Before we iterate our samples and the explainers, it is important to realize how we need to input the sample to the explainer because it will need a batch of 24. To this end, we will have to get the index of the sample once we’ve deducted the lookback window (
+nidx
+). Then, you can obtain the batch for this sample from the generator (
+gen_all
+). Each batch includes 24 timesteps, so you floor
+nidx
+by 24 (
+nidx//24
+) to get the batch’s position for that sample. Once you’ve got the batch for the sample (
+batch_X
+) and printed the shape
+(24, 168, 15)
+, it shouldn’t surprise you that the first number is 24. Of course, we will need to get the index of the sample within the batch (
+nidx%24
+) to obtain the data for that sample:
+nidx = holiday_afternoon_s.index.tolist()[
+0
+] – lb
+batch_X = gen_all[nidx//
+24
+][
+0
+]
+print
+(batch_X.shape)
+The
+for
+loop will use the previously explained method to locate the batch for the sample
+(batch_X
+). This
+batch_X
+is inputted into the
+explain
+function. This is because this is a regression problem and there’s no target class; that is,
+target=None
+. Once the explanation is produced, the
+attributions
+property will have the attributions for the entire batch. We can only obtain this for the sample and
+transpose
+it to produce an image that
+has this shape:
+(15, lb)
+. The rest of the code in the
+for
+loop simply obtains the labels to use in the tick marks and
+then plots an image stretched out to fit the dimensions of our
+figure
+, along with its labels:
+samples = [holiday_afternoon_s, peak_morning_s, hot_saturday_s]
+sample_names = [
+'Holiday Afternoon'
+,
+'Peak Morning'
+,
+'Hot Saturday'
+]
+for
+s
+in
+range
+(
+len
+(samples)):
+    nidx = samples[s].index.tolist()[
+0
+] - lb
+    batch_X = gen_all[nidx//
+24
+][
+0
+]
+    explanation = ig.explain(batch_X, target=
+None
+)
+    attributions = explanation.attributions[
+0
+]
+    attribution_img = np.transpose(attributions[nidx%
+24
+,:,:])
+    end_date = traffic_df.iloc[samples[s].index
+        ].index.to_pydatetime()[
+0
+]
+    date_range = pd.date_range(
+        end=end_date, periods=
+8
+, freq=
+'1D'
+).to_pydatetime().tolist()
+    columns = samples[s].columns.tolist()  
+    plt.title(
+'Integrated Gradient Attribution Map for "{}"'
+.\
+format
+(sample_names[s], lb), fontsize=
+16
+)
+    divnorm = TwoSlopeNorm(
+        vmin=attribution_img.
+min
+(),
+        vcenter=
+0
+,
+        vmax=attribution_img.
+max
+()
+    )
+    plt.imshow(
+        attribution_img,
+        interpolation=
+'nearest'
+,
+        aspect=
+'auto'
+,
+        cmap=
+'coolwarm_r'
+,
+        norm=divnorm
+)
+    plt.xticks(np.linspace(
+0
+,lb,
+8
+).astype(
+int
+), labels=date_range)
+    plt.yticks([*
+range
+(
+15
+)], labels=columns)
+    plt.colorbar(pad=
+0.01
+,fraction=
+0.02
+,anchor=(
+1.0
+,
+0.0
+))
+    plt.show()
+The preceding code will generate the plots shown in
+Figure 9.8
+. On the
+y
+-axis, you can see the variable names, while on the
+x
+-axis, you can see the dates corresponding to the lookback window for the sample in question. The rightmost part of the
+x
+-axis is the sample’s
+date, and as you move left, you
+go backward in time. For instance, the holiday afternoon sample was 4 p.m. September 3 and there is one week’s worth of lookback, so each tick mark backward is a day before that date.
+Figure 9.8: Annotated integrated gradients attribution map for all samples for the “LSTM_traffic_168_compact1” model
+You can
+tell by the intensity in the attribution maps in
+Figure 9.8
+which hour/variables mattered for the prediction. The
+color bar to the right of each attribution map can serve as a key. Negative numbers in red correspond to a negative correlation, while positive numbers in blue correspond to a positive correlation. However, something that is pretty evident is the tendency for intensities to fade as each map goes backward in time. Since it’s bidirectional, this happens from both ends. What is surprising is how fast this happens.
+Let’s start from the bottom. For “Hot Saturday,” day of the week, hour, temperature, and clear weather play an important role in this prediction increasingly as you get closer to the predicted time (midday Saturday). The day started cooler, which explains how there’s a patch of red before the blue in the temperature feature.
+For “Peak Morning,” attributions make sense since it was clear after it had been previously rainy and cloudy, which caused the rush hour to peak quickly rather than increase slowly. To a certain degree, the LSTM has learned that only recent weather matters – no more than two or three days’ worth. However, that is not the only reason the integrated gradients fade. They also fade because
+of the
+vanishing gradient problem
+. This problem occurs during backpropagation because the gradient values are multiplied by the weight matrices in each step, so gradients can exponentially decrease to zero.
+LSTMs are organized in a very long sequence, making the network ever more ineffective at capturing dependencies in the long term. Fortunately, these LSTMs
+are
+stateful
+, which means they string batches in a sequence by leveraging states from the previous batch.
+Statefulness
+ensures
+learning from a long sequence, despite vanishing gradients. This is why when we observe the attribution map for “Holiday Afternoon,” there are negative attributions for
+is_holiday
+, which makes sense to anticipate no rush hour. It turns out September 3 (Labor Day) is nearly two months after the previous holiday (Independence Day), which is a more festive holiday. Is it possible that the model is picking up on these patterns?
+We could try subcategorizing holidays by their traffic patterns to see if that helps the model identify them. We could also make rolling aggregations of previous weather conditions to make it easier for the model to pick up on recent weather patterns. Weather patterns span hours, so it is intuitive to aggregate, not to mention easier to interpret. Interpretation methods can point us in the right direction as to how to improve models, and there’s certainly a lot of room for improvement.
+Next, we will take a stab at a permutation-based method!
+Computing global and local attributions with SHAP’s KernelExplainer
+Permutation methods
+make changes to the input to assess how much difference they will make to a model’s output. We first discussed this in
+Chapter 4
+,
+Global Model-Agnostic interpretation methods
+, but if you recall, there’s a coalitional framework to perform these permutations that will produce the average marginal contribution for each feature across different coalitions of features. This process’s outcome
+is
+Shapley
+values
+, which have essential mathematical properties such as additivity and symmetry. Unfortunately, Shapley values are costly to compute for datasets that aren’t small, so the SHAP library has approximation methods. One of these methods is
+KernelExplainer
+, which we also explained in
+Chapter 4
+and used in
+Chapter 5
+,
+Local Model-Agnostic Interpretation Methods
+. It approximates the Shapley values with a weighted local linear regression, just like LIME does.
+Why use KernelExplainer?
+We have
+a deep learning model, so why aren’t we using SHAP’s
+DeepExplainer
+as we did with the CNN in
+Chapter 7
+,
+Visualizing Convolutional Neural Networks
+? DeepExplainer adapted the DeepLIFT algorithm to approximate the Shapley values. It works very well with any feedforward network that’s used for tabular data, CNNs, and RNNs with an embedding layer, such as those used for an NLP classifier, or even to detect genomic sequences. It gets trickier for multivariate time series because DeepExplainer doesn’t know what to do with the input’s three-dimensional array. Even if it did, it includes data for previous timesteps, so you cannot permute one timestep without considering the previous ones. For instance, if the permutation dictates that the temperature is five degrees lower, shouldn’t that affect all the previous timestep’s temperatures up to a certain number of hours? And what if it’s 20 degrees lower? Doesn’t that mean it’s likely in a different season with entirely different weather – perhaps more clouds and snow as well?
+SHAP’s
+KernelExplainer
+can receive any arbitrary black box
+predict
+function. It also makes assumptions about the input dimensions. Fortunately, we can change the input data before it
+permutes it, making it seem to the
+KernelExplainer
+like it’s dealing with a tabular dataset. The arbitrary
+predict
+function doesn’t have to simply call the model’s
+predict
+function – it can change data both on the way in and on the way out!
+Defining a strategy to get it to work with a multivariate time series model
+To mimic likely past
+weather patterns based on the permutated input data, we could create a generative model or something to that effect. This strategy will help us to generate a variety of past timesteps that fit the permutated timestep, as well as to generate images for a specific class. Although this would likely lead to more accurate predictions, we won’t use this strategy because it’s incredibly time-consuming.
+Instead, we will find the time series data that best suits the permutated input with existing examples from our
+gen_all
+generator. There are distance metrics we can use to find the one that is closest to the permutated input. However, we must place some guardrails because if the permutation is for a Saturday at 5 a.m. with a temperature of 27 degrees Celsius and 90 percent cloud coverage, the closest observation to this one could be on a Friday at 7 a.m., but regardless of the weather traffic, it would be completely different. Therefore, we can implement a filter function that ensures that it only finds the closest observations for the same
+dow
+,
+is_holiday
+, and
+hr
+. The filter function can also clean up the permutated sample to remove or modify anything nonsensical for the model, such as a continuous value for a categorical feature:
+Figure 9.9: Permutation approximation strategy
+Figure 9.9
+depicts the rest
+of the process where it uses a distance function to find the closest observation to the modified permutated sample. This function returns the closest observation index, but the model can’t predict on singular observations (or timesteps), so it requires its past hourly history up to the lookback window. For this reason, it retrieves the right batch from the generator and makes a prediction on that, but the predictions will be on a different scale, so they need to be inverse transformed with
+y_scaler
+. Once the
+predict
+function has iterated through all the samples and made predictions for them and rescaled them, it sends them back to the
+KernelExplainer
+, which outputs their SHAP values.
+Laying the groundwork for the permutation approximation strategy
+You can
+define a custom filter function (
+filt_fn
+). It takes a
+pandas
+DataFrame with the entire dataset (
+X_df
+) you want to filter from, as well as the permutated sample (
+x
+) for filtering and the length of the
+lookback
+window.
+The function can also modify the permutated sample. In this case, we have to do this because so many features of the model are discrete, but the permutation process makes them continuous. As we mentioned previously, all the filtering does is protect the distance
+function from finding a nonsensical closest sample to the permutated sample by limiting the options:
+def
+filt_fn
+(
+X_df, x, lookback
+):
+    x_ = x.copy()
+    x_[
+0
+] =
+round
+(x_[
+0
+])
+#round dow
+x_[
+1
+] =
+round
+(x_[
+1
+])
+#round hr
+x_[
+6
+] =
+round
+(x_[
+6
+])
+#round is_holiday
+if
+x_[
+1
+] <
+0
+:
+#if hr < 0
+x_[
+1
+] =
+24
++ x_[
+1
+]
+        x_[
+0
+] = x_[
+0
+] –
+1
+#make it previous day
+if
+x_[
+0
+] <
+0
+:
+#if dow < 0
+x_[
+0
+] =
+7
++ x_[
+0
+]
+#make it previous week
+X_filt_df = X_df[
+            (X_df.index >= lookback) & (X_df.dow==x_[
+0
+]) &\
+            (X_df.hr==x_[
+1
+]) & (X_df.is_holiday==x_[
+6
+]) &\
+            (X_df.temp-
+5
+<=x_[
+2
+]) & (X_df.temp+
+5
+>=x_[
+2
+])
+        ]
+return
+X_filt_df, x_
+If you refer to
+Figure 9.9
+, after the filter function, the next thing we ought to define is the distance function. We could use any standard distance function accepted by
+scipy.spatial.distance.cdist
+, such as “Euclidean,” “cosine,” or “Hamming.” The problem with these standard distance functions is that they either work well with continuous or discrete variables but not both. We have both in this dataset!
+Fortunately, some alternatives exist that
+can handle both, such as
+Heterogeneous Euclidean-Overlap Metric
+(
+HEOM
+) and
+Heterogeneous Value Difference Metric
+(
+HVDM
+). Both methods apply different distance
+metrics, depending on the nature of the variable. HEOM uses a normalized Euclidean
+for continuous and , for discrete, “overlap” distance; that is, a distance of zero if the same and one otherwise.
+HVDM is more complicated because, for continuous variables, it’s the absolute distance between both values, divided by the standard deviation of the feature in question times four
+), which is a great distance metric for handling outliers. For discrete variables, it uses a normalized
+value difference metric
+, which is based on the difference between the conditional probability of both values.
+Even
+though HVDM is better than HEOM for datasets with many continuous values, it is overkill in this case. Once the dataset has been filtered by day of the week (
+dow
+) and hour (
+hr
+), the remaining discrete features are all binary, so “overlap” distance is ideal, and for the three remaining continuous features (
+temp
+,
+rain_1h
+,
+snow_1h
+, and
+cloud_coverage
+), Euclidean distance should suffice.
+distython
+has an
+HEOM
+distance method, and all it requires is a background dataset (
+X_df.values
+) and the indexes of the categorical features (
+cat_idxs
+). We can programmatically identify these features with an
+np.where
+command.
+If you want to verify that these are the right ones, run
+print(cat_idxs)
+in a cell. Only indexes 2, 3, 4, and 5 should be omitted:
+cat_idxs = np.where(traffic_df.drop([
+'traffic_volume'
+],\
+                                    axis=
+1
+).dtypes != np.float64)[
+0
+]
+heom_dist = HEOM(X_df.values, cat_idxs)
+print
+(cat_idxs)
+Now, we can create a
+lambda
+function that puts everything depicted in
+Figure 9.9
+together. It leverages a function called
+approx_predict_ts
+that takes care of the entire pipeline. It takes our filter function (
+filt_fn
+), distance function (
+heom_dist.heom
+), generator (
+gen_all
+), and fitted model (
+lstm_traffic_mdl
+), and chains them together, as described in
+Figure 9.9
+. It also scales the data with our scalers (
+X_scaler
+and
+y_scaler
+). Distance is computed on transformed features for higher accuracy, and the predictions are reverse transformed on the way out:
+predict_fn =
+lambda
+X: mldatasets.approx_predict_ts(
+    X, X_df,
+    gen_all,
+    lstm_traffic_mdl,
+    dist_metric=heom_dist.heom,
+    lookback=lookback,
+    filt_fn=filt_fn,
+    X_scaler=X_scaler,
+    y_scaler=y_scaler
+)
+We can now use the prediction function with
+KernelExplainer
+, but it should be done on samples that
+are most representative of the construction crew’s expected working conditions; that is, they plan to work March through November only, preferably on weekdays and in low-traffic hours. To this end, let’s create a DataFrame (
+working_season_df
+) that only includes these months and initializes a
+KernelExplainer
+with
+predict_fn
+and the k-means of the DataFrame as background data:
+working_season_df =\
+    traffic_df[lookback:].drop([
+'traffic_volume'
+], axis=
+1
+).copy()
+working_season_df =\
+    working_season_df[(working_season_df.index.month >=
+3
+) &\
+                      (working_season_df.index.month <=
+11
+)]
+explainer = shap.KernelExplainer(
+    predict_fn, shap.kmeans(working_season_df.values,
+24
+)
+)
+We can now produce SHAP values for a random set of observations of the
+working_season_df
+DataFrame.
+Computing the SHAP values
+We will
+sample 48 observations from it.
+KernelExplainer
+is rather slow, especially when it’s using our approximation method. To get an optimal global interpretation, it is best to use a high number of observations but also a high
+nsamples
+, which is the number of times we need to reevaluate the model when explaining each prediction. Unfortunately, having 50 of each would cause the explainer to take many hours to run, depending on your available compute, so we will use
+nsamples=10
+. You can look at SHAP’s progress bar and adjust it accordingly. Once it’s done, it will produce a feature importance
+summary_plot
+containing the SHAP values:
+X_samp_df = working_season_df.sample(
+80
+, random_state=rand)
+shap_values = explainer.shap_values(X_samp_df, nsamples=
+10
+)
+shap.summary_plot(shap_values, X_samp_df)
+The preceding code plots the summary shown in the following graph. Not surprisingly,
+hr
+and
+dow
+are the most important features, followed by some weather features. Strangely enough, temperature and rain don’t seem to weigh in on the predictions, but late spring through fall may not be a significant factor. Or maybe more observations and a higher
+nsample
+will yield a better global interpretation:
+Figure 9.10: SHAP summary plot based on the SHAP values produced by 48 sampled observations
+We can
+do the same with the instances of interest we chose in the previous section for local interpretations. Let’s iterate through all these data points. Then, we can produce a single
+shap_values
+, but this time with
+nsamples=80
+, and then generate a
+force_plot
+for each one:
+for
+s
+in
+range
+(
+len
+(samples)):
+print
+(
+'Local Force Plot for "{}"'
+.
+format
+(sample_names[s]))
+    shap_values_single = explainer.shap_values(
+        datapoints[i], nsamples=
+80
+)
+    shap.force_plot(
+    explainer.expected_value,
+    shap_values_single[
+0
+],
+    samples[s],
+    matplotlib=
+True
+)
+    plt.show()
+The
+preceding code generates the plots shown in
+Figure 9.11
+. “Holiday afternoon” has the hour (
+hr=16
+) pushing toward a higher prediction, while the fact that it’s a Monday (
+dow=0
+) and a holiday (
+is_holiday=1
+) is a driving force in the opposite direction. On the other hand, “Peak Morning” is mostly peak due to the hour (
+hr=8.0
+), but it has a high
+cloud_coverage
+, affirmative
+weather_Clouds
+, and yet no rain (
+rain_1h=0.0
+). Lastly, “Hot Saturday” has the day of the week (
+dow=5
+) pushing for a lower value, but the abnormally high value is mostly due to it being midday with no rain and clouds. Strangely, higher than normal temperature is not one of the factors:
+Figure 9.11: Force plots generated with SHAP values using nsamples=80 for a Holiday Afternoon, Peak Morning, and Hot Saturday
+With
+SHAP’s game theory-based approach, we can gauge how many permutations for the existing observations marginally vary the predicted outcome across many possible coalitions of features. However, this approach can be very limiting because our background data’s existing variance shapes our understanding of outcome variance.
+In the real world,
+variability is often determined by what is NOT represented in your data – but infinitesimally plausible
+. For instance, reaching 25°C (77°F) before 5 a.m. in a Minneapolis summer is not a common occurrence, but with global warming, it could become frequent, so we would want to simulate how it could impact traffic patterns. Forecasting models are particularly prone to risk, so simulating is a crucial interpretation component to assess this uncertainty. A better understanding of uncertainty can yield more robust models and directly inform decisions. Next, we will discuss how we can produce simulations with sensitivity analysis methods.
+Identifying influential features with factor prioritization
+The
+Morris method
+is
+one of several global sensitivity analysis methods
+that range from
+simple
+Fractional factorial
+to complicated
+Monte Carlo filtering
+. Morris is somewhere on this spectrum, falling into two
+categories. It uses
+one-at-a-time sampling
+, which means
+that only one value changes between consecutive simulations. It’s also
+an
+Elementary Effects
+(
+EE
+) method, which means that it doesn’t quantify the exact effect of a factor in a model but rather gauges its importance and relationship with other factors. By the way,
+factor
+is just another word for a feature or variable that’s commonly used in applied statistics. To be consistent with the related theory, we will use this word in this and the next section.
+Another property of Morris is that it’s less computationally expensive than the variance-based methods we will study next. It can provide more insights than simpler and less costly methods such as regression-, derivative-, or factorial-based ones. It can’t quantify effects precisely but can identify those with negligible or interaction effects, making it an ideal method for screening factors
+when the number of factors is low. Screening is also known as
+factor prioritization
+because it can prioritize your factors by how they are classified.
+Computing Morris sensitivity indices
+The Morris method derives
+a distribution of elementary effects that it associates with an individual factor. Each EE distribution has a mean (
+µ
+) and a standard deviation (
+σ
+). These two statistics are what help map the factors into different classifications. The mean could be negative when the model is non-monotonic, so a Morris method variation adjusts for this with absolute values (
+µ
+*
+) so that it is more manageable to interpret. We will use this variation here.
+Now, let’s limit the scope of this problem to make it more manageable. The traffic uncertainties the construction crew will face will be ongoing from May to October, Monday to Friday, from 11 p.m. to 5 a.m. Therefore, we can take the
+working_season_df
+DataFrame and subset it further to produce a working hours one (
+working_hrs_df
+) that we can
+describe
+. We will include the 1%, 50%, and 99% percentiles to understand where the median and outliers lie:
+working_hrs_df = working_season_df[
+    (working_season_df.dow <
+5
+)
+    & ((working_season_df.hr <
+5
+) | (working_season_df.hr >
+22
+))
+]
+working_hrs_df.describe(percentiles=[
+.01
+,
+.5
+,
+.99
+]).transpose()
+The
+preceding code produced the table in
+Figure 9.12
+. We can use this table to extract the ranges we will use for our features in the simulation. Typically, we would use plausible values that have exceeded the existing maximums or minimums. For most models, any feature value can be increased or decreased beyond its known limits, and since the model learned a monotonic relationship, it can infer a realistic outcome. For instance, it might learn that rain beyond a certain point will increasingly diminish traffic. Then, say you want to simulate a severe flood with, say, 30 mm of rain per hour; it can accurately predict no traffic:
+Figure 9.12: Summary statistics for the period that the construction crew plans to work through
+However, because we are using a prediction approximation method that samples from historical values, we are limited to how far we can push the boundaries outside of the known. For this reason, we will use the 1% and 99% percentile values as our limits. We should note that this is an important caveat for any findings, especially for features that could plausibly extend beyond these limits, such as
+temp
+,
+rain_1h
+, and
+snow_1h
+.
+Another
+thing to note from the summary of
+Figure 9.12
+is that many weather-related binary features are very sparse. You can tell by their extremely low mean. Each factor that’s added to the sensitivity analysis simulation slows it down, so we will only take the top three; that is,
+weather_Clear
+,
+weather_Clouds
+, and
+weather_Rain
+. These factors are specified along with the other six factors in a “problem” dictionary (
+morris_problem
+), which has their corresponding
+names
+,
+bounds
+, and
+groups
+. Now,
+bounds
+is critical because it denotes what ranges of values will be simulated for each factor. We will use [0,4] (Monday to Friday) for
+dow
+and [-1,4] (11 p.m. to 4 a.m.) for
+hr
+. The filter function automatically translates negative hours into hours from the day before so that -1 on a Tuesday is equivalent to 23 on a Monday. The rest of the bounds were informed by the percentiles. Note that
+groups
+all have factors in the same group, except for the three weather ones:
+morris_problem = {
+# There are nine variables
+'num_vars'
+:
+10
+,
+# These are their names
+'names'
+: [
+'dow'
+,
+'hr'
+,
+'temp'
+,
+'rain_1h'
+,
+'snow_1h'
+,\
+'cloud_coverage'
+,
+'is_holiday'
+,
+'weather_Clear'
+,\
+'weather_Clouds'
+,
+'weather_Rain'
+],
+# Plausible ranges over which we'll move the variables
+'bounds'
+: [
+        [
+0
+,
+4
+],
+# dow Monday - Firday
+[-
+1
+,
+4
+],
+# hr
+[-
+12
+,
+25.
+],
+# temp (C)
+[
+0.
+,
+3.1
+],
+# rain_1h
+[
+0.
+,
+.3
+],
+# snow_1h
+[
+0.
+,
+100.
+],
+# cloud_coverage
+[
+0
+,
+1
+],
+# is_holiday
+[
+0
+,
+1
+],
+# weather_Clear
+[
+0
+,
+1
+],
+# weather_Clouds
+[
+0
+,
+1
+]
+# weather_Rain
+],
+# Only weather is grouped together
+'groups'
+: [
+'dow'
+,
+'hr'
+,
+'temp'
+,
+'rain_1h'
+,
+'snow_1h'
+,\
+'cloud_coverage'
+,
+'is_holiday'
+,
+'weather'
+,
+'weather'
+,\
+'weather'
+]
+}
+Once the dictionary has been defined, we can generate Morris method samples with
+SALib's
+sample
+method. In addition to the dictionary, it takes a number of trajectories (
+256
+) and levels (
+num_levels=4
+). The method uses a grid with factors and levels to construct the trajectories for which inputs are randomly moved
+one at a time
+(
+OAT
+). What is
+important to heed here is that more levels add more resolution to this grid, potentially making for a better analysis. However, this can be very time-consuming. It’s better to start with a ratio between the number of trajectories and levels of 25:1 or higher.
+Then, you can decrease this ratio progressively. In other words, if you have enough compute, you can make
+num_levels
+match the number of trajectories, but if you have this much compute available, you could try
+optimal_trajectories=True
+. However, given that we have groups,
+local_optimization
+would have to be
+False
+. The output of
+sample
+is an array that is one column for each factor and (
+G
++ 1) ×
+T
+rows (where
+G
+is the number of groups and
+T
+is the number of trajectories). We have eight groups and 256 trajectories, so
+print
+should output a shape of 2,304 rows and 10 columns:
+morris_sample = ms.sample(morris_problem,
+256
+,\
+                          num_levels=
+4
+, seed=rand)
+print
+(morris_sample.shape)
+Given that the
+predict
+function will only work with 15 factors, we should modify the samples to fill the remaining five factors with zeroes. We use zeroes because that is the median value for these features. Medians are least likely to increase traffic, but you ought to tailor your default values on a case-by-case basis. If you recall our
+Cardiovascular Disease
+(
+CVD
+) example from
+Chapter 2
+,
+Key Concepts of Interpretability
+, the feature value that would increase CVD risk was sometimes the minimum or maximum.
+The
+np.hstack
+function can concatenate the array horizontally so that three zero factors follow the samples for the first eight factors. Then, there’s a lonely ninth sample factor corresponding to
+weather_Rain
+, followed by two zero factors. The resulting array should have the same number of rows as before but 15 columns:
+morris_sample_mod = np.hstack(
+    (
+        morris_sample[:,
+0
+:
+9
+],
+        np.zeros((morris_sample.shape[
+0
+],
+3
+)),
+        morris_sample[:,
+9
+:
+10
+],
+        np.zeros((morris_sample.shape[
+0
+],
+2
+))
+    )
+)
+print
+(morris_sample_mod.shape)
+The
+numpy
+array known as
+morris_sample_mod
+now has the Morris samples in a shape that can be understood by our
+predict
+function. If this was a model that had been trained on a
+tabular dataset, we could just leverage the model’s
+predict
+function. However, just as we did with SHAP, we have to use the approximation method. This time, we won’t use
+predict_fn
+because we want to set one additional option,
+progress_bar=True
+, in
+approx_predict_ts
+. Everything else will remain the same. The progress bar will come in handy because this should take a while. Run the cell and take a coffee break:
+morris_preds = mldatasets.approx_predict_ts(
+    morris_sample_mod,
+    X_df,
+    gen_all,
+    lstm_traffic_mdl,
+    filt_fn=filt_fn,
+    dist_metric=heom_dist.heom,
+    lookback=lookback,
+    X_scaler=X_scaler,
+    y_scaler=y_scaler,
+    progress_bar=
+True
+)
+To produce a sensitivity analysis with
+SALib's
+analyze
+function, all you need is your problem dictionary (
+morris_problem
+), the original Morris samples (
+morris_sample
+), and the predictions we just produced with those samples (
+morris_preds
+). There’s an optional confidence interval level argument (
+conf_level
+), but the default of 0.95 is good. It uses resamples to compute this confidence level, which is 1,000 by default. This setting can also be changed with an optional
+num_resamples
+argument:
+morris_sensitivities = ma.analyze(
+    morris_problem, morris_sample, morris_preds,\
+    print_to_console=
+False
+)
+Analyzing the elementary effects
+analyze
+will return a
+dictionary with the Morris sensitivity indices, including the mean (
+µ
+) and standard deviation (
+σ
+) elementary effect, as well as the absolute value of the mean (
+µ
+*
+). It’s easier to appreciate these values in a tabular format so that we can place them into a DataFrame and sort and color-code them according to
+µ
+*
+, which
+can be interpreted as the overall importance of the factor.
+σ
+, on the other hand, is how much the factor interacts with other ones:
+morris_df = pd.DataFrame(
+    {
+'features'
+:morris_sensitivities[
+'names'
+],
+'μ'
+:morris_sensitivities[
+'mu'
+],
+'μ*'
+:morris_sensitivities[
+'mu_star'
+],
+'σ'
+:morris_sensitivities[
+'sigma'
+]
+    }
+)
+morris_df.sort_values(
+'μ*'
+, ascending=
+False
+).style\
+    .background_gradient(cmap=
+'plasma'
+, subset=[
+'μ*'
+])
+The preceding code outputs the DataFrame depicted in
+Figure 9.13
+. You can tell that
+is_holiday
+is one of the most important factors, at least during the bounds specified in the problem definition (
+morris_problem
+). Another thing to note is that weather does have an absolute mean elementary effect but inconclusive interaction effects. Groups are challenging to assess, especially when they are sparse binary factors:
+Figure 9.13: The elementary effects decomposition of the factors
+The DataFrame
+in the preceding figure is not the best way to visualize the elementary effects. When there are not too many factors, it’s easier to plot them.
+SALib
+comes with two plotting methods. The horizontal bar plot (
+horizontal_bar_plot
+) and covariance plot (
+covariance_plot
+) can be placed side by side. The covariance plot is excellent, but it doesn’t annotate the areas it delineates. We will learn about these next. So, solely for instructional purposes, we will use
+text
+to place the annotations:
+fig, (ax0, ax1) = plt.subplots(
+1
+,
+2
+, figsize=(
+12
+,
+8
+))
+mp.horizontal_bar_plot(ax0, morris_sensitivities, {})
+mp.covariance_plot(ax1, morris_sensitivities, {})
+ax1.text(
+    ax1.get_xlim()[
+1
+] *
+0.45
+, ax1.get_ylim()[
+1
+] *
+0.75
+,\
+'Non-linear and/or-monotonic'
+, color=
+'gray'
+,\
+    horizontalalignment=
+'center'
+)
+ax1.text(ax1.get_xlim()[
+1
+] *
+0.75
+, ax1.get_ylim()[
+1
+] *
+0.5
+,\
+'Almost Monotonic'
+, color=
+'gray'
+, horizontalalignment=
+'center'
+)
+ax1.text(ax1.get_xlim()[
+1
+] *
+0.83
+, ax1.get_ylim()[
+1
+] *
+0.2
+,\
+'Monotonic'
+, color=
+'gray'
+, horizontalalignment=
+'center'
+)
+ax1.text(ax1.get_xlim()[
+1
+] *
+0.9
+, ax1.get_ylim()[
+1
+] *
+0.025
+,
+'Linear'
+, color=
+'gray'
+, horizontalalignment=
+'
+center'
+)
+The preceding code produces the plots shown in
+Figure 9.14
+. The bar plot on the left ranks the factors by
+µ
+*
+, while the lines sticking out of each bar signify their corresponding confidence bands. The covariance plot to the right is a scatter plot with
+µ
+*
+on the
+x
+-axis and
+σ
+on the
+y
+-axis. Therefore, the farther right the point is, the more important it is, while the further up it is in the plot, the more it interacts with other factors and becomes increasingly less monotonic. Naturally, this means that factors that don’t interact much and are mostly monotonic ones comply with linear regression assumptions, such as linearity and multicollinearity. However, the spectrum between linear and non-linear or non-monotonic is determined diagonally by the ratio of
+σ
+and
+µ
+*
+:
+Figure 9.14: A bar and covariance plot depicting the elementary effects
+You can
+tell by the preceding covariance plot that all the factors are non-linear or non-monotonic.
+hr
+is by far the most important, with the following two (
+dow
+and
+temp
+) clustered relatively nearby, followed by
+weather
+and
+is_holiday
+. The
+weather
+group is not on the plot because interactivity was inconclusive, yet
+cloud_coverage
+,
+rain_1h
+, and
+snow_1h
+are considerably more interactive than important on their own.
+Elementary effects help us understand how to classify our factors in accordance with their effects on model outcomes. However, it’s not a robust method to properly quantify their effects or those derived from factor interactions. For that, we would have to turn to a variance-based global method that uses a probabilistic framework to decompose the output’s variance and trace
+it back to the inputs. Those
+methods include
+Fourier Amplitude Sensitivity Test
+(
+FAST
+) and
+Sobol
+. We will study the latter approach next.
+Quantifying uncertainty and cost sensitivity with factor fixing
+With
+the Morris indices, it became evident that all the factors are non-linear or non-monotonic. There’s a high degree of interactivity between them – as expected! It should be no surprise that climate factors (
+temp
+,
+rain_1h
+,
+snow_1h
+, and
+cloud_coverage
+) are likely multicollinear with
+hr
+. There are also patterns to be found between
+hr
+,
+is_holiday
+, and
+dow
+and the target. Many of these factors most definitely don’t have a monotonic relationship with the target. We know this already. For instance, traffic doesn’t consistently increase as hours increase throughout the day. That’s not the case for days of the week either!
+However, we didn’t know to what degree
+is_holiday
+and
+temp
+impacted the model, particularly during the crew’s working hours, which was an important insight. That being said, factor prioritization with Morris indices is usually to be taken as a starting point or “first setting” because once you ascertain that there are interaction effects, it’s best if you disentangle them. To this end, there’s a “second setting” called
+factor fixing
+. We can quantify the
+variance and, by doing so, the uncertainty brought on by all the factors.
+Only
+variance-based methods
+can
+quantify these effects in a statistically rigorous fashion.
+Sobol sensitivity analysis
+is
+one of these methods, which means that it decomposes the model’s output variance into percentages and attributes it to the model’s inputs and interactions. Like Morris, it has a sampling step, as well as a sensitivity index estimation step.
+Unlike Morris, the sampling doesn’t follow a series of levels but the input data’s distribution. It
+uses a
+quasi-Monte Carlo method
+, where it samples points in hyperspace that follow the inputs’ probability distributions.
+Monte Carlo
+methods
+are a family of algorithms that perform random sampling, often for optimization or simulation. They seek shortcuts on problems that would be impossible to solve with brute force or entirely deterministic approaches. Monte Carlo methods are common in sensitivity analysis precisely for this reason. Quasi-Monte Carlo methods have the same goal. However, they converge faster because they use a deterministic low-discrepancy sequence instead of using a pseudorandom one. The Sobol method uses
+the
+Sobol sequence
+, devised by the same mathematician. We will use another sampling scheme derived from Sobol’s, called Saltelli’s.
+Once the samples have been produced, Monte Carlo estimators compute the variance-based sensitivity indices. These indices are capable of quantifying non-linear non-additive effects
+and second-order indices, which relate to the interaction between two factors. Morris can reveal interactivity in your model, but not precisely how it is manifested. Sobol can tell you what factors are interacting and to what degree.
+Generating and predicting on Saltelli samples
+To begin a
+Sobol sensitivity analysis with
+SALib
+, we must first define a problem. We’ll do the same as we did with Morris. This
+time, we will reduce the factors because we realized that the
+weather
+grouping led to inconclusive results. We should include the least sparse of all the weather factors; that is,
+weather_Clear
+. And since Sobol uses a probabilistic framework, there’s no harm in expanding the bounds to their minimum and maximum values for
+temp
+,
+rain_1h
+, and
+cloud_coverage
+, as seen in
+Figure 9.12
+:
+sobol_problem = {
+'num_vars'
+:
+8
+,
+'names'
+: [
+'dow'
+,
+'hr'
+,
+'temp'
+,
+'rain_1h'
+,
+'snow_1h'
+,
+'cloud_coverage'
+,
+'is_holiday'
+,
+'weather_Clear'
+],
+'
+bounds'
+: [
+        [
+0
+,
+4
+],
+# dow Monday through Friday
+[-
+1
+,
+4
+],
+# hr
+[-
+3.
+,
+31.
+],
+# temp (C)
+[
+0.
+,
+21.
+],
+# rain_1h
+[
+0.
+,
+1.6
+],
+# snow_1h
+[
+0.
+,
+100.
+],
+# cloud_coverage
+[
+0
+,
+1
+],
+# is_holiday
+[
+0
+,
+1
+]
+# weather_Clear
+],
+'groups'
+:
+None
+}
+Generating the samples should look familiar too. The Saltelli
+sample
+function requires the following:
+A problem statement (
+sobol_problem
+)
+A number of samples to produce per factor (
+300
+)
+Second-order indices to compute (
+calc_second_order=True
+)
+Given that we want the interactions, the output of
+sample
+is an array that has one column for each factor and
+rows (where
+N
+is the number of samples and
+F
+is the number of factors). We have eight factors and 256 samples per factor, so
+print
+should output
+a shape of 4,608 rows and 8 columns. First, we will modify it, as we did previously, with
+hstack
+to add the 7 empty factors
+needed to make the predictions, resulting in 15 columns instead:
+saltelli_sample = ss.sample(
+    sobol_problem,
+256
+, calc_second_order=
+True
+, seed=rand
+)
+saltelli_sample_mod = np.hstack(
+    (saltelli_sample, np.zeros((saltelli_sample.shape[
+0
+],
+7
+)))
+)
+print
+(saltelli_sample_mod.shape)
+Now, let’s predict on these samples. This should take a while, so it’s coffee time once more:
+saltelli_preds = mldatasets.pprox._predict_ts(
+    saltelli_sample_mod,
+    X_df,
+    gen_all,
+    lstm_traffic_mdl,
+    filt_fn=filt_fn,
+    dist_metric=heom_dist.heom,
+    lookback=lookback,
+    X_scaler=X_scaler,
+    y_scaler=y_scaler,
+    progress_bar=
+True
+)
+Performing Sobol sensitivity analysis
+For
+Sobol sensitivity analysis (
+analyze
+), all you need is a problem statement (
+sobol_problem
+) and the model outputs (
+saltelli_preds
+). But the predictions don’t tell the story of uncertainty. Sure, there’s variance in the predicted traffic, but that traffic is only a problem once it exceeds 1,500. Uncertainty is something you want to relate to risk or reward, costs or revenue, loss or profit – something tangible you can connect to your problem.
+First, we must
+assess if there’s any risk at all. To get an idea of whether the predicted traffic in the samples exceeded the no-construction threshold during working hours, we can use
+print(max(saltelli_preds[:,0]))
+. The maximum traffic level should be somewhere in the neighborhood of 1,800-1,900, which means that there’s at least some risk that the construction company will pay a fine. Instead of using the predictions (
+saltelli_preds
+) as the model’s output, we can create a simple binary array with ones when it exceeded 1,500 and zero otherwise. We will call this
+costs
+, and then run the
+analyze
+function with it. Note that
+calc_second_order=True
+is also set here. It will throw an error if
+sample
+and
+analyze
+don’t have a consistent setting. Like with Morris, there’s an optional confidence interval level argument (
+conf_level
+), but the default of 0.95 is good:
+costs = np.where(saltelli_preds >
+1500
+,
+1
+,
+0
+)[:,
+0
+]
+factor_fixing_sa = sa.analyze(
+    sobol_problem,
+    costs,
+    calc_second_order=
+True
+,
+    print_to_console=
+False
+)
+analyze
+will return a dictionary with the Sobol sensitivity indices, including the first-order (
+S1
+), second-order (
+S2
+), and total-order (
+ST
+) indices, as well as the total confidence bounds (
+ST_conf
+). The indices correspond to percentages, but the totals won’t necessarily add up unless the model is additive. It’s easier to appreciate these values in a tabular format so that we can place them into a DataFrame and sort and color-code them according to the total, which can be interpreted as the overall importance of the factor. However, we will leave the second-order indices out because they are two-dimensional and akin to a correlation plot:
+sobol_df = pd.DataFrame(
+    {
+'features'
+:sobol_problem[
+'names'
+],
+'1st'
+:factor_fixing_sa[
+'S1'
+],
+'Total'
+:factor_fixing_sa[
+'ST'
+],
+'Total Conf'
+:factor_fixing_sa[
+'ST_conf'
+],
+'Mean of Input'
+:saltelli_sample.mean(axis=
+0
+)[:
+8
+]
+    }
+)
+sobol_df.sort_values(
+'Total'
+, ascending=
+False
+).style
+    .background_gradient(cmap=
+'plasma'
+, subset=[
+'Total'
+])
+The preceding
+code outputs the DataFrame depicted in
+Figure 9.15
+. You can tell that
+temp
+and
+is_holiday
+are in the top four, at least during the bounds specified in the problem definition (
+sobol_problem
+). Another thing to note is that
+weather_Clear
+does have more of an effect on its own, but
+rain_1h
+and
+cloud_coverage
+seem to have no effect on the potential cost because they have zero total first-order indices:
+Figure 9.15: Sobol global sensitivity indices for the eight factors
+Something interesting about the first-order values is how low they are, suggesting that interactions account for most of the model output variance. We can easily produce a heatmap with second-order indices to corroborate this. It’s the combination of these indices and the first-order ones that add up to the totals:
+S2 = factor_fixing_sa[
+'S2'
+]
+divnorm = TwoSlopeNorm(vmin=S2.
+min
+(), vcenter=
+0
+, vmax=S2.
+max
+())
+sns.heatmap(S2, center=
+0.00
+, norm=divnorm, cmap=
+'coolwarm_r'
+,\
+            annot=
+True
+, fmt =
+'.2f'
+,\
+            xticklabels=sobol_problem[
+'names'
+],\
+            yticklabels=sobol_problem[
+'names'
+])
+The preceding code outputs the heatmap in
+Figure 9.16
+:
+Figure 9.16: Sobol second-order indices for the eight factors
+Here, you
+can tell that
+is_holiday
+and
+weather_Clear
+are the two factors that contribute the most to the output variance with the highest absolute value of 0.26.
+dow
+and
+hr
+have sizable interactions with all the factors.
+Incorporating a realistic cost function
+Now, we
+can create a cost function that takes our inputs (
+saltelli_sample
+) and outputs (
+saltelli_preds
+) and computes how much the twin cities would fine the construction company, plus any additional costs the additional traffic could produce.
+It is better to do this if both the input and outputs are in the same array because we will need details from both to calculate the costs. We can use
+hstack
+to join the samples and their corresponding predictions, producing an array with eight columns (
+saltelli_sample_preds
+). We can then define a cost function that can compute the costs (
+cost_fn
+), given an array with these nine columns:
+#Join input and outputs into a sample+prediction array
+saltelli_sample_preds = np.hstack((saltelli_sample, saltelli_preds))
+We know that
+the half-capacity threshold wasn’t exceeded for any sample predictions, so we won’t even bother to include the daily penalty in the function. Besides that, the fines are $15 per vehicle that exceeds the hourly no-construction threshold. In addition to these fines, to be able to leave on time, the construction company estimates additional costs: $1,500 in extra wages if the threshold is exceeded at 4 a.m. and $4,500 more on Fridays to speed up the moving of their equipment because it can’t stay on the highway shoulder during weekends. Once we have the cost function, we can iterate through the combined array (
+saltelli_sample_preds
+), calculating costs for each sample. List comprehension can do this efficiently:
+#Define cost function
+def
+cost_fn
+(
+x
+):
+    cost =
+0
+if
+x[
+8
+] >
+1500
+:
+        cost = (x[
+8
+] -
+1500
+) *
+15
+if
+round
+(x[
+1
+]) ==
+4
+:
+        cost = cost +
+1500
+if
+round
+(x[
+0
+]) ==
+4
+:
+            cost = cost +
+4500
+return
+cost
+#Use list comprehension to compute costs for sample+prediction array
+costs2 = np.array([cost_fn(xi)
+for
+xi
+in
+saltelli_sample_preds])
+#Print total fines for entire sample predictions
+print
+(
+'
+Total Fines: $%s'
+%
+'{:,.2f}'
+.
+format
+(
+sum
+(costs2)))
+The
+print
+statement should output a cost somewhere between $170,000 and $200,000. But not to worry! The construction crew only plans to work about 195 days on-site per year and 5 hours each day, for a total of 975 hours. However, there are 4,608 samples, which means that there are almost 5 years’ worth of predicted costs due to excess traffic. In any case, the point of calculating these costs is to figure out how they relate to the model’s inputs. More years’ worth of samples means tighter confidence intervals:
+factor_fixing2_sa = sa.analyze(
+    sobol_problem, costs2, calc_second_order=
+True
+,
+    print_to_console=
+False
+)
+We can now
+perform the analysis again but with
+costs2
+, and we can save the analysis into a
+factor_fixing2_sa
+dictionary. Lastly, we can produce a new sorted and color-coded DataFrame with this dictionary’s values, as we did previously for
+Figure 9.15
+, which generates the output shown in
+Figure 9.17
+.
+As you can tell by
+Figure 9.17
+once the actual costs have been factored in,
+dow
+,
+hr
+, and
+is_holiday
+become riskier factors, while
+snow_1h
+and
+temp
+become less relevant when compared to
+Figure 9.15
+:
+Figure 9.17: Sobol global sensitivity indices for the eight factors using the realistic cost function
+One thing that is hard to appreciate with a table is the confidence intervals of the sensitivity indices. For that, we can use a bar plot, but first, we must convert the entire dictionary
+into a DataFrame so that
+SALib's
+plotting function can plot it:
+factor_fixing2_df = factor_fixing2_sa.to_df()
+fig, (ax) = plt.subplots(
+1
+,
+1
+, figsize=(
+15
+,
+7
+))
+sp.plot(factor_fixing2_df[
+0
+], ax=ax)
+The preceding code generates the bar plot in
+Figure 9.18
+. The 95% confidence interval for
+dow
+is much larger than for other important factors, which shouldn’t be surprising considering how much variance there is between days of the week. Another interesting insight is how
+weather_Clear
+has negative first-order effects, so the positive total-order indices are entirely attributed to second-order ones, which expand the confidence interval:
+Figure 9.18: Bar plot with the Sobol sensitivity total-order indices and their confidence intervals using a realistic cost function
+To understand how, let’s plot the heatmap shown in
+Figure 9.16
+again but this time using
+factor_fixing2_sa
+instead of
+factor_fixing_sa
+. The heatmap in
+Figure 9.19
+should depict how the realistic costs reflect the interactions in the model:
+Figure 9.19: Sobol second-order indices for seven factors while factoring a more realistic cost function
+The
+preceding heatmap shows similar salient interactions to those in
+Figure 9.16
+but they’re much more nuanced since there are more shades. It becomes evident that
+weather_Clear
+has a magnifying effect when combined with
+is_holiday
+, and a tempering effect for
+dow
+and
+hr
+.
+Mission accomplished
+The mission was to train a traffic prediction model and understand what factors create uncertainty and possibly increase costs for the construction company. We can conclude a significant portion of the potential $35,000/year in fines can be attributed to the
+is_holiday
+factor. Therefore, the construction company should rethink working holidays. There are only seven or eight holidays between March and November, and they could cost more because of the fines than working on a few Sundays instead. With this caveat, the mission was successful, but there’s still a lot of room for improvement.
+Of course, these conclusions are for the
+LSTM_traffic_168_compact1
+model – which we can compare with other models. Try replacing the
+model_name
+at the beginning of the notebook with
+LSTM_traffic_168_compact2
+, an equally small but significantly more robust model, or
+LSTM_traffic_168_optimal
+, a larger slightly better-performing model, and re-running the notebook. Or glance at the notebooks named
+Traffic_compact2
+and
+Traffic_optimal
+, which already have been re-run with these corresponding models. You will find that it is possible to train and select models that manage uncertain inputs much better. That being said, improvement doesn’t always come by simply selecting a better model.
+For instance, one thing that could be covered in further depth is the true impact of
+temp
+,
+rain_1h
+, and
+snow_1h
+. Our prediction approximation method precluded Sobol from testing the effect of extreme weather events. If we modified the model to train on aggregated weather features at single timesteps and built in some guardrails, we could simulate weather extremes with Sobol. And the “third setting” of sensitivity analysis, known as factor mapping, could help pinpoint how exactly some factor values affect the predicted outcome, leading to a sturdier cost-benefit analysis, but we won’t cover that in this chapter.
+Throughout
+Part Two
+of this book, we explored an ecosystem of interpretation methods: global and local; model-specific and model-agnostic; permutation-based and sensitivity-based. There’s no shortage of interpretation methods to choose from for any machine learning use case. However, it cannot be stressed enough that
+NO method is perfect
+. Still, they can complement each other to approximate a better understanding of your machine learning solution and the problem it aims to solve.
+This chapter’s focus on certainty in forecasting was designed to shed light on a particular problem in the machine learning community: overconfidence.
+Chapter 1
+,
+Interpretation, Interpretability, Explainability; and Why Does It All Matter?
+, in the
+A business case of interpretability
+section, described the many biases that infest human decision-making. These biases are often fueled by overconfidence in domain knowledge or our models’ impressive results. And these impressive results cloud us from grasping the limitations of our models as the public distrust of AI increases.
+As we discussed in
+Chapter 1
+,
+Interpretation, Interpretability, Explainability; and Why Does It All Matter?
+, machine learning is only meant to tackle
+incomplete problems
+. Otherwise, we might as well use deterministic and procedural programming like those found in closed-loop systems. The best we can do to solve an incomplete problem is an incomplete solution, which should be optimized to solve as much of it as possible. Whether through gradient descent, least-squares estimation, or splitting and pruning a decision tree, machine learning doesn’t produce a model that generalizes perfectly. That lack of completeness in machine learning is precisely why we need interpretation methods. In a nutshell: models learn from our data, and we can learn a lot from our models, but only if we interpret them!
+Interpretability doesn’t stop there, though. Model interpretations can drive decisions and help us understand model strengths and weaknesses. However, often, there are problems in the data or models themselves that can make them less interpretable. In
+Part Three
+of this book, we’ll learn how to tune models and the training data for interpretability by reducing complexity, mitigating bias, placing guardrails, and enhancing reliability.
+Statistician George E.P. Box famously quipped that “
+all models are wrong, but some are useful
+.” Perhaps they aren’t always wrong, but humility is required from machine learning practitioners to accept that even high-performance models should be subject to scrutiny and our assumptions about them. Uncertainty with machine learning models is expected and shouldn’t be a source of shame or embarrassment. This leads us to another takeaway from this chapter: that uncertainty comes with ramifications, be it costs or profit lift, and that we can gauge these with sensitivity analysis.
+Summary
+After reading this chapter, you should understand how to assess a time series model’s predictive performance, know how to perform local interpretations for them with integrated gradients, and know how to produce both local and global attributions with SHAP. You should also know how to leverage sensitivity analysis factor prioritization and factor fixing for any model.
+In the next chapter, we will learn how to reduce the complexity of a model and make it more interpretable with feature selection and engineering.
+Dataset and image sources
+TomTom, 2019, Traffic Index:
+https://nonews.co/wp-content/uploads/2020/02/TomTom2019.pdf
+UCI Machine Learning Repository, 2019, Metro Interstate Traffic Volume Data Set:
+https://archive.ics.uci.edu/ml/datasets/Metro+Interstate+Traffic+Volume
+Further reading
+Wilson, D.R., and Martinez, T., 1997,
+Improved Heterogeneous Distance Functions
+. J. Artif. Int. Res. 6-1. pp.1-34:
+https://arxiv.org/abs/cs/9701101
+Morris, M., 1991,
+Factorial sampling plans for preliminary computational experiments
+. Quality Engineering, 37, 307-310:
+https://doi.org/10.2307%2F1269043
+Saltelli, A., Tarantola, S., Campolongo, F., and Ratto, M., 2007,
+Sensitivity analysis in practice: A guide to assessing scientific models
+. Chichester: John Wiley & Sons.
+Sobol, I.M., 2001,
+Global sensitivity indices for nonlinear mathematical models and their Monte Carlo estimates
+. MATH COMPUT SIMULAT,55(1–3),271-280:
+https://doi.org/10.1016/S0378-4754(00)00270-6
+Saltelli, A., P. Annoni, I. Azzini, F. Campolongo, M. Ratto, and S. Tarantola, 2010,
+Variance based sensitivity analysis of model output. Design and estimator for the total sensitivity index
+. Computer Physics Communications, 181(2):259-270:
+https://doi.org/10.1016/j.cpc.2009.09.018
+Learn more on Discord
+To join the Discord community for this book – where you can share feedback, ask the author questions, and learn about new releases – follow the QR code below:
+https://packt.link/inml
+
+10
+Feature Selection and Engineering for Interpretability
+In the first three chapters, we discussed how complexity hinders
+Machine Learning
+(
+ML
+) interpretability. There’s a trade-off because you may need some complexity to maximize predictive performance, yet not to the extent that you cannot rely on the model to satisfy the tenets of interpretability: fairness, accountability, and transparency. This chapter is the first of four focused on how to tune for interpretability. One of the easiest ways to improve interpretability is through feature selection. It has many benefits, such as faster training and making the model easier to interpret. But if these two reasons don’t convince you, perhaps another one will.
+A common misunderstanding is that complex models can self-select features and perform well nonetheless, so why even bother to select features? Yes, many model classes have mechanisms that can take care of useless features, but they aren’t perfect. And the potential for overfitting increases with each one that remains. Overfitted models aren’t reliable, even if they are more accurate. So, while employing model mechanisms such as regularization is still highly recommended to avoid overfitting, feature selection is still useful.
+In this chapter, we will comprehend how irrelevant features adversely weigh on the outcome of a model and thus, the importance of feature selection for model interpretability. Then, we will review filter-based feature selection methods such as
+Spearman’s correlation
+and
+learn about embedded methods such
+as
+LASSO and ridge regression
+. Then, we will discover wrapper methods
+such as
+sequential feature selection
+, and hybrid ones such as
+Recursive Feature Elimination
+(
+RFE
+). Lastly, even
+though feature engineering is typically conducted before selection, there’s value in exploring feature engineering for many reasons after the dust has settled and features have been selected.
+These are the main topics we are going to cover in this chapter:
+Understanding the effect of irrelevant features
+Reviewing filter-based feature selection methods
+Exploring embedded feature selection methods
+Discovering wrapper, hybrid, and advanced feature selection methods
+Considering feature engineering
+Let’s begin!
+Technical requirements
+This chapter’s example uses the
+mldatasets
+,
+pandas
+,
+numpy
+,
+scipy
+,
+mlxtend
+,
+sklearn-genetic-opt
+,
+xgboost
+,
+sklearn
+,
+matplotlib
+, and
+seaborn
+libraries. Instructions on how to install all these libraries are in the
+Preface
+.
+The GitHub code for this chapter is located here:
+https://packt.link/1qP4P
+.
+The mission
+It has
+been estimated that there are over 10 million non-profits worldwide, and while a large portion of them have public funding, most of them depend mostly on private donors, both corporate and individual, to continue operations. As such, fundraising is mission-critical and carried out throughout the year.
+Year over year, donation revenue has grown, but there are several problems non-profits face: donor interests evolve, so a charity popular one year might be forgotten the next; competition is fierce between non-profits, and demographics are shifting. In the United States, the average donor only gives two charitable gifts per year and is over 64 years old. Identifying potential donors is challenging, and campaigns to reach them can be expensive.
+A National Veterans Organization non-profit arm has a large mailing list of about 190,000 past donors and would like to send a special mailer to ask for donations. However, even with a special bulk discount rate, it costs them $0.68 per address. This adds up to over $130,000. They only have a marketing budget of $35,000. Given that they have made this a high priority, they are willing to extend the budget but only if the
+Return On Investment
+(
+ROI
+) is
+high enough to justify the additional cost.
+To minimize
+the use of their limited budget, instead of mass mailing, they’d like to try direct mailing, which aims to identify potential donors using what is already known, such as past donations, geographic location, and demographic data. They will reach other donors via email instead, which is much cheaper, costing no more than $1,000 per month for their entire list. They hope this hybrid marketing plan will yield better results. They also recognize that high-value donors respond better to personalized paper mailers, while smaller donors respond better to email anyway.
+No more than six percent of the mailing list donates to any given campaign. Using ML to predict human behavior is by no means an easy task, especially when the data categories are imbalanced. Nevertheless, success is not measured by the highest predictive accuracy but by profit lift. In other words, the direct mailing model evaluated on the test dataset should produce more profit than if they mass-mailed the entire dataset.
+They have sought your assistance to use ML to produce a model that identifies the most probable donors, but also in a way that
+guarantees
+an ROI.
+You received the dataset from the non-profit, which is approximately evenly split into training and test data. If you send the mailer to absolutely everybody in the test dataset, you make a profit of $11,173, but if you manage to identify only those who will donate, the maximum yield of $73,136 will be attained. Your goal is to achieve a high-profit lift and reasonable ROI. When the campaign runs, it will identify the most probably donors for the entire mailing list, and the non-profit hopes to spend not much more than $35,000 in total. However, the dataset has 435 columns, and some simple statistical tests and modeling exercises show that the data is too noisy to identify the potential donors’ reliability because of overfitting.
+The approach
+You’ve
+decided to first fit a base model with all the features and assess it at different levels of complexity to understand the relationship between the increased number of features and the propensity for the predictive model to overfit to the training data. Then, you will employ a series of feature selection methods ranging from simple filter-based methods to the most advanced ones to determine which one achieves the profitability and reliability goals sought by the client. Lastly, once a list of final features has been selected, you can try feature engineering.
+Given the cost-sensitive nature of the problem, thresholds are important to optimize the profit lift. We will get into the role of thresholds later on, but one significant effect is that even though this is a classification problem, it is best to use regression models, and then use predictions to classify so that there’s only one threshold to tune. That is, for classification models, you would need a threshold for the label, say those that donated over $1, and then another one for probabilities predicted. On the other hand, regression predicts the donation, and the threshold can be optimized based on that.
+The preparations
+The code for this
+example can be found at
+https://github.com/PacktPublishing/Interpretable-Machine-Learning-with-Python-2E/blob/main/10/Mailer.ipynb
+.
+Loading the libraries
+To run this
+example, we need to install the following libraries:
+mldatasets
+to load the dataset
+pandas
+,
+numpy
+, and
+scipy
+to manipulate it
+mlxtend
+,
+sklearn-genetic-opt
+,
+xgboost
+, and
+sklearn
+(scikit-learn) to fit the models
+matplotlib
+and
+seaborn
+to create and visualize the interpretations
+To load the libraries, use the following code block:
+import
+math
+import
+os
+import
+mldatasets
+import
+pandas
+as
+pd
+import
+numpy
+as
+np
+import
+timeit
+from
+tqdm.notebook
+import
+tqdm
+from
+sklearn.feature_selection
+import
+VarianceThreshold,\
+                                    mutual_info_classif, SelectKBest
+from
+sklearn.feature_selection
+import
+SelectFromModel
+from
+sklearn.linear_model
+import
+LogisticRegression,\
+                                    LassoCV, LassoLarsCV, LassoLarsIC
+from
+mlxtend.feature_selection
+import
+SequentialFeatureSelector
+from
+sklearn.feature_selection
+import
+RFECV
+from
+sklearn.decomposition
+import
+PCA
+import
+shap
+from
+sklearn-genetic-opt
+import
+GAFeatureSelectionCV
+from
+scipy.stats
+import
+rankdata
+from
+sklearn.discriminant_analysis
+import
+LinearDiscriminantAnalysis
+from
+sklearn.ensemble
+import
+RandomForestRegressor
+import
+xgboost
+as
+xgb
+import
+matplotlib.pyplot
+as
+plt
+import
+seaborn
+as
+sns
+Next, we will load
+and prepare the dataset.
+Understanding and preparing the data
+We load the data
+like this into two DataFrames (
+X_train
+and
+X_test
+) with the features and two
+numpy
+arrays with corresponding labels (
+y_train
+and
+y_test
+). Please note that these DataFrames have already been previously prepared for us to remove sparse or unnecessary features, treat missing values, and encode categorical features:
+X_train, X_test, y_train, y_test = mldatasets.load(
+"nonprofit-mailer"
+,
+    prepare=
+True
+)
+y_train = y_train.squeeze()
+y_test = y_test.squeeze()
+All features are numeric with no missing values and categorical features have already been one-hot encoded for us. Between both train and test mailing lists, there should be over 191,500 records and 435 features. You can check this is the case like this:
+print
+(X_train.shape)
+print
+(y_train.shape)
+print
+(X_test.shape)
+print
+(y_test.shape)
+The preceding code should output the following:
+(95485, 435)
+(95485,)
+(96017, 435)
+(96017,)
+Next, we can
+verify that the test labels have the right number of donors (
+test_donors
+), donations (
+test_donations
+), and hypothetical profit ranges (
+test_min_profit
+and
+test_max_profit
+) using the variable cost of $0.68 (
+var_cost
+). We can print these, and then do the same for the training dataset:
+var_cost =
+0.68
+y_test_donors = y_test[y_test >
+0
+]
+test_donors =
+len
+(y_test_donors)
+test_donations =
+sum
+(y_test_donors)
+test_min_profit = test_donations - (
+len
+(y_test)*var_cost)
+test_max_profit = test_donations - (test_donors*var_cost)
+print
+(
+'%s test donors totaling $%.0f (min profit: $%.0f,\
+max profit: $%.0f)'
+%(test_donors, test_donations, test_min_profit,\
+       test_max_profit))
+y_train_donors = y_train[y_train >
+0
+]
+train_donors =
+len
+(y_train_donors)
+train_donations =
+sum
+(y_train_donors)
+train_min_profit = train_donations – (
+len
+(y_train)*var_cost)
+train_max_profit = train_donations – (train_donors*var_cost)
+print
+(
+'%s train donors totaling $%.0f (min profit: $%.0f,\
+max profit: $%.0f)'
+%(train_donors, train_donations, train_min_profit,\
+    train_max_profit))
+The preceding code should output the following:
+4894 test donors totaling $76464 (min profit: $11173, max profit: $73136)
+4812 train donors totaling $75113 (min profit: $10183, max profit: $71841)
+Indeed, if the
+non-profit mass-mailed to everyone on the test mailing list, they’d make about $11,000 profit but would have to go grossly over budget to achieve this. The non-profit recognizes that making the max profit by identifying and targeting only donors is nearly an impossible feat. Therefore, they would be content with producing a model that reliably can yield more than the min profit but with a smaller cost, preferably under budget.
+Understanding the effect of irrelevant features
+Feature selection
+is
+also known as
+variable
+or
+attribute selection
+. It is
+the method by which you can automatically or manually select a subset of specific features useful to the construction of ML models.
+It’s not necessarily
+true that more features lead to better models. Irrelevant features can impact the learning process, leading to overfitting. Therefore, we need some strategies to remove any features that might adversely affect learning. Some
+of the advantages of selecting a smaller subset of features include the following:
+It’s easier to understand simpler models
+: For instance, feature importance for a model that uses 15 variables is much easier to grasp than one that uses 150 variables.
+Shorter training time
+: Reducing the number of variables decreases the cost of computing, speeds up model training, and perhaps most notably, simpler models have quicker inference times.
+Improved generalization by reducing overfitting
+: Sometimes, with little prediction value, many of the variables are just noise. The ML model, however, learns from this noise and triggers overfitting to the training data while minimizing generalization simultaneously. We may significantly enhance the generalization of ML models by removing these irrelevant or noisy features.
+Variable redundancy
+: It is common for datasets to have collinear features, which could mean some are redundant. In cases like these, as long as no significant information
+is lost, we can retain only one of the correlated features and delete the others.
+Now, we will fit some models to demonstrate the effect of too many features.
+Creating a base model
+Let’s create a
+base model for our mailing list dataset to see how this plays out. But first, let’s set our random seed for reproducibility:
+rand =
+9
+os.environ[
+'PYTHONHASHSEED'
+]=
+str
+(rand)
+np.random.seed(rand)
+We will use
+XGBoost’s
+Random Forest
+(
+RF
+) regressor (
+XGBRFRegressor
+) throughout this chapter. It’s just like scikit-learn’s but faster because it uses second-order approximations of the objective function. It also has more options, such as setting the learning rate and monotonic constraints, examined in
+Chapter 12
+,
+Monotonic Constraints and Model Tuning for Interpretability
+. We initialize
+XGBRFRegressor
+with a conservative initial
+max_depth
+value of
+4
+and always use
+200
+estimators for consistency. Then, we fit it with our training data. We will use
+timeit
+to measure how long it takes, which we save in a variable (
+baseline_time
+) for later reference:
+stime = timeit.default_timer()
+reg_mdl = xgb.XGBRFRegressor(max_depth=
+4
+, n_estimators=
+200
+, seed=rand)
+fitted_mdl = reg_mdl.fit(X_train, y_train)
+etime = timeit.default_timer()
+baseline_time = etime-stime
+Now that we have a base model, let’s evaluate it.
+Evaluating the model
+Next, let’s
+create a dictionary (
+reg_mdls
+) to house all the models we will fit in this chapter to test which feature subsets produce the best models. Here, we can evaluate the RF model with all the features and a
+max_depth
+value of
+4
+(
+rf_4_all
+) using
+evaluate_reg_mdl
+. It will make a summary and a scatter plot with a regression line:
+reg_mdls = {}
+reg_mdls[
+'rf_4_all'
+] = mldatasets.evaluate_reg_mdl(
+    fitted_mdl,
+    X_train,
+    X_test,
+    y_train,
+    y_test,
+    plot_regplot=
+True
+,
+    ret_eval_dict=
+True
+)
+The
+preceding code produces the metrics and plot shown in
+Figure 10.1
+:
+Figure 10.1: Base model predictive performance
+For a
+plot like the one in
+Figure 10.1
+, usually, a diagonal line is expected, so one glance at this plot would tell you that the model is not predictive. Also, the RMSEs may not seem bad but in the context of such a lopsided problem, they are dismal. Consider this: only 5% of the list makes a donation, and only 20% of those are over $20, so an average error of $4.3 – $4.6 is enormous.
+So, is this model useless? The answer lies in what thresholds we use to classify with it. Let’s start by defining an array of thresholds (
+threshs
+), ranging from $0.40 to $25. We start spacing these out by a cent until it reaches $1, then by 10 cents until it reaches $3, and after that, space by $1:
+threshs = np.hstack(
+    [
+      np.linspace(
+0.40
+,
+1
+,
+61
+),
+      np.linspace(
+1.1
+,
+3
+,
+20
+),
+      np.linspace(
+4
+,
+25
+,
+22
+)
+    ]
+)
+There’s a
+function in
+mldatasets
+that can compute profit at every threshold (
+profits_by_thresh
+). All it needs is the actual (
+y_test
+) and predicted labels, followed by the thresholds (
+threshs
+), the variable cost (
+var_costs
+), and the
+min_profit
+required. It produces a
+pandas
+DataFrame with the revenue, costs, profit, and ROI for every threshold, as long as the profit is above
+min_profit
+. Remember, we had set this minimum at the beginning of the chapter as $11,173 because it makes no sense to target donors under this amount. After we generate these profit DataFrames for the test and train datasets, we can place the maximum and minimum amounts in the model’s dictionary for later use. And then, we employ
+compare_df_plots
+to plot the costs, profits, and ROI ratio for testing and training for every threshold where it exceeded the profit minimum:
+y_formatter = plt.FuncFormatter(
+lambda
+x, loc:
+"${:,}K"
+.
+format
+(x/
+1000
+)
+)
+profits_test = mldatasets.profits_by_thresh(
+    y_test,
+    reg_mdls[
+'rf_4_all'
+][
+'
+preds_test'
+],
+    threshs,
+    var_costs=var_cost,
+    min_profit=test_min_profit
+)
+profits_train = mldatasets.profits_by_thresh(
+    y_train,
+    reg_mdls[
+'rf_4_all'
+][
+'preds_train'
+],
+    threshs,
+    var_costs=var_cost,
+    min_profit=train_min_profit
+)
+reg_mdls[
+'rf_4_all'
+][
+'max_profit_train'
+] =profits_train.profit.
+max
+()
+reg_mdls[
+'rf_4_all'
+][
+'max_profit_test'
+] = profits_test.profit.
+max
+()
+reg_mdls[
+'rf_4_all'
+][
+'
+max_roi'
+] = profits_test.roi.
+max
+()
+reg_mdls[
+'rf_4_all'
+][
+'min_costs'
+] = profits_test.costs.
+min
+()
+reg_mdls[
+'rf_4_all'
+][
+'profits_train'
+] = profits_train
+reg_mdls[
+'rf_4_all'
+][
+'profits_test'
+] = profits_test
+mldatasets.compare_df_plots(
+    profits_test[[
+'costs'
+,
+'
+profit'
+,
+'roi'
+]],
+    profits_train[[
+'costs'
+,
+'profit'
+,
+'roi'
+]],
+'Test'
+,
+'Train'
+,
+    y_formatter=y_formatter,
+    x_label=
+'Threshold'
+,\
+    plot_args={
+'secondary_y'
+:
+'roi'
+}
+)
+The
+preceding snippet generates the plots in
+Figure 10.2
+. You can tell that
+Test
+and
+Train
+are almost identical. Costs decrease steadily at a high rate and profit at a lower rate, while ROI increases steadily. However, some differences exist, such as ROI, which becomes a bit higher eventually, and although viable thresholds start at the same point,
+Train
+does end at a different threshold. It turns out the model can turn a profit, so despite the appearance of the plot in
+Figure 10.1
+, the model is far from useless:
+Figure 10.2: Comparison between profit, costs, and ROI for the test and train datasets for the base model across thresholds
+The difference in RMSEs for the train and test sets didn’t lie. The model did not overfit. The main reason for this is that we used relatively shallow trees by setting our
+max_depth
+value at
+4
+. We can easily see this effect of using shallow trees by computing how many features had a
+feature_importances_
+value of over 0:
+reg_mdls[
+'rf_4_all'
+][
+'total_feat'
+] =\
+    reg_mdls[
+'rf_4_all'
+][
+'fitted'
+].feature_importances_.shape[
+0
+] reg_mdls[
+'rf_4_all'
+][
+'num_feat'
+] =
+sum
+(
+    reg_mdls[
+'rf_4_all'
+][
+'fitted'
+].feature_importances_ >
+0
+)
+print
+(reg_mdls[
+'rf_4_all'
+][
+'num_feat'
+])
+The
+preceding code outputs
+160
+. In other words, only 160 were used out of 435—there are only so many features that can be accommodated in such a shallow tree! Naturally, this leads to lowering overfitting, but at the same time, the choice of features with measures of impurity over a random selection of features is not necessarily the most optimal.
+Training the base model at different max depths
+So, what
+happens if we make the trees deeper? Let’s repeat all the steps we did for the shallow one but for max depths between 5 and 12:
+for
+depth
+in
+tqdm(
+range
+(
+5
+,
+13
+)):
+mdlname =
+'rf_'
++
+str
+(depth)+
+'_all'
+stime = timeit.default_timer()
+reg_mdl = xgb.XGBRFRegressor(
+    max_depth=depth,
+    n_estimators=
+200
+,
+    seed=rand
+)
+fitted_mdl = reg_mdl.fit(X_train, y_train)
+etime = timeit.default_timer()
+reg_mdls[mdlname] = mldatasets.evaluate_reg_mdl(
+    fitted_mdl,
+    X_train,
+    X_test,
+    y_train,
+    y_test,
+    plot_regplot=
+False
+,
+    show_summary=
+False
+,
+    ret_eval_dict=
+True
+)
+reg_mdls[mdlname][
+'speed'
+] = (etime - stime)/baseline_time
+reg_mdls[mdlname][
+'depth'
+] = depth
+reg_mdls[mdlname][
+'fs'
+] =
+'all'
+profits_test = mldatasets.profits_by_thresh(
+    y_test,
+    reg_mdls[mdlname][
+'preds_test'
+],
+    threshs,
+    var_costs=var_cost,
+    min_profit=test_min_profit
+)
+profits_train = mldatasets.profits_by_thresh(
+    y_train,
+    reg_mdls[mdlname][
+'preds_train'
+],
+    threshs,
+    var_costs=var_cost,
+    min_profit=train_min_profit
+)
+reg_mdls[mdlname][
+'max_profit_train'
+] = profits_train.profit.
+max
+()
+reg_mdls[mdlname][
+'max_profit_test'
+] = profits_test.profit.
+max
+()
+reg_mdls[mdlname][
+'max_roi'
+] = profits_test.roi.
+max
+()
+reg_mdls[mdlname][
+'min_costs'
+] = profits_test.costs.
+min
+()
+reg_mdls[mdlname][
+'profits_train'
+] = profits_train
+reg_mdls[mdlname][
+'profits_test'
+] = profits_test
+reg_mdls[mdlname][
+'total_feat'
+] =\
+reg_mdls[mdlname][
+'fitted'
+].feature_importances_.shape[
+0
+]
+reg_mdls[mdlname][
+'
+num_feat'
+] =
+sum
+(
+    reg_mdls[mdlname][
+'fitted'
+].feature_importances_ >
+0
+)
+Now, let’s
+plot the details in the profits DataFrames for the “deepest” model (with a max depth of 12) as we did before with
+compare_df_plots
+, producing
+Figure 10.3
+:
+Figure 10.3: Comparison between profit, costs, and ROI for the test and train datasets for a “deep” base model across thresholds
+See how different
+Test
+and
+Train
+are this time in
+Figure 10.3
+.
+Test
+reaches a max of about $15,000 and
+Train
+exceeds $20,000.
+Train
+’s costs dramatically fall, making the ROI orders of magnitude much higher than
+Test
+. Also, the ranges of thresholds are much different. Why is this a problem, you ask? If we had to guess what threshold to use to pick who to target in the next mailer, the optimal for
+Train
+is higher than for
+Test
+—meaning that by using an overfit model, we could miss the mark and underperform on unseen data.
+Next, let’s
+convert our model dictionary (
+reg_mdls
+) into a DataFrame and extract some details from it. Then, we can sort it by depth, format it, color-code it, and output it:
+def
+display_mdl_metrics
+(
+reg_mdls, sort_by=
+'depth'
+, max_depth=
+None
+):
+    reg_metrics_df = pd.DataFrame.from_dict( reg_mdls,
+'index'
+)\
+                        [[
+'depth'
+,
+'fs'
+,
+'rmse_train'
+,
+'rmse_test'
+,\
+'max_profit_train'
+,\
+'max_profit_test'
+,
+'max_roi'
+,\
+'min_costs'
+,
+'speed'
+,
+'num_feat'
+]]
+    pd.set_option(
+'precision'
+,
+2
+) 
+    html = reg_metrics_df.sort_values(
+        by=sort_by, ascending=
+False
+).style.\
+format
+({
+'max_profit_train'
+:
+'${0:,.0f}'
+,\
+'max_profit_test'
+:
+'${0:,.0f}'
+,
+'min_costs'
+:
+'${0:,.0f}'
+}).\
+        background_gradient(cmap=
+'plasma'
+, low=
+0.3
+, high=
+1
+,
+                            subset=[
+'rmse_train'
+,
+'rmse_test'
+]).\
+        background_gradient(cmap=
+'viridis'
+, low=
+1
+, high=
+0.3
+,
+                            subset=[
+'max_profit_train'
+,
+'max_profit_test'
+]
+                            )
+return
+html
+display_mdl_metrics(reg_mdls)
+The preceding snippet leverages the
+display_mdl_metrics
+function to output the DataFrame shown in
+Figure 10.4
+. Something that should be immediately visible is how RMSE train and RMSE test are inverses. One decreases dramatically, and another increases slightly as the depth increases. The same can be said for profit. ROI tends to increase with depth and training speed and the number of features used as well:
+Figure 10.4: Comparing metrics for all base RF models with different depths
+We could
+be tempted to use
+rf_11_all
+with the highest profitability, but it would be risky to use it! A common misunderstanding is that black-box models can effectively cut through any number of irrelevant features. While they are often be able to find something of value and make the most out of it, too many features could hinder their reliability by overfitting to noise in the training dataset. Fortunately, there is a sweet spot where you can reach high profitability with minimal overfitting, but to get there, we have to reduce the number of features first!
+Reviewing filter-based feature selection methods
+Filter-based methods
+independently
+select features from a dataset without employing any ML. These methods depend only on the variables’ characteristics and are relatively effective, computationally inexpensive, and quick to perform. Therefore, being the low-hanging fruit of feature selection methods, they are usually the first step in any feature selection pipeline.
+Filter-based methods can be categorized as:
+Univariate
+: Individually
+and independently of the feature space, they evaluate and rate a single feature at a time. One problem that can occur with univariate methods is that they may filter out too much since they don’t take into consideration the relationship between features.
+Multivariate
+: These
+take into account the entire feature space and how features interact with each other.
+Overall, for the removal of obsolete, redundant, constant, duplicated, and uncorrelated features, filter methods are very strong. However, by not accounting for complex, non-linear, non-monotonic correlations and interactions that only ML models can find, they aren’t effective whenever these relationships are prominent in the data.
+We will review three categories of filter-based methods:
+Basic
+Correlation
+Ranking
+We will explain them further in their own sections.
+Basic filter-based methods
+We
+employ
+basic filter methods
+in the
+data preparation stage, specifically, the data cleaning stage, before any modeling. The reason for this is there’s a low risk of making feature selection decisions that would adversely impact models. They involve common-sense operations such as removing features that carry no information or duplicate it.
+Constant features with a variance threshold
+Constant features
+don’t
+change
+in the training dataset and, therefore, carry no information, and the model can’t learn from them. We can use a univariate method called
+VarianceThreshold
+, which removes low-variance features. We will use a threshold of zero because we want to filter out only features
+with
+zero variance
+—in other words, constant features. It only works with numeric features, so we must first identify which features are numeric and which are categorical. Once we fit the method on the numeric columns,
+get_support()
+returns the list of features that aren’t constant, and we can use set algebra to return only the constant features (
+num_const_cols
+):
+num_cols_l = X_train.select_dtypes([np.number]).columns
+cat_cols_l = X_train.select_dtypes([np.
+bool
+, np.
+object
+]).columns
+num_const = VarianceThreshold(threshold=
+0
+)
+num_const.fit(X_train[num_cols_l])
+num_const_cols =
+list
+(
+set
+(X_train[num_cols_l].columns) -
+set
+(num_cols_l[num_const.get_support()])
+)
+The
+preceding snippet produced a list of constant numeric features, but how about categorical features? Categorical features would only have one category or unique value. We can easily check this by applying the
+nunique()
+function on categorical features. It will return a
+pandas
+series, and then a
+lambda
+function can filter out only those with one unique value. Then,
+.index.tolist()
+returns the name of the features as a list. Now, we just join both lists of constant features, and voilà! We have all constants (
+all_const_cols
+). We can print them; there should be three:
+cat_const_cols = X_train[cat_cols_l].nunique()[
+lambda
+x:\
+                                               x<
+2
+].index.tolist()
+all_const_cols = num_const_cols + cat_const_cols
+print
+(all_const_cols)
+In most cases, removing constant features isn’t good enough. A redundant feature might be almost constant or
+quasi-constant
+.
+Quasi-constant features with value_counts
+Quasi-constant features
+are
+almost
+entirely the same value. Unlike constant filtering, using a variance threshold won’t work because high variance and quasi-constantness aren’t mutually exclusive. Instead, we will iterate all features and get
+value_counts()
+, which returns the number of rows for each value. Then, divide these counts by the total number of rows to get a percentage and sort by the highest. If the top value is higher than the predetermined threshold (
+thresh
+), we append it to a list of quasi-constant columns (
+quasi_const_cols
+). Please note that choosing this threshold must be done with a lot of care and understanding of the problem. For instance, in this case, we know that it’s lopsided because only 5% donate, most of whom donate a low amount, so even a tiny percentage of a feature might make an impact, which is why our threshold is so high at 99.9%:
+thresh =
+0.999
+quasi_const_cols = []
+num_rows = X_train.shape[
+0
+]
+for
+col
+in
+tqdm(X_train.columns):
+    top_val = (
+        X_train[col].value_counts() / num_rows
+        ).sort_values(ascending=
+False
+).values[
+0
+]
+if
+top_val >= thresh:
+        quasi_const_cols.append(col)
+print
+(quasi_const_cols)
+The
+preceding code should have printed five features, which include the three that were previously obtained. Next, we will deal with another form of irrelevant features: duplicates!
+Duplicating features
+Usually, when
+we discuss duplicates with data, we immediately think of duplicate rows, but
+duplicate columns
+are also
+problematic. We can find them just as you would find duplicate rows with the
+pandas duplicated()
+function, except we would transpose the DataFrame first, inversing columns and rows:
+X_train_transposed = X_train.T
+dup_cols = X_train_transposed[
+    X_train_transposed.duplicated()].index.tolist()
+print
+(dup_cols)
+The preceding snippet outputs a list with the two duplicated columns.
+Removing unnecessary features
+Unlike
+other feature selection methods, which you should test with models, you can apply basic filter-based feature selection methods right away by removing the features you deemed useless. But just in case, it’s good practice to make a copy of the original data. Please note that we don’t include constant columns (
+all_constant_cols
+) in the columns we are to drop (
+drop_cols
+) because the quasi-constant ones already include them:
+X_train_orig = X_train.copy()
+X_test_orig = X_test.copy()
+drop_cols = quasi_const_cols + dup_cols
+X_train.drop(labels=drop_cols, axis=
+1
+, inplace=
+True
+)
+X_test.drop(labels=drop_cols, axis=
+1
+, inplace=
+True
+)
+Next, we will
+explore multivariate filter-based methods on the remaining features.
+Correlation filter-based methods
+Correlation filter-based methods
+quantify
+the strength of the relationship between two features. It is useful for feature selection because we might want to filter out extremely correlated
+features or those that aren’t correlated with others at all. Either way, it is a multivariate feature selection method—bivariate, to be precise.
+But first, we ought to choose a correlation method:
+Pearson’s correlation coefficient
+: Measures
+the linear correlation between two features. It outputs a coefficient between -1 (negative) and 1 (positive), with 0 meaning no linear correlation. Like linear regression, it assumes linearity, normality, and homoscedasticity—that is, the error term around the linear regression line is similarly sized across all values.
+Spearman’s rank correlation coefficient
+: Measures the strength of monotonicity
+of two features regardless of whether they are linearly related or not. Monotonicity is the degree to which as one feature increases, the other one consistently increases or decreases. It is measured between -1 and 1, with 0 meaning no monotonic correlation. It makes no distribution assumptions and can work with both continuous and discrete features. However, its weakness is with non-monotonic relationships.
+Kendall’s tau correlation coefficient
+: Measures
+the ordinal association between features—that is, it computes the similarity between lists of ordered numbers. It also ranges between -1 and 1, but they mean low and high, respectively. It’s useful with discrete features.
+The dataset is a mix of continuous and discrete, and we cannot make any linear assumptions about it, so
+spearman
+is the right choice. All three can be used with the
+pandas
+corr
+function though:
+corrs = X_train.corr(method=
+'spearman'
+)
+print
+(corrs.shape)
+The
+preceding code should output the shape of the correlation matrix, which is
+(428, 428)
+. This dimension makes sense because there are 428 features left, and each feature has a relationship with 428 features, including itself.
+We can
+now look for features to remove in the correlation matrix (
+corrs
+). Note that to do so, we must establish thresholds. For instance, we can say that an extremely correlated feature has an absolute value coefficient of over 0.99 and less than 0.15 for an uncorrelated feature. With these thresholds in mind, we can find features that are correlated to only one feature and extremely correlated to more than one feature. Why one feature? Because the diagonals in a correlation matrix are always 1 because a feature is always perfectly correlated with itself. The
+lambda
+functions in the following code make sure we are accounting for this:
+extcorr_cols = (
+abs
+(corrs) >
+0.99
+).
+sum
+(axis=
+1
+)[
+lambda
+x: x>
+1
+]\
+.index.tolist()
+print
+(extcorr_cols)
+uncorr_cols = (
+abs
+(corrs) >
+0.15
+).
+sum
+(axis=
+1
+)[
+lambda
+x: x==
+1
+]\
+.index.tolist()
+print
+(uncorr_cols)
+The preceding code outputs the two lists as follows:
+['MAJOR', 'HHAGE1', 'HHAGE3', 'HHN3', 'HHP1', 'HV1', 'HV2', 'MDMAUD_R', 'MDMAUD_F', 'MDMAUD_A']
+['TCODE', 'MAILCODE', 'NOEXCH', 'CHILD03', 'CHILD07', 'CHILD12', 'CHILD18', 'HC15', 'MAXADATE']
+The first list contains features that are extremely correlated with ones other than themselves. While this is useful to know, you shouldn’t remove features from this list without understanding what features they are correlated with and how, as well as with the target. Then, only if redundancy is found, make sure you only remove one of them. The second list is of features uncorrelated to any others than themself, which, in this case, is
+suspicious given the sheer number of features. That being said, we also should inspect them one by one, especially to measure them against the target to see whether they are redundant. However, we will take a chance and make a feature subset (
+corr_cols
+) excluding the uncorrelated ones:
+corr_cols = X_train.columns[
+    ~X_train.columns.isin(uncorr_cols)
+].tolist()
+print
+(
+len
+(corr_cols))
+The preceding
+code should output
+419
+. Let’s now fit the RF model with only these features. Given that there are still over 400 features, we will use a
+max_depth
+value of
+11
+. Except for that and a different model name (
+mdlname
+), it’s the same code as before:
+mdlname =
+'rf_11_f-corr'
+stime = timeit.default_timer()
+reg_mdl = xgb.XGBRFRegressor(
+    max_depth=
+11
+,
+    n_estimators=
+200
+,
+    seed=rand
+)
+fitted_mdl = reg_mdl.fit(X_train[corr_cols], y_train)
+reg_mdls[mdlname][
+'num_feat'
+] =
+sum
+(
+    reg_mdls[mdlname][
+'fitted'
+].feature_importances_ >
+0
+)
+Before we compare the results for the preceding model, let’s learn about ranking filter methods.
+Ranking filter-based methods
+Ranking filter-based methods
+are
+based on
+statistical univariate ranking tests, which assess the strength of the dependency between a feature and the target. These are some of the most popular methods:
+ANOVA F-test: Analysis of Variance
+(
+ANOVA
+) F-test measures the linear dependency
+between
+features and the target. As the name suggests, it does this by decomposing the variance. It makes similar assumptions to linear regression, such as normality, independence, and homoscedasticity. In scikit-learn, you can use
+f_regression
+and
+f_classification
+for regression and classification, respectively, to rank features by the F-score yielded by the F-test.
+Chi-square test of independence
+: This
+test measures the association between
+non-negative categorical variables and binary targets, so it’s only suitable for classification problems. In scikit-learn, you can use
+chi2
+.
+Mutual information
+(
+MI
+): Unlike
+the two previous methods, this one is derived from information theory rather than classical statistical hypothesis testing. It’s a different name but a concept we have already discussed in this book as
+the
+Kullback-Leibler
+(
+KL
+)
+divergence
+because it’s the KL for feature
+X
+and target
+Y
+. The Python implementation in scikit-learn uses a numerically stable and symmetric offshoot of KL
+called
+Jensen-Shannon
+(
+JS
+) divergence instead and leverages k-nearest neighbors to compute distances. Features can be ranked by MI with
+mutual_info_regression
+and
+mutual_info_classif
+for regression and classification, respectively.
+Of the three options mentioned, the one that is most appropriate for this dataset is MI because we cannot assume linearity among our features, and most of them aren’t categorical either. We can try classification with a threshold of $0.68, which at least covers the cost of sending the mailer. To that end, we must first create a binary classification target (
+y_train_class
+) with that threshold:
+y_train_class = np.where(y_train >
+0.68
+,
+1
+,
+0
+)
+Next, we can use
+SelectKBest
+to get the top 160 features according
+to
+MI Classification
+(
+MIC
+). We then employ
+get_support()
+to obtain a Boolean vector (or mask), which tells us which features are in the top 160, and we subset the list of features with this mask:
+mic_selection = SelectKBest(
+    mutual_info_classif, k=
+160
+).fit(X_train, y_train_class)
+mic_cols = X_train.columns[mic_selection.get_support()].tolist()
+print
+(
+len
+(mic_cols))
+The
+preceding code should confirm that there are 160 features in the
+mic_cols
+list. Incidentally, this is an arbitrary number. Ideally, we could test different thresholds for the
+classification target and
+k
+s for the MI, looking for the model that achieved the highest profit lift while underfitting the least. Next, we can fit the RF model as we’ve done before with the MIC features. This time, we will use a max depth of
+5
+because there are significantly fewer features:
+mdlname =
+'rf_5_f-mic'
+stime = timeit.default_timer()
+reg_mdl = xgb.XGBRFRegressor(max_depth=
+5
+, n_estimators=
+200
+, seed=rand)
+fitted_mdl = reg_mdl.fit(X_train[mic_cols], y_train)
+reg_mdls[mdlname][
+'num_feat'
+] =
+sum
+(
+    reg_mdls[mdlname][
+'fitted'
+].feature_importances_ >
+0
+)
+Now, let’s plot the profits for
+Test
+and
+Train
+as we did in
+Figure 10.3
+, but for the MIC model. It will produce what’s shown in
+Figure 10.5
+:
+Figure 10.5: Comparison between profit, costs, and ROI for the test and train datasets for a model with MIC features across thresholds
+In
+Figure 10.5
+, you
+can tell that there is quite a bit of difference between
+Test
+and
+Train
+, yet similarities indicate minimal overfitting. For instance, the highest profitability can be found between 0.66 and 0.75 for
+Train
+, and while
+Test
+is mostly between 0.66 and 0.7, it only gradually
+decreases afterward.
+Although we have visually examined the MIC model, it’s nice to have some reassurance by looking at raw metrics. Next, we will compare all the models we have trained so far using consistent metrics.
+Comparing filter-based methods
+We
+have been saving metrics into a dictionary (
+reg_mdls
+), which we easily convert to a DataFrame and output as we have done before, but this time we sort by
+max_profit_test
+:
+display_mdl_metrics(reg_mdls,
+'max_profit_test'
+)
+The preceding snippet generated what is shown in
+Figure 10.6
+. It is evident that the filter MIC model is the least overfitted of all. It ranked higher than more complex models with more features and took less time to train than any model. Its speed is an advantage for hyperparameter tuning. What if we wanted to find the best classification target thresholds or MIC
+k
+? We won’t do this now, but we would likely get a better model if we ran every combination, but it would take time to do and even more with more features:
+Figure 10.6: Comparing metrics for all base models and filter-based feature-selected models
+In
+Figure 10.6
+, we
+can tell that the correlation filter model (
+rf_11_f-corr
+) performs worse than the model with more features and an equal amount of
+max_depth
+(rf_11_all)
+, which suggests that we must have removed an important feature. As cautioned in that section, the problem with blindly setting thresholds and removing anything above it is that you can inadvertently remove something useful. Not all extremely correlated and uncorrelated features are useless, so further inspection is required. Next, we will explore some embedded methods that, when combined with cross-validation, require less oversight.
+Exploring embedded feature selection methods
+Embedded methods
+exist
+within models themselves by naturally selecting features during training. You can leverage the intrinsic properties of any model that has them to capture the features selected:
+Tree-based models
+: For
+instance, we have used the following code many times to count the number of features used by the RF models, which is evidence of feature selection naturally occurring in the learning process:
+sum
+(reg_mdls[mdlname][
+'fitted'
+].feature_importances_ >
+0
+)
+XGBoost’s RF uses gain by default, which is the average decrease in error in all splits where it used the feature to compute feature importance. We can increase the
+threshold above 0 to select even fewer features according to their relative contribution. However, by constraining the trees’ depth, we forced the model to choose even fewer features already.
+Regularized models with coefficients
+: We will study this further in
+Chapter 12
+,
+Monotonic Constraints and Model Tuning for Interpretability
+, but many model classes
+can incorporate penalty-based regularization, such as L1, L2, and elastic net. However, not all of them have intrinsic parameters such as coefficients that can be extracted to determine which features were penalized.
+This section
+will only cover regularized models given that we are using a tree-based model already. It’s best to leverage different model classes to get different perspectives on what features matter the most.
+We covered some of these models in
+Chapter 3
+,
+Interpretation Challenges
+, but these are a few model classes that incorporate penalty-based regularization and output feature-specific coefficients:
+Least Absolute Shrinkage and Selection Operator
+(
+LASSO
+): Because it uses L1 penalty in the
+loss function, LASSO can set coefficients to 0.
+Least-Angle Regression
+(
+LARS
+): Similar
+to LASSO but is vector-based and is more suitable for high-dimensional data. It is also fairer toward equally correlated features.
+Ridge regression
+: Uses
+L2 penalty in the loss function and because of this, can only shrink coefficients of irrelevance close to 0 but not to 0.
+Elastic net regression
+: Uses
+a mix of both L1 and L2 norms as penalties.
+Logistic regression
+: Contingent
+on the solver, it can handle L1, L2, or elastic net penalties.
+There are also several variations of the preceding models, such
+as
+LASSO LARS
+, which is a LASSO fit using the LARS algorithm, or
+even
+LASSO LARS IC
+, which is the same but uses AIC or BIC criteria for the model section:
+Akaike’s Information Criteria
+(
+AIC
+): A
+relative goodness of fit measure founded in information theory
+Bayesian Information Criteria
+(
+BIC
+): Has
+a similar formula to AIC but has a different penalty term
+OK, now let’s
+use
+SelectFromModel
+to extract top features from a LASSO model. We will use
+LassoCV
+because it can automatically cross-validate to find the optimal penalty strength. Once you fit it, we can get the feature mask with
+get_support()
+. We can then print the number of features and list of features:
+lasso_selection = SelectFromModel(
+    LassoCV(n_jobs=-
+1
+, random_state=rand)
+)
+lasso_selection.fit(X_train, y_train)
+lasso_cols = X_train.columns[lasso_selection.get_support()].tolist()
+print
+(
+len
+(lasso_cols))
+print
+(lasso_cols)
+The preceding code outputs the following:
+7
+['ODATEDW', 'TCODE', 'POP901', 'POP902', 'HV2', 'RAMNTALL', 'MAXRDATE']
+Now, let’s try the same but with
+LassoLarsCV
+:
+llars_selection = SelectFromModel(LassoLarsCV(n_jobs=-
+1
+))
+llars_selection.fit(X_train, y_train)
+llars_cols = X_train.columns[llars_selection.get_support()].tolist()
+print
+(
+len
+(llars_cols))
+print
+(llars_cols)
+The preceding snippet produces the following output:
+8
+['RECPGVG', 'MDMAUD', 'HVP3', 'RAMNTALL', 'LASTGIFT', 'AVGGIFT', 'MDMAUD_A', 'DOMAIN_SOCIALCLS']
+LASSO shrunk coefficients for all but seven features to 0, and LASSO LARS did the same but for eight. However, notice how there’s no overlap between both lists! OK, so let’s try incorporating AIC model selection into LASSO LARS with
+LassoLarsIC
+:
+llarsic_selection = SelectFromModel(LassoLarsIC(criterion=
+'aic'
+))
+llarsic_selection.fit(X_train, y_train)
+llarsic_cols = X_train.columns[
+    llarsic_selection.get_support()
+].tolist()
+print
+(
+len
+(llarsic_cols))
+print
+(llarsic_cols)
+The preceding snippet generates the following output:
+111
+['TCODE', 'STATE', 'MAILCODE', 'RECINHSE', 'RECP3', 'RECPGVG', 'RECSWEEP',..., 'DOMAIN_URBANICITY', 'DOMAIN_SOCIALCLS', 'ZIP_LON']
+It’s the same
+algorithm but with a different method for selecting the value of the regularization parameter. Note how this less-conservative approach expands the number of features to 111. Now, so far, all of the methods we have used have the L1 norm. Let’s try one with L2—more specifically, L2-penalized logistic regression. We do exactly what we did before, but this time, we fit with the binary classification targets (
+y_train_class
+):
+log_selection = SelectFromModel(
+    LogisticRegression(
+        C=
+0.0001
+,
+        solver=
+'sag'
+,
+        penalty=
+'l2'
+,
+        n_jobs=-
+1
+,
+        random_state=rand
+    )
+)
+log_selection.fit(X_train, y_train_class)
+log_cols = X_train.columns[log_selection.get_support()].tolist()
+print
+(
+len
+(log_cols))
+print
+(log_cols)
+The preceding code produces the following output:
+87
+['ODATEDW', 'TCODE', 'STATE', 'POP901', 'POP902', 'POP903', 'ETH1', 'ETH2', 'ETH5', 'CHIL1', 'HHN2',..., 'AMT_7', 'ZIP_LON']
+Now that we have a few feature subsets to test, we can place their names into a list (
+fsnames
+) and the feature subset lists into another list (
+fscols
+):
+fsnames = [
+'e-lasso'
+,
+'e-llars'
+,
+'e-llarsic'
+,
+'e-logl2'
+]
+fscols = [lasso_cols, llars_cols, llarsic_cols, log_cols]
+We can then
+iterate across all list names and fit and evaluate our
+XGBRFRegressor
+model as we have done before, but increasing
+max_depth
+at every iteration:
+def
+train_mdls_with_fs
+(
+reg_mdls, fsnames, fscols, depths
+):
+for
+i, fsname
+in
+tqdm(
+enumerate
+(fsnames), total=
+len
+(fsnames)):
+       depth = depths[i]
+       cols = fscols[i]
+       mdlname =
+'rf_'
++
+str
+(depth)+
+'
+_'
++fsname
+       stime = timeit.default_timer()
+       reg_mdl = xgb.XGBRFRegressor(
+           max_depth=depth, n_estimators=
+200
+, seed=rand
+       )
+       fitted_mdl = reg_mdl.fit(X_train[cols], y_train)
+       reg_mdls[mdlname][
+'num_feat'
+] =
+sum
+(
+           reg_mdls[mdlname][
+'fitted'
+].feature_importances_ >
+0
+)
+train_mdls_with_fs(reg_mdls, fsnames, fscols, [
+3
+,
+4
+,
+5
+,
+6
+])
+Now, let’s see how our embedded feature-selected models fare in comparison to the filtered ones. We will rerun the code we ran to output what was shown in
+Figure 10.6
+. This time, we will get what is shown in
+Figure 10.7
+:
+Figure 10.7: Comparing metrics for all base models and filter-based and embedded feature-selected models
+According
+to
+Figure 10.7
+, three of the four embedded methods we tried produced models with the lowest test RMSE (
+rf_5_e-llarsic
+,
+rf_e-lasso
+, and
+rf_4_e-llars
+). They also all trained much faster than the others and are more profitable than any other model of equal complexity. One of them (
+rf_5_e-llarsic
+) is even highly profitable. Compare this with
+rf_9_all
+with similar test profitability to see how performance diverges from the training data.
+Discovering wrapper, hybrid, and advanced feature selection methods
+The feature
+selection methods studied so far are computationally inexpensive because they require no model fitting or fitting simpler white-box models. In this section, we will learn about other, more exhaustive methods with many possible tuning options. The categories of methods included here are as follows:
+Wrapper
+: Exhaustively
+searches for the best subset of features by fitting an ML model using a search strategy that measures improvement on a metric.
+Hybrid
+: A
+method
+that combines embedded and filter methods with wrapper methods.
+Advanced
+: A method
+that doesn’t fall into any of the previously
+discussed categories. Examples include dimensionality reduction, model-agnostic
+feature importance, and
+Genetic Algorithms
+(
+GAs
+).
+And now, let’s get started with wrapper methods!
+Wrapper methods
+The
+concept behind
+wrapper methods
+is reasonably simple: evaluate different subsets of features on the ML model and choose the one that achieves the best score in a predetermined objective function. What varies here is the search strategy:
+Sequential Forward Selection
+(
+SFS
+): This
+approach
+begins without a feature and adds one, one at a time.
+Sequential Forward Floating Selection
+(
+SFFS
+): The same
+as the previous except for
+every feature it adds, it can remove one, as long as the objective function increases.
+Sequential Backward Selection
+(
+SBS
+): This
+process begins with all features
+present and eliminates one feature at a time.
+Sequential Floating Backward Selection
+(
+SFBS
+): The same
+as the previous except for
+every feature it removes, it can add one, as long as the objective function increases.
+Exhaustive Feature Selection
+(
+EFS
+): This
+approach
+seeks all possible combinations of features.
+BiDirectional Search
+(
+BDS
+): This
+last
+one simultaneously allows both forward and backward function selection to get one unique solution.
+These methods are greedy algorithms because they solve the problem piece by piece, choosing pieces based on their immediate benefit. Even though they may arrive at a global maximum, they take an approach more suited for finding local maxima. Depending on the number of features, they might be too computationally expensive to be practical, especially EFS, which grows exponentially. Another important distinction is the difference between forward methods’ accuracy increases as features are added and backward ones, monitor accuracy decreases as features are removed. To allow for shorter search times, we will do two things:
+Start
+our search with the features collectively selected by other methods to have a smaller feature space to choose from. To that end, we combine feature lists from several methods into a single
+top_cols
+list:
+top_cols =
+list
+(
+set
+(mic_cols).union(
+set
+(llarsic_cols)\
+).union(
+set
+(log_cols)))
+len
+(top_cols)
+Sample our datasets so that ML models speed up. We can use
+np.random.choice
+to do a random selection of row indexes without replacement:
+sample_size =
+0.1
+sample_train_idx = np.random.choice(
+    X_train.shape[
+0
+],
+    math.ceil(X_train.shape[
+0
+]*sample_size),
+    replace=
+False
+)
+sample_test_idx = np.random.choice(
+    X_test.shape[
+0
+],
+    math.ceil(X_test.shape[
+0
+]*sample_size),
+    replace=
+False
+)
+Out of the wrapper methods presented, we will only perform SFS, given how time-consuming they are. Still, with an even smaller dataset, you can try the other options, which the
+mlextend
+library also supports.
+Sequential forward selection (SFS)
+The
+first argument of a wrapper
+method is an unfitted estimator (a model). In
+SequentialFeatureSelector
+, we are placing a
+LinearDiscriminantAnalysis
+model. Other arguments include the direction (
+forward=true
+), whether it’s floating (
+floating=False
+), which means it might undo the previous exclusion or inclusion of a feature, the number of features we wish to select (
+k_features=27
+), the number of cross-validations (
+cv=3
+), and the loss function to use (
+scoring=f1
+). Some recommended optional arguments to enter are the verbosity (
+verbose=2
+) and the number of jobs to run in parallel (
+n_jobs=-1
+). Since it could take a while, we’ll definitely want it to output something and use as many processors as possible:
+sfs_lda = SequentialFeatureSelector(
+    LinearDiscriminantAnalysis(n_components=
+1
+),
+    forward=
+True
+,
+    floating=
+False
+,
+    k_features=
+100
+,
+    cv=
+3
+,
+    scoring=
+'f1'
+,
+    verbose=
+2
+,
+    n_jobs=-
+1
+)
+sfs_lda = sfs_lda.fit(X_train.iloc[sample_train_idx][top_cols],\
+                      y_train_class[sample_train_idx])
+sfs_lda_cols = X_train.columns[
+list
+(sfs_lda.k_feature_idx_)].tolist()
+Once we fit the SFS, it will return the index of features that have been selected with
+k_feature_idx_
+, and we can use those to subset the columns and obtain the list of feature names.
+Hybrid methods
+Starting
+with
+435 features, there are over 10
+42
+combinations of 27 feature subsets alone! So, you can see how EFS would be impractical in such a large feature space. Therefore, except for EFS on the entire dataset, wrapper methods will invariably take some shortcuts to select the features. Whether you are going forward, backward, or both, as long as you are not assessing every single combination of features, you could easily miss out on the best one.
+However, we can leverage the more rigorous, exhaustive search approach of wrapper methods with filter and embedded methods’ efficiency. The result of this is
+hybrid methods
+. For instance, you could employ filter or embedded methods to derive only the top 10 features and perform EFS or SBS on only those.
+Recursive Feature Elimination (RFE)
+Another, more
+common approach is something such as SBS, but instead of removing features based on improving a metric
+alone, using the model’s intrinsic parameters to rank the features and only removing the least ranked. The name of this approach is
+Recursive Feature Elimination
+(
+RFE
+), and it is a hybrid between embedded and wrapper methods. We can only use models with
+feature_importances_
+or coefficients (
+coef_
+) because this is how the method knows what features to remove. Model classes in scikit-learn with these attributes are classified under
+linear_model
+,
+tree
+, and
+ensemble
+. Also, scikit-learn-compatible versions of XGBoost, LightGBM, and CatBoost also have
+feature_importances_
+.
+We will use the cross-validated version of RFE because it’s more reliable.
+RFECV
+takes the estimator first (
+LinearDiscriminantAnalysis
+). We can then define
+step
+, which sets how many features it should remove in every iteration, the number of cross-validations (
+cv
+), and the metric used for evaluation (
+scoring
+). Lastly, it is recommended to set the verbosity (
+verbose=2
+) and leverage as many processors as possible (
+n_jobs=-1
+). To speed it up, we will use a sample again for the training and start with the 267 for
+top_cols
+:
+rfe_lda = RFECV(
+    LinearDiscriminantAnalysis(n_components=
+1
+),
+    step=
+2
+, cv=
+3
+, scoring=
+'f1'
+, verbose=
+2
+, n_jobs=-
+1
+)
+rfe_lda.fit(
+    X_train.iloc[sample_train_idx][top_cols],
+    y_train_class[sample_train_idx]
+)
+rfe_lda_cols = np.array(top_cols)[rfe_lda.support_].tolist()
+Next, we will try different methods that don’t relate to the main three feature selection categories: filter, embedded, and wrapper.
+Advanced methods
+Many
+methods
+can be categorized under advanced feature selection methods, including the following subcategories:
+Model-agnostic feature importance
+: Any
+feature importance method covered in
+Chapter 4
+,
+Global Model-Agnostic Interpretation Methods
+, can be used to
+obtain the top features of a model for feature selection purposes.
+Genetic algorithms
+: This
+is a wrapper method in the sense that it “wraps” a model assessing predictive performance across many feature subsets. However, unlike the wrapper methods we examined, it doesn’t make the most locally optimal choice. It’s more optimized to work with large feature spaces. It’s called genetic because it’s inspired by biology—natural selection, specifically.
+Dimensionality reduction
+: Some
+dimensionality reduction methods, such as
+Principal Component Analysis
+(
+PCA
+), can
+return explained variance on a feature basis. For others, such as factor analysis, it can be derived from other outputs. Explained variance can be used to rank features.
+Autoencoders
+: We
+won’t delve into this one, but deep learning can be leveraged for feature selection with autoencoders. This method has many variants you can find in Google Scholar and is not widely adopted in industry.
+We will briefly cover the first two in this section so you can understand how they can be implemented. Let’s dive right in!
+Model-agnostic feature importance
+A popular
+model-agnostic feature importance
+method that we have used throughout this book is SHAP, and it has many properties that make it more reliable than other methods. In the following code, we can take our best model and extract
+shap_values
+for it using
+TreeExplainer
+:
+fitted_rf_mdl = reg_mdls[
+'rf_11_all'
+][
+'fitted'
+]
+shap_rf_explainer = shap.TreeExplainer(fitted_rf_mdl)
+shap_rf_values = shap_rf_explainer.shap_values(
+    X_test_orig.iloc[sample_test_idx]
+)
+shap_imps = pd.DataFrame(
+    {
+'col'
+:X_train_orig.columns,
+'imp'
+:np.
+abs
+(shap_rf_values).mean(
+0
+)}
+).sort_values(by=
+'imp'
+,ascending=
+False
+)
+shap_cols = shap_imps.head(
+120
+).col.tolist()
+Then, the average for the absolute value of the SHAP values across the first dimension is what provides us with a ranking for each feature. We put this value in a DataFrame and sort it as we did for PCA. Lastly, also take the top 120 and place them in a list (
+shap_cols
+).
+Genetic algorithms
+GAs are a
+stochastic global optimization
+technique inspired by natural selection, which wrap a model much like wrapper methods do. However, they don’t follow a sequence on a step-by-step basis. GAs don’t have iterations but generations, which include populations of chromosomes. Each chromosome is a binary representation of your feature space, where 1 means to select a feature and 0 to not. Each generation is produced with the following operations:
+Selection
+: Like
+with natural selection, this is partially random (exploration) and partially based on what has already worked (exploitation). What has worked is its fitness. Fitness is assessed with a “scorer” much like wrapper methods. Poor fitness chromosomes are removed, whereas good ones get to reproduce through “crossover.”
+Crossover
+: Randomly, some
+good bits (or features) of each parent go to a child.
+Mutation
+: Even when a
+chromosome has proved effective, given a low mutation rate, it will occasionally mutate or flip one of its bits, in other words, features.
+The
+Python implementation we will use has many options. We won’t explain all of them here, but they are documented well in the code should you be interested. The first attribute is the estimator. We can also define the cross-validation iterations (
+cv=3
+) and
+scoring
+to determine whether chromosomes are fit. There are some important probabilistic properties, such as the probability for a mutated bit (
+mutation_probability
+) and that bits will get exchanged (
+crossover_probability
+). Generation-wise,
+n_gen_no_change
+provides a means for early stopping if generations haven’t improved, and
+generations
+by default is 40, but we will use 5. We can fit
+GeneticSelectionCV
+as you would any model. It can take a while, so it is best to define the verbosity and allow it to use all the processing capacity. Once finished, we can use the Boolean mask (
+support_
+) to subset the features:
+ga_rf = GAFeatureSelectionCV(
+    RandomForestRegressor(random_state=rand, max_depth=
+3
+),
+    cv=
+3
+,
+    scoring=
+'neg_root_mean_squared_error'
+,
+    crossover_probability=
+0.8
+,
+    mutation_probability=
+0.1
+,
+    generations=
+5
+, n_jobs=-
+1
+)
+ga_rf = ga_rf.fit(
+    X_train.iloc[sample_train_idx][top_cols].values,
+    y_train[sample_train_idx]
+)
+ga_rf_cols = np.array(top_cols)[ga_rf.best_features_].tolist()
+OK, now that we have covered a wide variety of wrapper, hybrid, and advanced feature selection methods in this section, let’s evaluate all of them at once and compare the results.
+Evaluating all feature-selected models
+As we have
+done with embedded methods, we can place feature subset names (
+fsnames
+), lists (
+fscols
+), and corresponding
+depths
+in lists:
+fsnames = [
+'w-sfs-lda'
+,
+'h-rfe-lda'
+,
+'a-shap'
+,
+'a-ga-rf'
+]
+fscols = [sfs_lda_cols, rfe_lda_cols, shap_cols, ga_rf_cols]
+depths = [
+5
+,
+6
+,
+5
+,
+6
+]
+Then, we can use the two functions we created to first iterate across all feature subsets, training and evaluating a model with them. Then the second function outputs the results of the evaluation in a DataFrame with previously trained models:
+train_mdls_with_fs(reg_mdls, fsnames, fscols, depths) 
+display_mdl_metrics(reg_mdls,
+'max_profit_test'
+, max_depth=
+7
+)
+This time, we are limiting the models to those with no more than a depth of 7 since those are very overfitted. The result of the snippet is depicted in
+Figure 10.8
+:
+Figure 10.8: Comparing metrics for all feature-selected models
+Figure 10.8
+shows how feature-selected models are more profitable than ones that include all the features compared at the same depths. Also, the embedded LASSO LARS with AIC (
+e-llarsic
+) method and the MIC (
+f-mic
+) filter method outperform all wrapper, hybrid, and advanced methods with the same depths. Still, we also impeded these methods by using a sample of the training dataset, which was necessary to speed up the process. Maybe they would have outperformed the top ones otherwise. However, the three feature selection methods that follow are pretty competitive:
+RFE with LDA: Hybrid method (
+h-rfe-lda
+)
+Logistic regression with L2 regularization: Embedded method (
+e-logl2
+)
+GAs with RF: Advanced method (
+a-ga-rf
+)
+It
+would make sense to spend many days running many variations of the methods reviewed in this book. For instance, perhaps RFE with L1 regularized logistic regression or GA with support vector machines with additional mutation yields the best model. There are so many different possibilities! Nevertheless, if you were forced to make a recommendation based on
+Figure 10.8
+, by profit alone, the 111-feature
+e-llarsic
+is the best option, but it also has higher minimum costs and lower maximum ROI than any of the top models. There’s a trade-off. And even though it has among the highest test RMSEs, the 160-feature model (
+f-mic
+) has a similar spread between max profit train and test and beat it in max ROI and min costs. Therefore, these are the two reasonable options. But before making a final determination, profitability would have to be compared side by side across different thresholds to assess when each model can make the most reliable predictions and at what costs and ROIs.
+Considering feature engineering
+Let’s assume that
+the non-profit has chosen to use the model whose features were selected with LASSO LARS with AIC (
+e-llarsic
+) but would like to evaluate whether you can improve it further. Now that you have removed over 300 features that might have only marginally improved predictive performance but mostly added noise, you are left with more relevant features. However, you also know that 8 features selected by
+e-llars
+produced the same amount of RMSE as the 111 features. This means that while there’s something in those extra features that improves profitability, it does not improve the RMSE.
+From a feature selection standpoint, many things can be done to approach this problem. For instance, examine the overlap and difference of features between
+e-llarsic
+and
+e-llars
+, and do feature selection variations strictly on those features to see whether the RMSE dips on any combination while keeping or improving on current profitability. However, there’s also another possibility, which is feature engineering. There are a few important reasons you
+would want to perform feature engineering at this stage:
+Make model interpretation easier to understand
+: For instance, sometimes features have a scale that is not intuitive, or the scale is intuitive, but the distribution makes it hard to understand. As long as transformations to these features don’t worsen model performance, there’s value in transforming the features to understand the outputs of interpretation methods better. As you train models on more engineered features, you realize what works and why it does. This will help you understand the model and, more importantly, the data.
+Place guardrails on individual features
+: Sometimes, features have an uneven distribution, and models tend to overfit in sparser areas of the feature’s histogram or where influential outliers exist.
+Clean up counterintuitive interactions
+: Some interactions that models find make no sense and only exist because the features correlate, but not for the right reasons. They could be confounding variables or perhaps even redundant ones (such as the one we found in
+Chapter 4
+,
+Global Model-Agnostic Interpretation Methods
+). You could decide to engineer an interaction feature or remove a redundant one.
+In reference to the last two reasons, we will examine feature engineering strategies in more detail in
+Chapter 12
+,
+Monotonic Constraints and Model Tuning for Interpretability
+. This section will focus on the first reason, particularly because it’s a good place to start since it will allow you to understand the data better until you know it well enough to make more transformational changes.
+So, we are left with 111 features but have no idea how they relate to the target or each other. The first thing we ought to do is run a feature importance method. We can use SHAP’s
+TreeExplainer
+on the
+e-llarsic
+model. An advantage of
+TreeExplainer
+is that it can compute SHAP interaction values,
+shap_interaction_values
+. Instead of outputting an array of
+(N, 111)
+dimensions where
+N
+is the number of observations as
+shap_values
+does, it will output
+(N, 111, 111)
+. We can produce a
+summary_plot
+graph with it that ranks both individual features and interactions. The only difference for interaction values is you use
+plot_type="compact_dot"
+:
+winning_mdl =
+'rf_5_e-llarsic'
+fitted_rf_mdl = reg_mdls[winning_mdl][
+'fitted'
+]
+shap_rf_explainer = shap.TreeExplainer(fitted_rf_mdl)
+shap_rf_interact_values = \
+    shap_rf_explainer.shap_interaction_values(
+        X_test.iloc[sample_test_idx][llarsic_cols]
+    )
+shap.summary_plot(
+    shap_rf_interact_values,
+    X_test.iloc[sample_test_idx][llarsic_cols],
+    plot_type=
+"compact_dot"
+,
+    sort=
+True
+)
+The preceding
+snippet produces the SHAP interaction summary plot shown in
+Figure 10.9
+:
+Figure 10.9: SHAP interaction summary plot
+We can read
+Figure 10.9
+as we
+would any summary plot except it includes bivariate interactions twice—first with one feature and then with another. For instance,
+MDMAUD_A* - CLUSTER
+is the interaction SHAP values for that interaction from
+MDMAUD_A
+'s perspective, so the feature values correspond to that feature alone, but the SHAP values are for the interaction. One thing that we can agree on here is that the plot is hard to read given the scale of the importance values and complexity of comparing bivariate interactions in no order. We will address this later.
+Throughout
+this book, chapters with tabular data have started with a data dictionary. This one was an exception, given that there were 435 features to begin with. Now, it makes sense to at the very least understand what the top features are. The complete data dictionary can be found at
+https://kdd.ics.uci.edu/databases/kddcup98/epsilon_mirror/cup98dic.txt
+, but some of the features have already been changed because of categorical encoding, so we will explain them in more detail here:
+MAXRAMNT
+: Continuous, the dollar amount of the largest gift to date
+HVP2
+: Discrete, percentage of homes with a value of >= $150,000 in the neighborhoods of donors (values between 0 and 100)
+LASTGIFT
+: Continuous, the dollar amount of the most recent gift
+RAMNTALL
+: Continuous, the dollar amount of lifetime gifts to date
+AVGGIFT
+: Continuous, the average dollar amount of gifts to date
+MDMAUD_A
+: Ordinal, the donation amount code for donors who have given a $100 + gift at any time in their giving history (values between 0 and 3, and -1 for those who have never exceeded $100). The amount code is the third byte of an
+RFA
+(
+recency/frequency/amount
+) major customer matrix code, which is the amount given. The categories are as follows:
+0: Less than $100 (low dollar)
+1: $100 – 499 (core)
+2: $500 – 999 (major)
+3: $1,000 + (top)
+NGIFTALL
+: Discrete, number of lifetime gifts to date
+AMT_14
+: Ordinal, donation amount code of the RFA for the 14th previous promotion (2 years prior), which corresponds to the last dollar amount given back then:
+0: $0.01 – 1.99
+1: $2.00 – 2.99
+2: $3.00 – 4.99
+3: $5.00 – 9.99
+4: $10.00 – 14.99
+5: $15.00 – 24.99
+6: $25.00 and above
+DOMAIN_SOCIALCLS
+: Nominal,
+Socio-Economic Status
+(
+SES
+) of
+the neighborhood, which combines with
+DOMAIN_URBANICITY
+(0: Urban, 1: City, 2: Suburban, 3: Town, and 4: Rural), meaning the following:
+1: Highest SES
+2: Average SES, except above average for urban communities
+3: Lowest SES, except below average for urban communities
+4: Lowest SES for urban communities only
+CLUSTER
+: Nominal, code indicating which cluster group the donor falls in
+MINRAMNT
+: Continuous, dollar amount of the smallest gift to date
+LSC2
+: Discrete, percentage of Spanish-speaking families in the donor’s neighborhood (values between 0 and 100)
+IC15
+: Discrete, percentage of families with an income of < $15,000 in the donor’s neighborhood (values between 0 and 100)
+The following insights
+can be distilled from the preceding dictionary and
+Figure 10.9
+:
+Gift amounts prevail
+: Seven of the top features pertain to gift amounts, whether it’s a total, min, max, average, or last. If you include the count of gifts (
+NGIFTALL
+), there are eight features involving donation history, making complete sense. So, why is this relevant? Because they are likely highly correlated and understanding how could hold the keys to improving the model. Perhaps other features can be created that distill these relationships much better.
+High values of continuous gift amount features have high SHAP values
+: Plot a box plot of any of those features like this,
+plt.boxplot(X_test.MAXRAMNT)
+, and you’ll see how right-skewed these features are. Perhaps a transformation such as breaking them into bins—called “discretization”—or using a different scale, such as logarithmic (try
+plt.boxplot(np.log(X_test.MAXRAMNT))
+), can help interpret these features but also help find the pockets where the likelihood of donation dramatically increases.
+Relationship with the 14th previous promotion
+: What happened two years before they made that promotion connect to the one denoted in the dataset labels? Were the promotional materials similar? Is there a seasonality factor occurring at the same time every couple of years? Maybe you can engineer a feature that better identifies this phenomenon.
+Inconsistent classifications
+:
+DOMAIN_SOCIALCLS
+has different categories depending on the
+DOMAIN_URBANICITY
+value. We can make this consistent by using all five categories in the scale (Highest, Above Average, Average, Below Average, and Lowest) even if this means non-urban donors would be using only three. The advantage to doing this would be easier interpretation, and it’s highly unlikely it would adversely impact the model’s performance.
+The
+SHAP interaction summary plot can be useful for identifying feature and interaction rankings and some commonalities between them, but in this case (see
+Figure 10.9
+), it was hard to read. But to dig deeper into interactions, you first need to quantify their impact. To this end, let’s create a heatmap with only the top interactions as measured by their mean absolute SHAP value (
+shap_rf_interact_avgs
+). We should then set all the diagonal values to 0 (
+shap_rf_interact_avgs_nodiag
+) because these aren’t interactions but feature SHAP values, and it’s easier to observe the interactions without them. We can place this matrix in a DataFrame, but it’s a DataFrame of 111 columns and 111 rows, so to filter it by those features with the most interactions, we sum them and rank them with
+scipy
+'s
+rankdata
+. Then, we use the ranking to identify the 12 most interactive features (
+most_interact_cols
+) and subset the DataFrame by them. Finally, we plot the DataFrame as a heatmap:
+shap_rf_interact_avgs = np.
+abs
+(shap_rf_interact_values).mean(
+0
+)
+shap_rf_interact_avgs_nodiag = shap_rf_interact_avgs.copy()
+np.fill_diagonal(shap_rf_interact_avgs_nodiag,
+0
+)
+shap_rf_interact_df = pd.DataFrame(shap_rf_interact_avgs_nodiag)
+shap_rf_interact_df.columns = X_test[llarsic_cols].columns
+shap_rf_interact_df.index = X_test[llarsic_cols].columns
+shap_rf_interact_ranks =
+112
+-rankdata(np.
+sum
+(
+     shap_rf_interact_avgs_nodiag, axis=
+0
+)
+)
+most_interact_cols = shap_rf_interact_df.columns[
+    shap_rf_interact_ranks <
+13
+]
+shap_rf_interact_df = shap_rf_interact_df.loc[
+most_interact_cols,most_interact_cols
+]
+sns.heatmap(
+    shap_rf_interact_df,
+    cmap=
+'Blues'
+,
+    annot=
+True
+,
+    annot_kws={
+'size'
+:
+10
+},
+    fmt=
+'.3f'
+,
+    linewidths=
+.5
+)
+The
+preceding snippet outputs what is shown in
+Figure 10.10
+. It depicts the most salient feature interactions according to SHAP interaction absolute mean values. Note that these are averages, so given how right-skewed most of these features are, it is likely much higher for many observations. However, it’s still a good indication of relative impact:
+Figure 10.10: SHAP interactions heatmap
+One way in
+which we can understand feature interactions one by one is with SHAP’s
+dependence_plot
+. For instance, we can take our top feature,
+MAXRAMNT
+, and plot it with color-coded interactions with features such as
+RAMNTALL
+,
+LSC4
+,
+HVP2
+, and
+AVGGIFT
+. But first, we will need to compute
+shap_values
+. There are a couple of problems though that need to be addressed, which we mentioned earlier. They have to do with the following:
+The prevalence of outliers
+: We can cut them out of the plot by limiting the
+x
+- and
+y
+-axes using percentiles for the feature and SHAP values, respectively, with
+plt.xlim
+and
+plt.ylim
+. This essentially zooms in on cases that lie between the 1st and 99th percentiles.
+Lopsided distribution of dollar amount features
+: It is common in any feature involving money for it to be right-skewed. There are many ways to simplify it, such as using percentiles to bin the feature, but a quick way to make it easier to appreciate is by using a logarithmic scale. In
+matplotlib
+, you can do this with
+plt.xscale('log')
+without any need to transform the feature.
+The
+following code accounts for the two issues. You can try commenting out
+xlim
+,
+ylim
+, or
+xscale
+to see the big difference they individually make in understanding
+dependence_plot
+:
+shap_rf_values = shap_rf_explainer.shap_values(
+    X_test.iloc[sample_test_idx] [llarsic_cols]
+)
+maxramt_shap = shap_rf_values[:,llarsic_cols.index(
+"MAXRAMNT"
+)]
+shap.dependence_plot(
+"MAXRAMNT"
+,
+    shap_rf_values,
+    X_test.iloc[sample_test_idx][llarsic_cols],
+    interaction_index=
+"AVGGIFT"
+,
+    show=
+False
+, alpha=
+0.1
+)
+plt.xlim(xmin=np.percentile(X_test.MAXRAMNT,
+1
+),\
+         xmax=np.percentile(X_test.MAXRAMNT,
+99
+))
+plt.ylim(ymin=np.percentile(maxramt_shap,
+1
+),\
+         ymax=np.percentile(maxramt_shap,
+99
+))
+plt.xscale(
+'log'
+)
+The preceding code generates what is shown in
+Figure 10.11
+. It shows how there’s a tipping point somewhere between 10 and 100 for
+MAXRAMNT
+where the mean impact on the model output starts to creep out, and these correlate with a higher
+AVGGIFT
+value:
+Figure 10.11: SHAP interaction plot between MAXRAMNT and AVGGIFT
+A
+lesson you could take from
+Figure 10.11
+is that a cluster is formed by certain values of these features and possibly a few others that increase the likelihood of a donation. From a feature engineering standpoint, we could take unsupervised methods to create special cluster features solely based on the few features you have identified as related. Or we could take a more manual route, comparing different plots to understand how to best identify clusters. We could derive binary features from this process or even a ratio between features that more clearly depict interactions or cluster belonging.
+The idea here is not to reinvent the wheel trying to do what the model already does so well but to, first and foremost, aim for a more straightforward model interpretation. Hopefully, that will even have a positive impact on predictive performance by tidying up the features, because if you understand them better, maybe the model does too! It’s like smoothing a grainy image; it might confuse you less and the model too (see
+Chapter 13
+,
+Adversarial Robustness
+, for more on that)! But understanding the data better through the model has other positive side effects.
+In fact, the lessons don’t stop with feature engineering or modeling but can be directly applied to promotions. What
+if tipping points identified could be used to encourage donations? Perhaps get a free mug if you donate over $
+X
+? Or set up a recurring donation of $
+X
+and be on the exclusive list of “silver” patrons?
+We will end this topic on that curious note, but hopefully, this inspires you to appreciate how we can apply lessons from model interpretation to feature selection, engineering, and much more.
+Mission accomplished
+To approach this mission, you have reduced overfitting using primarily the toolset of feature selection. The non-profit is pleased with a profit lift of roughly 30%, costing a total of $35,601, which is $30,000 less than it would cost to send everyone in the test dataset the mailer. However, they still want assurance that they can safely employ this model without worries that they’ll experience losses.
+In this chapter, we’ve examined how overfitting can cause the profitability curves not to align. Misalignment is critical because it could mean that choosing a threshold based on training data would not be reliable on out-of-sample data. So, you use
+compare_df_plots
+to compare profitability between the test and train sets as you’ve done before, but this time, for the chosen model (
+rf_5_e-llarsic
+):
+profits_test = reg_mdls[
+'rf_5_e-llarsic'
+][
+'profits_test'
+]
+profits_train = reg_mdls[
+'rf_5_e-llarsic'
+][
+'profits_train'
+]
+mldatasets.compare_df_plots(
+    profits_test[[
+'costs'
+,
+'
+profit'
+,
+'roi'
+]],
+    profits_train[[
+'costs'
+,
+'profit'
+,
+'roi'
+]],
+'Test'
+,
+'Train'
+,
+    x_label=
+'Threshold'
+,
+    y_formatter=y_formatter,
+    plot_args={
+'secondary_y'
+:
+'roi'
+}
+)
+The preceding code generates what is shown in
+Figure 10.12
+. You can show this to the non-profit to prove that there’s a sweet spot at $0.68 that is the second highest profit attainable in
+Test
+. It is also within reach of their budget and achieves an ROI of 41%. More importantly, these numbers are not far from what they are for
+Train
+. Another thing that is great to see is that the profit curve slowly slides down for both
+Train
+and
+Test
+instead of dramatically falling off a cliff. The non-profit can be assured that the operation would still be profitable if they choose to increase the threshold. After all, they want to target donors from the entire mailing list, and for that to be financially feasible, they have to be more exclusive. Say they are using a threshold of $0.77 on the entire mailing list, the campaign would cost about $46,000 but return over $24,000 in profit:
+Figure 10.12: Comparison between profit, costs, and ROI for the test and train datasets for the model with LASSO LARS via AIC features across different thresholds
+Congratulations! You have accomplished this mission!
+But there’s one crucial detail that we’d be careless if we didn’t bring up.
+Although we trained this model with the next campaign in mind, the model will likely be used in future direct marketing campaigns without retraining. This model reusing presents a problem. There’s a concept
+called
+data drift
+, also known as
+feature drift
+, which
+is that, over time, what the model learned about the features concerning the target variable no longer holds true. Another concept,
+concept drift
+, is
+about how the definition of the target feature changes over time. For instance, what constitutes a profitable donor can change. Both drifts can happen simultaneously, and with problems involving human behavior, this is to be expected. Behavior is shaped by cultures, habits, attitudes, technologies, and fashions, which are always evolving. You can caution the non-profit that you can only assure them that the model will be reliable for the next campaign, but they can’t afford to hire you for model retraining every single time!
+You can propose to the client creating a script that monitors drift directly on their mailing list database. If it finds significant changes in the features used by the model, it will alert both them and you. You could, at this point, trigger automatic retraining of the model. However, if the drift is due to data corruption, you won’t have an opportunity to address the problem. And even if automatic retraining is done, it can’t be deployed if performance metrics don’t meet predetermined standards. Either way, you should keep a close eye on predictive performance to be able to guarantee reliability. Reliability is an essential theme in model interpretability because it relates heavily to accountability. We won’t cover drift detection in this book, but future chapters discuss data augmentation (
+Chapter 11
+,
+Bias Mitigation and Causal Inference Methods
+) and adversarial robustness (
+Chapter 13
+,
+Adversarial Robustness
+), which pertain to reliability.
+Summary
+In this chapter, we have learned about how irrelevant features impact model outcomes and how feature selection provides a toolset to solve this problem. We then explored many different methods in this toolset, from the most basic filter methods to the most advanced ones. Lastly, we broached the subject of feature engineering for interpretability. Feature engineering can make for a more interpretable model that will perform better. We will cover this topic in more detail in
+Chapter 12
+,
+Monotonic Constraints and Model Tuning for Interpretability
+.
+In the next chapter, we will discuss methods for bias mitigation and causal inference.
+Dataset sources
+Ling, C., and Li, C., 1998,
+Data Mining for Direct Marketing: Problems and Solutions
+. In Proceedings of the Fourth International Conference on Knowledge Discovery and Data Mining (KDD’98). AAAI Press, 73–79:
+https://dl.acm.org/doi/10.5555/3000292.3000304
+UCI Machine Learning Repository, 1998, KDD Cup 1998 Data Data Set:
+https://archive.ics.uci.edu/ml/datasets/KDD+Cup+1998+Data
+Further reading
+Ross, B.C., 2014
+, Mutual Information between Discrete and Continuous Data Sets
+. PLoS ONE, 9:
+https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0087357
+Geurts, P., Ernst, D., and Wehenkel, L., 2006,
+Extremely randomized trees
+. Machine Learning, 63(1), 3-42:
+https://link.springer.com/article/10.1007/s10994-006-6226-1
+Abid, A., Balin, M.F., and Zou, J., 2019,
+Concrete Autoencoders for Differentiable Feature Selection and Reconstruction
+. ICML:
+https://arxiv.org/abs/1901.09346
+Tan, F., Fu, X., Zhang, Y., and Bourgeois, A.G., 2008,
+A genetic algorithm-based method for feature subset selection
+. Soft Computing, 12, 111-120:
+https://link.springer.com/article/10.1007/s00500-007-0193-8
+Calzolari, M., 2020, October 12, manuel-calzolari/sklearn-genetic: sklearn-genetic 0.3.0 (Version 0.3.0). Zenodo:
+http://doi.org/10.5281/zenodo.4081754
+Learn more on Discord
+To join the Discord community for this book – where you can share feedback, ask the author questions, and learn about new releases – follow the QR code below:
+https://packt.link/inml

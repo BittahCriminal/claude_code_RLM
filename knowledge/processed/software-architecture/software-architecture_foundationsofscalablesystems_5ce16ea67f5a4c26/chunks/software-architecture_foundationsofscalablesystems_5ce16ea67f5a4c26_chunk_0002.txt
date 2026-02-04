@@ -1,0 +1,2083 @@
+ct-Oriented Software
+(Addison Wesley Professional, 1994).
+3
+An excellent NGINX study
+benchmarks the performance of API gateways. It is performed by one of the vendors, so a hint of caution in interpreting results is required. Studies like this are valuable in assessing potential solutions.
+4
+This limit can be
+increased
+.
+
+Part III.
+Scalable Distributed Databases
+Part III
+takes us into the complex realm of scaling the data tier. This is where distributed systems theory is most prominent. As systems introduce data replicas to facilitate scalability, other system qualities such as availability and especially consistency must be addressed—these qualities are indelibly entwined in distributed data systems. I’ll motivate the need for the algorithms that make distributed databases function and sketch out some of the algorithms that are utilized. I’ll then illustrate how these algorithms are manifested in major distributed databases including MongoDB, Google Cloud Spanner, and Amazon DynamoDB.
+
+Chapter 10.
+Scalable Database Fundamentals
+In the early 2000s, the world of databases was a comparatively calm and straightforward place. There were a few exceptions, but the vast majority of applications were built on relational database technologies. Systems leveraged one of a handful of relational databases from the major vendors, and these still dominate the top ten spots in
+database market share ranking today
+.
+If you could jump into a time
+machine and look at a similar ranking from 2001, you’d probably find 7 of the current top 10—all relational databases—in similar places to the ones they occupy in 2022. But if you examine the top 20 in 2022, at least 10 of the current database engines listed did not exist 20 years ago, and most of these are not relational. The market has expanded and diversified.
+This chapter is the first of four in
+Part III
+that focuses on the data—or persistent storage—tier. I’ll cover the ever-changing and evolving scalable database landscape, including distributed nonrelational and relational approaches, and the fundamental approaches that underpin these technologies.
+In this chapter, I’ll explain how traditional relational databases have evolved to adopt distributed architectures to address scalability. I’ll then introduce some of the main characteristics of the new generation of databases that have emerged to natively support distribution. Finally, I’ll describe the architectures utilized for distributing data across multiple database nodes and the trade-offs inherent with these approaches regardless of the data models they support.
+Distributed Databases
+The data systems we build today dwarf those
+of 20 years ago, when relational databases ruled the earth. This growth in data set size and complexity has been driven by internet-scale applications. These create and manage vast quantities of heterogeneous data for literally tens of millions of users. This includes, for example, user profiles, user preferences, behavioral data, images and videos, sales data, advertising, sensor readings, monitoring data, and much more. Many data sets are simply far too big to fit on a single machine.
+This has necessitated the evolution
+of database engines to manage massive collections of distributed data. New generations of relational and nonrelational database platforms have emerged, with a wide range of competing capabilities aimed at satisfying different use cases and scalability requirements. Simultaneously, the development of low-cost, powerful hardware has made it possible to cost-effectively distribute data across literally hundreds or even thousands of nodes and disks. This enhances both scalability and, by replicating data, availability.
+Another major driver of database engine innovation has been the changing nature of the application requirements that populate the internet today. The inherent strengths of relational databases, namely transactions and consistency, come at a performance cost that is not always justified in sites like Twitter and Facebook. These don’t have requirements for every user to always see the same version of, for example, my tweets or timeline updates. Who cares if the latest photo of my delicious dinner is seen immediately by some of my followers and friends, while others have to wait a few seconds to admire the artful dish I’m consuming?
+With tens of thousands to millions of users, it is possible to relax the various data constraints that relational databases support and attain enhanced performance and scalability. This enables the creation of new, nonrelational data models and natively distributed database engines, designed to support the variety of use cases for today’s applications. There are trade-offs, of course. These manifest themselves in the range of features a database supports and the complexity of its programming model.
+Scaling Relational Databases
+Databases that support the relational model and SQL query language represent some of the most mature, stable, and powerful
+software platforms that exist today. You’ll find relational databases lurking behind systems in every type of application domain you can imagine. They are incredibly complex and amazingly successful technologies.
+Relational database technology was designed and matured when data sets were relatively small by today’s standards, and the database could run on a single machine. As data sets have grown, approaches to scale databases have emerged. I’ll briefly cover these with some examples in the following subsections.
+Scaling Up
+Relational databases were designed
+to run on a single machine, which enables shared memory and disks to be exploited to store data and process queries. This makes it possible for database engines to be customized to run on machines with multiple CPUs, disks, and large shared memories. Database engines can exploit these resources to execute many thousands of queries in parallel to provide extremely high throughput.
+Figure 10-1
+depicts the scale-up scenario. The database is migrated to new, more powerful (virtual) hardware. While there is database administration magic to perform the migration and tune the database configuration to effectively exploit the new resources, the application code should require no changes.
+There are three main downsides to this approach:
+Cost
+Hardware costs tend to grow exponentially as the computational resources offered grow.
+Availability
+You still have a single database node, albeit a powerful one. If it becomes unavailable, your system is down. A multitude of high availability (HA) solutions exist that offer mechanisms to detect unavailability and failover to a backup copy of the database. Many HA solutions are database vendor dependent.
+Growth
+If your database continues to grow, another migration to more powerful hardware is inevitable.
+Figure 10-1.
+Example of a relational database scale-up scenario
+Scaling up is indeed attractive in many applications. Still, in high-volume applications, there are two common scenarios in which scaling up becomes problematic. First, the database grows to exceed the processing capability of a single node. Second, low latency database accesses are required to service clients spread around the globe. Traversing
+intercontinental networks just doesn’t cut it.
+In both cases, distributing a database is necessary.
+Scaling Out: Read Replicas
+A common first step to increasing a database’s
+processing capacity is to scale out using read replicas. You configure one or more nodes as read replicas of the main database. The main database node is known as the primary, and read replicas are known as secondaries. The secondaries maintain a copy of the main database. Writes are only possible to the primary, and all changes are then asynchronously replicated to secondaries. Secondaries may be physically located in different data centers or different continents to support global clients.
+This architecture is shown in
+Figure 10-2
+.
+Figure 10-2.
+Distribution through read replication
+This approach enhances scalability by directing all reads to the read replicas.
+1
+It is hence highly effective for applications that must support read-heavy workloads. Reads can be scaled by adding more secondaries, reducing the load on the primary. This enables it to more efficiently handle writes. In addition, if the primary becomes unavailable due to a transient failure, read requests directed to secondaries are not interrupted.
+As there is a delay between when data is written to the primary and then successfully replicated to the secondaries, there is a chance that clients may read stale data from secondaries. Application must therefore be aware of this possibility. In normal operations, the time between updating the primary and the secondaries should be small, for example, a few milliseconds. The smaller this time window, then the less chance there is of a stale read.
+Read replication and primary/secondary–based database architectures are topics I’ll return to in much more detail in this and
+the following chapters.
+Scale Out: Partitioning Data
+Splitting up, or partitioning data in a
+relational database, is a technique for distributing the database over multiple independent disk partitions and database engines. Precisely how partitioning is supported is highly product-specific. In general, there are two strategies: horizontal partitioning and vertical partitioning.
+Horizontal partitioning
+splits a logical table into multiple physical partitions. Individual rows are allocated to a partition based on some partitioning strategy. Common partitioning strategies are to allocate rows to partitions based on some value in the row, or to use a hash function on the primary key. As shown in
+Figure 10-3
+, you can allocate a row to a partition based on the value of the
+region
+field in each row.
+Figure 10-3.
+Horizontal database partitioning
+Vertical partitioning, also
+known as row splitting, partitions a table by the columns in a row. Like normalization, vertical partitioning splits a row into one or more parts, but for the reasons of physical rather than conceptual optimization. A common strategy is to partition a row between static, read-only data and dynamic data.
+Figure 10-4
+shows a simple vertical partitioning for an inventory system that employs this scheme.
+Figure 10-4.
+Vertical database partitioning
+Relational database engines will have various levels of support for data partitioning. Some facilitate partitioning tables on disk. Others support partitioning data across nodes to scale horizontally in a distributed system.
+Regardless, the very nature of relational schemas, with data split across multiple tables, makes it problematic to devise a general partitioning strategy for distribution. Horizontal partitions of data ideally distribute tables across multiple nodes. However, if a single request needs to access data from multiple nodes, or join data from distributed partitioned tables, a high level of network traffic and request coordination is required. This may not give the performance benefits you expect. These issues are briefly covered in the following sidebar.
+Distributed Joins
+SQL joins are complex to implement in
+distributed relational databases. The longevity of SQL engines means they are highly optimized for joins on a single database, as Franck Pachot describes in his excellent
+The myth of NoSQL (vs. RDBMS) “joins don’t scale”
+blog post
+. However, when relational tables are partitioned and spread around a large cluster of machines, distributed joins need to be carefully designed to minimize data movement and hence reduce latencies. Common strategies to achieve this are:
+Define reference tables that are relatively small, rarely change, and need to be joined against frequently. These reference tables can be copied to each node so that join operations can execute locally and in parallel on each partitioned node. The results of each partition’s join are then sent to the request coordinator to merge and return the result set.
+Use partition keys or secondary indexes in joins. Again, this allows joins to execute locally and in parallel on each partition using the indexed fields.
+Ensure one side of the join has a highly selective filter that reduces the set of rows to a small collection. This can then be sent to each partitioned node and the join proceeds as in a reference table join. This approach minimizes data movement.
+Joins that involve large collections of data on each side of the join, don’t join on partition keys, and create large result sets require data shuffling and movement between nodes. This is required to move data to nodes to perform the partition, and subsequently gather and merge the results. These are the joins that are most difficult to scale.
+The bottom line is that high throughput queries need to carefully design schema and choose appropriate join algorithms. A great example is Google’s Cloud Spanner distributed relational database.  Spanner has multiple join algorithms and will choose algorithms automatically. But as the
+documentation states
+:
+Join operations can be expensive. This is because
+JOIN
+s can significantly increase the number of rows your query needs to scan, which results in slower queries. Google advises you to test with different join algorithms. Choosing the right join algorithm can improve latency, memory consumption, or both. For queries that are critical for your workload, you are advised to specify the
+most performant join method and join order in your SQL statements for more consistent performance.
+Example: Oracle RAC
+Despite the inherent problems of partitioning
+relational models and the complexities of SQL queries at scale, vendors have worked in the last two decades to scale out relational databases. One notable example is Oracle’s
+Real Applications Cluster (RAC) database
+.
+Oracle’s RAC database was released in 2001 to provide a distributed version of the Oracle database engine for high-volume, highly available systems. Essentially, Oracle makes it possible to deploy a cluster of up to 100 Oracle database engines that all access the same physical database.
+To avoid the data partitioning problem, Oracle RAC is an example of a
+shared-everything
+database. The clustered database engines access a single, shared data store of the data files, logs, and configuration files that comprise an Oracle database. To the database client, the clustered deployment is transparent and appears as a single database engine.
+The physical storage needs
+to be accessible to all nodes using a network-accessible storage solution known as Storage Area Network (SAN). SANs provide high-speed network access to the Oracle database. SANs also must provide hardware-level disk mirroring to create multiple copies of application and system data in order to survive disk failure. Under high load, the SAN can potentially become a bottleneck. High-end SANs are extremely specialized storage devices that are expensive beasts to acquire.
+Two proprietary software components are required for Oracle RAC deployments, namely:
+Clusterware
+Supports communications and
+coordination between the clustered database engines. It manages, for example, cluster node membership, node failover, and high availability.
+Cache Fusion
+Enables the individual caches in each
+clustered database node to be effectively shared so that accesses to the persistent store are minimized.
+An overview of a RAC system is shown in
+Figure 10-5
+.
+Figure 10-5.
+Oracle RAC overview
+Oracle RAC illustrates one architectural approach, namely shared everything, to scaling a relational database. It adds processing capacity and high availability to an Oracle deployment while requiring (in theory anyway) no application code changes. The database requires multiple proprietary Oracle software components and expensive redundant storage and interconnect hardware. Add Oracle license costs, and you don’t have a low-cost solution by any means.
+Many Oracle customers have adopted this technology in the last 20 years. It’s mature and proven, but through the lens of today’s technology landscape, is based on an architecture that offers limited on-demand scalability at high costs. The alternative, namely a shared-nothing architecture that exploits the widely available low-cost commodity compute nodes and storage is the approach I’ll focus on going forward.
+The Movement to NoSQL
+I’m not brave enough to try and construct
+a coherent narrative describing the forces that brought about the creation of a new generation of NoSQL database technologies.
+2
+My personal inclination is that this innovation was driven by a confluence of reasons that started to gather momentum in the early 2000s. In no particular order, some of these reasons were:
+The development of powerful, low-cost, commodity hardware, including multicore CPUs, faster, larger disks, and increased network speeds.
+The emergence of applications that dealt with unstructured data types and rapidly evolving business and data models. No longer was the “one size fits all” approach of relational adherents applicable to these new use cases.
+Increased need for scalability and availability for internet-facing applications.
+New opportunities to gather raw data and utilize this for new business insights and analytics.
+Combined with the complexities of scaling relational databases for massive data sets that I’ve described in this chapter, the time was rife for a new database paradigm. Much of the database and distributed systems theory that was needed for such innovation was known, and this created fertile ground for the emergence of a whole collection of new database platforms.
+The NoSQL database ecosystem that blossomed to address the evolving business and technological landscape of the early 2000s is by no means a homogeneous place. Several different approaches emerged
+and were implemented to some extent in various (mostly open source) databases. In general, however, the core characteristics of the NoSQL movement are:
+Simplified data models that can be easily evolved
+Proprietary query languages with limited or no support for joins
+Native support for horizontal scaling on low-cost, commodity hardware
+I’ll look at each of these characteristics in turn in the following subsections. But before that, consider this: how do NoSQL databases survive without the capability to execute JOIN-like queries? The answer lies in how you model data with NoSQL.
+NoSQL JOIN
+For illustration, and at the time of
+writing, CouchBase, Oracle NoSQL, and MongoDB support some form of joins, often with limitations. Oracle NoSQL joins are limited to hierarchically related tables only. MongoDB’s
+$lookup
+operation allows only one of the collections to be partitioned. Cassandra, DynamoDB, Riak, and Redis have no support for join operations. Graph databases like Neo4j and OrientDB use graph traversal algorithms and operations and hence have no need for joins.
+Data model normalization, as
+encouraged by relational databases, provides a proven technique for modeling the
+problem domain
+. It creates models with a single entry for every data item, which can be referenced when needed. Updates just need to modify the canonical data reference, and the update is then available to all queries that reference the data. Due to the power of SQL and joins, you don’t have to think too hard about all the weird and wonderful ways the data will be accessed, both immediately and in the future. Your normalized model should (in theory) support any reasonable query for the application domain, and SQL is there to make it possible.
+With NoSQL, the emphasis changes from problem domain modeling to modeling the
+solution domain
+. Solution domain
+modeling requires you to think about the common data access patterns the application must support, and to devise a data model that supports these accesses. For reading data, this means your data model must
+prejoin
+the data you need to service a request. Essentially, you produce what relational modelers deem a denormalized data model. You are trading off flexibility for efficiency.
+Another way of thinking about solution domain modeling is to create a table per use case. As an example, skiers and snowboarders love to use their apps to list how many days they have visited their favorite mountains each season, how many lifts they rode, and what the weather was like. Using normalization, you’d probably produce something like the following as a logical data model and create tables that implement the model:
+SnowSportPerson = {ssp_id, ssp_name, address, dob, ……….}
+Resort = {resort_id, resort_name, location, …..}
+Visit = {ssp_id, resort_id, date, numLifts, vertical, …..}
+Weather = {resort_id, date, maxtemp, mintemp, wind, …}
+Using SQL, it’s straightforward
+JOIN
+wizardry to generate a list of visits for a specific person that looks like the following:
+Summary
+Ian Gorton
+Number of days:
+2
+Date
+Resort
+Number of lifts
+Total vertical feet
+Max/min temperature (F)
+Wind speed (mph)
+Dec 2nd 2021
+49 Degrees North
+17
+27,200
+27/19
+11
+Dec 9th
+Silver Mt.
+14
+22,007
+32/16
+3
+In NoSQL data modeling, you create a data model that has the results the query needs all together in a table. As shown in the following, a
+VisitDay
+has all the data items needed to generate each line in the list above. You just have to sum the number of
+VisitDay
+objects in the results set to calculate the number of days for a single person.
+3
+VisitDay = {date, resort_name, ssp_id, ssp_name, numLifts, vertical, maxtemp, mintemp, wind}
+The
+SnowSportPerson
+,
+Resort
+, and
+Weather
+tables would remain unchanged from your original model. This means we have duplicated data across your logical tables. In this example, most of the data in these tables is write-once and never changes (e.g., weather conditions for a particular day), so duplication just uses more disk space—not a major problem in modern systems.
+Imagine, though, if a resort name changes. It does actually happen occasionally. This update would have to retrieve all
+VisitDay
+entries for that resort and update the resort name in every entry. In a very large database, this update might take a few tens of seconds or more, but as it’s a data maintenance operation, it can be run one dark night so that the new name appears magically to users the next day.
+So there you have it. If you design your data model to efficiently process requests based on major use cases, complex operations like joins are unnecessary. Add to this that it becomes easier to partition and distribute data and the benefits start to stack up at scale. The trade-offs are that, typically, reads are faster and writes are slower. You also have to think carefully about how to implement updates to duplicate data and maintain data integrity.
+Normalization
+The design of relational databases
+encourages normalization. Normalization structures the business domain data to eliminate data redundancy and support data integrity. Normalization is a complex topic that is beyond the scope of this book. In a nutshell, the result of normalization is a data model that adheres to the rules described by one of six—yes, six—major normal forms.
+4
+Each normal form defines rules for how the domain data should be organized into a collection of tables and columns.
+In reality, many databases I have seen over
+many years are designed to the rules defined by third normal form (3NF). I’ve heard rumors of fourth normal form databases, but suspect any higher normal forms have never left the environs of academia.
+Essentially, 3NF data models are designed to simplify data management. Domain data is split among multiple relations such that every data item has a single entry that can be referenced by a unique identifier when required. Data in 3NF data models can be mechanically translated into a relational schema and instantiated by a relational
+database
+engine. Applications can then use the SQL query language to
+INSERT
+,
+UPDATE
+,
+SELECT
+, and
+DELETE
+data from the database.
+It’s not uncommon, however, for relational data models to be demoralized to enhance query performance and application
+scalability. This insight is one of the key tenets that underpins the simpler data models that are supported by NoSQL databases.
+NoSQL Data Models
+As illustrated in
+Figure 10-6
+, there are four main NoSQL data models, all of which are somewhat simpler than the relational model.
+Figure 10-6.
+NoSQL data models
+Fundamentally there are subtle overlaps between these models. But ignoring these subtleties, the four are:
+Key-value
+Key-value (KV) databases are basically
+a hash map. Every object in the database has a unique key that is used to retrieve data associated with that key. To the database, the data associated with the key is typically opaque to the database engine. It can be a string, JSON, image, or whatever else the business problem demands. Examples of KV databases include
+Redis
+and
+Oracle NoSQL
+.
+Document
+A document database builds
+on the KV model, again with each document in the database requiring a unique key. The value associated with the key is not opaque to the database. Rather it is encoded, typically in JSON, making it possible to reference individual elements in a document in queries and for the database to build indexes on document fields. Documents are usually organized into logical collections analogous to relational tables, but there is no requirement for all documents in the collection to have the same format. Leading document databases are
+MongoDB
+and
+Couchbase
+.
+Wide column
+A wide column database extends
+the KV model by organizing data associated with a key in named columns. It’s essentially a two-dimensional hash map, enabling columns within a row to be uniquely identified and sorted using the column name. Like a document database, each row in a collection can have different columns. Apache
+Cassandra
+and Google
+Bigtable
+are examples of wide column databases.
+Graph
+Graphs are well understood
+data structures for storing and querying highly connected data. Think of your friends on Facebook, or the routes flown by an airline between airports. Graphs treat relationships between database objects as first-class citizens, and hence enable a wide range of graph-based algorithms to be efficiently implemented. Conceptually closest to relational databases, prominent examples are
+Neo4j
+and
+Amazon Neptune
+.
+Regardless of data model, NoSQL databases are usually termed as
+schemaless
+databases. Unlike relational databases, the format of every object you write into the database does not have to be defined up front. This makes it possible to easily evolve data object formats as there is no need for every object in a logical collection to have the same format.
+The inevitable trade-off for this flexibility is that it becomes the responsibility of the application to discover the structure of the data it reads. This requires data objects to be stored in the database along with metadata (basically field names) that make structure discovery possible. You’ll often see these two approaches called schema-on-write (defined schema) and schema-on-read (schemaless).
+Query Languages
+NoSQL database query languages are
+nearly always proprietary to a specific database, and vary between explicit API-based capabilities and SQL-like declarative languages. Client libraries in various languages, implemented by the vendor as well as third parties, are available for utilization in applications. For example, MongoDB officially
+supports twelve client libraries
+for different languages and
+has third-party offerings for many more
+.
+KV databases may offer little more than APIs that support CRUD operations based on individual key values. Document databases normally support indexing of individual document fields. This enables efficient implementations of queries that retrieve results sets and apply updates to documents that satisfy various search criteria. For example, the following is a MongoDB query that retrieves all the documents from the
+skiers
+database collection for individuals older than 16 who have not renewed their ski pass:
+db.skiers.find( {
+   age: { $gt:  16},
+   renew: { $exists: false }} 
+)
+Wide column databases have a
+variety of query capabilities.
+HBase supports a Java CRUD API
+with the ability to retrieve result sets using filters. Cassandra Query Language (CQL) is modeled on SQL and provides a declarative language for accessing the underlying wide column store. If you are familiar with SQL, CQL will look very familiar. CQL by no means implements the full set of SQL features. For example, the CQL
+SELECT
+statement can only apply to a single table and doesn’t support joins or subqueries.
+Graph databases support
+much richer query capabilities. OrientDB uses SQL as the basic query language and
+implements extensions to support graph queries
+. Another example is Cypher, originally designed for the Neo4j graph database, and open sourced through the
+openCypher project
+. Cypher provides capabilities to match patterns of nodes and relationships in the graph, with powerful query and insert statements analogous to SQL. The following example returns the emails of everyone who has a
+visited
+relationship to the ski resort node
+with a name property of
+Mission Ridge
+:
+MATCH (p:Person)-[rel:VISITED]->(c:Skiresort)
+WHERE c.name = ‘Mission Ridge’
+RETURN p.email
+Data Distribution
+NoSQL databases are in general designed
+to natively scale horizontally across distributed compute nodes equipped with local storage. This is a
+shared nothing
+architecture, as
+opposed to the
+shared everything
+approach I described with Oracle RAC. With no shared state, bottlenecks and single points of failure are eliminated,
+5
+and performance, scalability, and availability enhanced. There’s one notable exception to this rule, and that is graph databases, as I describe in the following sidebar.
+Distributing Graph Databases
+Graph databases are commonly included
+in the NoSQL database categorization. They are, however, a little bit of an outsider. Graph data structures, as implemented by graph databases, explicitly represent relationships between nodes in the graph. This means that, just like with relational databases, how to partition the data is not obvious.
+The core of the problem is: how can a graph be partitioned into subgraphs that can then be distributed across multiple nodes and support efficient query processing? This is both theoretically and practically a challenging problem, especially at the scale of contemporary graphs with billions of nodes and relationships. A solution would have to take into account, for example, access patterns to try and ensure queries don’t constantly follow relationships that point to remote data.
+For these reasons, partitioning a
+graph database can benefit from human guidance. For example, Neo4j’s
+Fabric extension
+allows a graph to be manually partitioned. Fabric creates what is essentially a proxy database to support queries that traverse relationships between nodes on different servers.
+In summary, graph databases are nontrivial to scale out to improve performance. But give one enough compute resources, memory, and disk in a single big server, and graph database engines can do some remarkable things.
+Partitioning, commonly known as sharding, requires
+an algorithm to distribute the data objects in a logical database collection across multiple server nodes. Ideally, a sharding algorithm should evenly distribute data across the available resources. Namely, if you have one hundred million objects and ten identical database servers, each shard will have ten million objects resident locally.
+Sharding requires a shard or partition key that is used to allocate a given data object to a specific partition. When a new object is created, the shard key maps the object to a specific partition that resides on a server. When a query needs to access an object, it supplies the shard key so the database engine can locate the object on the server it resides. This is illustrated in
+Figure 10-7
+.
+Figure 10-7.
+Data partitioning
+Three main techniques exist for sharding, and all distributed databases will implement one or more of these approaches:
+Hash key
+The partition for any given data object
+is chosen as the result of applying a hash function to the shard key. The result of the hash is then mapped to a partition. There are two main ways of doing this, using a modulus approach or an algorithm known as consistent hashing.
+Value-based
+The partition is chosen based
+on the value of the shard key. For example, you might want to partition your data on customers based on their country of residence. Choosing the country field as the shard key would ensure all data objects for customers who live in China reside in the same partition, all Finland customers are allocated to the same partition, and so on.
+Range-based
+Partitions host data objects where
+the shard key resides within a specific range of the shard key value. For example, you might use zip code/post code ranges to allocate all customer objects who reside in the same geographical area to the same partition.
+Partitioning makes it possible to scale out a database by adding processing and disk capacity and distributing data across these additional resources. However, if one of the partitions is unavailable due to a network error or disk crash, then a chunk of the database cannot be accessed.
+Solving this availability problem requires the introduction of replication. The data objects in each partition are replicated to typically two or more nodes. If one node becomes unavailable, the application can continue to execute by accessing one of the replicas. This partitioned, replicated architecture is shown in
+Figure 10-8
+. Each partition has three replicas, with each replica hosted on a different node.
+Figure 10-8.
+Data partitioning and replication with three replicas per partition
+Replication enhances both availability
+and scalability. The additional resources that store replicas can be used to handle both read and write requests from applications.
+There is however, as always with distributed systems, a complication to address. When a data update request occurs, the database needs to update all replicas. This ensures the replicas are consistent and all clients will read the same value regardless of the replica they access.
+There are two basic architectures for managing distributed database replication. These are:
+Leader-follower
+One replica is designated the
+leader and it always holds the latest value of any data object. All writes are directed to the leader, which is responsible for propagating updates to the replicas. The followers are read-only replicas. Application reads can be load balanced across the followers to scale out read performance.
+Leaderless
+Any replica can handle both
+reads and updates. When an update is sent to a replica, it becomes the request coordinator for that update and is responsible for ensuring the other replicas get correctly updated. As writes can be handled by any replica, the leaderless approach tends to be more scalable for write-heavy applications.
+Replica consistency turns out to be a thorny distributed systems issue. The core of the problem revolves
+around how and when updates are propagated to replicas to ensure they have the same values. The usual issues of varying latencies and network and hardware failures make this totally nontrivial.
+If a database can ensure all replicas always have the same value, then it is said to provide
+strong consistency
+, as all client accesses will return the same value for every data object. This implies the client must wait until all replicas are modified before an update is acknowledged as successful.
+In contrast, a client may only want to wait for one replica to be updated, and trust the database to update the others as soon as it can. This means you have a window of time when replicas are inconsistent and reads may or may not return the latest value.  Databases that allow replica inconsistency are known as
+eventually consistent
+. The trade-offs between strong and eventual consistency and how design choices affect scalability and availability are dealt with in detail in the next three chapters.
+The CAP Theorem
+Eric Brewer’s famous CAP theorem
+6
+elegantly encapsulates the options you have for replica consistency and availability when utilizing distributed databases. It describes the
+choices a database system has if there is a network partition, namely when the network drops or delays messages sent between the nodes in the database.
+Basically, if the network
+is operating correctly, a system can be both consistent and available. If a network partition occurs, a system can be either consistent (CP) or available (AP).
+This situation arises because a network partition means some nodes in the database are not accessible to others—the partition splits the database into two groups of nodes. If an update occurs and the replicas for the updated data object reside on both sides of the partition, then the database can either:
+Return an error as it cannot ensure replica consistency (CP).
+Apply the update to the subset of replicas that are visible (AP). This means there is replica inconsistency until the partition heals and the database can make all replicas consistent. Until the inconsistency is resolved, clients may see different values for the same data object.
+You’ll see the AP or CP categorization used for different NoSQL databases. It’s useful but not totally meaningful as most databases, as I’ll explain in
+Chapter 13
+, make it possible to
+tune configuration parameters to achieve AP or CP to meet application requirements.
+In the Wild: Internet-Scale Database Examples
+Facebook is well known for using MySQL to manage petabytes of social-related activities such as user comments and likes. The
+basic architecture is based on replica sets, with a single primary that handles all writes. Updates are replicated asynchronously to geographically distributed read-only replicas. Facebook engineering has made multiple updates to the MySQL code base, including building their own storage technology,
+MyRocks
+, to replace MySQL’s InnoDB default storage engine. MyRocks improves write performance and uses 50% less storage than a compressed InnoDB database. At Facebook scale, this provides a major storage saving. Porting to MyRocks for MySQL version 8.0 took two years and 1,500 code patches.
+7
+MongoDB has many large-scale deployments. One of the highest-profile ones is Baidu, China’s largest internet services company. It has utilized MongoDB since 2012 and now uses MongoDB to manage data for multiple services including maps, messaging, and photo sharing. Collectively, this amounts to 200 billion documents and more than 1 petabyte of data. This is managed by 600 nodes and is distributed across multiple locations for availability.
+8
+Summary and Further Reading
+As the scale of systems has grown, a revolution has taken place in the database realm. Databases must store massive volumes of data, provide rapid query response times for globally distributed clients and be available 24/7. This has required database technologies to become distributed and adopt new data models that are more amenable to the unstructured, ever changing data types necessitated by modern applications.
+In this chapter, I’ve explained why relational databases and SQL can become problematic at scale. In contrast, NoSQL databases adopt simple data models that can be replicated and partitioned to support massive data sets and request volumes. As always, there are trade-offs. NoSQL databases do not support the rich query features of SQL, placing a greater burden on the application. Distributed database designers also need to be aware of the consistency and availability trade-offs that are enumerated by the CAP theorem.
+With these foundations, the following three chapters focus on the complexities of the trade-offs inferred by the CAP theorem. I’ll explain the approaches that have been devised and implemented in various databases to enable applications to balance consistency, availability, and performance to meet their requirements.
+For an excellent introduction to NoSQL databases, it’s still hard to beat
+NoSQL Distilled: A Brief Guide to the Emerging World of Polyglot Persistence
+by Pramod Sadalage and Martin Fowler (Addison-Wesley Professional, 2013). For broader coverage of the database landscape, including both SQL and NoSQL,
+SQL and NoSQL Databases: Models, Languages, Consistency Options and Architectures for Big Data Management
+by Andreas Meier and Michael Kaufmann (Springer, 2019) is well worth a read. Finally, if this chapter has whetted your appetite for learning about how databases work in depth, Alex Petrov’s
+Database Internals
+(O’Reilly, 2019) is highly recommended.
+1
+The primary can typically be configured to handle reads as well as writes. This is all highly application-dependent.
+2
+NoSQL probably stands for Not Only SQL, but this is somewhat vacuous. It’s best to regard NoSQL as a simple label rather than an acronym.
+3
+Most NoSQL databases support embedded or nested data objects. This makes it possible to create a single database object for a person’s resort visits and update this object every time a new visit occurs. This simplifies reads as a query just retrieves one object that contains all the visit data needed. Depending on the database, updates may not be as efficient as inserts. This is a very database-specific issue.
+4
+Chris Date,
+Database Design and Relational Theory: Normal Forms and All That Jazz
+, 2nd ed. (Apress, 2012).
+5
+Again, this is in fact database implementation dependent. Shared-nothing architecture theoretically removes single points of failure and bottlenecks, but some implementations add them back!
+6
+Eric Brewer, “CAP Twelve Years Later: How the ‘Rules’ Have Changed,”
+Computer
+, Volume 45, Issue 2 (2012), 23–29.
+7
+The
+story
+of the move to MyRocks and MySQL version 8.0 is well worth a few minutes’ reading.
+8
+MongoDB’s usage at Baidu is
+briefly described here
+, and links to an excellent presentation with more details.
+
+Chapter 11.
+Eventual Consistency
+Eventual consistency has risen in prominence with the emergence of distributed, NoSQL databases. It’s still a concept that has been and remains heretical to some, raised in the era of transactions with relational databases. In some application domains, with banking and finance usually cited, eventual consistency simply isn’t appropriate. So goes the argument, anyway.
+In fact, eventual consistency has been used in the banking industry for many years. Anyone remember writing checks? Checks take days to be reconciled on your account, and you can easily write checks for more money than you have in your account. When the checks get processed, and consistency is established, you might see some consequences, however.
+It is similar with ATM transactions. If an ATM is partitioned from the network and cannot check your balance, you will still usually be able to get cash, albeit limited to a small amount. At this stage your account balance is inconsistent. When the partition heals, the ATM will send the transactions to be processed by the backend systems and the correct value for your account will be calculated.
+In the era of scalable internet systems, eventual consistency has found many suitable use cases. In this chapter, I’ll delve into the major issues that you need to be aware of when building eventually consistent systems with distributed databases at scale.
+What Is Eventual Consistency?
+In the good old days, when systems had a single source of truth for all data items—the database—replica consistency was
+not a problem. There simply were no replicas. But as I explained in
+Chapter 10
+, many systems need to scale out their databases across multiple nodes to provide the necessary processing and storage capacity. In addition, to ensure the data for each node is highly available, you also need to replicate the contents of each node to eliminate single points of failure.
+Suddenly your database has become a distributed system. When the database nodes and networks are fast and working reliably, your users have no idea they are interacting with a distributed system. Replicas are updated seemingly instantaneously, and user requests are processed with low response times. Inconsistent reads are rare.
+But as you know by now, distributed systems need to be able to handle various failure modes. This means the database has to deal with all the issues inherent with highly variable network latencies, and communication and machine failures. These failures mean your database replicas may remain inconsistent for longer periods than your application may wish to tolerate. This creates issues you need to understand and be able to address.
+Inconsistency Window
+The inconsistency window in an eventually consistent system is the duration it takes for an update to a data object to propagate to all replicas. In a leader-based system, the leader coordinates the updating of other replicas. In a leaderless system, any replica (or potentially any database node—this is implementation dependent) coordinates the update. The inconsistency window ends when all replicas have the same value.
+Several factors affect the duration of the inconsistency window. These are outlined in the following:
+The number of replicas
+The more replicas you have, the more
+replica updates need to be coordinated. The inconsistency window only closes when all replicas are identical. If you have three replicas, then only three updates are needed. The more replicas you have, the chances of one of your replicas responding slowly and elongating the inconsistency window increases.
+Operational environment
+Any instantaneous operational glitches, such
+as a transient network failure or lost packets, can extend the inconsistency window. Probably the main cause for replica update delays is a heavy read/write workload at a node. This causes replicas to become overloaded and introduces additional data propagation latency. Hence the more load your database is experiencing, the longer the inconsistency window is likely to be.
+Distance between replicas
+If all replicas are
+on the same local area network subnet, communications latencies can be submillisecond. If one of your replicas is across the continent or across the world, the minimum value of the inconsistency window will be the round-trip time between replicas. With geographical distribution, this could be relatively large, several tens of milliseconds, in fact.
+1
+It all depends on the distance as I explained in
+Chapter 3
+.
+All these issues mean that you don’t have control over the duration of the inconsistency window. You can’t provide or know an upper bound. With eventually consistent systems that communicate state changes asynchronously, this is a fact of life you have to live with.
+Read Your Own Writes
+Not too long ago, while booking a flight, I had to update my credit card information as a new one had been issued due to a hack at a major store. I duly added my new card information, saved it,
+and continued the checkout process to pay for my flight. To my surprise, the payment was rejected because I hadn’t updated my credit card information. Wait a minute, I thought, and checked my profile. The new card details were in my profile marked as the default card. So, I tried the transaction again, and everything worked fine.
+I don’t know exactly how this system was implemented, but I’m betting it uses an eventually consistent database and does not support
+read your own writes (RYOWs)
+. RYOWs is a property of a system that ensures if a client makes a persistent change to data, the updated data value is guaranteed to be returned by any subsequent reads from the same client.
+In an eventually consistent system, the inconsistency window makes it possible for a client to:
+Issue an update to a database object key.
+Issue a subsequent read for the same database object key and see the old value as it accesses a replica that has not yet persisted the prior update.
+This is illustrated in
+Figure 11-1
+. The client request to update their credit card details is coordinated by
+Replica 1
+, which sends the new card details asynchronously to the other replicas. The update to
+Replica 3
+incurs a delay however. Before the update is applied, the same client issues a read which is directed to
+Replica 3
+. The result is a stale read.
+Figure 11-1.
+Eventual consistency leads to stale reads
+To avoid this situation, a system
+needs to provide RYOWs consistency.
+2
+This guarantees, for an individual user, that any updates made by the user will be visible in subsequent reads. The guarantee doesn’t hold for other users. If I add a comment to an online article, when I reload the page, I will see my comment. Other users who load the page at the same time may or may not see my comments immediately. They will see it eventually.
+With leader-follower replication, implementing
+read your writes consistency is straightforward. For use cases that require RYOWs, you simply ensure the subsequent read is handled by the leader replica. This is guaranteed to hold the latest data object value.
+The implementation of RYOWs, if supported, varies by database platform. With MongoDB, a database I’ll describe in more detail in
+Chapter 13
+, this is the default behavior achieved by accessing the master replica.
+3
+In
+Neo4j clusters
+, all writes are handled by the leader, which asynchronously updates read-only followers. Reads, however, may be handled by replicas. To implement RYOWs consistency, any write transaction can request that a
+bookmark
+is returned that uniquely identifies that update. A subsequent read request
+passes the bookmark to Neo4j, enabling the cluster to ensure that only replicas that have received the bookmarked transaction process the read.
+Tunable Consistency
+Many eventually consistent databases provide
+configuration options and API parameters to enable you to tailor the database’s eventually consistent behavior. This makes it possible to trade off the performance of individual read and write operations based on the level of eventual replica consistency a use case can tolerate. The basic approach is known as tunable consistency.
+Tunable consistency is based on specifying the number of replicas that a request must access to complete a database request. To explain how this works, let’s define the following:
+N
+Total number of replicas
+W
+Number of replicas
+to update before confirming the update to the client
+R
+Number or replicas to read from before returning a value
+As an example, assume
+N
+= 3, and there is a leaderless database in which any individual request can be handled by any one of the replicas. The replica handling the request is called the coordinator. You can tune write operation performance and the extent of the inconsistency window by specifying the W value as shown in the following examples:
+W = 3
+The request coordinator will wait until all three replicas are updated before returning success to the client.
+W = 1
+The request coordinator will confirm the update locally and return success to the client. The other two replicas will be updated asynchronously.
+This means if
+W
+= 3, all replicas will be consistent after the write completes. This is sometimes called immediate consistency. In this case, clients can issue reads with a value of
+R
+= 1 (or quorum—see next section) and they should receive the latest value, as long as reads are not concurrent with the replica updates. Reads that occur while the replicas are being updated may still see different values depending on the replicas they access. Only once the replica values have converged will all reads see the same value. Hence immediate consistency is not the same as strong consistency (see
+Chapter 12
+) as stale reads are still possible.
+4
+If
+W
+= 1, then you have an inconsistency window as only one replica, the request coordinator in our example, is guaranteed to have the latest value. If you issue a read with
+R
+= 1, the result may or may not be the latest value.
+Remember the CAP theorem from
+Chapter 10
+? There are some consistency-availability trade-offs to consider here. If we set
+W
+=
+N
+, then there are two
+consequences:
+All replicas are consistent. This option favors replica consistency. Note that writes will be slower. The client must wait for updates to be acknowledged by all replicas, and this will add latency to writes, especially if one replica is slow to respond.
+Writes may fail if a replica is not accessible. This would make it impossible for the request coordinator to update all replicas, and hence the request will throw an exception. This negatively affects availability (see discussion of hinted handoffs later in this chapter).
+This option is
+CP
+in CAP terminology.
+Alternatively, if we set
+W
+= 1, writes succeed if any replica is available. There will be an inconsistency window
+that will last until all replicas are updated. The write will succeed even if one or more replicas are partitioned or have failed. This option therefore favors availability over replica consistency, or
+AP
+in CAP parlance.
+To combat this inconsistency window, a client can specify how many replicas should be read before a result is returned. If we set
+R
+=
+N
+, then the request coordinator will read from all replicas, determine which is the latest update, and return that value to the client (I’ll return to precisely how the coordinator determines which replica holds the latest value later in this chapter. For now just assume it is possible). The result is that by reading from all replicas, you are guaranteed to access the one that holds the latest updated value.
+Another way to look at the trade-offs involved is
+read optimized
+versus
+write optimized
+. The (
+W
+=
+N
+,
+R
+= 1) setting favors both consistency and read latencies, as only one replica needs to be accessed. The trade-off is longer write times. The (
+W
+= 1,
+R
+=
+N
+) option favors both availability and write latencies, as writes succeed after any replica is updated. The trade-off is slower reads.
+These settings enable you to tune individual database requests to match your requirements. If inconsistent reads are not desirable, choose either
+W
+=
+N
+and
+R
+= 1, which will add latency to writes but make reads as fast as possible, or
+W
+= 1 and
+R
+=
+N
+, to optimize writes at the expense of reads. If your use cases can tolerate inconsistency, set
+W
+=
+R
+= 1 and
+benefit from fast reads and writes. Or, if you want to balance performance and consistency, there’s another option, as I’ll explain in the next section.
+Quorum Reads and Writes
+There’s an option that lies between the
+alternatives discussed in the previous section. These are known as
+quorum
+reads and writes. Quorum simply means the majority, which is (
+N
+/ 2) + 1.
+5
+For our three replicas, the majority is two. For five replicas, the majority is three, and so on.
+If we configure both the
+W
+and
+R
+value to be the quorum, we can balance the performance of reads and writes and still provide access to the latest updated value of a data object.
+Figure 11-2
+illustrates how quorums work. With three replicas, a quorum means a write must succeed at two replicas, and a read must access two replicas. Initially all three replicas have a data object
+K
+with value
+v1,
+and the following sequence of actions takes place:
+Client 1
+updates the object to hold value
+v2
+and the write is acknowledged as successful once a quorum—in this case
+Replica 1
+and
+Replica 2
+—are updated.
+The command to update to
+Replica 3
+is delayed (slow network? busy node?).
+Client 2
+issues a read on object
+K
+.
+Replica 2
+acts as the request coordinator and sends a read request to the other two replicas for their value for
+K
+.
+Replica 3
+is first to respond with
+K
+=
+v1
+.
+Replica 2
+compares its value for
+K
+with that returned from
+Replica 3
+and determines that
+v2
+is the most recently updated value. It returns value
+v2
+to
+Client 2
+.
+The basic intuition of quorums
+is that by always reading and writing from the majority of replicas, read requests will see the latest version of a database object. This is because the majority that is written to and the majority that are read from must overlap. In
+Figure 11-2
+, even though
+Replica 3
+is not updated before the read takes place, the read accesses
+Replica 2
+, which does hold the updated value. The request coordinator can then ensure the latest value is returned to the client.
+Figure 11-2.
+Quorum reads and writes
+So, what’s the inevitable trade-off here? Simply, writes and reads will fail if a quorum of nodes is not available. A network failure that partitions a group of replicas such that the partition visible to a client does not contain a quorum will cause that client’s requests to fail.
+In some database systems designed to favor
+availability over consistency, the concept of a
+sloppy quorum
+is supported. Sloppy quorums were first described in Amazon’s original Dynamo paper,
+6
+and are implemented in several databases including DynamoDB, Cassandra, Riak, and Voldemort.
+The idea is simple. If a given write cannot achieve quorum due to the unavailability of replicas nodes, the update can be stored temporarily on another reachable node. When the home node(s) for the replica(s) become available again, the node storing the update performs what is called a
+hinted handoff.
+A hinted handoff sends the latest value of the replica to the home nodes from its temporary location.
+This scheme is depicted in
+Figure 11-3
+. The client sends an update to
+Replica 1
+.
+Replica 1
+attempts to update
+Replica 2
+and
+Replica 3,
+but
+Replica 3
+is unavailable due to a transient network partition.
+Replica 1
+therefore sends the update to another database node,
+Node N
+, which temporarily stores the update. Sometime later,
+Node N
+sends the update to
+Replica 3
+, and the value for the updated object becomes consistent across all replicas.
+Figure 11-3.
+Sloppy quorum and hinted handoff
+Sloppy quorums have two main implications. First, a write that has achieved a sloppy quorum guarantees durability on
+W
+nodes, but the
+W
+nodes are not all nodes that hold replica values of the updated data object. This means a client may still read a stale value, even with quorums configured (i.e.,
+R
++
+W
+>
+N
+), as it may access
+R
+nodes that have not been updated by the previous write operation.
+Second, sloppy quorums increase write availability for a system. The trade-off is the potential for stale reads until the hinted handoff has occurred. Databases that support these features typically allow the system designer to turn these capabilities on or off to suit
+application needs.
+Replica Repair
+In a distributed, replicated
+database, you expect every replica will be consistent. Replication may take a while, but consistency is always the ultimate outcome. Unfortunately, in operational databases, replica drift occurs. Network failures, node stalls, disk crashes, or (heaven forbid!) a bug in the database code can cause replicas to become inconsistent over time.
+A term from
+thermodynamics, entropy, is used to describe this situation. Basically, systems tend to entropy (disorder) over time. Because of entropy, databases need to take active measures to ensure replicas remain consistent. These measures are known collectively as anti-entropy repair.
+There are basically two strategies for anti-entropy repair. One is an active strategy that is applied when objects are accessed. This works effectively for database objects that are read reasonably frequently. For infrequently accessed objects, most likely the vast majority of your data, a passive repair strategy is used. This runs in the background and searches for inconsistent replicas to fix.
+Active Repair
+Also known as
+read repair
+, active
+replica repair takes place in response to database read requests. When a read arrives at a coordinator node, it requests the latest value for each replica. If any of the values are inconsistent, the coordinator sends back the latest value to update the stale replicas. This can be done in a blocking or nonblocking mode. Blocking waits for the replicas to confirm updates before responding to the client, whereas nonblocking returns the latest value to the client immediately and updates stale replicas asynchronously.
+Precisely how read repair works is implementation dependent. Factors to consider are how many replicas are accessed on each read—perhaps all, quorum or specific
+R
+value—and how replica divergence is detected and fixed. For detection, instead of requesting and comparing a complete, potentially large object with a complex structure, a hash value of the object can be used. If replica hashes match, then there is no need to perform a repair operation. Reading hashes, known as digest reads, reduces network traffic and latency. You’ll find digest read implementations in several NoSQL databases, for example,
+ScyllaDB
+and Cassandra.
+Passive Repair
+Passive anti-entropy repair is a
+process that typically runs periodically and is targeted at fixing replicas that are infrequently accessed. Essentially, the approach
+builds a hash value that represents each replicated collection of objects and compares the hashes of each collection. If the hashes match, no repair is needed. If they don’t, you know some replicas in the collection are inconsistent and further action is needed.
+To create an efficient hash representation of a potentially very large collection of data objects, a data structure called a Merkle tree
+7
+is typically utilized. A Merkle tree is a
+binary hash tree whose leaf nodes are hashes of individual data objects. Each parent node in the tree stores a hash of its pair of children nodes, such that the root node hash provides a compact representation of the entire data collection.
+Figure 11-4
+shows a representation of a simple Merkle tree.
+Figure 11-4.
+Merkle tree example
+Once a Merkle tree for a collection of objects has been constructed, it can be efficiently utilized to compare Merkle trees for each replica collection. Two nodes can exchange the root node hash, and if the root node values are equal, then the objects stored in the partitions are consistent. If they are not, the two child nodes of the root must be compared. One (or maybe both) of the child node hashes must be different as the root node hashes were different. The traversal and data exchange algorithm basically continues down the tree, following branches where hashes are not equal between replica trees, until leaf nodes are identified. Once identified, the stale data objects can be updated on the appropriate replica node.
+Merkle tree construction is a CPU- and memory-intensive operation. For these reasons, the process is either initiated on demand, initiated by an administration tool, or scheduled periodically. This enables anti-entropy repair to occur when the database is experiencing a low request
+load, and hence doesn’t cause increased latencies on database accesses during production. Examples of NoSQL databases that implement anti-entropy repair are
+Riak
+and Cassandra.
+Handling Conflicts
+Up until now in this chapter, I’ve assumed that a database has some mechanism to discern the latest value for any given replicated database object. For example, when reading from three replicas, the database will somehow be able to decide which replica is the most recently updated and return that value as the query result.
+In a leaderless system, writes can be handled by any replica. This makes it possible for two clients to concurrently apply independent updates to the same database key on different replicas. When this occurs, in what order should the updates be applied? What should be the final value that all replicas hold? You need some mechanism to make this decision possible.
+Last Writer Wins
+One way to decide final, definitive values is to
+use timestamps. A timestamp is generated for the update request and the database ensures that when concurrent writes occur, the update with the most recent timestamp becomes the final version. This is simple and fast from the database perspective.
+Unfortunately, there’s a problem with this approach. In what order did the updates really happen? As I described in
+Chapter 3
+, clocks on machines drift. This means one node’s clock may be ahead of others, making comparing timestamps meaningless. In reality, we can’t determine the order of the events. They are executed on different replicas of the same data object by two or more independent processes. These updates must be considered as simultaneous, or concurrent. The timestamps attached to the updates simply impose an arbitrary order on the updates for conflict resolution.
+The consequence of this is when concurrent updates occur using last writer wins, updates will be silently discarded.
+Figure 11-5
+depicts one scenario where updates are lost using a shared playlist as an example.
+Client 1
+writes the first entry to the playlist, and this entry is subsequently read at some time later by both
+Client 1
+and
+Client 2
+. Both clients then write a new entry to the playlist, but as
+Client 2
+’s update is timestamped later than
+Client 1
+’s, the updates made by
+Client 1
+are lost.
+Figure 11-5.
+Concurrent writes cause lost updates with last writer wins
+Data loss with a last writer wins conflict resolution policy is inevitable. There are mitigation strategies such as timestamps on individual fields and conditional writes (which I’ll discuss in
+Chapter 13
+) that can minimize or mitigate the likelihood of data loss. However, the only way to safely utilize a database that employs purely a last writer wins policy is to ensure all writes store data objects with a unique key, and objects are subsequently immutable. Any changes to data in the database require the existing data object to be read and the new contents
+written to the database with a new key.
+Version Vectors
+To handle concurrent updates
+and not lose data, we need a way to identify and resolve conflicts.
+Figure 11-6
+shows an approach to achieving this for a single replica using versioning. Each unique database object is stored along with a version number.
+Figure 11-6.
+Conflict identification with versioning
+Reading and writing data from the database proceeds as follows:
+When a client reads a database object, the object and its version are returned.
+When a client updates a database object, it writes the new data values and the version of the object that was received from the previous read.
+The database checks that the version in the write request is the same as the object’s version in the database, and if it is, it accepts the write and increments the version number.
+If the version number accompanying a write does not match the database object version, a conflict has occurred, and the database must take remedial action to ensure data is not lost. It may return an error to the client and make it reread the new version. Alternatively, it may store both updates and inform the client that a conflict has occurred.
+In
+Figure 11-6
+, the remedial action depicted is based on the
+Riak database
+. When a conflict occurs in Riak, the database stores both versions of the database object and returns the conflicts to the client. In this example, the resolution is for the client to simply merge the two updates, which are known as
+siblings
+in Riak.
+With multiple replicas, however, the situation is somewhat more complex than in
+Figure 11-6
+. As writes may be handled by any replica, we need to maintain the version number for each unique object and each replica. Replicas maintain their own version as writes are processed, and also keep track of the versions of the other replicas it has seen. This creates what is known as a
+version vector
+.
+When a replica accepts a write from a client, it updates its own version number and sends the update request along with its version vector to the other replicas. The version vector is used by a replica to decide whether the update should be accepted or if siblings should be created.
+The management of version vectors is the responsibility of the database. Database clients just need to present the latest version with updates and be able to handle conflicts when they occur. The following sidebar gives a brief overview of some of the theory behind the conflict resolution approach represented by version vectors.
+Logical Clocks
+Physical, CPU-measured time is not a
+reliable source of reference in distributed systems (see
+Chapter 3
+). Consequently, you need another approach to make sense of the order that database accesses occur. This is where logical clocks enter the scene.
+Logical clocks were first described by Leslie Lamport in his seminal paper.
+8
+The essence of the work is the definition of a
+happens-before
+relationship. This means:
+If a process issues operation
+a
+(e.g., a database request), and after it completes, issues operation
+b
+, then
+a happens-before b
+. This is denoted by
+a
+→
+b
+.
+If a process sends a message
+m
+to another process, the send
+happens-before
+the receipt.
+If two independent processes perform operations
+a
+→
+b
+and
+c
+→
+d
+, then it is not possible to define an order between the {
+a
+,
+b
+} and {
+c
+,
+d
+}. In this case, the operations are concurrent.
+The
+happens-before
+relationship is transitive, such that if
+a
+→
+b
+and
+b
+→
+c
+, then
+a
+→
+c
+.
+Systems can capture the
+happens-before
+relationship using a logical clock. This is done using a simple counter and algorithm. Each process has a local clock, which it initializes to zero on startup. The following shows pseudocode for when a process sends a message to another:
+# increment local clock
+local_clock ++;
+# send message to another process
+send(msg, local_clock);
+When the receiving process accepts the message, it sets its own local clock as follows:
+(msg, clock_msg) = receive();
+local_clock = max(clock_msg, local_clock) + 1;
+This ensures the value of
+local_clock
+in the receiving process is greater than the value sent in the message. This reflects that the send operation
+happens-before
+the receive operation. Whenever there is a cause and effect, or causal relationship between two events, such that
+a
+→
+b
+, then
+clock(a)
+<
+clock(b).
+Lamport clocks define a
+partial order between events as they cannot discern between concurrent requests with no causal relationship. Hence, they cannot be used to detect database conflicts. This is where version vectors enter the scene. Version vectors define an array of logical clocks, with one element for each database object replica. This is shown in the following for a newly created object with three replicas:
+r1, r2, r3 = [ [r1,0], [r2,0], [r3,0] ]
+When an update is processed by a coordinator node, in the following this is
+r2
+, it increments its own clock in the vector, and sends the updated vector to the other replicas:
+r2 = [ [r1,0], [
+r2,1
+], [r3,0] ]
+When a replica receives an update and version vector from the coordinator, it compares the vector with its local copy. If every clock value for the updated object version vector is greater than or equal to the clock values stored by the replicas, the write is accepted. All replicas synchronize and will have identical version vectors.
+If concurrent updates occur at replicas two and three, as shown in the following, each replica will update its own clock:
+r2 = [ [r1,0], [
+r2,2
+], [r3,0] ]
+r3 = [ [r1,0], [r2,1], [
+r3,1
+] ]
+When the version vectors are exchanged and compared by
+r2
+and
+r3
+, the conflict is detected as all the clock values do not obey the
+greater than or equal to
+rule. This is how version vectors enable conflict detection in replicated databases.
+As
+Figure 11-6
+illustrates, when a database detects a conflict, the client typically needs to do some work to resolve it. If the database throws an error, the client can reread the latest version of the database object and attempt the update again. If siblings are returned, the client must perform some form of merge. These situations are very use case–specific and hence impossible to generalize.
+Luckily, there are circumstances when a database can automatically resolve conflicts. Some databases, including Redis, Cosmos DB, and Riak, are leveraging recent results from the
+research community to support a collection of data types known as conflict-free replicated data types (CRDTs). CRDTs have semantics such that they can be concurrently updated and any conflicts can be resolved sensibly by the database. The value of a CRDT will always converge to a final state that is consistent on all replicas.
+A simple example of a CRDT is a counter that could be used to maintain the number of followers for a user on a social media site. Increments and decrements to a counter can be applied in any order on different replicas, and the resulting value should eventually converge on all replicas.
+Common CRDTs include sets, hash tables, lists and logs. These data structures behave identically to their nondistributed counterparts, with minor caveats.
+9
+Importantly, they alleviate the application from the burden of conflict handling. This simplifies
+application logic, saving you time and money, and will probably make your applications less error prone.
+In the Wild: Eventual Consistency
+Eventually consistent databases are widely used in large-scale systems. For example, at Netflix, the Cassandra
+database underpins the user experience when viewing content. In 2019, Netflix reported over six petabytes of subscriber related content in Cassandra, stored in tens of thousands of database instances and hundreds of globally distributed clusters.
+10
+Cassandra’s low write latencies provide an excellent solution for use cases that have a 9:1 write-to-read ratio. Netflix also exploits Cassandra’s tunable consistency and global data replication to support its most time-critical use cases for its more than 100 million subscribers.
+11
+Netflix benchmarks results from Cassandra testing are really useful for quantifying the latencies that are achievable with eventually consistent technologies.
+12
+For example, one benchmark test achieved 1 million writes per second with an average latency of 6 milliseconds and a P95 of 17 milliseconds. These results were produced using a Cassandra cluster with 285 nodes. Like all benchmark studies, you need to delve into the details on the Netflix technical blog to make full sense of the results.
+The online betting and gaming industry relies on high availability and low latencies. It’s not hard to imagine the effect of downtime and slow responses when huge amounts of bets are being placed on high-profile events such as a world championship boxing match or the soccer world cup. bet365 is one of the largest online gambling sites and built its site based on the Riak KV database.
+13
+bet365 calculates odds, takes bets, and manages account and transaction data for millions of concurrent users, generating gigabytes of data for processing every second. Odds change constantly and must be recalculated with low latencies to capture the effect of in-game variables. Data written to Riak KV is automatically written to multiple replicas across globally distributed clusters with tunable consistency. This provides high availability and low latencies through enabling users to access replicas that are physically close to their location.
+Summary and Further Reading
+Eventually consistent databases have become an established part of the landscape of scalable distributed systems. Simple, evolvable data models that are naturally partitioned and replicated for scalability and availability provide an excellent solution for many internet-scale systems.
+Eventual consistency inevitably creates opportunities for systems to deliver stale reads. As a consequence, most databases provide tunable consistency. This allows the system designer to balance latencies for read and writes, and trade off availability and consistency to meet application needs.
+Concurrent writes to different replicas of the same database object can cause conflicts. These cause the database to have inconsistent replicas and to silently lose updates, neither of which are desirable in most systems. To address this problem, conflict resolution mechanisms are required. These often need application logic (and/or users) to resolve conflicts and ensure updates are not lost. This can cause additional application complexity. New research is coming to the rescue, however, and some databases support data types that have semantics to automatically resolve conflicts.
+The classic reference for eventually consistent databases and the inspiration for many of today’s implementations is the
+original Dynamo paper
+. It is still a great read over a decade after its 2007 publication.
+If you want to know more about how eventually consistent databases—and massive data stores in general—are built, I can think of no better source than
+Designing Data-Intensive Applications
+by Martin Kleppman (O’Reilly, 2017). I also enjoy
+NoSQL for Mere Mortals
+by Dan Sullivan (Addison-Wesley Professional, 2015) for solid basic information. And if you want to know more about CRDTs,
+this review paper
+is a great place to start.
+14
+1
+The quantum communications systems of the future may well
+overcome distance-induced latencies
+.
+2
+For an excellent description of eventual consistency models, see
+https://oreil.ly/2qUQh
+.
+3
+MongoDB enables you to tune which replica
+handles reads
+.
+4
+Immediate consistency should not be confused with strong consistency, as described in the next chapter. Databases that favor availability over consistency and use
+W
+=
+N
+for writes still have an inconsistency window. Also, writes may not be completed on every replica if one or more is unreachable. To understand why, see discussion of hinted handoffs later in this chapter.
+5
+This formula uses integer division, such that the fractional part is discarded. For example, 5 / 2 = 2.
+6
+Giuseppe DeCandia et al., “Dynamo: Amazon’s Highly Available Key-Value Store,” in the Proceedings of the 21st ACM Symposium on Operating Systems Principles, Stevenson, WA, October 2007.
+7
+Merkle trees are useful in
+many use cases
+, including Bitcoin/blockchain transaction verifications.
+8
+Leslie Lamport, “Time, Clocks, and the Ordering of Events in a Distributed System,”
+Communications of the ACM
+21, no. 7 (1978): 558–65.
+https://doi.org/10.1145/359545.359563
+.
+9
+For example, if one process removes an element from a set concurrently with another node adding the same elements, the “add wins.”
+10
+For more details on how Netflix’s cloud data engineering team uses Cassandra to manage data at petabyte scale, check out this
+excellent presentation
+.
+11
+This
+Netflix technical blog entry
+explains how the Cassandra-based solution for scaling the user viewing history database evolved over time.
+12
+Cassandra benchmarks are indicative of the
+capabilities of eventually consistent data stores
+.
+13
+bet365 relies so heavily on Riak KV, it actually bought the technology! An overview of its business challenges is described
+here
+.
+14
+Marc Shapiro et al., “Convergent and Commutative Replicated Data Types,”
+European Association for Theoretical Computer Science
+; 1999, 2011, 67–88.
+⟨hal-00932833⟩
+.
+
+Chapter 12.
+Strong Consistency
+As I described in
+Chapter 11
+, eventually consistent databases are designed to scale by allowing data sets to be partitioned and replicated across multiple machines. Scalability is achieved at the expense of maintaining strong data consistency across replicas, and allowing conflicting writes.
+The consequences of these trade-offs are twofold. First, after a data object has been updated, different clients may see either the old or new value for the object until all replicas converge on the latest value. Second, when multiple clients update an object concurrently, the application is responsible for ensuring data is not lost and the final object state reflects the intent of the concurrent update operations. Depending on your system’s requirements, handling inconsistency and conflicts can be straightforward, or add considerable complexity to application code.
+Another class of distributed databases
+provides an alternative model, namely strongly consistent data systems. Also known as NewSQL or, more recently, distributed SQL, strongly consistent systems attempt to ensure all clients see the same, consistent value of a data object once it has been updated. They also deliver the well-known
+benefits of atomicity, consistency, isolation, durability (ACID) database transactions to handle conflicting updates.
+Transactions and data consistency, the characteristics everyone is familiar with in existing single-node relational databases, eliminate many of the complexities inherent in eventually consistent systems. Together they can significantly simplify application logic. As stated in Google’s original Spanner distributed database paper: “We believe it is better to have application programmers deal with performance problems due to overuse of transactions as bottlenecks arise, rather than always coding around the lack of transactions.”
+1
+For internet-scale systems, the trick of course is to provide the benefits of strongly consistent databases, along with the performance and availability that eventually consistent systems can achieve. This is the challenge that distributed SQL databases are tackling. In this chapter, I’ll explain the characteristics of these strongly consistent systems and the algorithms required to make it possible for consistent data systems to be partitioned and replicated for scalability and availability.
+Introduction to Strong Consistency
+In sequential programs, once you write a value (x) to a variable, you expect all subsequent reads will return (x). If this guarantee didn’t hold, as it doesn’t for concurrent programs
+without careful thread synchronization, writing software systems would be a lot more fraught.
+This, however, is the case when you use an eventually consistent database system. A client may think it has written a new value to a data object, but other clients may access the same object and receive a stale value until the inconsistency window closes and all replica values have converged. In fact, as I described in
+Chapter 11
+, a client may even access an object it successfully updated and receive a stale value unless RYOWs consistency is supported.
+In systems based on eventually consistent databases, applications must be aware of the precise consistency guarantees of the underlying data store, and be designed to deal with these accordingly. Handling inconsistent reads and concurrent write conflicts can add considerable complexity to code bases and test cases. If you do not take appropriate care, difficult-to-reproduce errors can creep into applications. Following Murphy’s law, these will inevitably only become apparent when the system experiences high load or unexpected failures.
+In contrast, strongly consistent databases aim to deliver the same consistency guarantees as single-node systems. With strong consistency, you can write applications with assurances that once an update has been confirmed by the database, all subsequent reads by all clients will see the new value. And if concurrent clients attempt to update the same object, the updates behave as if one happens before the other. They do not occur concurrently and cause data loss or corruption.
+Slightly confusingly, the technical community uses strong consistency to describe two subtly different concepts in distributed databases. These are:
+Transactional consistency
+This is the “C” in ACID transactions (see
+“ACID Transactions”
+) as supported by relational databases. In a distributed
+database that supports ACID transactions, you need an algorithm that makes it possible to maintain consistency when data objects from different physical data partitions and nodes are updated within a single transaction. Consistency in this case is defined by the semantics of the business logic executed within the transaction.
+Replica consistency
+Strong replica consistency implies
+that clients all see the same value for a data object after it has been updated, regardless of which replica they access. Basically, this eliminates the inconsistency window I covered in
+Chapter 11
+in eventually consistent systems. There are various subtleties inherent in supporting strong replica consistency that I will explore later in this chapter.
+The algorithms used for transactional
+and replica consistency are known as
+consensus algorithms
+. These algorithms enable nodes in a distributed system to reach consensus, or agreement, on the value of some shared state. For transactional consistency, all participants in the transaction must agree to commit or abort the changes executed within the transaction. For replica consistency, all replicas need to agree on the same order of updates for replicated data objects.
+Solutions for transactional and replica consistency were developed by different technical communities at different times. For transactional consistency, the two-phase commit algorithm originated from work by Jim Gray, one of the pioneers of database systems, in 1978.
+2
+The classic replica consistency algorithm, Paxos, was first described in 1998 by Leslie Lamport.
+3
+I’ll spend the rest of this chapter exploring transaction and replica consistency and how these algorithms are used in distributed SQL
+databases.
+ACID Transactions
+Transactions in database systems may modify multiple
+database objects. Such transactions support ACID properties, namely:
+Atomicity
+All changes to the database must
+be executed as if they are a single operation. This means all updates must succeed (commit), or all must fail (roll back). For example, for a purchase I make online, if my credit card is successfully charged, my order details are recorded and sent for processing. If I have no credit, my purchase is refused.
+Consistency
+Transactions will leave the database in
+a consistent state. If my online purchase succeeds, the number of items in stock for the products I have purchased is decreased by the number of items I selected. This property is defined by the specific business logic the transaction executes.
+Isolation
+While a transaction is in
+progress, any data modified by the transaction is invisible to other concurrent transactions. Transactions that compete for resources are isolated from each other, and the results of a transaction are not accessible to other concurrent transactions until the transaction completes. A database achieves this by acquiring locks on the data objects that a transaction accesses, and releasing the locks when the transaction completes.
+Durability
+If a transaction commits, the changes
+are permanent and recoverable in the event of a system failure.
+The isolation property in ACID requires transactions to execute as if they were
+serialized
+. Serializability guarantees that concurrent transactions appear to execute in some sequential, or total, order.
+Consistency Models
+The database and distributed systems communities have studied consistency for more than four decades. Each has
+developed several different consistency models that have subtly different semantics and guarantees. This has led to a somewhat confusing and complex landscape of definitions and overloaded terminology. If you are interested in the full details, there is an excellent depiction of the different models and their relationships organized as a hierarchy on the
+Jepsen website
+. I’ll just focus on the strongest consistency model in this chapter. This is known variously as strict consistency, strict serializability or external consistency, and implies the combination of the two most restrictive consistency models defined by the database and distributed systems communities. These are serializability and linearizability respectively, as explained in the following:
+Serializability
+This is commonly referred
+to as
+transactional
+consistency, the “C” in ACID. Transactions perform one or more reads and writes on multiple data objects. Serializability guarantees that the execution of a set of concurrent transactions over multiple items is equivalent to some sequential execution order of the transactions.
+Linearizability
+This is concerned with reads
+and writes to single data objects. Basically, it says that all clients should always see the most recent value of a data object. Once a write to a data object succeeds, all subsequent reads that occur after the write must return the value of that write, until the object is modified again. Linearizability defines the order of operations using wall clock time, such that an operation with a more recent wall clock time occurs after any operations with lower wall clock times. In distributed databases with multiple data object replicas, linearizable consistency is concerned with
+replica
+consistency, essentially the “C” in the CAP theorem.
+Combining these two models gives the strongest possible data consistency. The basic effect is that transactions execute in a serial order (serializability), and that order is defined by the wall clock times of the transactions (linearizability). For simplicity, I’ll refer to this as
+strong consistency
+.
+Anyway, that’s a summary of the theory. To support these consistency models in distributed SQL databases, we require consensus algorithms, as I explain in the rest of this chapter.
+Distributed Transactions
+From an application developer’s perspective, the simplest way to think of transactions is as a tool to simplify
+failure scenarios in distributed systems. The application simply defines which operations must be carried out with ACID properties, and the database does the rest. This greatly reduces the application complexity, as you can ignore the subtle and numerous failure possibilities. Your code simply waits for the database to inform it of the transaction outcome (commit or abort) and behaves accordingly.
+Example 12-1
+shows a simple example of a purchasing transaction using the SQL variant of YugabyteDB.
+4
+The transaction modifies the
+stock
+table to reflect the number of items ordered by the customer, and inserts a new row in the
+purchases
+table to represent the customer’s order. These operations are defined with a transaction boundary, marked by the
+BEGIN/END TRANSACTION
+syntax.
+Example 12-1.
+An example YugabyteDB transaction
+BEGIN TRANSACTION
+UPDATE stock SET in_stock = in_stock - purchase_amount 
+WHERE stock_id = purchase_stock_id;
+    INSERT INTO purchases (cust_id, stock_id, amount) 
+           VALUES (customer, purchase_stock_id, purchase_amount);
+END TRANSACTION;
+Transactional semantics ensure that both operations either succeed or fail. If a database does not support transactions, as in most NoSQL databases, the application programmer would effectively have to break the transaction down into two individual updates and define potentially complex exception handling. Basically, this would mean:
+Performing each update separately, and checking that each succeeds.
+If the
+INSERT
+fails after the
+UPDATE
+succeeds, the stock table updates must be undone using another SQL statement. This is known as a compensating action.
+If the compensating action fails, or the service executing the code fails, you need to take remedial actions. This is where things start to get really complicated!
+In a single node database, committing a transaction is relatively straightforward. The database engine ensures transaction modifications and state are persisted to disk in a transaction log file. Should the database engine fail, the transaction log can be utilized on restart to restore the database to a consistent state. However, if the
+purchases
+and
+stock
+tables from
+Example 12-1
+reside in different databases or different partitions in a distributed database, the process is somewhat more complex. You need an algorithm to ensure that both nodes
+agree on the transaction outcome.
+Two-Phase Commit
+Two-phase commit (2PC) is the classic distributed transaction consensus algorithm. It is widely implemented in established
+relational databases like SQL Server and Oracle, as well as contemporary distributed SQL platforms including VoltDB and Cloud Spanner. 2PC is also supported by external middleware platforms such as the Java Enterprise Edition, which includes the
+Java Transaction API (JTA) and Java Transaction Service (JTS)
+. These external coordinators can drive distributed transactions across heterogeneous databases using the XA protocol.
+5
+Figure 12-1
+illustrates an example of the basic 2PC protocol based on
+Example 12-1
+. The protocol is driven by a coordinator, or leader. The coordinator can be an external service, for example the JTS, or an internal database service. In a distributed SQL database, the coordinator can be one of the partitions that is being updated as part of a multipartition transactional update.
+When a database client starts a transaction (e.g., the
+BEGIN TRANSACTION
+statement in
+Example 12-1
+), a coordinator is selected. The coordinator allocates a
+globally unique transaction identifier (
+tid
+) and returns this to the client. The
+tid
+identifies a data structure maintained by the coordinator known as the transaction context. The transaction context records the database partitions, or participants, that take part in the transaction and the state of their communications. The context is persisted by the coordinator, so that it durably maintains the state of the transaction.
+The client then executes the operations defined by the transaction, passing the
+tid
+to each participant that performs the database operations. Each participant acquires locks on mutated objects and executes the operations locally. It also durably associates the
+tid
+with the updates in a local transaction log. These database updates are not completed at this stage—this only occurs if the transaction commits.
+Figure 12-1.
+Two-phase commit
+Once all the operations in the transaction are completed successfully, the client tries to commit the transaction. This is when the 2PC algorithm commences on the coordinator, which drives two rounds of votes with the participants:
+Prepare phase
+The coordinator sends a message
+to all participants to tell them to prepare to commit the transaction. When a participant successfully prepares, it guarantees that it can commit the transaction and make it durable. After this, it can no longer unilaterally decide to abort the transaction. If a participant cannot
+prepare,
+that is, if it cannot guarantee to commit the transaction, it must abort. Each participant then informs the coordinator about its decision to commit or abort by returning a message that contains its decision.
+Resolve phase
+When all the participants have
+replied to the
+prepare
+phase, the coordinator examines the results. If all the participants can commit, the whole transaction can commit, and the coordinator sends a commit message to each participant. If any participant has decided that it must abort the transaction, or doesn’t reply to the coordinator within a
+specified time period, the coordinator sends an abort message to each participant.
+2PC Failure Modes
+2PC has two main failure modes. These
+are participant failure and coordinator failure. As usual, failures can be caused by systems crashing, or being partitioned from the rest of the application. From the perspective of 2PC, the crashes and partitions are indistinguishable:
+Participant failure
+When a participant crashes before the
+prepare
+phase completes, the transaction is aborted by the
+coordinator. This is a straightforward failure scenario. It’s also possible for a participant to reply to the
+prepare
+message and then fail. In either case, when the participant restarts, it needs to communicate with the coordinator to discover transaction outcomes. The coordinator can use its transaction log to look up the outcomes and inform the recovered participant accordingly. The participant then completes the transaction locally. Essentially then, participant failure doesn’t threaten consistency, as the correct transaction outcome is reached.
+Coordinator failure
+Should the coordinator fail after sending the
+prepare
+message, participants have a dilemma. Participants
+that have voted to commit must block until the coordinator informs them of the transaction outcome. If the coordinator crashes before or during sending out the commit messages, participants cannot proceed, as the coordinator has failed and will not send the transaction outcome until it recovers. This is illustrated in
+Figure 12-2
+, where the coordinator crashes after receiving the participant responses from the
+prepare
+phase.
+Figure 12-2.
+Coordinator failures causes transaction outcome to be uncertain and participants to block
+There is no simple resolution to this problem. A participant cannot autonomously decide to commit as it does not know how other participants voted. If one participant has voted to roll back, and others to commit, this would violate transaction semantics. The only practical resolution is for participants to wait until the coordinator recovers and examines its transaction log.
+6
+The log enables the coordinator to resolve all incomplete transactions. If it has logged a commit entry for an incomplete transaction, it will inform the participants to commit. Otherwise, it will roll back the transaction.
+Transaction coordinator recovery and
+the transaction log make it possible to finalize incomplete transactions and ensure the system maintains consistency. The downside is that participants must block while the coordinator recovers. How long this takes is implementation dependent, but is likely to be at least a few seconds. This negatively impacts availability.
+In addition, during this time, participants must hold locks on the data objects mutated by the transaction. The locks are necessary to ensure transaction isolation. If other concurrent transactions try to access these locked data items, they will be blocked. This results in increased response times and may cause requests to time out. In heavily loaded systems or during request spikes, this can cause cascading failures, circuit breakers to open, and other generally undesirable outcomes depending on the characteristics of the system design.
+In summary, the weakness of 2PC is that it is not tolerant of coordinator failure. One possible way to fix this, as with all single point of failure problems, is to replicate the coordinator and transaction state across participants. If the coordinator fails, a participant can be promoted to coordinator and complete the transaction. Taking
+this path leads to a solution that requires a distributed consensus algorithm, as I describe in the next section.
+Distributed Consensus Algorithms
+Implementing replica consistency such that
+all clients see a consistent view of a data object’s replica values requires consensus, or agreement, on every replica value. All updates to replicas for an object must be applied in the same order at every replica. Making this possible requires a distributed consensus algorithm.
+Much intellectual effort has been devoted to distributed consensus algorithms in the last 40 years or so. While consensus is simple conceptually, it turns out many subtle problems arise because messages between participants can be lost or delayed, and participants can crash at inconvenient times.
+As an example of the need for consensus, imagine what could happen at the end of an online auction when multiple last second bids are submitted. This is equivalent to multiple clients sending update requests that can be handled by different replicas of the same
+auction
+data object. In an eventually consistent system, this could lead to replicas with different bid values and potentially the loss of the highest bid.
+A consensus algorithm makes sure such problems cannot occur. More specifically:
+All replicas must agree on the same winning bid. This is a correctness (or safety) property. Safety properties ensure
+nothing bad happens
+. In this case, two winning bids would be bad.
+A single winning bid is eventually selected. This is a liveness property. Liveness ensures
+something good happens
+and the system makes progress. In this case consensus is eventually reached on a single winning bid. Consensus algorithms that guarantee liveness are known as fault-tolerant consensus algorithms.
+The winning bid is one of the bids that was submitted. This ensures the algorithm can’t simply be hardcoded to agree on a predetermined value.
+The basis of fault-tolerant consensus approaches
+are a class of algorithms called atomic broadcast, total order broadcast, or replicated state machines.
+7
+These guarantee that a set of values, or states, are delivered to multiple nodes exactly once, and in the same order. 2PC is also a consensus algorithm. However, as I explained earlier in this chapter, it is not fault tolerant as it cannot make progress when the transaction coordinator, or leader, fails.
+A number of well-known consensus algorithms exist. For example,
+Raft
+is a leader-based atomic broadcast algorithm.
+8
+A single leader receives clients requests, establishes their order, and performs an atomic broadcast to the followers to ensure a consistent order of updates.
+In contrast, Leslie Lamport’s Paxos, probably
+the best known consensus algorithm, is leaderless. This, along with other complexities, make it notoriously tricky to implement.
+9
+As a consequence, a variant known as Multi-Paxos
+10
+was developed. Multi-Paxos has much in common with leader-based approaches like Raft and is the basis of implementations in distributed relational databases like Google Cloud Spanner.
+To be fault tolerant, a consensus algorithm must make progress in the event of both leader and follower failures. When a leader fails, a single new leader must be elected and all followers must agree on the same leader. New leader election approaches vary across algorithms, but at their core they require:
+Detection of the failed leader
+One or more followers to nominate themselves as leaders
+Voting, with potentially multiple rounds, to select a new leader
+A recovery protocol to ensure all replicas attain a consistent state after a new leader is elected
+Of course, followers may also be unavailable. Fault-tolerant consensus algorithms are therefore designed to operate with just a quorum, or majority, of participants. Quorums are used both for acknowledging atomic broadcasts and for leader election. As long as a quorum of the participating nodes are available and agree, the algorithm can make progress. I’ll explore these issues in more detail in the following subsections, which use the Raft algorithm as an example.
+Raft
+Raft was designed as a direct
+response to the complexity inherent in the Paxos algorithm. Termed “an understandable consensus algorithm,” it was first published in 2013.
+11
+Importantly, a reference implementation was also published. This provides a concrete description of the concepts in Raft, and acts as a basis for implementers to leverage in their own systems.
+Raft is a leader-based algorithm. The leader accepts all updates and defines an order for their execution. It then takes responsibility for sending these updates to all replicas in the defined order, such that all replicas maintain identical committed states. The updates are maintained as a log, and Raft essentially replicates this log to all members of the system.
+A Raft cluster has an odd number of nodes, for example, three or five. This enables consensus to proceed based on quorums. At any instant, each node is either a leader, a follower, or a candidate for leader if a leader failure has been detected.  The leader sends periodic heartbeat messages to followers to signal that it is still alive. The message flow in a basic Raft cluster architecture is shown in
+Figure 12-3
+. The time period for leader heartbeats is typically around 300–500 milliseconds.
+Each leader is associated with a monotonically increasing value known as a
+term
+.  The term is a logical clock, and each valid term value is associated with a single leader. The current term value is persisted locally by every node in the cluster, and is essential for leader election, as I’ll soon explain. Each heartbeat message contains the current term value and leader identity and is delivered using an
+AppendEntries()
+message.
+AppendEntries()
+is also utilized to deliver new entries to commit on the log. During idle periods when the leader has no new requests from clients, an empty
+AppendEntries()
+simply suffices as the heartbeat.
+Figure 12-3.
+Message exchange in a Raft cluster, with one leader and two followers
+During normal operations, all client updates are sent to the leader. The leader orders the updates and appends them to a local log. Initially, all log entries are marked as uncommitted. The leader then sends the updates to all followers using an
+AppendEntries
+message, which also identifies the term and the position of the updates in the log. When a follower receives this message, it persists the update to its local log as uncommitted and sends an acknowledgment to the leader. Once the leader has received positive acknowledgments from a majority of followers, it marks the update as committed and communicates the decision to all followers.
+This protocol is depicted in
+Figure 12-4
+. Log entries 1 and 2 are committed on all three replicas, and the corresponding mutations are applied to the database partitions to become visible to clients. Log entry 3 is only committed on the leader and one follower.
+Follower 1
+will eventually commit this update.
+Clients also have sent updates to the leader represented by log entries 4 and 5. The leader writes these to its local log and marks them as uncommitted. It will then send
+AppendEntries()
+messages to the followers and if no exceptions occur, followers will acknowledge these updates and they will be committed at all the replicas.
+Figure 12-4.
+Log replication with Raft
+Only a majority of followers are required to commit an entry on the log. This means the committed log entries may not be identical at every follower at any instant. If a follower falls behind or is partitioned, and is not acknowledging
+AppendEntries
+requests, the leader continues to resend messages until the follower responds. Duplicated messages to followers can be recognized using the term and sequence numbers in the messages and safely discarded.
+Leader Election
+The leader in Raft sends periodic
+heartbeat messages to followers. Each follower maintains an election timer, which it starts after receiving a heartbeat message. If the timer expires before another heartbeat is received, the follower starts an election. Election timers are randomized to minimize the likelihood that multiple followers time out simultaneously and call an election.
+If a follower’s election timeout expires, it changes its state to candidate, increments the election term value, and sends a
+RequestVote
+message to all nodes. It also votes for itself. The
+RequestVote
+message contains the candidate’s identifier, the new term value, and information about the state of the committed entries in the candidate’s log. The candidate then waits until it receives replies. If it receives a majority of positive votes, it will transition to leader, and start sending out heartbeats to inform the other nodes in the cluster about its newly acquired status. If a majority of votes are not received, it remains a candidate and resets its election timer.
+When followers receive a
+RequestVote
+message, they perform one of the following actions:
+If the term in the incoming message is greater than the locally persisted term, and the candidate’s log is at least as up to date as the follower’s, it votes for the candidate.
+If the term is less than or equal to the local term, or the follower’s log has committed log entries that are not present in the candidate’s log, it denies the leadership request.
+For example,
+Follower 1
+in
+Figure 12-4
+could not become leader as its committed log entries are not up to date.
+Follower 2
+does have all committed log entries and could become leader. To illustrate this,
+Figure 12-5
+shows how
+Follower-2
+can transition to leader when its election timer expires.
+Figure 12-5.
+Leader election in Raft
+These conditions on Raft’s leader election ensure that any elected leader has all the committed entries from previous terms in its log. If a candidate does not have all committed entries in its log, it cannot receive a positive vote from more up-to-date followers. The candidate will then back down, another election will be started, and eventually a candidate with the most up-to-date log entries will win.
+It’s also possible for the election timers of two or more followers to expire simultaneously. When this happens, each follower will transition to a candidate, increment the term, and send
+RequestVote
+messages. Raft enforces a rule whereby any node can only vote once within a single term. Hence, when multiple candidates start an election:
+One may receive a majority of votes and win an election.
+None may receive a majority. In this case, candidates reset their election timers and another election will be initiated. Eventually a leader will be elected.
+Raft has attracted considerable interest due to its relative simplicity. It is implemented in multiple production systems that
+require consensus. These include databases such as the Neo4j and YugabyteDB databases, the etcd key-value store, and Hazelcast, a distributed in-memory object store.
+Strong Consistency in Practice
+Distributed SQL databases have undergone a rapid evolution since around 2011, when the term NewSQL was
+first coined
+. The manner in which these databases support strong consistency varies quite considerably across this class of technologies, so it pays to dig into the often-murky details to understand the consistency guarantees provided. In the following two sections, I’ll briefly highlight the different approaches taken by two contemporary examples.
+VoltDB
+VoltDB
+is one of the original NewSQL databases. It is built upon a shared-nothing
+architecture, in which relational tables are sharded using a partition key and replicated across nodes. Low latencies are achieved by maintaining tables in memory and asynchronously writing snapshots of the data to disk. This limits the database size to the total memory available in the cluster of VoltDB nodes. The primary deployments of VoltDB are in the telecommunication industry.
+Each VoltDB table partition is associated with a single CPU core. A core is responsible for executing all read and write requests at its associated partitions, and these are ordered
+sequentially by a Single Partition Initiator (SPI) process that runs on the core. This means each core executes database requests on its associated partitions in a strict single-threaded manner. Single-threaded execution alleviates contention concerns and the overheads of locking, and is an important mechanism that facilitates VoltDB’s ACID consistency support. The SPI for a partition also ensures write requests are executed in the same order for each partition replica.
+Clients submit requests as SQL stored procedures. A stored procedure is regarded as a transactional unit. When a client request arrives at VoltDB, the SQL query analyzer generates an execution plan based on the database schema and the partition keys and indexes available for the tables. Based on this execution plan, VoltDB sends requests  to the partition or partitions that the query needs to access.
+Importantly, VoltDB delivers queries to each partition replica for execution in exactly the same order. The SPI associated with a partition simply accepts requests into a local command log and executes them one at a time, as illustrated in
+Figure 12-6
+. The query analyzer determines which table a stored procedure wishes to access. It then dispatches the stored procedures to be executed serially by the CPU core that is associated with the table partitions necessary to execute the transaction.
+Figure 12-6.
+VoltDB single partition transaction execution architecture
+This has important implications for write transactions, based on whether the transaction mutates data in one or multiple partitions. If a transaction only modifies data in a single partition, as in
+Figure 12-6
+, it can execute at each SPI and commit unimpeded at each replica. As VoltDB sends transactions to execute at each partition replica in exactly the same order, this guarantees serializability without the need for data object locking and 2PC. Simply, you don’t have isolation concerns in a single-threaded system. Hence, single partition transactions can execute with extremely low latency.
+However, if the query planner determines
+a transaction mutates data in two or more partitions, VoltDB sends the request for coordination across multiple cores. A cluster-wide Multi-Partition Initiator (MPI) acts as the coordinator and drives a 2PC algorithm to ensure the transaction commits or aborts atomically at all partitions. This introduces higher overheads and hence lower performance for multipartition transactions.
+As VoltDB is an in-memory database, it must take additional measures to provide data safety and durability. You can configure two mechanisms, periodic command logging and partition snapshots, to meet application performance and safety requirements as described in the following:
+Each SPI writes the entries in its command log to persistent storage. If a node fails, VoltDB can restore the partition by reading the latest snapshot of the partition and sequentially executing the commands in the command log. Command log durability hence facilitates recoverability. The frequency with which the command log is persisted is controlled by a system-defined interval value. The shorter the interval (on the scale of a few milliseconds), the lower risk of losing updates if a node should crash. There’s an inherent trade-off here between performance and safety.
+Each partition also defines a snapshot interval. This defines how often the local partition’s data is written to disk. Typically, this is configured in the seconds-to-minutes range, depending on transaction load.
+These two settings have an important interaction. When VoltDB successfully writes a partition to persistent storage, the command log can be truncated. This is because the outcome of all the transactions in the command log are durable in the latest partition snapshot, and hence the commands can be discarded.
+Finally, since version 6.4, VoltDB supports linearizability, and hence the strongest consistency level, within the same
+database cluster. VoltDB achieves linearizability because it reaches consensus on the order of writes at all partitions, and transactions do not interleave because they are executed sequentially. However, up until this version, stale reads were possible as read-only transactions were not strictly ordered with write transactions, and could be served by out-of-date replicas. The root cause of this issue was an optimization that tried to load balance reads across partitions. You can read all about the details of the tests that exposed these problems and the fixes at the Jepsen website.
+12
+Google Cloud Spanner
+In 2013, Google published the Spanner database
+paper.
+13
+Spanner is designed as a strongly consistent, globally distributed SQL database. Google refers to this strong consistency as
+external consistency
+. Essentially, from the programmer’s perspective, Spanner behaves indistinguishably from a single machine database. Spanner is exposed to Google clients through the Cloud Spanner service. Cloud Spanner is a cloud-based database as a service (DBaaS) platform.
+To scale out, Cloud Spanner partitions database
+tables into splits (shards). Splits contain a contiguous key range for a table, and one machine can host multiple splits. Splits are also replicated across multiple availability zones to provide fault tolerance. Cloud Spanner keeps replicas consistent using the Paxos consensus algorithm. Like Raft, Paxos enables a set of replicas to agree on the order of a sequence of updates. The Cloud Spanner Paxos implementation has long-lived elected leaders and commits replica updates upon a majority vote from the replica set.
+Cloud Spanner hides the details of table partitioning from the programmer. It will dynamically repartition data across machines as data volumes grow or shrink and migrate data to new locations to balance load. An
+API layer
+processes user requests. This utilizes an optimized, fault tolerant lookup service to find the machines that host the key ranges a query accesses.
+Cloud Spanner supports ACID transactions. If a transaction only updates data in a single split, the Paxos leader for the split processes the request. It first acquires locks on the rows that are modified, and communicates the mutations to each replica. When a majority of replicas vote to commit, in parallel the leader responds to the client and tells the replicas to apply the changes to the persistent storage.
+Transactions that modify data in multiple splits are more complex, and incur more overhead. When the client attempts to commit the transaction, it selects the leader of one of the modified splits as the transaction coordinator to drive a 2PC algorithm. The other split leaders become participants in the transaction. This architecture is depicted in
+Figure 12-7
+. The
+Purchases
+table leader is selected as the 2PC coordinator, and it communicates with the leaders from the modified
+Stock West
+and
+Stock East
+table splits as 2PC participants. Cloud Spanner uses Paxos to ensure consensus on the order of replica updates within each replica group.
+Figure 12-7.
+Cloud Spanner 2PC
+The coordinator communicates the client request to each participant. As each participant is the Paxos leader for the split, it acquires locks for the rows modified on a majority of split replicas. When all participants confirm they have acquired the necessary locks, the coordinator chooses a commit timestamp and tells the participants to commit. The participants subsequently communicate the commit decision and timestamp to each of their replicas, and all replicas apply the updates to the database.  Should a participant be unable to prepare to commit, the coordinator directs all participants to abort the transaction.
+Importantly, the 2PC implementation
+behaves as a Paxos group. The coordinator replicates the state of the transaction to the participants using Paxos. Should the coordinator fail, one of the participants can take over as leader and complete the transaction. This eliminates the problem I described earlier in this chapter of coordinator failure leading to blocked transactions, at the cost of additional coordination using Paxos.
+Cloud Spanner also supports linearizability of transactions. This basically means that if transaction T1 commits before transaction T2, then transaction T2 can only commit at a later time, enforcing real-time ordering. T2 can also observe the results of T1 after it commits.
+Figure 12-8
+demonstrates how this works in Spanner. Transaction T1 reads and modifies data object (x). It then successfully commits, and the commit occurs at time t1. Transaction T2 starts after T1 but before T1 commits. T2 reads and modifies data object (y), then reads and modifies (x), and finally commits at time t2. When T2 reads (x), it sees the effects of T1 on (x) as the read occurs after T1 commits.
+Cloud Spanner uses the commit time for a transaction to timestamp all the objects modified within the transaction scope. This means all the effects of a transaction appear to have occurred at exactly the same instant in time. In addition, the order of the transactions is reflected in the commit timestamps, as t1 < t2.
+Figure 12-8.
+Linearizability of transactions in Cloud Spanner
+Achieving linearizability requires a reliable time source across all nodes.
+14
+This is not possible using the NTP-style time services, as clock skew across nodes can be of the order of a few hundred milliseconds. From
+Figure 12-8
+, transaction T2 may commit at an earlier time than transaction T1 if T2 is using a time source that is behind that of T1.
+Cloud Spanner implements a unique solution to this problem, namely the TrueTime service. TrueTime equips Google data centers with satellite connected GPS and atomic clocks, and provides closely synchronized clocks with a known upper bound clock skew, reportedly around 7 milliseconds. All data objects in Spanner are associated with a TrueTime timestamp that represents the commit time of the transaction that last mutated the object.
+As TrueTime still has an inherent, albeit small, clock skew, Cloud Spanner introduces a
+commit wait
+period. A commit timestamp is generated from TrueTime and the coordinator then waits for a period that is equal to the known upper bound clock skew. By introducing this wait period, all transaction locks are held and the data mutated by the transaction is not visible to other transactions until TrueTime is guaranteed to report a higher timestamp at all nodes. This ensures any concurrent transactions will be blocked on the locks and hence must use a higher commit timestamp, and all clients will always see commit timestamps that are in the past.
+There’s one more ingredient needed for strong consistency in Cloud Spanner. As updates are replicated by Paxos and committed when a majority of nodes agree, it is possible for a client read request to access a replica that has not received the latest update for a data object. By default, Cloud Spanner provides strongly consistent reads. When a replica receives a read, it communicates with the Paxos leader for its replica split and checks it has the most up-to-date value for all objects accessed by the read. Again, this mechanism introduces overheads to guarantee clients do not see stale data.
+Cloud Spanner is an integral component of GCP. Its customer base spans industries such as financial services, retail, and gaming, all attracted by the strong consistency guarantees as well as high availability and globally distributed deployment capabilities. Interestingly, Cloud Spanner has inspired open source implementations based on the Spanner architecture, but which do not require custom TrueTime-style hardware. The trade-off, of course, is lower consistency guarantees.
+15
+Notable examples are
+CockroachDB
+and
+YugabyteDB
+.
+Summary and Further Reading
+For many application areas, a scalable and highly available distributed database with the consistency guarantees and ease of programming of a single machine is the holy grail of data management systems. Building such a database turns out to be rather difficult. Additional coordination and consensus mechanisms need to be incorporated to provide the data consistency expected of a sequential system. These database platforms are complex to build correctly and even more complex to make highly available and provide low response times.
+Consistency in general is a complex topic, with overloaded terminology generated separately by the database and distributed systems communities. In this chapter, I’ve focused on the two strongest consistency guarantees from each community, serializability and linearizability, and explained consensus algorithms that are fundamental to achieving these levels of consistency. Using VoltDB and Cloud Spanner as examples, I’ve shown how distributed databases at scale utilize these algorithms along with innovative design approaches to achieve strong consistency.
+Distributed systems consistency remains a topic of active research and innovation. A unique approach for a strongly consistent database is embodied in the Calvin database system.
+16
+Calvin preprocesses and sequences transactions so that they are executed by replicas in the same order. This is known as deterministic transaction execution. It essentially reduces the coordination overheads of transaction execution as every replica sees the same inputs and hence will produce the same outputs.
+Fauna
+is the most notable database implementation of the Calvin architecture.
+If you really want to deep dive into the world of consistency, the
+Jepsen website
+is a wonderful resource. There are around 30 detailed analyses of adherence to promised consistency levels for multiple distributed databases. These analyses are often extremely revealing and expose areas where promises don’t always meet reality.
+1
+James C. Corbett et al., “Spanner: Google’s Globally Distributed Database.” ACM Transactions on Computer Systems (TOCS) 31.3 (2013), 1–22.
+https://oreil.ly/QYX8y
+.
+2
+Jim Gray, “Notes on Database Operating Systems.” In R. Bayer et al.
+Operating Systems: An Advanced Course
+. Vol. 60. Lecture Notes in Computer Science. Berlin: Springer, 1978.
+3
+Leslie Lamport, “The Part-Time Parliament.”
+ACM Transactions on Computer Systems
+16, no. 2 (1998), 133–69.
+https://doi.org/10.1145/279227.279229
+.
+4
+YugabyteDB
+is a distributed relational database.
+5
+Support for XA is mixed across platforms, and it is rarely used in large-scale systems. If you want to learn more, yours truly wrote a book on it: Ian Gorton,
+Enterprise Transaction Processing Systems: Putting the Corba OTS, Encina++ and OrbixOTM to Work
+(Addison-Wesley, 2000).
+6
+It is possible to introduce another phase of voting to get around the problem of 2PC blocking when the coordinator fails. This is known as a three-phase commit. However, it adds even more overheads to those already inherent in 2PC, and is hence rarely used in practice.
+7
+The elements replicated are the commands which cause transitions in the replicated state machines to execute in the same order at each replica.
+8
+Diego Ongaro and John Ousterhout, “In Search of an Understandable Consensus Algorithm.” In Proceedings of the 2014 USENIX conference on USENIX Annual Technical Conference (USENIX ATC’14), 305–320. USA: USENIX Association.
+9
+Tushar D. Chandra et al., “Paxos Made Live: An Engineering Perspective.” In
+Proceedings of the Twenty-Sixth Annual ACM Symposium on Principles of Distributed Computing (PODC ’07)
+, 398–407. New York, NY, USA: Association for Computing Machinery.
+10
+Robbert Van Renesse and Deniz Altinbuken, “Paxos Made Moderately Complex,” ACM Computing Surveys 47, no. 3 (2015), 1–36.
+https://doi.org/10.1145/2673577
+.
+11
+Diego Ongaro and John Ousterhout, “In Search of an Understandable Consensus Algorithm.” In Proceedings of the 2014 USENIX conference on USENIX Annual Technical Conference (USENIX ATC’14), 305–320. USA: USENIX Association.
+12
+Kyle Kingsbury provides distributed database consistency testing using the Jepsen test suite. The
+results for testing VoltDB 6.3
+are a fascinating read.
+13
+James C. Corbett et al., “Spanner: Google’s Globally Distributed Database.” ACM Transactions on Computer Systems (TOCS) 31.3 (2013), 1–22.
+https://dl.acm.org/doi/10.1145/2491245
+.
+14
+Or serialized execution of transactions based on a globally agreed order—see
+“VoltDB”
+.
+15
+This
+blog post
+by Spencer Kimball and Irhan Sharif is an excellent analysis of how distributed SQL databases can approach the highest
+consistency guarantees with NTP-based clocks.
+16
+Alexander Thompson et al, 2012. “Calvin: Fast Distributed Transactions for Partitioned Database Systems.” In Proceedings of the 2012 ACM SIGMOD International Conference on Management of Data (SIGMOD ’12), 1–12.  New York, NY, USA: Association for Computing Machinery.
+
+Chapter 13.
+Distributed Database Implementations
+In the previous three chapters, I’ve described the various distributed system principles and architectures that are widely employed in scalable distributed databases. These make it possible to partition and replicate data over multiple storage nodes, and support different consistency and availability models for replicated data objects.
+Precisely how specific databases build on these principles is highly database dependent. Different database providers pick and choose among well-understood approaches, as well as designing their own proprietary mechanisms, to implement the software architecture quality attributes they wish to promote in their products. This means databases that are superficially similar in their architectures and features will likely behave very differently. Even implementations of the same feature—for example, primary election—can vary significantly in terms of their performance and robustness across databases.
+Evaluating a database technology for a specific use case therefore requires both knowledge and diligence. You need to understand how the basic architecture and data model of a candidate technology match your requirements in terms of scalability, availability, consistency, and of course other qualities such as security that are beyond the scope of this book. To do this effectively, you need to delve under the hood and gain insights into precisely how high-priority features for your application work. I don’t think I’d surprise anyone by telling you about the dangers of faithfully believing marketing materials. With apologies to George Orwell, all databases are scalable, but some are more scalable than others.
+In this chapter I’ll briefly review the salient features of three widely deployed distributed databases, namely Redis, MongoDB, and DynamoDB. Each of these implementations support different data models and make very different trade-offs on the consistency-versus-availability continuum. These design decisions percolate through to the performance and scalability each system offers.
+The approach I take can work as a blueprint for carrying out your own database platform comparisons. You’ll see many of the concepts already discussed in this book raising their heads here again. You’ll also see product-specific approaches to solving some of the problems faced in distributed databases. As always, the devil lurks deeply in the details.
+Redis
+Since its initial release in 2009,
+Redis
+has grown in popularity to become one of the
+most widely deployed distributed databases. The main attraction of Redis is its ability to act as both a distributed cache and data store. Redis maintains an in-memory data store, known as a
+data structure store
+. Clients send commands to a Redis server to manipulate the data structures it holds.
+Redis is implemented in C and uses a single-threaded event loop to process client requests. In version 6.0, this event loop was augmented with additional threads to handle network operations in order to provide more bandwidth for the event loop to process client requests. This enables a Redis server to better exploit multicore nodes and provide higher throughput.
+To provide data safety, the in-memory data structure maintained by a single Redis server can be made durable using two approaches. In one, you can configure a periodic background thread to dump the memory contents to disk. This snapshot process uses the
+fork()
+system call, and hence can be expensive if the memory contents are large. In high-throughput systems, snapshots are typically configured at intervals of tens of seconds. Snapshots can also be triggered after a configurable number of writes to provide a known bound of potential data loss.
+The other approach is to configure Redis to log every command to an append-only file (AOF). This is essentially an operation log, and is persisted by default every second. Using both approaches, namely snapshots and operation logging, provides the greatest data safety guarantees. In the event of a server crash, the AOF can be replayed against the latest snapshot to recreate the server data contents in memory.
+Data Model and API
+Redis is a key-value store. It offers a small collection of data structures that applications can use to create data objects associated with unique keys. Each data structure has a set of defined commands that applications use to create, manipulate, and delete data objects. Commands are simple and operate on a single object identified by the key.
+The core Redis structures are:
+Strings
+Strings are versatile in Redis
+and are able to store both text and binary data with a maximum of 512 MB in length. For example, you can use strings as a random access vector using
+get()
+and
+set()
+operations on specified subranges. Strings can also be used to represent and manipulate counters.
+Linked lists
+These are lists of strings, with operations
+to manipulate elements at the head, tail, and in the body of the list.
+Sets and sorted sets
+Sets represent a collection of
+unique strings. Sorted sets associate a
+score
+value with each element and maintain the strings in ascending score order. This makes it possible to efficiently access elements in the set by score or rank order.
+Hashes
+Like a Python map, a Redis hash maps a
+key value represented as a string to one or more string values. Hashes are the primary Redis structure for representing application data objects such as user profiles or stock inventory.
+Operations on a single key are atomic. You can
+also specify a group of operations as requiring atomic execution using the
+multi
+and
+exec
+commands. All commands you place between
+multi
+and
+exec
+are called Redis transactions, and are serialized and executed in order. An example of a Redis transaction is in the code example below, which defines a transaction with two operations. The first adds a string representing a new customer order to a
+neworders
+list. The second modifies the value of the key
+lastorder
+in the hashmap for the user. A Redis server queues these commands until it receives the
+exec
+command, and then executes them in sequence:
+multi
+lpush neworders “orderid 600066 customer 89788 item 788990 amount 11 date 12/24/21”
+hmset user:89788 lastorder 600066
+exec
+Transactions are essentially the only way
+to perform operations that move or compute data across multiple types. They are limited, however, in that they only provide atomicity when all commands succeed. If a command fails, there are no rollback capabilities. This means that even if one command fails, the remaining commands in the transaction will still be executed. Similarly, if a crash occurs while the server is executing the transaction, the server is left in an unknown state. Using the AOF durability mechanism, you can fix the state administratively on restart. In reality, Redis transactions are somewhat of a misnomer; they certainly aren’t ACID.
+Distribution and Replication
+In its original version, Redis was a single server data store, which somewhat limited its scalability. In 2015,
+Redis Cluster
+was
+released to facilitate partitioning and replication of a
+Redis data store across multiple nodes. Redis Cluster defines 16,384 hash slots for a cluster. Every key is hashed modulo 16,384 to a specific slot, which is configured to reside on a host in the cluster. This is illustrated in
+Figure 13-1
+, in which four nodes with unique identifiers comprise the cluster and an equal range of hash slots is assigned to each.
+Figure 13-1.
+Sharding in Redis using hash slots
+Each node in the cluster runs a Redis server and an additional component that handles internode communications in the cluster. Redis
+uses a protocol known as the
+Cluster bus
+to enable direct TCP communications between every node in the cluster. Nodes maintain state information about all other nodes in the cluster, including the hash slots that each node serves. Redis implements this capability using a gossip protocol that efficiently enables nodes to track the state of all the nodes in the cluster.
+Clients can connect to any node in the cluster and submit commands to manipulate specified keys. If a command arrives at a node that does not manage the hash slot for a given object, it looks up the address of the server that hosts the required hash slot. It then responds to the client with a
+MOVED
+error and the address of the node where the keys in the hash slot reside. The client must then resend the command to the correct node. Typically, Redis client drivers will maintain an internal directory that maps hash slots to server nodes so that redirections do not occur when the cluster is stable.
+Another implication of this architecture is that commands in transactions must access keys that reside in the same hash slot. Redis does not have capabilities to execute commands on objects that reside in different hash slots and different nodes. This requires careful data modeling to work around this limitation. Redis does provide support for a workaround using a concept known as hash tags which force keys into the same hash slot based on a substring of the key which is identical for different objects.
+You can resize a Redis Cluster to add
+new nodes or remove nodes from the cluster. When this occurs, hash slots must be assigned to the new nodes or moved from the deleted nodes to existing nodes. You perform this action using the
+CLUSTER
+administrative command that modifies a node’s cluster configuration information. Once hash slots are reassigned to a different node, Redis migrates the objects in the migrated hash slots automatically. Objects are serialized and sent from their existing home node to the new home node. When an object is successfully acknowledged, it is removed from the original home node and becomes visible to clients at its new location.
+You can also replicate every node in a cluster using a primary-replica architecture. The primary updates replicas asynchronously to provide data safety. To scale out read workloads, you can configure replicas to handle read commands. By default, the primary does not wait until replicas acknowledge an update before returning success to the client.
+Optionally, the client can issue a
+WAIT
+command after an update. This specifies the number of replicas that should acknowledge the update and a timeout period after which the
+WAIT
+should return. A timeout period of zero specifies that the client should block indefinitely. In the following example, the client blocks until two replicas have acknowledged updates, or a 500 milliseconds timeout expires. In either case, Redis returns the number of replicas that have been updated:
+WAIT 2 500
+In the event of a primary failure, a replica is promoted to primary. Redis uses a custom primary election algorithm. A replica that detects its primary has failed starts an election and attempts to obtain a vote from a majority of primary nodes in the cluster. If it obtains a majority, it promotes itself to primary and informs the nodes in the cluster. The election algorithm enables replicas to exchange information to try and determine which replica is most up to date. There is no guarantee, however, that the most up-to-date replica will eventually be promoted to primary. Hence some data
+loss is possible if an out-of-date replica becomes primary.
+Strengths and Weaknesses
+One way to think about Redis, and in fact most in-memory databases, is that it is essentially a disk-backed cache with trailing persistence. This architecture has an inherent performance versus data safety trade-off. I’ll dig into how this manifests in Redis in the following subsections.
+Performance
+Redis is designed for low latency
+responses and high throughput. The primary data store is main memory, making for fast data object access. The limited collection of data structures and operations also make it possible for Redis to optimize requests and use space-efficient data object representations. As long as you can design your data model within the constraints of the Redis data types, you should see some very impressive performance.
+Data safety
+Redis trades off data safety for performance. In the default configuration, there is a 1-second window between AOF writes
+during which a crash can cause data loss. You can improve data safety by persisting the AOF on every write. Unfortunately, the performance hit of this configuration is substantial under heavy write loads.
+Redis also uses a proprietary replication and primary election algorithm. A replica that is not up to date can be elected as leader, and hence data persisted at the previous leader may be lost.
+The bottom line is that you probably don’t want to use Redis (or any in-memory database) as your primary data store if data loss is not an option.
+1
+But if you can tolerate occasional data loss, Redis can provide very impressive throughput indeed.
+Scalability
+Redis Cluster is the primary scalability
+mechanism for Redis. It allows up to 1,000 nodes to host sharded databases distributed across 16,384 hash slots. Replicas for each primary can also serve read requests, enabling scaling of read workloads. If you need more than 1,000 primary nodes, then you must design your data store accordingly.
+Consistency
+Redis replication provides eventual
+consistency by default based on asynchronous replication. Stale reads from replicas are therefore possible. Using the
+WAIT
+command, the replication approach becomes effectively synchronous, as the primary does not respond to the client until the requested number of replicas have acknowledged the update. The trade-off of
+WAIT
+is longer latencies. In addition, it only guarantees data resides in memory in replicas. A replica crash before the next snapshot of AOF write could lead to the update being lost.
+Availability
+Redis Cluster implements a tried-and-tested primary-replica architecture for individual database shards. Write availability
+is inevitably impacted by leader failure. Writes will be unavailable for a given shard until a replica is promoted to leader.
+Network faults can split a Redis Cluster deployment into majority and minority partitions. This has implications for both availability and data safety. Client writes can continue to all leader nodes in both partitions as long as they have at least one replica available. If a leader is split from its replicas in a minority partition, writes are still initially available for clients that also reside in the minority partition. After a timeout period, the partitioned leader will stop accepting writes as it cannot send updates to its replicas. Concurrently, a leader election will occur in the majority partition and a replica will be promoted to primary. When the partition heals, the write modifications made to the previous leader while partitioned will be lost.
+MongoDB
+MongoDB has been at the forefront of the NoSQL database movement since its first release in 2009. It directly addressed the well-known object-relational impedance mismatch by essentially harmonizing the database model with object models. The resulting document database can be best thought of as a JSON database. You can transform your business objects to JSON and store, query, and manipulate your data directly as a document. No elaborate object-relational mapper is needed. The result is intuitive and simpler business logic.
+The initial popularity of MongoDB was driven by its
+ease of programming and use. The underlying storage engine in the early releases, known as MMAPv1,
+2
+left something to be desired. MMAPv1 implements memory-mapped files using the
+mmap()
+system call. Documents in the same logical groupings, known as
+collections
+, are allocated contiguously on disk. This is great for sequential read performance. But if an object grows in size, new space has to be allocated and all document indexes updated. This can be a costly operation, and leads to disk fragmentation.
+To minimize this cost, MMAPv1 initially allocates documents with additional space to accommodate growth. A solution indeed, but perhaps not the most space efficient and scalable. In addition, document locks for updates are obtained at very coarse grain levels (e.g., in various releases, server, database, collection), causing less than spectacular write performance.
+Around 2015, the development team reengineered MongoDB to support a pluggable storage engine architecture. Soon after, a new storage engine, WiredTiger, became default in MongoDB v3.2. WiredTiger addresses many of the shortcomings of MMAPv1.
+3
+It introduces optimistic concurrency control and document-level locking, compression, operational journaling and checkpointing for crash recovery, and its own internal cache for improved performance.
+Data Model and API
+MongoDB documents are basically JSON objects with
+a set of extended types defined in the Binary JSON (BSON) specification. Documents are stored in BSON format and organized in databases comprising one or more collections. Collections are equivalent to a relational database table, but without a defined schema. This means MongoDB collections
+do not enforce a structure on documents. Documents with different structures can be stored in the same collection. This is a schemaless, or schema-on-read approach that requires the application to interpret a document structure on access.
+MongoDB documents are composed of name-value pairs. The value of a field may be any BSON data type. Documents can also incorporate other documents, known as embedded or nested documents, and arrays of values or documents. Every document has an
+_id
+field which
+acts as the primary key. Applications can set this key value on document creation, or allow the MongoDB client to automatically allocate a unique value. You can also define secondary indexes on any field, subfield or on multiple fields—a compound key—in a collection.
+An example document that you might find in a skier management system is shown in the code below. The field
+skiresorts
+is represented as an array of strings, and each different ski day is represented by an element in an array of nested documents:
+{
+    _id: 6788321471
+    name: { first: "Ian", last: "Gorton" }
+    location: "USA-WA-Seattle",
+    skiresorts: ["Crystal Mountain", “Mission Ridge”]
+    numdays: 2
+    season21 {
+          {
+               day: 1 
+               resort: "Crystal Mountain",
+               vertical: 30701
+               lifts: 27
+               date: “12/1/2021”
+          }
+          {
+               day: 2
+               resort: "Mission Ridge",
+               vertical: 17021
+               lifts: 10  
+               date: “12/8/2021”
+          }
+    }     
+}
+As there is no uniform document structure in a collection, the storage engine needs to persist field names and values for every document. For small documents, long field names may end up representing the majority of the document size. Shorter field names can reduce the size of the document on disk, and at scale, in a collection with many millions of documents, this saving will become significant.
+4
+Optimized document sizes reduce disk usage, memory and cache consumption, and network bandwidth. As usual, at scale, small optimizations can pay back many times in minimizing resource utilization.
+To manipulate documents, MongoDB provides APIs for basic CRUD operations. There is a
+.find()
+method with an extensive set of conditions and operators that emulate an SQL
+SELECT
+statement for documents in a single collection. MongoDB supports aggregate queries with the
+$match
+and
+$group
+operators, and the
+$lookup
+operator provides SQL
+JOIN
+-like behavior across collections in the same database. A simple example of querying a collection is shown in the following. The
+.find()
+operation returns all documents for skiers who have registered more than 20 ski days from the
+skiers2021
+collection:
+db.skiers2021.find({ numdays: { $gt: 20 } })
+Write operations to a single document in MongoDB are atomic. For this reason, if you denormalize your
+data model to make extensive use of nested documents, you can avoid the complexities of updating multiple documents and distributed transactions in your application code. Before MongoDB version 4.0, this was essentially the only way to ensure consistency for multidocument updates without complex application logic to handle failures.
+Since version 4.0, support for ACID, multidocument transactions has been implemented. MongoDB transactions
+use two-phase commit
+and leverage the underlying WiredTiger storage engine’s snapshot isolation capabilities. Snapshot isolation is a weaker guarantee than the
+serialization implied by the ACID semantics. This enables higher performance than serialization and avoids most, but not all, of the concurrency anomalies that serializability
+avoids. Snapshot isolation is actually the default in many relational databases, including Oracle and PostgreSQL.
+Distribution and Replication
+To scale horizontally, you can choose between two data partitioning or sharding strategies with MongoDB. These are
+hash-based and range-based sharding, respectively. You define a shard
+key for each document based on one or more field values. Upon document creation, MongoDB then chooses a database shard to store the document based on either:
+The result of a hash function applied to the shard key
+The shard that is defined to store the shard key range within which the key resides
+Sharded deployments in MongoDB require you
+to deploy several distinct database components. The
+mongod
+process is the MongoDB database daemon that must run on every shard. The
+mongos
+process is responsible for processing database client queries by routing requests to the targeted shard(s) and returning the results to the client. Clients issue MongoDB API calls using a MongoDB driver.
+Config servers
+store database cluster configuration metadata, which the
+mongos
+uses to route queries to the correct shards based on shard key values. This architecture is depicted in
+Figure 13-2
+.
+Figure 13-2.
+MongoDB database partitioning architecture
+The
+mongos
+process acts as a proxy between the client’s MongoDB driver and the database shards. All client requests must pass through a
+mongos
+instance. A
+mongos
+has no persistent state, and simply caches the cluster configuration information it obtains from the
+config servers
+.
+The
+mongos
+process is the client’s only query interface. It is therefore critical for performance and scalability that sufficient
+mongos
+processing capacity is available. Precisely how you configure
+mongos
+deployments is highly dependent on your applications needs, and MongoDB provides you with flexibility to design your system to satisfy the required workload. There are three basic alternatives, as depicted in
+Figure 13-3
+:
+Figure 13-3.
+MongoDB database deployment alternatives
+Configuration (A)
+Deploy a
+mongos
+on each application
+server that acts as a MongoDB client. This reduces latency by making every client request to
+mongos
+a local call.
+Configuration (B)
+Deploy a
+mongos
+on every database shard. In this configuration, a
+mongos
+can communicate with the shard locally.
+Configuration (C)
+Deploy a collection of
+mongos
+on their own dedicated hardware. You incur additional network latency communicating with the client and database shards. The trade-off is that the
+mongos
+load is eliminated from the application server and database nodes, and the
+mongos
+processes are allocated more exclusive processing capacity.
+Within each shard, MongoDB stores documents in storage units known as chunks. By default a chunk is a maximum of 64 MB. When a chunk grows beyond its maximum configured size, MongoDB automatically splits the chunk into two or more new chunks. Chunk splitting is a metadata change, triggered by inserts or updates, and does not involve any data movement.
+As the data grows across the cluster, the data distribution across shards can become unbalanced. This creates uneven loads on shards and can produce hotspots—shards that are heavily loaded with requests for commonly accessed keys. Hotspots impair query performance. For this reason, MongoDB runs a cluster balancer process on the primary
+config server
+. The cluster balancer monitors the data distribution across shards and if it detects that a (configurable) migration threshold has been reached, it triggers a chunk migration. Migration thresholds are based on the difference between the number of data chunks between the shard with the most chunks and the shard with the least chunks for a collection.
+Chunk migration is initiated by the balancer. It sends a
+moveChunk
+command to the source shard. The source shard takes responsibility for copying the chunk to the destination. While migration is occurring, the source shard handles any updates to the chunk, and it ensures these updates are synchronized to the destination shard after the migration has completed. Finally, the source shard updates the cluster configuration metadata at the
+config server
+with the migrated chunk’s new location, and deletes its copy of the chunk.
+MongoDB also supports enhanced availability and read query capacity through shard replication. Each primary shard can have multiple secondaries, and collectively these are known as a replica set. All client writes are processed by the primary, and it logs all changes to an
+operations log (oplog)
+data structure. Periodically, the primary ships its oplog to the secondaries, which in turn apply the modifications in the oplog to their local database copy. This approach is illustrated in
+Figure 13-4
+.
+Figure 13-4.
+MongoDB replica sets
+Nodes in a replica set send periodic heartbeat messages, by default every two seconds, to confirm member availability. If a secondary node does not receive a heartbeat message from a primary in a (by default) 10-second period, it commences a leader election. The leader election algorithm is
+based on Raft
+. In addition, if a leader is partitioned in a minority partition, it will step down as leader. A new leader will subsequently be elected from the majority partition or when the partition heals. In either case, writes are not available to the replica set while the new leader is elected.
+MongoDB supports tunable consistency. You can control replica consistency for writes using MongoDB
+write concerns
+. In version 5.0, the default is
+majority
+, which ensures writes are durable at the majority of nodes in a replica set before success is acknowledged. In earlier versions, the default setting only waited for the primary to make a write durable, trading off performance against data safety.
+Similarly,
+read preferences
+make it possible
+to configure which nodes in a replica set may handle reads. By default, requests are sent to primaries, ensuring consistent reads. You can modify this to trade off read performance and consistency. For example, you can specify reads may be handled by any replica (see
+Figure 13-4
+) or the nearest replica as measured by shortest round-trip time. In either case, stale reads are possible. Reading from the nearest replica is especially useful in widely geographically distributed deployments. You can locate the primary in one data center and place
+replicas in other data center locations that are closer to the origins of client read requests. This reduces network latency costs for replica reads.
+Strengths and Weaknesses
+MongoDB has matured massively since its initial releases. The attractive programming model drove initial popularity, and the core platform has been evolved by MongoDB engineers over more than a decade to improve performance, availability, scalability, and consistency. This has resulted in a powerful distributed database platform that applications can configure and tune to meet their requirements.
+Performance
+Initial MongoDB releases suffered
+from poor write performance. This has improved dramatically over the last decade, fueled to a large extent by the WiredTiger storage layer. Like most databases, each node’s performance benefits greatly from large local memory space allocated for internal caching. You can also choose read preferences and write concerns that favor raw performance over consistency if application requirements allow.
+Data safety
+The default
+majority
+write
+concern ensures updates are durable on a quorum of nodes in the replica set. You can achieve greater write performance by specifying that updates must only be made durable on the primary. This creates the potential for data loss if the primary crashes before updates are replicated. The Raft-based leader election algorithm ensures that only an up-to-date secondary can be promoted to leader, again guarding against data loss.
+Scalability
+You can scale data collections horizontally
+using sharding and by deploying multiple
+mongos
+query router processes. Automatic data rebalancing across nodes helps spread requests evenly across the cluster, utilizing cluster capacity. You can add new and retire existing nodes, and the MongoDB cluster balancer automatically moves chunks across the cluster to utilize capacity. You can scale read loads by enabling reads to secondaries in a replica set.
+Consistency
+The availability of ACID transactions across multiple sharded collections provides developers with transaction
+consistency capabilities. You can also achieve replica consistency using appropriate write concerns settings. Session-based causal consistency provides RYOWs capabilities. You can also ensure linearizable reads and writes for single documents. This requires a read concern setting of
+linearizable
+and a write concern value of
+majority
+.
+5
+Availability
+Replica sets are the primary mechanism to ensure
+data availability. You should configure
+config servers
+as a replica set to ensure the cluster metadata remains available in the face of node failures and partitions. Your configurations also need to deploy sufficient
+mongos
+query router processes, as clients cannot query the database if a
+mongos
+process is not reachable.
+Amazon DynamoDB
+Amazon’s DynamoDB is a core service offering
+in the AWS Cloud. Its origins go back to the original research published by Werner Vogels and his team on the Dynamo database.
+6
+Dynamo was built for usage on Amazon’s website. Lessons learned internally, especially about the need for ease of management, led to the evolution of Dynamo to become the publicly available, fully managed DynamoDB database service in 2012.
+As a fully managed database, DynamoDB minimizes the database administration effort required for applications. Replicated database partitions are automatically managed by DynamoDB, and data is repartitioned to satisfy size and performance requirements. Data items are hashed across partitions based on a user-defined partition key. Individual data items comprise nested, key-value pairs, and are replicated three times for data safety. The point-in-time recovery feature automatically performs incremental backups and stores them for a rolling 35-day period. Full backups can be run at any time with minimal effect on production systems.
+As part of AWS, you are charged based on
+both the amount of storage used and the application’s DynamoDB usage. Storage charges are straightforward. You basically pay for each GB of data storage. Charging for application usage is more complex, and affects both performance and scalability. Basically you pay for every read and write you make to your database. You can choose between two modes, known as capacity modes. The on-demand capacity mode is intended for applications that experience unpredictable traffic profiles with rapid spikes and troughs. DynamoDB employs its adaptive capacity capabilities to attempt to ensure the database deployment is able to satisfy performance and scalability requirements. You are
+charged for every operation
+.
+For applications with more predictable load profiles, you can choose
+provisioned
+capacity mode. You specify the number of reads and writes per second that your DynamoDB database should
+provide in terms of read and write capacity units. Should your application exceed this read/write capacity, requests may be throttled. DynamoDB provides burst capacity, based on recently unused provisioned capacity, to try to avoid throttling. You can also define a database to utilize autoscaling based on minimum and maximum provisioned capacity limits. Autoscaling dynamically adjusts the provisioned capacity on your behalf, within the specified limits, in response to observed traffic load.
+DynamoDB has many optional features that either make it easier for you to write applications or provide your applications with higher levels of management automation. In general, the rule of thumb is that the more you ask DynamoDB to do for you, the more you pay. For example, if you enable point-in-time backups, then you pay per GB per month. If you disable this feature, you pay nothing. This is pretty much the way the world works with all cloud-based managed services. Caution is needed in how prolifically you use these options, especially at scale. But in most cases, your costs are reduced considerably due to the reduction in administrative and management effort.
+Data Model and API
+DynamoDB organizes data items in logical collections known as tables. Tables contain multiple items, which are
+uniquely identified by a primary key. Each item has a collection of uniquely identified attributes, which can optionally be nested. An individual item is restricted to 400 KB in size. DynamoDB is schemaless—items in the same table can have a different set of attributes.
+In terms of data types, DynamoDB is fairly limited. Scalar types supported include strings, binary, numbers, and Booleans. You
+can build documents using list and map data types, and these can be nested up to 32 levels deep. You can also use sets to create a named attribute containing unique values. The code below depicts a DynamoDB item as an example. The primary key is
+skierID
+. The
+skiresorts
+field is represented by a list, and
+season21
+is a map containing nested documents representing each of the skier’s visits to a resort:
+{
+ "skierID": "6788321471",
+    "Name": {
+          "last": "Gorton",
+          "first": "Ian"
+    },
+ "location": "USA-WA-Seattle",
+ "skiresorts": [
+          "Crystal Mountain",
+          "Mission Ridge"
+ ],
+ "numdays": "2",
+ "season21": {
+    "day1": {
+          "date": "12/1/2021",
+          "vertical ": 30701,
+          "lifts": 27,
+          "resort": "Crystal Mountain"
+  },
+    "day2": {
+          "date": "12/8/2021",
+          "vertical": "17021",
+          "lifts": 10,
+          "resort": "Mission Ridge"
+    }
+ }
+}
+The primary key value for an item acts as the partition key, which is hashed to map each item to a distinct database partition. You can also create composite primary keys by defining a sort key using items in the table. This creates the ability to group logically related items in the same partition by using the same primary key and a unique sort key; DynamoDB still hashes the primary key to locate the partition, and it then stores all items with the same partition key value together, in sorted order by sort key value.
+7
+As a simple example using the skier item in the code above, you could create a unique composite key using the
+location
+as the primary key and the
+skierID
+as the sort key. This would group together all skiers in the same location in the same partition, and store them in sorted order.
+To support alternative efficient query paths, you can create multiple secondary indexes on a table, referred to as the base table. There are two types of secondary indexes, local and global.
+A local secondary index must have the same partition key as the base table, and a different sort key. Local indexes are built and maintained on the same partition as the items to which they refer. Local index reads and writes consume the capacity units allocated to the base table.
+Global secondary indexes can have different primary and sort keys to the base table. This means index entries can span all partitions for the table, hence the global terminology. A global secondary index is created and maintained in its own partition, and requires capacity to be provisioned separately from the base table.
+For data access, you have two choices for APIs in DynamoDB. The so-called
+classic
+API provides single- and multiple-item CRUD capabilities using variations of four core operations, namely
+PutItem
+,
+GetItem
+,
+DeleteItem
+, and
+UpdateItem
+operations. The following Java example shows a
+GetItem
+API. It retrieves the complete document identified by the
+skierID
+primary key value specified in the API:
+Table table = dynamoDB.getTable("Skiers");  
+Item item = table.getItem("skierID", “6788321471”);
+If you want to read or write to multiple items at the same time, you can use the
+BatchGetItem
+and
+BatchWriteItem
+operations. These are essentially wrappers around individual
+GetItem
+and
+PutItem
+/
+DeleteItem
+/
+UpdateItem
+APIs. The advantage of using these batch versions is that all the requests are submitted in a single API call. This reduces the number of network round trips from your client to DynamoDB. Your performance also benefits because DynamoDB executes each individual read or write operation in parallel.
+The more recently available alternative API, known as PartiQL, is an SQL-derived dialect. You submit SQL statements using the
+ExecuteStatement
+and
+BatchExecuteStatement
+APIs. DynamoDB translates your SQL statements into individual API calls as defined in the classic API.
+You also have ACID transaction capabilities using the
+ExecuteTransaction
+API. This enables you to group multiple CRUD operations to multiple items both within and across tables, with guarantees that all will succeed, or none will. Under the hood, DynamoDB uses the 2PC algorithm to coordinate transactions across distributed partitions.
+Transactions
+have an impact
+on capacity provisioning. In provisioned mode, each
+transaction will incur two reads or writes to each data item accessed in the transaction. This means you have to plan your read and write capacity units accordingly. If sufficient
+provisioned capacity is not available for any of the tables accessed in the transaction, the transactions may fail.
+Distribution and Replication
+As a managed service, DynamoDB simplifies data
+distribution and replication from the application’s perspective. You define a partition key for items, and DynamoDB hashes the key to store three copies of every item. To enhance availability, the nodes that host each partition are in different availability zones within a single AWS region. Availability zones are designed to fail independently of others within each AWS region.
+Each partition has a leader and two followers. When you issue an update request to an item, you receive an HTTP 200 response code when the update is made durable on the leader. Updates then propagate asynchronously to replicas.
+By default, read operations can access any replica, leading to the potential for stale reads. If you want to ensure you read the latest value of an item, you can set the
+ConsistentRead
+parameter in read APIs to
+true
+. This directs reads to the leader node, which has the latest value. Strongly consistent reads consume more capacity units than eventually consistent reads, and may fail if the leader partition is unavailable.
+DynamoDB manages your partitions,
+and its adaptive capacity capabilities will
+automatically
+repartition data, while maintaining availability, under the following
+circumstances:
+A partition exceeds the size limits for partitions, which is approximately 10 GB.
+You increase the provisioned throughput capacity for a table, requiring performance that is higher than the existing partitions can support.
+A table configured to use on-demand capacity experiences a spike in requests that exceeds the throughput it is able to sustain.
+By default, DynamoDB tables
+reside in a single AWS region. AWS regions are tied to physical resources known as data centers that are located in different places around the world. For applications that serve large-scale, globally distributed user populations, latencies can be potentially prohibitive if requests must travel long distances to the region where your DynamoDB database resides.
+As an example, imagine the skier management system from earlier in this chapter has ski resorts all over the globe, and uses a DynamoDB database located in the US west coast region (e.g., us-west-1). Skiers at European and Australian resorts would experience considerably longer latencies to access the system than those located in North America.
+You can address these latencies by deploying
+your tables across multiple regions using DynamoDB global tables. Global tables maintain additional replicas in multiple AWS regions, and replicate all items across all the regions you wish to locate the table. Updates made in one region propagate to other replicas asynchronously. You also pay storage charges at each region, increasing the overall application costs. This scheme is shown in
+Figure 13-5
+, with global tables located in the US, India, and Italy.
+Figure 13-5.
+DynamoDB global tables
+Importantly, global tables are multileader, meaning you can update the leader replica in any region. This creates the potential for conflicts if the same item is concurrently updated in two regions. In this case, DynamoDB uses a last writer wins conflict resolution strategy to converge replicas on a single value.
+Global tables have some subtle restrictions you need to be aware of. These concern strongly consistent reads and transactions, which both operate at the scope of a single region:
+A strongly consistent read returns the latest value for an item within the region that the read takes place. If the same item key has been more recently updated in another region, this value will not be returned. It may take several seconds for the latest version to be replicated across regions.
+The ACID properties of transactions are only guaranteed within the region that processes the transaction. Once the transaction has been committed in this source region, DynamoDB replicates the resulting updates to the other regions. The updates flow using the standard replication protocol, meaning you may see partial updates in destination regions
+while all the updates from the transaction are applied.
+Strengths and Weaknesses
+It’s not easy to divorce the increasing popularity of DynamoDB from the ever-growing usage of the AWS Cloud. DynamoDB exists as part of the powerful AWS ecosystem of tools and technologies. The benefits of this can be considerable. For example, AWS provides integrated performance monitoring for DynamoDB using CloudWatch, and integrates seamlessly with AWS Lambda serverless functions. If you are deploying your systems to AWS, DynamoDB can be an excellent candidate for your persistence layer. Like any database of course, there are things you need to carefully assess. And as always with public cloud-based systems, you have to be aware of the costs your applications accrue.
+Performance
+The DynamoDB APIs are relatively
+primitive and hence can be generally executed with very low latencies. Your data model can also exploit composite keys and secondary indexes to provide efficient access to your data. Queries that exploit indexes rather than performing table scans will execute faster and consume fewer capacity units, which also reduces costs. Crafting an appropriate data model that supports low latency queries is undoubtedly not a straightforward exercise
+8
+and requires care to achieve performance requirements. At additional cost, you can deploy the
+DynamoDB
+Accelerator (DAX) in-memory cache
+that can further reduce query latencies.
+Data safety
+Updates are acknowledged when the
+leader partition makes the modification durable, and all items in tables are replicated across three partitions in the local region. Using global tables increases the replication factor, but does introduce the potential for data loss if the same item is concurrently updated in two different regions. Point-in-time and on-demand backups are fully integrated with the AWS environment.
+Scalability
+DynamoDB’s adaptive capacity is designed to
+rebalance large databases to provide sufficient partitions to match observed demand. This provides excellent scalability for workloads that exert relatively even loads across partitions.
+A well-known problem revolves around hotkeys. Provisioned capacity is allocated on a per-table basis. This means if your application has 10 partitions, each partition receives a tenth of the overall table capacity. If requests disproportionately access a small number of
+hot keys
+, the partitions that host those items can consume the provisioned capacity for the table. This can cause requests to be rejected due to a lack of provisioned capacity.
+Adaptive capacity
+in extreme cases may create a partition that holds a single item with a hotkey. In this case, requests to the item are limited to the maximum throughput a single partition can deliver of 3,000 read capacity units or 1,000 write capacity units per second.
+Consistency
+Replicas are eventually consistent, so stale
+reads from nonleader replicas are possible. You can obtain the latest replica value using strongly consistent reads at the cost of additional capacity unit usage and latency. Reads from global indexes are always eventually consistent. You can also use ACID transactions to perform multi-item updates.
+9
+Both strongly consistent reads and transactions are scoped to a region and hence do not provide consistency guarantees with global tables.
+Availability
+DynamoDB provides users with a service-level agreement (SLA). This basically guarantees 99.999% availability for global
+tables and 99.99% availability for single-region tables. AWS outages do occur occasionally; for example, a major one
+brought down many applications in December 2021
+and it’s possible a failure in a part of the AWS ecosystem could make your data unavailable. It’s basically a risk you take when you adopt a cloud-based service, and the reason that deployment strategies like hybrid and multicloud are becoming more and more popular.
+Summary and Further Reading
+In this chapter, I’ve described some of the major architectural features of three prominent NoSQL databases, namely Redis, MongoDB, and DynamoDB. Each is a powerful distributed platform in its own right, with large user communities. Underneath the hood, the implementations vary considerably. This affects the performance, scalability, availability, and consistency you can expect from applications built on each platform.
+Redis favors raw performance and simplicity over data safety and consistency. MongoDB has a richer feature set and is suited to a broad range of business applications that require future growth. DynamoDB is a fully managed service and supports low-latency key-value lookups. It is deeply integrated into the AWS Cloud infrastructure, providing automatic scalability and availability guarantees. Similarly, you can use cloud-hosted implementations of both MongoDB and Redis (and several other databases) that are supported by major cloud vendors to simplify your operations and management.
+In reality, there’s no perfect solution or approach for choosing a distributed database to match your application needs. There are simply too many dimensions and features to thoroughly evaluate even for a small number of candidate platforms. The best you can do most of the time is serious due diligence, and ideally build a proof-of-technology prototype that lets you test-drive one or two platforms. There will always be unexpected roadblocks that make you curse your chosen platform. Software engineering at scale is an imperfect practice, I’m afraid, but with deep knowledge of the issues involved, you can usually  avoid most disasters!
+For a book with excellent coverage (both breadth and depth) of distributed database systems,
+Principles of Distributed Database Systems
+, 4th ed. (Springer, 2020) by M. Tamer Özsu and Patrick Valduriez is one to have on your bookshelf.
+An excellent place for gaining insights into how some of the largest systems on the internet operate is
+highscalability.com
+. For example, recent posts
+describe the design of Tinder
+, which uses DynamoDB among a whole collection of technologies, and
+Instagram
+, built upon Cassandra and Neo4j.
+Finally, the complexity of managing distributed databases at scale is driving many businesses to use managed services such as DynamoDB. Platforms providing equivalent “serverless database” capabilities are emerging for many popular databases. Examples are MongoDB Atlas, Astra DB for Cassandra, and Yugabyte Cloud.
+1
+Emil Koutanov goes into more detail with an
+excellent analysis of data safety in Redis
+.
+2
+MMAPv1 was deprecated in MongoDB version 4.0. You can find its documentation at
+https://oreil.ly/uWiNx
+.
+3
+A good comparison of the two file systems can be found on the
+Percona blog
+.
+4
+This
+blog post
+by David Murphy illustrates how a 25% reduction in document size can be achieved with shorter field names.
+5
+A slightly out-of-date but still fascinating analysis of MongoDB consistency is provided by
+this Jepsen report
+.
+6
+G. Decandia et al. “Dynamo: Amazon’s Highly Available Key-Value Store.”. In Proceedings of Twenty-First ACM SIGOPS Symposium on Operating Systems Principles—SOSP ’07, p. 205. New York, NY, USA: ACM.
+7
+For more examples of the power of sort keys, see
+https://oreil.ly/5G5le
+.
+8
+Best practices for data modeling are described in the
+AWS documentation
+.
+9
+An explanation of transaction isolation levels is at
+https://oreil.ly/kDRnC
+.
+
+Part IV.
+Event and Stream Processing
+Part IV
+switches gears and describes architectures and technologies for processing streaming events at scale. Event-based systems pose their own unique challenges. They require technologies for reliably and efficiently capturing and persisting high-volume event streams. You also need tools to support calculating partial results from the most recent snapshots of the event stream (think trending topics in Twitter), with real-time capabilities and tolerance of processing node failures. I’ll explain the architectural approaches required and illustrate solutions using the widely deployed Apache Kafka and Flink open source technologies.
+
+Chapter 14.
+Scalable Event-Driven Processing
+In
+Chapter 7
+, I described the benefits and basic primitives of asynchronous messaging systems. By utilizing a messaging system for communications, you can create loosely coupled architectures. Message producers simply store a message on a queue, without concern about how it is processed by consumers. There can be one or many consumers, and the collection of producers and consumers can evolve over time. This buys you immense architectural flexibility and has benefits in improving service responsiveness, smoothing out request arrival spikes through buffering, and maintaining system processing in the face of unavailable consumers.
+Traditionally, the message broker technologies used to implement asynchronous systems focus on message transit. A broker platform such as RabbitMQ or ActiveMQ supports collections of queues that are used as temporary FIFO-based memory or disk-based storage. When a consumer accesses a message from a queue, the message is removed from the broker. This is
+known as
+destructive consumer semantics
+. If publish-subscribe messaging is used, brokers implement mechanisms to maintain messages in queues until all active subscribers have consumed each message. New subscribers do not see old messages. Brokers also typically implement some additional features for message filtering and routing.
+In this chapter I’m going to revisit asynchronous systems through the lens of event-driven architectures. Event-driven systems have some attractive features for scalable distributed applications. I’ll briefly explain these attractions, and then focus on the Apache Kafka platform. Kafka is designed to support event-driven systems at scale, utilizing a simple persistent message log data structure and nondestructive consumer semantics.
+Event-Driven Architectures
+Events represent that
+something interesting
+has happened in the application context. This might be an
+external event that is captured by the system, or an internally generated event due to some state change. For example, in a package shipping application, when a package arrives at a new location, a barcode scan generates an event containing the package identifier, location, and time. A microservice in a car hire system that manages driver details could emit an event when it detects a driver’s license has expired. Both these examples demonstrate using events for notifications. The event source simply emits the event and has no expectations on how the event might be processed by other components in the system.
+Events are typically published to a messaging system. Interested parties can register to receive events and process them accordingly. A package shipping barcode scan might be consumed by a microservice that sends a text to the customer awaiting the package. Another microservice might update the package’s delivery state, noting its current location. The expired license event may be utilized to send the driver an email to remind them to update their information. The important thing is that the event source is oblivious to the actions that are triggered by event generation. The resulting architecture is loosely coupled and affords high levels of flexibility for incorporating new consumers of events.
+You can implement an event-based architecture using messaging systems like
+RabbitMQ’s
+publish/subscribe features. Once
+every subscriber has consumed an event, the event is removed from the broker. This frees up broker resources, but also has the effect of destroying any explicit record of the event.
+It turns out that keeping a permanent record of immutable events in a simple log data structure has some useful characteristics. In contrast to FIFO queues managed by most message brokers, an event log is an append-only data structure, as shown in
+Figure 14-1
+. Records are appended to the end of the log and each log entry has a unique entry number. The sequence numbers explicitly capture the order of events in the system. Events with a lower sequence number are defined to have occurred before entries with a higher sequence number. This order is especially useful in distributed systems and can be exploited to produce useful application insights and behaviors.
+Figure 14-1.
+A log data structure
+For example, in the package shipping example, you could process the log to discover the number of packages at each location at any instant, and the duration that packages reside at locations before being loaded onto the next stage of delivery. If a package gets misplaced or delayed, you can generate another event to trigger some remedial action to get a package moving again. These analyses become straightforward to implement as the log is the single source of truth about where every package is (and was) at any instant.
+Another common use case for event-based systems is keeping replicated data synchronized across microservices. For example, a manufacturer might change the name of a product by sending an update request to the
+Catalog
+microservice. Internally, this microservice updates the product name in its local data store and emits an event to an event log shared with other microservices in the application. Any microservice that stores product details can read the event and update its own copy of the product name. As shown in
+Figure 14-2
+, the event log is essentially being used for replication across microservices to implement state transfer.
+Figure 14-2.
+Using an event log to replicate state changes across microservices
+The persistent nature of the event log has some key advantages:
+You can introduce new event
+consumers at any time. The log stores a permanent, immutable record of events and a new consumer has access to this complete history of events. It can process both existing and new events.
+You can modify existing event-processing logic, either to add new features or fix bugs. You can then execute the new logic on the complete log to enrich results or fix errors.
+If a server or disk failure occurs, you can restore the last known state and replay events from the log to restore the data set. This is analogous to the role of the transaction log in database systems.
+As with all things, there are downsides to immutable, append-only logs. I briefly describe one of these, deleting events, and Apache Kafka’s related capabilities in the following sidebar.  You can read an awful lot more about designing event-driven architectures and patterns such as event collaboration and event sourcing. I’ll point you to several excellent
+sources in
+“Summary and Further Reading”
+. For the remainder of this chapter, however, I want to explore the features of the Apache Kafka platform.
+Deleting Events from a Log
+Some use cases require log entries to
+be deleted. A prominent one is the
+right to be forgotten
+regulatory requirements of the European Union’s General Data Protection Regulation (GDPR) laws. Append-only immutable logs are not designed for deletion of entries, which can make deleting entries problematic.
+Apache Kafka provides two main mechanisms for log entry deletion. There are:
+Time to live
+Log entries are deleted after a default
+period of two weeks. You can adjust this to meet your requirements for log entry retention and deletion.
+Compacted topics
+Topics can be configured to only retain the most recent entry for a given event key. If you need to delete an existing log entry, you simply write a new one with the same key and a null value. Kafka will then mark the older entry for deletion. Events are actually marked for deletion in compacted topics and removed at some time later when a period log compaction task runs. Again, the frequency of this task is configurable.
+Apache Kafka
+At its core, Kafka is a distributed persistent log store. Kafka employs what is often called a
+dumb broker/smart clients
+architecture. The broker’s main capabilities revolve around
+efficiently appending new events to persistent logs, delivering events to consumers, and managing log partitioning and replication for scalability and availability. Log entries are stored durably and can be read multiple times by multiple consumers. Consumers simply specify the log offset, or index, of the entries they wish to read. This frees the broker from maintaining any complex consumer-related state.
+The resulting architecture has proven to be incredibly scalable and to provide very high throughput. For these reasons, Kafka has become one of the most widely used open source messaging platforms in use in modern systems.
+Kafka originated at LinkedIn from
+efforts to streamline their system integration efforts.
+1
+It migrated to become an
+Apache project
+in 2012. The Kafka broker, which
+is the focus of the following subsections, sits at the core of a suite of related technologies. These are:
+Kafka Connect
+This is a framework designed for
+building connectors to link external data systems to the Kafka broker. You can use the framework to build high-performance connectors that produce or consume Kafka messages from your own systems. Multiple vendors also provide prefabricated connectors for pretty much any data management system most of you can probably think of!
+2
+Kafka Streams
+This is a lightweight client library for
+building streaming applications from events stored in the Kafka broker. A data stream represents an unbounded, continuously updating data set. Streaming applications
+provide useful real-time insights by processing data in batches or time windows. For example, a supermarket may process a stream of incoming item purchases to discover the highest selling items in the last hour. This could be used to trigger reordering or restocking of items that are unexpectedly selling quickly. Streaming applications and platforms are the topic I cover in depth in
+Chapter 15
+, so I won’t return to Kafka Streams here.
+Kafka supports highly distributed
+cluster deployments in which brokers communicate to distribute and replicate event logs. This requires management of cluster metadata, which essentially specifies where the multiple event logs live in the cluster, and various other elements of cluster state. Kafka delegates this metadata management to
+Apache ZooKeeper
+.
+ZooKeeper is a highly available service that is used by many distributed platforms to manage configuration
+information and support group coordination. ZooKeeper provides a hierarchical namespace similar to a normal filesystem that Kafka uses to maintain the cluster state externally, making it available to all brokers. This means you must create a ZooKeeper cluster (for availability) and make this accessible to the brokers in your Kafka cluster.
+3
+After that, Kafka’s use of ZooKeeper is transparent to your application.
+Topics
+Kafka topics are the equivalent of
+queues in general messaging technologies. In Kafka, topics are managed by a broker and are always persistent, or durable. One or more producers send events to a topic. Topics are implemented as append-only logs, meaning new events are always written to the end of the log. Consumers read events by specifying the name of the topic they wish to access and the index, or offset, of the message they want to read.
+Reading an event from a topic is nondestructive. Each topic persists all events until a topic-specific configurable event retention period expires. When events have been stored for longer than this retention period, they are automatically removed from the topic.
+Brokers take advantage of the append-only nature of logs to exploit the linear read and write performance capabilities of disks. Operating systems are heavily optimized for these data access patterns, and use techniques such as prefetching and caching of data. This enables Kafka to provide constant access times regardless of the number of events stored in a topic.
+Returning to the skier management system example from
+Chapter 13
+,
+Figure 14-3
+shows a Kafka broker that supports three topics used to capture ski lift ride events from three different ski resorts. Each time a skier rides a lift, an event is generated and written to the corresponding topic for that resort by a Kafka producer. Consumers can read events from the topic to update the skier’s profile, send alerts for high-traffic lifts, and various other useful analytical functions
+related to the ski resort management business.
+Figure 14-3.
+A Kafka broker managing topics for three ski resorts
+Producers and Consumers
+Kafka provides APIs for both producers to write events and consumers to read events from a topic. An event has an application-defined key and an associated value, and a publisher-supplied timestamp. For a lift ride event, the key might be the
+skierID
+and the value would embed the
+skiLiftID
+and a timestamp for when the skier rode the lift. The publisher would then send the event to the topic for the appropriate resort.
+Kafka producers send events to brokers
+asynchronously. Calling the
+pro⁠ducer​.send()
+operation causes the event to be written to a local buffer in the producer. Producers create batches of pending events until one of a configurable pair of parameters is triggered. The whole event batch is then sent in one network request. You can, for example, use these parameters to send the batch to the broker as soon as the batch size exceeds a specified value (e.g., 256 K) or some latency bound (e.g., 5 ms) expires. This is illustrated in
+Figure 14-4
+along with how to set these configuration parameter values using a
+Properties
+object. Producers build independent batches in local buffers for each topic they deliver events to. Batches are maintained in the buffer until they are successfully acknowledged by the broker.
+Figure 14-4.
+Kafka producer
+Accumulating events in batches enables Kafka to incur less network round trips to the broker to deliver events. It also enables the broker to perform fewer, larger writes when appending event batches to the topic. Together, these efficiency measures are responsible for much of the high throughput that a Kafka system can achieve. Buffering events on producers allows you to trade off the additional latency that is incurred while batches are accumulated (the
+linger.ms
+value) for improved system throughput.
+The following code snippet shows a simple method that sends a ski lift ride event to a topic that represents the resort on the broker. The
+send()
+method returns a
+Future
+of type
+RecordMetaData
+. Calls to
+Future.get()
+will block until the broker has appended the event to the topic and returns a
+RecordMetaData
+object. This contains information about the event in the log such as its timestamp and offset:
+public Future<RecordMetadata> sendToBroker(final String skierID, final String 
+                                                 liftRideEvent) {

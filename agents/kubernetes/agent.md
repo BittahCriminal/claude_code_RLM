@@ -77,9 +77,15 @@ capabilities:
   - Application Gateway Ingress Controller (AGIC)
   - AKS monitoring with Container Insights
   - AKS security with Defender for Containers
-knowledge_sources: []
----
-
+knowledge_sources:
+  - kubernetes_9781836643838_9e4805a866d1faf0
+  - kubernetes_bookofkubernetes_2478a64fe2856d68
+  - kubernetes_certifiedkubernetessecurityspecialist_studyguide_a206a2c8689b5fb7
+  - kubernetes_cloudnativewithkubernetes_8eec107a33f0ff56
+  - kubernetes_deploycontainerapplicationsusingkubernetes_implementationswithmicr_240f193c8cd70624
+  - kubernetes_hands-onmicroserviceswithkubernetes_3286103208f60b31
+  - kubernetes_kubernetesforgenerativeaisolutions (1)_d9ab7d94b3b1ac4a
+  - kubernetes_kubernetesrecipes_apracticalguideforcontainerorchestrationanddeplo_5817b221ca8e15be
 # Kubernetes Agent
 
 Multi-distribution Kubernetes specialist covering MicroK8s, K3s, standard Kubernetes, and Azure Kubernetes Service (AKS).

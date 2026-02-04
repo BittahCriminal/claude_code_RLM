@@ -1,0 +1,4335 @@
+
+In this chapter, we created IAM groups and users and attached policies to the IAM groups required to set up the EKS cluster. We then launched the EKS cluster and learned the various details about the cluster, how it compares with the microk8s kubernetes cluster, the similarities and differences, as well as how to add compute capacity to the cluster. This is where kubernetes implementations on the public cloud excel; the compute capacity can be scaled up or down on demand, always optimizing for cost and the needs of the business. The bonus is technologies such as fargate make it easy so that we do not have to do any node management such as patching and hardening; AWS takes care of it.
+In the next chapter, we will launch some pods and workloads onto our newly minted Kubernetes cluster and learn how such workloads behave in a public cloud setup and how to configure and manage them to meet our business needs.
+Footnotes
+1
+https://aws.amazon.com/blogs/aws/amazon-eks-now-generally-available/
+
+© The Author(s), under exclusive license to APress Media, LLC, part of Springer Nature 2023
+S. Subramanian
+Deploy Container Applications Using Kubernetes
+https://doi.org/10.1007/978-1-4842-9277-8_14
+14. Operating the EKS Cluster
+Shiva Subramanian
+1
+(1)
+Georgia, GA, USA
+In this chapter, we will learn about operating the EKS cluster we set up in the previous chapter. The typical tasks of systems engineering would be to launch workloads, adding and deleting compute nodes, setting up additional users to utilize the cluster, and so on and so forth; these are the tasks that we will detail in this chapter.
+One of the first things we have to do is to set up command-line access to our cluster, which makes programmatic interaction with the cluster possible. The main components of managing the cluster via the command line are the (1) aws cli and (2) eksctl program.
+In order to differentiate between the Linux user “shiva” that has been set up to use the
+microk8s
+cluster and the user that will be managing Kubernetes clusters in AWS EKS, let us set up a new Linux user named shiva-eks so that the client binaries, configuration files, and such are not stepping on each other.
+Creating a New OS User for Managing AWS EKS
+On your Linux
+workstation
+, use the following Linux commands to create the user and setup for sudo:
+sudo useradd -c "Shiva AWS EKS User" -s /bin/bash -m -k /etc/skel -G sudo shiva-eks
+shiva@wks01:~$ sudo useradd -c "Shiva AWS EKS User" -s /bin/bash -m -k /etc/skel -G sudo shiva-eks
+shiva@wks01:~$
+You can set a password for this user or place your ssh-key in the ~/.ssh/authorized_keys to enable login as this user. The author chooses to place his ssh-key in the new users ~/.ssh/authorized_keys to log in. Once you have logged in as this new user and have been verified, we can proceed to the next step.
+Installing and Configuring AWS CLI v2
+To begin, the first thing you’ll need to do is install the
+aws cli v2
+. For detailed and/or customized installation, please refer to the official AWS documentation at
+https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-install.html
+.
+The basic installation of the AWS CLI involves downloading the installation package, unzipping the installation package, and finally installing it. These basic steps are given in Listing
+14-1
+.
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+sudo apt install unzip -y  # Optional, if unzip needs to be installed
+unzip awscliv2.zip
+sudo ./aws/install
+aws --version
+shiva-eks@wks01:~$ aws --version
+aws-cli/2.13.13 Python/3.11.4 Linux/5.15.0-69-generic exe/x86_64.ubuntu.22 prompt/off
+shiva-eks@wks01:~$
+Listing 14-1
+Downloading, installing, and verifying the AWS CLI package
+The successful execution of the command
+aws -version
+indicates that the AWS CLI is installed and working as expected.
+Note
+The AWS CLI package is continuously updated; thus, your version might be newer than the one shown in our screenshot and/or text.
+Installing and Configuring kubectl Program
+The official install and setup
+instructions
+are available at
+https://kubernetes.io/docs/tasks/tools/install-kubectl-linux/
+.
+This is a single binary that we have to download, make executable, and place in our path, which can be done by the set of instructions shown in Listing
+14-2
+.
+curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.27.4/2023-08-16/bin/linux/amd64/kubectl
+mkdir bin
+chmod 755 kubectl; mv kubectl bin/
+export PATH=~/bin:$PATH
+shiva-eks@wks01:~$ curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.27.4/2023-08-16/bin/linux/amd64/kubectl
+% Total    % Received % Xferd  Average Speed   Time   Time     Time  Current
+Dload  Upload   Total  Spent    Left  Speed
+100 47.0M  100 47.0M    0     0  22.2M      0  0:00:02 0:00:02 --:--:-- 22.2M
+shiva@ubuntu2004-02:~$ mkdir bin
+shiva@ubuntu2004-02:~$ chmod 755 kubectl; mv kubectl bin/
+shiva@ubuntu2004-02:~$ export PATH=~/bin:$PATH
+shiva-eks@wks01:~$ ls -l bin/kubectl
+-rwxr-xr-x 1 shiva-eks shiva-eks 49295360 Aug 30 01:56 bin/kubectl
+shiva-eks@wks01:~$
+Listing 14-2
+Downloading and configuring the kubectl executable
+Now that the kubectl binary is downloaded and made executable and the location of this binary is added to the PATH variable, the next step is to validate that the binary is working as expected, which can be done with the instruction shown in Listing
+14-3
+.
+which kubectl
+kubectl version --short
+shiva-eks@wks01:~$ which kubectl
+/home/shiva-eks/bin/kubectl
+shiva-eks@wks01:~$
+shiva-eks@wks01:~$ kubectl version --short
+Flag --short has been deprecated, and will be removed in the future. The --short output will become the default.
+Client Version: v1.27.4-eks-8ccc7ba
+Kustomize Version: v5.0.1
+Error from server (NotFound): the server could not find the requested resource
+shiva-eks@wks01:~$
+Listing 14-3
+Verifying the kubectl binary is working as intended
+Note
+kubectl needs to be configured to talk to the remote AWS-hosted k8s API endpoints. This hasn't been done yet; that's why the output is complaining that the connection to the server refused/failed – ignore for now. We will add the .kube/config file later in this chapter.
+Installing and Configuring eksctl Program
+Now let us install eksctl.
+Why do we need eksctl? This is a simple
+command
+-line utility for creating and managing Kubernetes clusters in Amazon EKS, very similar to kubectl but customized for Amazon EKS. You can read more about eksctl in general at
+https://eksctl.io/
+and
+https://eksctl.io/introduction/#for-unix
+for the detailed installation section.
+Once again, the installation follows the same pattern we used for the kubectl program, meaning to download the binary, make executable, and put in a location that's included in the system PATH, as shown in Listing
+14-4
+.
+curl --silent --location "https://github.com/weaveworks/eksctl/releases/latest/download/eksctl_$(uname -s)_amd64.tar.gz" | tar xz -C /tmp
+sudo mv /tmp/eksctl /usr/local/bin
+shiva-eks@wks01:~$ eksctl version
+0.154.0
+shiva-eks@wks01:~$
+Listing 14-4
+Downloading and configuring the eksctl executable
+The installation of the AWS CLI, kubectl, and eksctl is now complete at this point.
+Configuring kubectl to Work with AWS EKS
+We now need to configure the kubectl so that it knows where to find the cluster's API server endpoint, what
+authentication
+parameters it needs to use, etc.
+This configuration information is maintained in a file named .kube/config. Instead of manual editing, the AWS CLI provides an easy way to populate this configuration information using the
+aws eks update-kubeconfig
+command, which can be run as shown in Listing
+14-5
+. Before running, we need to ensure our AWS CLI session is valid, which we can validate first, then run the update-kubeconfig command as shown in Listing
+14-5
+.
+aws configure
+aws sts get-caller-identity
+aws eks update-kubeconfig --region us-east-2 --name myeks01
+kubectl version
+shiva-eks@wks01:~$ aws configure
+AWS Access Key ID [None]: <SNIP>
+AWS Secret Access Key [None]: <SNIP>
+Default region name [None]: us-east-2
+Default output format [None]:
+shiva-eks@wks01:~$
+shiva-eks@wks01:~$ aws sts get-caller-identity
+{
+"UserId": "AIDAQAFVWO7Y2NBGEQR6K",
+"Account": "000381057009",
+"Arn": "arn:aws:iam::000381057009:user/shiva"
+}
+shiva-eks@wks01:~$
+shiva-eks@wks01:~$ aws eks update-kubeconfig --region us-east-2 --name myeks01
+Added new context arn:aws:eks:us-east-2:000381057009:cluster/myeks01 to /home/shiva-eks/.kube/config
+shiva-eks@wks01:~$
+shiva-eks@wks01:~$ kubectl version --short
+Flag --short has been deprecated, and will be removed in the future. The --short output will become the default.
+Client Version: v1.27.4-eks-8ccc7ba
+Kustomize Version: v5.0.1
+Server Version: v1.27.4-eks-2d98532
+shiva-eks@wks01:~$
+Listing 14-5
+Updating the kubeconfig file via the AWS CLI
+Now that we have updated the kubeconfig file, let’s verify by running the code in Listing
+14-6
+.
+kubectl get svc
+shiva-eks@wks01:~$ kubectl get svc
+NAME         TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
+kubernetes   ClusterIP   10.100.0.1   <none>        443/TCP   10h
+shiva-eks@wks01:~$
+Listing 14-6
+Verifying kubectl connectivity to our EKS cluster
+The output shows valid information about our cluster; thus, we can conclude that the kubectl is set up and working as intended.
+We can now start executing the usual kubectl commands, for example, we can verify what we saw on the AWS Console on the list of pods that were deployed via the
+command line
+– meaning what we saw on the console should be the same information that should be returned via the kubectl command line, which we can verify with the command in Listing
+14-7
+.
+kubectl get pods --all-namespaces
+shiva-eks@wks01:~$ kubectl get pods --all-namespaces
+NAMESPACE     NAME                       READY   STATUS    RESTARTS   AGE
+kube-system   aws-node-bpbsn             1/1     Running   0          9h
+kube-system   aws-node-r4rhw             1/1     Running   0          9h
+kube-system   coredns-647484dc8b-5pfqr   1/1     Running   0          10h
+kube-system   coredns-647484dc8b-qrrd4   1/1     Running   0          10h
+kube-system   kube-proxy-cvqfp           1/1     Running   0          9h
+kube-system   kube-proxy-mdgw9           1/1     Running   0          9h
+shiva-eks@wks01:~$
+Listing 14-7
+kubectl listing pods running in our EKS cluster
+This information is consistent with the information we saw on the AWS Console, EKS service page, indicating that we can now access the cluster information both via AWS Web Console and via the command-line tool kubectl which allows us to programmatically manage our cluster.
+We can check out the node information from the command line too via the
+kubectl get nodes
+command as shown in Listing
+14-8
+. Note the output contains very similar information about the nodes as we saw in our
+microk8s
+node
+setup; it gives information about the node's memory pressure, number of CPUs, and available memory for workloads, among others.
+Also, note that the node was set up for us by AWS; we did not have to find a physical or virtual machine, install the OS, connect to the cluster, and such. All those tasks were taken care of by the AWS EKS service; all we had to do was to define the fargate configuration, and the rest is automatic. This is the power of the AWS EKS managed service.
+kubectl get nodes
+shiva-eks@wks01:~$ kubectl get nodes
+NAME                                          STATUS   ROLES    AGE   VERSION
+ip-172-31-11-245.us-east-2.compute.internal   Ready    <none>   9h    v1.27.3-eks-a5565ad
+ip-172-31-36-222.us-east-2.compute.internal   Ready    <none>   9h    v1.27.3-eks-a5565ad
+shiva-eks@wks01:~$
+Listing 14-8
+Detailed information about the compute node
+Now that we have everything set up the way we need it, I will walk you through deploying your first pod.
+Deploying Your First Pod in EKS
+It's time to deploy our first
+pod
+. This is done the same way as before with microk8s; we can use a YAML deployment file, or we can do it via the command line. Since launching via the command line is easy and straightforward, let us first try the command-line way.
+We will use our tried and trusted workload, the primeornot application, by deploying it on EKS as shown in Listing
+14-9
+.
+kubectl create deployment primeornot --image=gitshiva/primeornot
+shiva-eks@wks01:~$ kubectl create deployment primeornot --image=gitshiva/primeornot
+deployment.apps/primeornot created
+shiva-eks@wks01:~$
+Listing 14-9
+Launching our first pod in the EKS cluster
+It's that simple. Now we can check the status of our deployment, the usual way by using the get deployment command as shown in Listing
+14-10
+.
+kubectl get deployment
+shiva-eks@wks01:~$ kubectl get deployment
+NAME         READY   UP-TO-DATE   AVAILABLE   AGE
+primeornot   1/1     1            1           25s
+shiva-eks@wks01:~$
+Listing 14-10
+Obtaining deployment details
+The
+deployment
+is successful, and we can see the pod is in READY status. We can get the pod information just to be sure as shown in Listing
+14-11
+.
+kubectl get pods
+shiva-eks@wks01:~$ kubectl get pods
+NAME                         READY   STATUS    RESTARTS   AGE
+primeornot-9d584fd7d-8zvl2   1/1     Running   0          47s
+shiva-eks@wks01:~$
+Listing 14-11
+Obtaining pod details
+Now, we can get some more details about the application that's running by obtaining the pod logs, just as we did in our microk8s cluster; the commands are no different, as shown in Listing
+14-12
+.
+kubectl logs -f primeornot-9d584fd7d-8zvl2
+shiva-eks@wks01:~$ kubectl logs -f primeornot-9d584fd7d-8zvl2
+.   ____          _            __ _ _
+/\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+\\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+'  |____| .__|_| |_|_| |_\__, | / / / /
+=========|_|==============|___/=/_/_/_/
+:: Spring Boot ::        (v2.2.6.RELEASE)
+2023-08-27 13:56:50.640  INFO 7 --- [           main] us.subbu.Primeornot01Application         : Starting Primeornot01Application on primeornot-9d584fd7d-8zvl2 with PID 7 (/tmp/primeornot01-0.0.1-SNAPSHOT.jar started by root in /)
+<SNIP>
+o.s.b.w.embedded.tomcat.TomcatWebServer  :
+Tomcat started on port(s): 8080 (http)
+with context path ''
+2023-08-27 13:56:53.959  INFO 7 --- [           main] us.subbu.Primeornot01Application         :
+Started Primeornot01Application in 4.481 seconds
+(JVM running for 5.339)
+Listing 14-12
+Obtaining pod logs
+You might have to CTRL+C out of the kubectl logs -f command since we asked it to tail the logs.
+We can see from the highlighted output that the application running inside the pod started successfully and that the process, tomcat, is running/listening on port tcp/8080.
+As before, we will need this to expose the port as a K8S service so that users external to the cluster can access this application; we can do this by executing Listing
+14-13
+.
+kubectl create service nodeport primeornot --tcp=80:8080
+shiva-eks@wks01:~$ kubectl create service nodeport primeornot --tcp=80:8080
+service/primeornot created
+shiva-eks@wks01:~$
+Listing 14-13
+Creating a service port
+The preceding output shows that the service is created. We can obtain the service port by getting details about the service as shown in Listing
+14-14
+.
+kubectl get service
+shiva-eks@wks01:~$ kubectl get service
+NAME         TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)        AGE
+kubernetes   ClusterIP   10.100.0.1       <none>        443/TCP        10h
+primeornot   NodePort    10.100.220.151   <none>        80:
+32187
+/TCP   22s
+shiva-eks@wks01:~$
+Listing 14-14
+Obtaining the NodePort from the service details
+From the output, we can see that our NodePort is mapped to the 32187 port on the Node, meaning we should be able to access this port via the Node with the format http://<NODE External IP>:<NodePort for Application>, which so far is http://<NODE External IP>:32187. We still need to know the node's external IP. What is our node's external IP address?
+We can find out the node's external IP with the command in Listing
+14-15
+.
+kubectl describe nodes | grep -i ExternalIP
+shiva-eks@wks01:~$ kubectl describe nodes | grep -i ExternalIP
+ExternalIP:   3.129.14.199
+shiva-eks@wks01:~$
+Listing 14-15
+Obtaining the node's external IP
+Here it is. Thus, the full URL for our application is
+http://3.129.14.199:32187
+.
+Updating Cluster Security Group to Allow Service Access
+However, before we can access it via the NodePort IP, we need to add the service port to AWS's security group that's protecting this
+node
+. We can edit the security group to allow access to this port in the AWS Console.
+Recall that the cluster's security group is as shown in Figure
+14-1
+.
+A screenshot titled My E K S 01 represents the cluster info at the top. At the bottom, it denotes a set of networking details, including V P C info, cluster I P address family info, service I P V 4 range, subnets, and A P I server endpoint. It indicates the cluster security group info.
+Figure 14-1
+Security group information shown in the EKS cluster detail page
+We'll edit the "Cluster security group" and add an ingress rule there, by clicking the hyperlink under the "Cluster security group," which opens in a new tab, as shown in Figure
+14-2
+.
+A screenshot of the Security Groups information represents the settings to create a security group. A table in the middle provides the details of the name, security group I D, security group name, and V P C I D. It indicates the Inbound Rules tab and the Edit Inbound Rules button at the bottom.
+Figure 14-2
+Editing the Cluster Security Group
+By default, the Cluster Security Group does not allow any traffic from external IP addresses, so we need to edit the Inbound rules and add traffic from any Internet source 0.0.0.0/0 to target :32187, which is where our application is running.
+So, select the "Inbound rules" tab, then click "Edit inbound rules" as shown in Figure
+14-3
+to add the ingress rule.
+A screenshot of the Edit Inbound Rules page represents the security group rule I D and the settings for selecting the type, protocol, port range, source, and description. It indicates the add rule button at the bottom.
+Figure 14-3
+Editing inbound rules to add external access
+Click "Add rule," then select or enter the following values for the new rule:
+Type: Custom TCP
+Port range: 32187 [we determined this to be our application
+node
+port previously]
+Source: Anywhere-IPv4, 0.0.0.0/0 [for access from anywhere in the world, you can also choose to restrict this if you wish]
+Description (Optional): PrimeorNot-App
+Then click "Save rules." AWS confirms the rule is updated as shown in Figure
+14-4
+.
+A screenshot of a message explains that the inbound security group rules are successfully modified on security group. There is a drop-down option labeled Details and a bullet point labeled New.
+Figure 14-4
+Security Group is successfully updated
+Now, we can try to access the URL
+http://3.129.14.199:32187
+; recall that the full application URL was determined earlier by the formula http://<NODE External IP>:<NodePort for Application>.
+And voilà! Just like that, our application is out on the Internet, served via an AWS EKS cluster. We can now access our application via any browser as shown in Figure
+14-5
+.
+A screenshot of a web browser denotes a U R L comprising numerical values at the address bar. The text on the screen explains that the Restful service will determine whether a given number is prime or not. A couple of U R Ls are provided as examples, along with a link to log issues.
+Figure 14-5
+Accessing our application hosted via EKS
+Now that we have successfully launched a pod running our application on EKS, we can branch into other capabilities of the Kubernetes cluster on EKS. One of the main responsibilities of a systems engineer/administrator is to manage access to the EKS cluster. We will explore this in the next section.
+EKS RBAC and AWS IAM
+Recall that in the previous chapter with
+microk8s
+, we set up OS users and mapped them to K8S roles, allowing those users to access K8S with least privileges enough to do their job duties.
+AWS allows for authentication using multiple methods such as with IAM users; the AWS account could also be SSO enabled and access granted via the AssumeRole function. In our case, we'll keep it simple by using IAM users.
+Creating Three Classes of IAM Users
+The goal of this section is to create three different
+classes
+of users, namely:
+1)
+EKS administrators, typically your peers
+2)
+DevOps/SRE team users, typically needing privileges to maintain workloads, but not cluster admin
+3)
+Read-only users, typically needed by auditors, business users, and such
+Goal: Grant deploy permissions to k8sadmin01 IAM user.
+Create the following three user groups via IAM Service in our AWS account. Do not attach any permissions at this time, we'll add them later.
+grp-k8s-admins # for the systems or platform engineering groups
+grp-k8s-devops # for the DevOps teams including SRE type engineers
+grp-k8s-readonly # for monitoring and those that just need to view the cluster info
+Then add the following six users. Do Not Attach any permissions directly to the users, we'll grant it via the groups. Do grant API keys and console access for all users.
+k8sadmin01 # our k8s admin user 01, add to IAM Group grp-k8s-admins
+k8sadmin02 # our k8s admin user 02
+k8sdevops01 # our DevOps/SRE team user 01, add to IAM Group grp-k8s-devops
+k8sdevops02 # our DevOps/SRE team user 02
+k8sreadonly01 # read-only user, add to IAM Group grp-k8s-readonly
+k8sreadonly02 # indicative of any user needing only read rights, for example, developers in prod
+The reason we are adding the 01 users to the groups is to show how the cluster responds when the user brings appropriate privileges when performing a cluster action; since we will be granting privileges to the group, all 01 users would be able to perform actions that their privileges allow for, while the 02 users, despite their name, will NOT have privileges, since they are not yet part of the privilege granting group. We'll execute the same commands the 01 users will execute and observe the error conditions as a learning experience. Later on, we can add the 02 users to their appropriate groups.
+Granting EKS ALL Rights to grp-k8s-admins
+The first thing we want to do is attach an inline
+policy
+to the grp-k8s-admins. Edit the grp-k8s-admins group and go to the permissions tab, click the drop-down in "Add permissions," and select "Create inline policy," as shown in Figure
+14-6
+.
+A screenshot titled g r p k 8 s admins represents the summary of the user group name, creation time, and A R N. The Permissions tab is highlighted at the bottom, which denotes the option to add permission under the permission policy.
+Figure 14-6
+Attaching an inline policy to the grp-k8s-admins
+In the Specify permissions screen, under "Select a service," type EKS. EKS shows up in the results; select EKS and then click "Next" as shown in Figure
+14-7
+.
+A screenshot represents the options to specify permissions. There are options to add permissions by selecting the services, actions, resources, and conditions. It indicates the name of the selected service and the next button. The service is denoted as E K S.
+Figure 14-7
+Selecting All EKS options for the proposed EKS admins
+Select Resources: All resources as shown in Figure
+14-8
+.
+A screenshot represents the interface to specify permissions. It denotes the details under the policy editor and indicates the selected action as E K S, manual action as all E K S actions, and the resources selected as all. The next button is denoted at the bottom right corner.
+Figure 14-8
+Selecting "All resources" for the proposed EKS admins
+Then click the "Review policy" button; the Review Policy screen shows up next.
+In the Review Policy screen, select the following option as shown in Figure
+14-9
+:
+A screenshot represents the interface to review and create. It indicates the policy name under the policy details. A table under the permissions defined in the policy represents the details of service, access level, resource, and request condition. The create policy button is indicated on the right.
+Figure 14-9
+Create Policy screen
+Name: k8sadmins
+Click "Create policy."
+After clicking "Create Policy," the policy is created, and the permissions will be visible in the group description, which we can validate under the "Permissions" tab in the group Summary screen as shown in Figure
+14-10
+.
+A screenshot represents the summary and permissions policies under the g r p k 8 s admins. It indicates the policy name and a snippet of code under the k 8 s admins.
+Figure 14-10
+IAM all eks* policy added to grp-k8s-admins
+Give it about ten minutes or so for the policy to take effect; now would be a good time to refill the coffee cup.
+Now we will need to assume the persona of the k8sadmin01 user; for this, you can set up a new native user in your operating
+system
+to keep things clean, or you can simulate it having multiple profiles in your ~/.aws/credentials file. In this book, we'll choose to set up a native user to match k8sadmin – it keeps things clean.
+As a k8sadmin01 OS user, set up the AWS CLI, kubectl, and eksctl as needed, as well as configuring the aws cli.
+Do the same for k8sadmin02.
+Here, we have set it up successfully, meaning the OS user k8sadmin01 is set up to use the IAM user k8sadmin01 credentials, thus keeping the identity logically connected. The OS user k8sadmin01 is set up with AWS CLI credentials from the AWS IAM user k8sadmin01 and verified as shown in Listing
+14-16
+.
+aws sts get-caller-identity
+k8sadmin01@wks01:~$ aws sts get-caller-identity
+{
+"UserId": "AIDAQAFVWO7Y4JL5BTSTR",
+"Account": "000381057009",
+"Arn": "arn:aws:iam::000381057009:user/k8sadmin01"
+}
+k8sadmin01@wks01:~$
+Listing 14-16
+Verifying the OS user is successfully authenticated to AWS
+Now this k8sadmin IAM user has no privileges on the cluster yet, because we have not granted this user/group anything inside the K8S cluster we have set up, which we will do in the next section.
+Mapping IAM User/Group to Cluster Role(s)
+The act of granting
+privileges
+to the EKS cluster is similar to how we did for the microk8s-based kubernetes cluster; we map the OS/AWS IAM user in this case to a role inside the Kubernetes cluster using the iamidentitymapping facility of
+AWS
+. This step is unique to AWS; this may be different for other cloud providers.
+The act of mapping the IAM user to the EKS role is done with the eksctl command shown in Listing
+14-17
+; basically, it says to AWS, on the cluster, indicated using the –cluster option, located in this region, indicated using the –region option, for this IAM user, indicated using the ARN of the IAM user, map it to the cluster role, indicated using the –group option along with the –no-duplicate-arns so duplicate entries are not created. The full command looks as shown in Listing
+14-17
+.
+eksctl create iamidentitymapping \
+--cluster myeks01 \
+--region=us-east-2 \
+--arn arn:aws:iam::000381057009:user/k8sadmin01 \
+--group system:masters \
+--no-duplicate-arns
+shiva@wks01:~$ eksctl create iamidentitymapping \
+--cluster myeks01 \
+--region=us-east-2 \
+--arn arn:aws:iam::000381057009:user/k8sadmin01 \
+--group system:masters \
+--no-duplicate-arns
+2023-08-27 14:35:59
+[ℹ]
+checking arn arn:aws:iam::000381057009:user/k8sadmin01 against entries in the auth ConfigMap
+2023-08-27 14:35:59
+[ℹ]
+adding identity "arn:aws:iam::000381057009:user/k8sadmin01" to auth ConfigMap
+shiva@wks01:~$
+Listing 14-17
+Mapping the IAM user to the cluster role
+The output indicates that the command is successful, as shown in the highlighted entry in Listing
+14-17
+.
+Testing As k8sadmin01 User
+The next step is to validate if this
+user
+can now interact with the cluster as shown in Listing
+14-18
+.
+kubectl get svc
+k8sadmin01@wks01:~$ kubectl get svc
+E0827 14:37:54.471855 1720778 memcache.go:265] couldn't get current server API group list: the server could not find the requested resource
+<SNIP>
+Error from server (NotFound): the server could not find the requested resource
+k8sadmin01@wks01:~$
+Listing 14-18
+Accessing the cluster as user k8sadmin01
+As indicated before, the kubectl command does not know the Cluster's endpoint, which we can update using the update-kubeconfig command as we have done earlier and also shown in Listing
+14-19
+.
+aws eks update-kubeconfig --name myeks01
+k8sadmin01@wks01:~$ aws eks update-kubeconfig --name myeks01
+Added new context arn:aws:eks:us-east-2:000381057009:cluster/myeks01 to /home/k8sadmin01/.kube/config
+k8sadmin01@wks01:~$
+Listing 14-19
+Updating .kube/config using the AWS CLI
+After the update-kubeconfig, we can now describe the cluster as shown in Listing
+14-20
+.
+aws eks update-kubeconfig --name myeks01
+kubectl get svc
+k8sadmin01@wks01:~$ aws eks update-kubeconfig --name myeks01
+Added new context arn:aws:eks:us-east-2:000381057009:cluster/myeks01 to /home/k8sadmin01/.kube/config
+k8sadmin01@wks01:~$
+k8sadmin01@wks01:~$ kubectl get svc
+NAME         TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE
+kubernetes   ClusterIP   10.100.0.1      <none>        443/TCP        12h
+primeornot   NodePort    10.100.17.135   <none>        80:30969/TCP   11h
+k8sadmin01@wks01:~$
+Listing 14-20
+Listing cluster services as user k8sadmin01
+We can see that as user k8sadmin01, we can describe the service and manage the cluster. Let us test the management permissions given to this user k8sadmin01.
+A simple example might be that of creating a
+namespace
+, which is a privileged action. Let us try this first with user k8sadmin02 as shown in Listing
+14-21
+; despite the admin name, recall that this user is not in k8s group system:masters; thus, the expected result is for the action to fail with an unauthorized message, while trying with user k8sadmin01 should succeed since this user is part of the k8s admin group system:masters.
+aws sts get-caller-identity
+kubectl create namespace k8sadmin02test
+k8sadmin02@wks01:~$ aws sts get-caller-identity
+{
+"UserId": "AIDAQAFVWO7YQ3VMXLDWI",
+"Account": "000381057009",
+"Arn": "arn:aws:iam::000381057009:user/k8sadmin02"
+}
+k8sadmin02@wks01:~$
+k8sadmin02@wks01:~$ kubectl create namespace k8sadmin02test
+error: You must be logged
+in
+to the server (Unauthorized)
+k8sadmin02@wks01:~$
+Listing 14-21
+Attempt to create a namespace as user k8sadmin02 – should fail
+Notice the expected result.
+Let us do the same for k8sadmin01; this should succeed since we have added this user to the system:masters role inside the cluster earlier, and thus the user has the required authorization in the cluster to perform this action as shown in Listing
+14-22
+.
+aws sts get-caller-identity
+kubectl create namespace test
+k8sadmin01@wks01:~$ aws sts get-caller-identity
+{
+"UserId": "AIDAQAFVWO7Y4JL5BTSTR",
+"Account": "000381057009",
+"Arn": "arn:aws:iam::000381057009:user/k8sadmin01"
+}
+k8sadmin01@wks01:~$
+k8sadmin01@wks01:~$ kubectl create namespace test
+namespace/test created
+k8sadmin01@wks01:~$
+Listing 14-22
+Attempt to create a namespace as user k8sadmin01 – should succeed
+Success! As expected.
+We can also perform additional checks, such as listing the
+namespaces
+to ensure the namespace is visible and is available to use as shown in Listing
+14-23
+.
+kubectl get namespaces
+k8sadmin01@wks01:~$ kubectl get namespaces
+NAME              STATUS   AGE
+default           Active   33d
+kube-node-lease   Active   33d
+kube-public       Active   33d
+kube-system       Active   33d
+test              Active   113s
+k8sadmin01@wks01:~$
+Listing 14-23
+Listing the namespaces – as k8sadmin01
+We can see that the "test" namespace we created is visible, active, and ready for use.
+Testing As k8sadmin02 User
+As for the user
+k8sadmin02
+, even listing namespaces for user k8sadmin02 is prohibited, since the user doesn't have any privileges associated with them, as evidenced by the output in Listing
+14-24
+.
+kubectl get namespaces
+k8sadmin02@wks01:~$ kubectl get namespaces
+error: You must be logged
+in
+to the server (Unauthorized)
+k8sadmin02@wks01:~$
+Listing 14-24
+Listing the namespaces – as k8sadmin02
+YOUR TURN: Add user k8sadmin02 to the EKS system:masters group, then retry the preceding action; creating and listing namespaces should be successful!
+Provided the previous setup is correct, listing the iamidentitymapping as an admin on the cluster, either shiva or k8sadmin01, our output would be as shown in Listing
+14-25
+.
+eksctl get iamidentitymapping --cluster myeks01
+shiva@wks01:~$ eksctl get iamidentitymapping --cluster myeks01
+ARN                                          USERNAME GROUPS          ACCOUNT
+arn:aws:iam::000381057009:user/k8sadmin01                      system:masters
+arn:aws:iam::000381057009:user/k8sadmin02                      system:masters
+shiva@wks01:~$
+Listing 14-25
+Listing iamidentitymapping
+Note
+The preceding output would match yours closely provided you finished the "YOUR TURN" action to add the user k8sadmin02 to the system:masters role. If this was not successful for some reason, then you would most likely not see the k8sadmin02 user in the preceding output.
+Now let us move to the next role, DevOps/SRE, where we would like for the user to be able to deploy, roll back, and do similar actions on existing
+namespaces
+, but we do not want them to be full-scale admins of the cluster itself. Thus, we are scoping the role down one level, giving just enough privileges to operate on existing resources at the namespace level, but not above it. What does k8s RBAC give us? It gives us the admin role; recall that the k8sadmins were granted the cluster-admin role; this is simply an admin, which is scoped to the
+namespace
+level. Let us utilize that!
+We use the same eksctl iamidentitymapping command to do it.
+DevOps User Setup and Mapping
+First, let us
+add
+the
+k8sdevops01 user
+to the k8s admin group. As either the user that created the cluster or k8sadmin user, do the command shown in Listing
+14-26
+.
+eksctl create iamidentitymapping \
+--cluster myeks01 \
+--region us-east-2 \
+--arn arn:aws:iam::000381057009:user/k8sdevops01 \
+--group admin \
+--no-duplicate-arns
+shiva-eks@wks01:~$ eksctl create iamidentitymapping \
+--cluster myeks01 \
+--region us-east-2 \
+--arn arn:aws:iam::000381057009:user/k8sdevops01 \
+--group admin \
+--no-duplicate-arns
+2023-08-27 14:48:27
+[ℹ]
+checking arn arn:aws:iam::000381057009:user/k8sdevops01 against entries in the auth ConfigMap
+2023-08-27 14:48:27
+[ℹ]
+adding identity "arn:aws:iam::000381057009:user/k8sdevops01" to auth ConfigMap
+shiva-eks@wks01:~$
+Listing 14-26
+Mapping k8sdevops01 IAM user to the cluster admin role
+Now, we can verify the preceding command executed successfully by listing the
+iamidentitymapping entries
+as shown in Listing
+14-27
+.
+eksctl get iamidentitymapping --cluster myeks01
+k8sadmin01@wks01:~$ eksctl get iamidentitymapping --cluster myeks01
+ARN                                                USERNAME GROUPS                     ACCOUNT
+arn:aws:iam::000381057009:role/myAWSEKSNodeRole    system:node:{{EC2PrivateDNSName}}   system:bootstrappers,system:nodes
+arn:aws:iam::000381057009:user/k8sadmin01          system:masters
+arn:aws:iam::000381057009:user/k8sdevops01                                         admin
+k8sadmin01@wks01:~$
+Listing 14-27
+Verifying the k8sdevops01 user is mapped to the admin role
+Notice in the output that the k8sdevops01 has been authorized to use the role admin, which gives them most rights inside the cluster, enough to manage the workloads and more, but not the full system:masters role.
+Testing As k8sdevops01 User
+Now, as
+k8sdevops01
+let us run some commands to test what we can do with these rights as shown in Listing
+14-28
+.
+kubectl get namespaces
+aws eks list-clusters
+k8sdevops01@wks01:~$ kubectl get namespaces
+Error from server (Forbidden): namespaces is forbidden: User "" cannot list resource "namespaces"
+in
+API group "" at the cluster scope
+k8sdevops01@wks01:~$ aws eks list-clusters
+An error occurred (AccessDeniedException) when calling the ListClusters operation: User: arn:aws:iam::000381057009:user/k8sdevops01 is not authorized to perform: eks:ListClusters on resource: arn:aws:eks:us-east-2:000381057009:cluster/*
+k8sdevops01@wks01:~$
+Listing 14-28
+Attempt to work with the cluster as a k8sdevops01 user
+Why do we get this error? The astute reader would notice that even though the user has admin privileges in the K8S cluster, they do not have access to call the relevant APIs on the AWS IAM side; thus, an AWS IAM policy granting this access must be attached either directly to this IAM user or to the IAM groups this user belongs to. Let us do that.
+On the AWS Console page, IAM Service, logged in as a root user or user with IAM privileges, go to User Groups ➤ grp-k8s-devops ➤ Permissions as shown in Figure
+14-11
+.
+A screenshot represents the summary and permissions policies under the g r p k 8 s devops. It indicates the option to create inline policy under the drop-down menu of Add Permissions on the right.
+Figure 14-11
+Adding AWS permission policies to grp-k8s-devops
+Since we would like for this DevOps/SRE group to have all EKS privileges, let us add a policy by clicking "Add permissions" seen on the far right and choosing "Create inline policy" as shown in Figure
+14-12
+.
+A screenshot represents a list of 16 actions that are allowed under E K S. It indicates 6 actions selected under the list, 10 actions selected under read, and 2 actions selected under tagging. The All button is selected to specify the resource A R Ns for these actions.
+Figure 14-12
+Granting EKS privileges to grp-k8s-devops
+In this screen, select the following options:
+Service: EKS
+Actions: Everything but write, since we do not want these users to be able to perform cluster-level actions
+Resources: ALL
+Request Conditions: None for our example
+Then click Review Policy, to name the policy and create it, as shown in Figure
+14-13
+.
+A screenshot represents the interface to review and create. It indicates the policy name under the policy details. A table under the permission defined in the policy represents the details of E K S, access level, resources, and request condition. The Create Policy button is highlighted at the bottom.
+Figure 14-13
+Reviewing policy and creating it
+Choose the following option in the "Create Policy" screen, then click the "Create Policy" button as shown in Figure
+14-13
+.
+Name: IAM-Policy-for-k8s-devopsrole
+Then click the "Create Policy" button to finish creating the policy. We can then confirm that the policy is successfully attached to this group by reviewing its details as shown in Figure
+14-14
+.
+A screenshot represents the summary and permissions policies under the g r p k 8 s devops. A table at the bottom denotes the policy name, along with its type as customer inline.
+Figure 14-14
+Confirming the permissions policy is attached to group grp-k8s-devops
+You can see that our group grp-k8s-devops now has an inline policy that grants all List, Read, and Tagging privileges to the cluster.
+Since we already added the IAM user k8sdevops01 to the K8S cluster admin role, let us try the action again as shown in Listing
+14-29
+.
+aws eks list-clusters
+k8sdevops01@wks01:~$ aws eks list-clusters
+{
+"clusters": [
+"myeks01"
+]
+}
+k8sdevops01@wks01:~$
+Listing 14-29
+Listing EKS clusters as user k8sdevops01
+Voilà! We now can list the cluster, as expected. What else can we do? We can describe the cluster to obtain detailed information about the cluster with the command as shown in Listing
+14-30
+.
+aws eks describe-cluster --name myeks01 --no-cli-pager
+k8sdevops01@wks01:~$ aws eks describe-cluster --name myeks01 --no-cli-pager
+{
+"cluster": {
+"name": "myeks01",
+"arn": "arn:aws:eks:us-east-2:000381057009:cluster/myeks01",
+"createdAt": "2023-08-27T03:08:43.597000+00:00",
+"version": "1.27",
+"endpoint": "https://6CACF45813FE620AF8DEC4020009AEC0.gr7.us-east-2.eks.amazonaws.com",
+"roleArn": "arn:aws:iam::000381057009:role/eksClusterRole",<SNIP>
+S0K"
+},
+"platformVersion": "eks.5",
+"tags": {}
+}
+}
+k8sdevops01@wks01:~$
+Listing 14-30
+Obtaining detailed information about our cluster
+Okay, we can describe the cluster. Can we go inside the cluster and look at the workloads, which is the intended purpose of this role? Let us give it a try as shown in Listing
+14-31
+.
+kubectl get services
+k8sdevops01@wks01:~$ kubectl get services
+Error from server (Forbidden): services is forbidden: User "" cannot list resource "services"
+in
+API group ""
+in
+the namespace "default"
+k8sdevops01@wks01:~$
+Listing 14-31
+Attempt to list services on our cluster
+But we have admin role, right? We can check that using the get iamindentitymapping command as shown in Listing
+14-32
+.
+eksctl get iamidentitymapping --cluster myeks01
+shiva-eks@wks01:~$ eksctl get iamidentitymapping --cluster myeks01 -o json
+[
+<SNIP>
+},
+{
+"userarn": "arn:aws:iam::000381057009:user/k8sdevops01",
+"groups": [
+"admin"
+]
+}
+]shiva-eks@wks01:~$
+Listing 14-32
+Confirming the k8sdevops01 user has an admin role
+Indeed, we do, but why are we not able to do any action within the cluster itself, though we have admin rights as the user k8sdevops01? This is because we have not done the rolebinding yet, that is, we have not binded the admin role to a given namespace yet; since K8S has multiple namespaces, and it doesn't know which namespace to grant admin rights to for this user, it has denied this request. Let us grant our DevOps users access to the default namespace by binding the admin role to the default namespace.
+We do that by using the rolebinding command, we indicate which clusterrole we are interested in with the option –clusterrole, admin in our case, to which group with the option –group, admin in our case and finally to which namespace, with the option –namespace, default in our case. Thus, the entire command looks like shown in Listing
+14-33
+.
+kubectl create rolebinding devops-binding --clusterrole=admin --group admin --namespace=default
+shiva-eks@wks01:~$kubectl create rolebinding devops-binding --clusterrole=admin --group admin --namespace=default
+rolebinding.rbac.authorization.k8s.io/devops-binding created
+shiva-eks@wks01:~$
+Listing 14-33
+Granting rights to a namespace for the admin role
+Now that the role has rights into the default namespace, can we get some information about the services in this namespace? We can test that now as a k8sdevops01 user, as shown in Listing
+14-34
+.
+kubectl get services
+k8sdevops01@wks01:~$ kubectl get services
+NAME         TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)        AGE
+kubernetes   ClusterIP   10.100.0.1       <none>        443/TCP        12h
+primeornot   NodePort    10.100.220.151   <none>        80:32187/TCP   73m
+k8sdevops01@wks01:~$
+Listing 14-34
+Obtaining service information as a k8sdevops01 user
+Now this makes sense; user k8sdevops01 is in the K8S admin group, which is bound to the clusterRole admin, and the IAM group this user belongs to has IAM policies granting access to the EKS service, so the user is now able to do actions on the cluster.
+We can test in another way, by getting the pod information in the default namespace as shown in Listing
+14-35
+.
+kubectl get pods --namespace default
+k8sdevops01@wks01:~$ kubectl get pods --namespace default
+NAME                         READY   STATUS    RESTARTS   AGE
+primeornot-9d584fd7d-mqh72   1/1     Running   0          70m
+k8sdevops01@wks01:~$
+Listing 14-35
+Getting pod information on the default namespace as user k8sdevops01
+The negative test is that we can attempt to list the pods in a namespace that is not default, to which user k8sdevops01 does not have any rights and thus should fail; we can confirm that by attempting to list the pods on a public namespace, as shown in Listing
+14-36
+.
+kubectl get pods --namespace kube-public
+k8sdevops01@wks01:~$ kubectl get pods --namespace kube-public
+Error from server (Forbidden): pods is forbidden: User "" cannot list resource "pods" in API group "" in the namespace "kube-public"
+k8sdevops01@wks01:~$
+Listing 14-36
+Attempt to list pods on a public namespace as user k8sdevops01 – should fail
+Notice that the user is limited to using the "default" namespace, since that's how we did the roleBinding. They are able to do actions within default, as the first command shows, but the second command to show pods on a different namespace is denied, as expected.
+Since user k8sdevops01 has admin rights to the namespace, they can do normal activities a kubernetes admin can do within that namespace, such as creating a deployment, which we can test as shown in Listing
+14-37
+.
+kubectl create deployment primeornot02 --image=github/primeornot
+k8sdevops01@wks01:~$ kubectl create deployment primeornot02 --image=github/primeornot
+deployment.apps/primeornot02 created
+k8sdevops01@wks01:~$
+Listing 14-37
+Creating a deployment in the default namespace as user k8sdevops01
+Any attempt to create a deployment in a namespace to which user k8sdevops01 does not have rights would fail, as shown earlier; we will test it anyway with the deployment command as shown in Listing
+14-38
+as a learning activity.
+kubectl create deployment primeornot02 --image=github/primeornot --namespace kube-public
+k8sdevops01@wks01:~$
+error: failed to create deployment: deployments.apps is forbidden: User "" cannot create resource "deployments"
+in
+API group "apps"
+in
+the namespace "kube-public"
+k8sdevops01@wks01:~$
+Listing 14-38
+Creating a deployment in a public namespace as user k8sdevops01 – should fail
+Similarly, a deployment action also succeeds on the default namespace, but fails on the namespace to which we do not have access as expected.
+You can utilize this structure to create multiple
+namespaces
+and groups based on your business needs and segment the administrators to have powers only within the namespace created/allocated for their use.
+Read-Only User Setup, RoleBinding, and Testing
+Finally, we can use the same
+methodology
+for creating READ-ONLY users, for use by, for example, auditors or developers who are granted read access to production clusters.
+Use the same process as before.
+Create an inline policy on the IAM console with just LIST and READ actions only as shown in Figure
+14-15
+and attach to the IAM group k8s-readonly.
+A screenshot represents a list of 16 actions that are allowed under E K S. It indicates 6 actions selected under the list and 10 actions selected under Read. The all button is selected to specify the resource A R Ns for these actions.
+Figure 14-15
+Granting permissions for the read-only user in IAM
+This time, we also remove the tagging rights, since if we are using tags for billing constructs, etc., we do not want read-only users messing them up; just list and read should be fine. Click the "Review Policy" button to go to the next screen of "Review policy":
+Name: IAM-Policy-for-k8sreadonly
+Click "Create Policy."
+Name the policy, review, and finish creating the policy as shown in Figure
+14-16
+.
+A screenshot represents the interface to review and create. It indicates the policy name under the policy details and the Create Policy button. A table at the bottom represents the details of service, access level, resource, and request condition.
+Figure 14-16
+Naming and creating the policy
+Once the policy is created, you can confirm the inline policy is correctly applied by going to the "Permissions" tab on the Group description as shown in Figure
+14-17
+.
+A screenshot represents the summary and permissions policies under the g r p k 8 s read-only. The policy name reads I A M policy for k 8 s read only and there are a few lines of code under it.
+Figure 14-17
+Confirming the permissions policy after attaching the read-only rights
+Now, grant rights on the K8S cluster itself; this time, we will use the cluster role named "view" as shown in Listing
+14-39
+.
+eksctl create iamidentitymapping --cluster myeks01 --arn arn:aws:iam::000381057009:user/k8sreadonly01 --group readonly --no-duplicate-arns
+shiva-eks@wks01:~$ eksctl create iamidentitymapping --cluster myeks01 --arn arn:aws:iam::000381057009:user/k8sreadonly01 --group readonly --no-duplicate-arns
+2023-08-27 15:21:57
+[ℹ]
+checking arn arn:aws:iam::000381057009:user/k8sreadonly01 against entries in the auth ConfigMap
+2023-08-27 15:21:57
+[ℹ]
+adding identity "arn:aws:iam::000381057009:user/k8sreadonly01" to auth ConfigMap
+shiva-eks@wks01:~$
+Listing 14-39
+Creating the iamidentitymapping for the k8sreadonly01 user to cluster role read-only
+The iamidentitymapping is created successfully; we can now visually confirm the same with the command shown in Listing
+14-40
+.
+eksctl get iamidentitymapping --cluster myeks01 -o json
+shiva-eks@wks01:~$ eksctl get iamidentitymapping --cluster myeks01 -o json
+[
+<SNIP>
+{
+"userarn": "arn:aws:iam::000381057009:user/k8sreadonly01",
+"groups": [
+"readonly"
+]
+}
+]shiva-eks@wks01:~$
+Listing 14-40
+Confirming the read-only role is correctly mapped
+We can see that the user k8sreadonly01 is correctly mapped to the cluster role read-only. Now, let us go ahead and create the clusterrolebinding also so that the user has rights inside the cluster as shown in Listing
+14-41
+.
+kubectl create clusterrolebinding readonly-binding --clusterrole=view --group=readonly
+shiva@wks01:~$ kubectl create clusterrolebinding readonly-binding --clusterrole=view --group=readonly
+clusterrolebinding.rbac.authorization.k8s.io/readonly-binding created
+shiva@wks01:~$
+Listing 14-41
+clusterrolebinding for the read-only user
+Testing As k8sreadonly01 User
+The
+clusterrolebinding
+is successful; we can now test. As before, log in as the k8sreadonly01 user on the workstation; assuming we have the AWS CLI setup for this user to use the IAM user k8sreadonly01 as we have set up for other users, we should now be able to operate on the cluster as shown in Listing
+14-42
+.
+kubectl get services
+k8sreadonly01@wks01:~$ kubectl get svc
+NAME         TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)        AGE
+kubernetes   ClusterIP   10.100.0.1       <none>        443/TCP        12h
+primeornot   NodePort    10.100.220.151   <none>        80:32187/TCP   84m
+k8sreadonly01@wks01:~$
+Listing 14-42
+Obtaining the cluster services as the k8sreadonly01 user
+Since the get operation is a read-only operation, and we have the required privileges, we are successful in executing this command.
+A deployment is a write operation; since it creates resources within the cluster, a deployment command by the user k8sreadonly01 would fail, as expected and shown in the following output:
+kubectl create deployment test01 --image=gitshiva/primeornot
+k8sreadonly01@wks01:~$ kubectl create deployment test01 --image=gitshiva/primeornot
+error: failed to create deployment: deployments.apps is forbidden: User "" cannot create resource "deployments"
+in
+API group "apps"
+in
+the namespace "default"
+k8sreadonly01@wks01:~$
+Summary
+In this chapter, we learned about various concepts such as setting up IAM users for various business purposes, granting them access to the cluster based on the concept of least privileges. We also deployed our applications to the EKS cluster and accessed the application services from the Internet.
+In the next chapter, we will learn about data persistence; since the container images are immutable, any information stored during the lifetime of the
+container
+exists only when it is running. If the container should be destroyed, the
+container
+that replaces it is started from the container image, which does not contain any runtime information the previous container may have held in its memory; thus, data persistence is an important concept in Kubernetes in general, and in AWS this is implemented by using EBS add-ons – this is the core of our next chapter.
+
+© The Author(s), under exclusive license to APress Media, LLC, part of Springer Nature 2023
+S. Subramanian
+Deploy Container Applications Using Kubernetes
+https://doi.org/10.1007/978-1-4842-9277-8_15
+15. Data Persistence in EKS
+Shiva Subramanian
+1
+(1)
+Georgia, GA, USA
+One of the most important things to take care of in Kubernetes is data persistence. Because each container and everything inside of it is lost when the container is destroyed, it becomes important to save the transactional data that the container may be processing. This chapter deals with how to store transactional data that’s inside the container
+memory
+when it’s running to be stored on a durable storage such as EBS in AWS.
+Storage Volumes for Kubernetes
+Much like in traditional operating systems, system administrators often create different mount points solely for the purpose of storing data, for example, in Windows, it is common for system
+administrators
+to use C: for operating system data and D: for storing data; similarly, the Linux system administrators typically leave /, the root fs, for operating system–related files and create specific mount points such as /data for storing transactional data.
+We take a similar approach in Kubernetes; in the simplest terms, we create a persistent volume (PV) backed by an underlying durable storage, then allow the pods to make a claim (PVC) against the PVs in the persistent storage, either whole or in parts.
+Demonstrating Lack of Persistence Inside the Pods
+Assuming we have a farm of nginx pods in our microk8s kubernetes cluster, our goal is to externalize the webroot where the html files (data) are typically stored. Typically, the default directory used by
+nginx
+for its content files is /usr/share/nginx/html, which we will mount from outside the container, so our changes to this directory are persistent.
+The first thing we have to do for this setup is to create a stock nginx deployment, which we can by creating a mynginx.yaml – the contents of the file are shown in Listing
+15-1
+. Create this file using your favorite editor; save and have it ready for deployment.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: mydeployment-ch15
+spec:
+selector:
+matchLabels:
+app: mynginx
+template:
+metadata:
+labels:
+app: mynginx
+spec:
+containers:
+- ports:
+- containerPort: 80
+name: mynginx
+image: nginx
+Listing 15-1
+Creating a stock nginx deployment
+Then apply it to create the deployment:
+microk8s kubectl apply -f mynginx.yaml
+shiva@wks01:~$ microk8s kubectl apply -f mynginx.yaml
+deployment.apps/mydeployment-ch15 created
+shiva@wks01:~$
+Now that the deployment is created, we can use the myservice01.yaml file to expose the web service, as shown in the deployment file in Listing
+15-2
+.
+apiVersion: v1
+kind: Service
+metadata:
+name: "myservice"
+spec:
+ports:
+- port: 80
+targetPort: 80
+type: LoadBalancer
+selector:
+app: "mynginx"
+Listing 15-2
+Contents of the deployment file for the service
+Enter the contents in Listing
+15-2
+using your favorite editor, name it myservice01.yaml, then apply it using the commands shown in Listing
+15-3
+.
+microk8s kubectl apply -f myservice01.yaml
+microk8s kubectl get service
+shiva@wks01:~$ microk8s kubectl apply -f myservice01.yaml
+service/myservice configured
+shiva@wks01:~$
+shiva@wks01:~$ microk8s kubectl get service
+NAME            TYPE           CLUSTER-IP       EXTERNAL-IP   PORT(S)        AGE
+kubernetes     ClusterIP     10.152.183.1    <none>     443/TCP       5h23m
+dep-webserver  LoadBalancer  10.152.183.146  <pending>  80:32151/TCP  5h18m
+myservice      LoadBalancer  10.152.183.142  <pending>  80:
+30439
+/TCP  5h13m
+shiva@wks01:~$
+Listing 15-3
+Applying and confirming the service deployment
+As noted before, port 30439 is the service port; thus, we will then be able to access the web service using port 30439 as shown in Listing
+15-4
+.
+curl -L localhost:30439
+shiva@wks01:~$ curl -L localhost:30439
+<!DOCTYPE html>
+<html>
+<head>
+<title>Welcome to nginx!</title>
+<style>
+<SNIP>
+<p><em>Thank you for using nginx.</em></p>
+</body>
+</html>
+shiva@wks01:~$
+Listing 15-4
+Confirming connection to the web server using the service port
+The web server is accessible as expected.
+Now, let’s log in to the POD that is serving this content and make some edits to the index.html file that has the web server contents as shown in Listing
+15-5
+.
+microk8s kubectl get pods
+microk8s kubectl exec -i -t mydeployment-ch15-74d9d4bc84-cx22h -- /bin/bash
+shiva@wks01:~$ microk8s kubectl get pods
+NAME                                READY  STATUS            RESTARTS     AGE
+mydeployment-55bb4df494-bzmxn       1/1    Running           0            39m
+dep-webserver-7d7459d5d7-cx9t9      1/1    Running           3 (44m ago)  5h19m
+primeornot                          1/1    Running           2 (44m ago)  4h55m
+mynginx02                           1/1    Running           2 (44m ago)  5h9m
+mydeployment-ch15-74d9d4bc84-cx22h  1/1    Running           0            4m36s
+this-pod-will-not-start             0/1    ImagePullBackOff  0            5h1m
+shiva@wks01:~$
+shiva@wks01:~$ microk8s kubectl exec -i -t mydeployment-ch15-74d9d4bc84-cx22h -- /bin/bash
+root@mydeployment-ch15-74d9d4bc84-cx22h:/#
+Listing 15-5
+Editing the stock index.html file inside the container
+Notice the prompt changed to
+root@mynginx-7dccfdf5c8-k77bn:/
+#
+since we are inside the pod now, as is evident from the command prompt; now we can edit the index.html using this bash command, since typical editor utilities such as ex or vim won’t be found inside the
+container
+, we have to resort to using the echo command and redirecting it to the index.html file as shown in Listing
+15-6
+.
+# run this inside the container shell prompt
+echo -e "<html>\n<title>\nnew title\n</title>\n<body>\nnew content\n</body>\n</html>" > /usr/share/nginx/html/index.html
+Listing 15-6
+Command to replace the contents of the index.html file
+After executing the preceding command, we would have updated the index.html at the appropriate location; now let’s log out from inside the container and repeat CURL from the host terminal (or use a new terminal) as shown in Listing
+15-7
+.
+exit # run inside container to get back to workstation
+curl -L localhost:30439
+root@mydeployment-ch15-74d9d4bc84-cx22h:/# exit
+exit
+shiva@wks01:~$ curl -L localhost:30439
+<html>
+<title>
+new title
+</title>
+<body>
+new content
+</body>
+</html>
+shiva@wks01:~$
+Listing 15-7
+Accessing the web server – expecting the updated content
+We notice that our content has changed as expected. Now, let us kill the pod and observe the results as shown in Listing
+15-8
+.
+microk8s kubectl delete pod mydeployment-ch15-74d9d4bc84-cx22h
+microk8s kubectl get deployment
+microk8s kubectl get pods
+shiva@wks01:~$ microk8s kubectl delete pod mydeployment-ch15-74d9d4bc84-cx22h
+pod "mydeployment-ch15-74d9d4bc84-cx22h" deleted
+shiva@wks01:~$
+shiva@wks01:~$ microk8s kubectl get deployment
+NAME      READY   UP-TO-DATE   AVAILABLE   AGE
+mynginx   1/1     1            1           29m
+# A new pod is re-launched by kubernetes automatically
+shiva@wks01:~$ microk8s kubectl get pods
+NAME                                READY  STATUS            RESTARTS     AGE
+mydeployment-55bb4df494-bzmxn       1/1    Running           0            46m
+dep-webserver-7d7459d5d7-cx9t9      1/1    Running           3 (51m ago)  5h26m
+primeornot                          1/1    Running           2 (51m ago)  5h2m
+mynginx02                           1/1    Running           2 (51m ago)  5h16m
+this-pod-will-not-start             0/1    ImagePullBackOff  0            5h8m
+mydeployment-ch15-74d9d4bc84-fwnpd  1/1    Running           0            31s
+shiva@wks01:~$
+Listing 15-8
+Deleting the pod with our changes
+We can see that a new pod has been created, as evidenced by the new pod name; now what does the index.html look like? Check it out as shown in Listing
+15-9
+.
+shiva@wks01:~$ curl -L localhost:30439
+<!DOCTYPE html>
+<html>
+<head>
+<title>Welcome to nginx!</title>
+<style>
+<SNIP>
+<p><em>Thank you for using nginx.</em></p>
+</body>
+</html>
+shiva@wks01:~$
+Listing 15-9
+Accessing the web server again
+As expected, the content has been replaced; since our changes were discarded along with the pod when we killed it and when the pod was recreated using the image file, the original index.html was restored as that’s what is stored in the container image. The persistence is lost.
+But we need the ability to keep our changes to index.html though … somehow we need to externalize the
+/usr/share/nginx/html
+directory onto a persistent storage, so our changes are permanent.
+Let us see how we can accomplish this.
+Persistent Volumes in microk8s Kubernetes Cluster
+First, we will set up
+PVs
+in our microk8s cluster, then extend the same concepts in AWS.
+The first thing we would like to do is create a persistent volume of a certain size; in our case, we’ll use an existing filesystem to act as the durable storage (PV) for this setup. A good reading on setting up storage volumes on
+Kubernetes
+is here:
+https://codeburst.io/kubernetes-storage-by-example-part-2-a8fbebf82c23
+.
+Creating a PV
+Continuing along, first, let us delete the previous deployment named
+mynginx
+, then proceed to create a folder on the host (node) named /nginxdata, as shown in Listing
+15-10
+, which would act as the persistent volume, where we would like to store all our web content.
+microk8s kubectl delete deployment mydeployment-ch15
+sudo mkdir /nginxdata
+shiva@wks01:~$ microk8s kubectl delete deployment mydeployment-ch15
+deployment.apps "mydeployment-ch15" deleted
+shiva@wks01:~$
+shiva@wks01:~$ sudo mkdir /nginxdata
+shiva@wks01:~$
+Listing 15-10
+Creating a directory to act as the PV
+Let us ensure we have more than 2GB available in the host filesystem first, since we would like to define a PV of size 2GB; otherwise, the operation would fail due to lack of available disk space. We can do that with the Linux df command as shown in Listing
+15-11
+.
+df -h /
+shiva@wks01:~$ df -h /
+Filesystem                         Size  Used
+Avail
+Use% Mounted on
+/dev/mapper/ubuntu--vg-ubuntu--lv   38G   12G
+25G
+32% /
+shiva@wks01:~$
+Listing 15-11
+Confirming > 2GB is available on the host filesystem
+Avail = 2.8GB, so we should be okay. The manifest file to creating the PV is shown in Listing
+15-12
+; create the file, name it pv.yaml using the contents shown in Listing
+15-12
+using your favorite editor, save it, then we can apply it.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+name: nginxdata
+spec:
+accessModes:
+- ReadWriteOnce
+capacity:
+storage: 2Gi
+hostPath:
+path: /nginxdata
+storageClassName: webcontent
+Listing 15-12
+Deployment file for the persistent volume
+The fields are explained as follows:
+The apiVersion is standard, v1.
+The kind, like service, is PersistentVolume since we want to create a resource of type PersistentVolume.
+The metadata section is for our own reference:
+name: We’ve named the PV nginxdata consistent with its intended usage.
+spec
+accessModes → ReadWriteOnce
+As per the Kubernetes documentation at
+https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes
+, The access modes are:
+ReadWriteOnce
+, wherein the
+volume
+can be mounted as read-write by a single node. ReadWriteOnce access mode still can allow multiple pods to access the volume when the pods are running on the same node.
+ReadOnlyMany
+, wherein the
+volume
+can be mounted as read-only by many nodes.
+ReadWriteMany
+, wherein the
+volume
+can be mounted as read-write by many nodes.
+ReadWriteOncePod
+, wherein the volume can be mounted as read-write by a single Pod. Use
+ReadWriteOncePod
+access mode if you want to ensure that only one pod across the whole cluster can read that PVC or write to it. This is only supported for CSI volumes and Kubernetes version 1.22+.
+Since we are only dealing with one node in our microk8s case, we are okay to use ReadWriteOnce; other types are given for your reference.
+capacity -> 2GB, that is, we are indicating to the cluster that this PV is of size 2GB.
+hostPath -> path: /nginxdata where this volume is located on the host; in our case, this is a directory that we created on the host where microk8s is running.
+storageClassName
+Again, as per the Kubernetes documentation at
+https://kubernetes.io/docs/concepts/storage/storage-classes/
+, “Introduction – A StorageClass provides a way for administrators to describe the “classes” of storage they offer. Different
+classes
+might map to quality-of-service levels, or to backup policies, or to arbitrary policies determined by the cluster administrators. Kubernetes itself is unopinionated about what classes represent. This concept is sometimes called “profiles” in other storage systems.”
+Then, this field value seems somewhat arbitrary, in that we can group all SSD into a StorageClass we name “fast” and all magnetic storage items into “slow”; in our case, since we are wanting to only store web content in the volume, we have given the StorageClass the name “webcontent” to indicate the purpose of that directory.
+Now, let’s create the PV by applying the deployment file as shown in Listing
+15-13
+.
+microk8s kubectl apply -f pv.yaml
+microk8s kubectl get pv
+shiva@wks01:~$ microk8s kubectl apply -f pv.yaml
+persistentvolume/nginxdata created
+shiva@wks01:~$
+shiva@wks01:~$ microk8s kubectl get pv
+NAME        CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS      CLAIM   STORAGECLASS   REASON   AGE
+nginxdata   2Gi        RWO            Retain           Available           webcontent              7s
+shiva@wks01:~$
+Listing 15-13
+Applying the deployment file to create the PV and confirmation
+You can see that the PV is STATUS Available, but what about the RECLAIM POLICY? More on that later. You can also see that the ACCESS MODES state RWO, short for ReadWriteOnce.
+As per the K8S docs, in the CLI, the access modes are abbreviated to
+RWO – ReadWriteOnce
+ROX – ReadOnlyMany
+RWX – ReadWriteMany
+RWOP – ReadWriteOncePod
+Creating a PVC
+Now that we have the PV created and it is available for the cluster to use, it is time to make a claim from the pod, so that the pod can use this storage space. Listing
+15-14
+shows the contents of the
+deployment
+file for the persistent volume claim (PVC); create the file using your favorite editor and save it named pvc.yaml as shown in Listing
+15-14
+.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+name: webdata
+spec:
+accessModes:
+- ReadWriteOnce
+resources:
+requests:
+storage: 1Gi
+storageClassName: webdata
+Listing 15-14
+Deployment file contents for the PVC
+Note that the storage request here should be less than the available space in the PV; otherwise, the claim will NOT be satisfied by the cluster, since resources won’t be available.
+Apply the pvc.yaml file, then check the status of the PVC as shown in Listing
+15-15
+.
+microk8s kubectl apply -f pvc.yaml
+microk8s kubectl get pvc
+shiva@wks01:~$ microk8s kubectl apply -f pvc.yaml
+persistentvolumeclaim/webdata created
+shiva@wks01:~$
+shiva@wks01:~$ microk8s kubectl get pvc
+NAME      STATUS    VOLUME   CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+webdata   Pending                                      webdata        19s
+shiva@wks01:~$
+Listing 15-15
+Obtaining status of the PVC
+This has been pending for a while. The astute reader would have noticed that the storageclass available as per PV (
+webcontent
+) doesn’t match what is being requested here (
+webdata
+) – let us check on that as shown in Listing
+15-16
+.
+microk8s kubectl get pv
+shiva@wks01:~$ microk8s kubectl get pv
+NAME        CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS      CLAIM
+STORAGECLASS
+REASON   AGE
+nginxdata   2Gi        RWO            Retain           Available
+webcontent
+2m15s
+shiva@wks01:~$
+Listing 15-16
+Obtaining the STORAGECLASS name of the PV
+Notice the STORAGECLASS = webcontent in the PV.
+What is being requested via pvc is webdata; that’s why the PVC was stuck and will be stuck until we create a storageclass named webdata or fix our error in the pvc.yaml file and redeploy. Let us choose the latter to update the PVC deployment file to match the storageclass name as per the PV and redeploy.
+First, we delete the incorrect PVC deployment, then update the pvc.yaml file, then redeploy as shown in Listing
+15-17
+.
+microk8s kubectl delete pvc webdata
+microk8s kubectl delete -f pv.yaml
+vi pvc.yaml
+cat pvc.yaml
+microk8s kubectl apply -f pv.yaml
+microk8s kubectl apply -f pvc.yaml
+microk8s kubectl get pvc
+shiva@wks01:~$ microk8s kubectl delete pvc webdata
+persistentvolumeclaim "webdata" deleted
+shiva@wks01:~$
+shiva@wks01:~$ microk8s kubectl delete -f pv.yaml
+persistentvolume "nginxdata" deleted
+shiva@wks01:~$
+shiva@wks01:~$ vi pvc.yaml # fix change webdata to webcontent
+shiva@wks01:~$ cat pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+name: webcontent
+spec:
+accessModes:
+- ReadWriteOnce
+resources:
+requests:
+storage: 1Gi
+storageClassName: webcontent
+shiva@wks01:~$ microk8s kubectl apply -f pv.yaml
+persistentvolume/nginxdata created
+shiva@wks01:~$
+shiva@wks01:~$ microk8s kubectl apply -f pvc.yaml
+persistentvolumeclaim/webdata created
+shiva@wks01:~$
+shiva@wks01:~$ microk8s kubectl get pvc
+NAME      STATUS   VOLUME      CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+webdata   Bound    nginxdata   2Gi        RWO            webcontent     21s
+shiva@wks01:~$
+Listing 15-17
+Deleting incorrect pvc and pv deployment, updating pvc.yaml, and redeploying
+After we fixed the error and reapplied, we can see that the pvc is successful, and the status shows BOUND. This means this PVC can be utilized by the pods.
+Now, it’s time to actually use this PVC in a pod. How do we do that? We need to add a few additional parameters to our deployment file. Create a new mynginx-pvc.yaml file which includes the deployment along with the PVC to be used as shown in Listing
+15-18
+; create this file using your favorite editor; save and have it ready for deployment.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: mydeployment-ch15pvc
+spec:
+selector:
+matchLabels:
+app: mynginx
+template:
+metadata:
+labels:
+app: mynginx
+spec:
+containers:
+- ports:
+- containerPort: 80
+name: mynginx
+image: nginx
+volumeMounts:
+- name: nginxdata
+mountPath: /usr/share/nginx/html
+volumes:
+- name: nginxdata
+persistentVolumeClaim:
+claimName: webcontent
+Listing 15-18
+Contents of the mynginx-pvc.yaml deployment file including PVC
+The preceding nginx deployment file is very much similar to the ones we have used in previous chapters. Notice that we added a few lines to that deployment file indicating the volumeMounts and information about the volume itself, so the pod could utilize durable storage; let us examine them.
+volumeMounts is the section, name is the name of the volume, and mountPath indicates that this volume needs to be mounted in the path given inside of the pods. Thus, essentially what we have done is externalized the /usr/share/nginx/html directory to the PVC-based storage; thus, even if the pod is destroyed, the contents of the PVC are saved. When Kubernetes relaunches the pod to meet the deployment desired state, the contents of the /usr/share/nginx/html/index.html will be read from the PVC, which is persistent.
+volumes is the section, name is the name of the volume, and persistentVolumeClaim indicates the name of the pvc that we created where we intended to store the webdata.
+Note
+If you have the previous deployment of mynginx that we created previously, please delete both the deployment and the service before proceeding, so the system is clean.
+Now that we have the required updates to the mynginx.html file to include the PVC, let us proceed forward with deploying using this updated file as shown in Listing
+15-19
+.
+microk8s kubectl apply -f mynginx-pvc.yaml
+shiva@wks01:~$ microk8s kubectl apply -f mynginx-pvc.yaml
+deployment.apps/mydeployment-ch15pvc created
+shiva@wks01:~$
+Listing 15-19
+Redeploying mynginx.yaml with PVC
+Let us recreate the
+LoadBalancer service
+. No changes to the manifest file, so just rerun the command as shown in Listing
+15-20
+.
+microk8s kubectl apply -f myservice01.yaml
+microk8s kubectl get service
+shiva@wks01:~$ microk8s kubectl apply -f myservice01.yaml
+service/myservice unchanged
+shiva@wks01:~$ microk8s kubectl get service
+NAME          TYPE          CLUSTER-IP    EXTERNAL-IP PORT(S)       AGE
+kubernetes    ClusterIP    10.152.183.1   <none>      443/TCP       5h39m
+dep-webserver LoadBalancer 10.152.183.146 <pending>   80:32151/TCP  5h34m
+myservice     LoadBalancer 10.152.183.142 <pending>   80:30439/TCP  5h29m
+shiva@wks01:~$
+Listing 15-20
+Recreating the LoadBalancer service
+Placing and Serving nginx Content from the PVC-Backed Filesystem
+Now that the LoadBalancer is also
+created
+, we can see that the external port of the web server is :32614; we can access the web server using this port. We access it as shown in Listing
+15-21
+.
+curl -L localhost:30439
+shiva@wks01:~$ curl -L localhost:30439
+<html>
+<head><title>403 Forbidden</title></head>
+<body>
+<center><h1>403 Forbidden</h1></center>
+<hr><center>nginx/1.23.3</center>
+</body>
+</html>
+shiva@wks01:~$
+Listing 15-21
+Accessing the web server with contents served from the PVC
+Alas! 403 Forbidden!! Why so? Web admins would recall that the said mount point doesn’t have an index.html file yet; nginx, not seeing the index.html, is throwing this error. So we need to create the index.html file in the host directory of /nginxdata as shown in Listing
+15-22
+.
+sudo chown shiva:shiva /nginxdata
+sudo chmod 755 /nginxdata
+echo -e "<html>\n<title>\nnew title\n</title>\n<body>\nnew content\n</body>\n</html>" > /nginxdata/index.html
+shiva@wks01:~$ sudo chown shiva:shiva /nginxdata
+# or whatever group the localuser is a member of.
+shiva@wks01:~$ sudo chmod 755 /nginxdata
+# use 777 for chown permissions if all else fails - but this is not advised.
+shiva@wks01:~$ echo -e "<html>\n<title>\nnew title\n</title>\n<body>\nnew content\n</body>\n</html>" > /nginxdata/index.html
+shiva@wks01:~$
+Listing 15-22
+Creating the index.html file in the persistent storage layer
+Now that we have created the index.html file in the persistent storage, which is then shared with the pod via the PVC, this file can now be read by the nginx pod, which should then serve it; we can test it as shown in Listing
+15-23
+.
+curl localhost:30439
+shiva@wks01:~$ curl localhost:30439
+<html>
+<title>
+new title
+</title>
+<body>
+new content
+</body>
+</html>
+shiva@wks01:~$
+Listing 15-23
+Accessing the web server with contents served from the PVC
+It works! nginx is returning the new index.html from our mount point as opposed to the default file from inside the container.
+We can conduct more testing by scaling up the pods and using the same PVC; all the pods should return the same content. Let us first check how many pods are in this deployment as shown in Listing
+15-24
+.
+microk8s kubectl get deployments
+shiva@wks01:~$ microk8s kubectl get deployments
+NAME                   READY   UP-TO-DATE   AVAILABLE   AGE
+mydeployment-ch15pvc   1/1     1            1           54m
+shiva@wks01:~$
+Listing 15-24
+Checking the number of pods in the current deployment
+There’s just one pod; now, let’s scale up the pods to three replicas as shown in Listing
+15-25
+.
+microk8s kubectl scale --replicas 3 deployment mydeployment-ch15pvc
+microk8s kubectl get deployments
+shiva@wks01:~$ microk8s kubectl scale --replicas 3 deployment mydeployment-ch15pvc
+deployment.apps/mydeployment-ch15pvc scaled
+shiva@wks01:~$
+shiva@wks01:~$ microk8s kubectl get deployments
+NAME                   READY   UP-TO-DATE   AVAILABLE   AGE
+mydeployment-ch15pvc   3/3     3            3           56m
+shiva@wks01:~$
+Listing 15-25
+Scaling up the deployment
+Let us confirm the deployment scaled up as requested, as shown in Listing
+15-26
+.
+microk8s kubectl get pods
+shiva@wks01:~$ microk8s kubectl get pods
+NAME                                   READY   STATUS    RESTARTS   AGE
+mydeployment-ch15pvc-fb65494b8-rmtst   1/1     Running   0          57m
+mydeployment-ch15pvc-fb65494b8-6j8x8   1/1     Running   0          85s
+mydeployment-ch15pvc-fb65494b8-p9bph   1/1     Running   0          85s
+shiva@wks01:~$
+Listing 15-26
+Confirming scale-up activity is successful
+We can also confirm the same by describing the service and counting the number of Endpoints, which should match the required number of replicas as shown in Listing
+15-27
+.
+microk8s kubectl describe service myservice
+shiva@wks01:~$ microk8s kubectl describe service myservice
+Name:                     myservice
+Namespace:                default
+Labels:                   <none>
+Annotations:              <none>
+Selector:                 app=mynginx
+Type:                     LoadBalancer
+IP Family Policy:         SingleStack
+IP Families:              IPv4
+IP:                       10.152.183.191
+IPs:                      10.152.183.191
+Port:                     <unset>  80/TCP
+TargetPort:               80/TCP
+NodePort:                 <unset>  30439/TCP
+Endpoints:
+10.1.166.3:80,10.1.166.4:80,10.1.166.5:80
+Session Affinity:         None
+<SNIP
+shiva@wks01:~$
+Listing 15-27
+Confirming scale-up activity is successful – alternate way
+Notice that the Endpoints have increased to three, matching the number of replicas we asked for.
+Let us hit the web server and see what content it is serving. We can do that using a simple bash script running on the command line as shown in Listing
+15-28
+.
+i=0;
+while
+[ $i -le 13 ];
+do
+curl localhost:32614; ((i=i+1)); echo -e "count: $i \n";
+done
+shiva@wks01:~$ i=0;
+while
+[ $i -le 13 ];
+do
+curl localhost:30439; ((i=i+1)); echo -e "count: $i \n";
+done
+<html>
+<title>
+new title
+</title>
+<body>
+new content
+</body>
+</html>
+count: 1
+<html>
+<title>
+new title
+</title>
+<body>
+new content
+</body>
+</html>
+count: 2
+<SNIP>
+<html>
+<title>
+new title
+</title>
+<body>
+new content
+</body>
+</html>
+count: 14
+shiva@wks01:~$
+Listing 15-28
+Accessing the web server via the command line
+Now that we have hit the web server some 14 times, the content remains the same, but did we hit all the web servers/pods? We can check that by examining the access.log of each of the
+pods
+as shown in Listing
+15-29
+. Note that your pod names might be different; please use your pod names if you are following along on your system as shown in Listing
+15-29
+.
+microk8s kubectl logs mydeployment-ch15pvc-fb65494b8-rmtst --tail 7
+microk8s kubectl logs mydeployment-ch15pvc-fb65494b8-6j8x8 --tail 7
+microk8s kubectl logs mydeployment-ch15pvc-fb65494b8-p9bph --tail 7
+shiva@wks01:~$ microk8s kubectl logs mydeployment-ch15pvc-fb65494b8-rmtst --tail 7
+2023/08/27 16:59:46 [notice] 1#1: start worker process 28
+2023/08/27 16:59:46 [notice] 1#1: start worker process 29
+192.168.0.81 - - [27/Aug/2023:17:00:02 +0000] "GET / HTTP/1.1" 200 69 "-" "curl/7.81.0" "-"
+192.168.0.81 - - [27/Aug/2023:17:04:16 +0000] "GET / HTTP/1.1" 200 69 "-" "curl/7.81.0" "-"
+192.168.0.81 - - [27/Aug/2023:17:04:16 +0000] "GET / HTTP/1.1" 200 69 "-" "curl/7.81.0" "-"
+192.168.0.81 - - [27/Aug/2023:17:04:16 +0000] "GET / HTTP/1.1" 200 69 "-" "curl/7.81.0" "-"
+192.168.0.81 - - [27/Aug/2023:17:04:16 +0000] "GET / HTTP/1.1" 200 69 "-" "curl/7.81.0" "-"
+shiva@wks01:~$ microk8s kubectl logs mydeployment-ch15pvc-fb65494b8-6j8x8 --tail 7
+2023/08/27 17:01:07 [notice] 1#1: start worker process 30
+192.168.0.81 - - [27/Aug/2023:17:04:16 +0000] "GET / HTTP/1.1" 200 69 "-" "curl/7.81.0" "-"
+192.168.0.81 - - [27/Aug/2023:17:04:16 +0000] "GET / HTTP/1.1" 200 69 "-" "curl/7.81.0" "-"
+192.168.0.81 - - [27/Aug/2023:17:04:16 +0000] "GET / HTTP/1.1" 200 69 "-" "curl/7.81.0" "-"
+192.168.0.81 - - [27/Aug/2023:17:04:16 +0000] "GET / HTTP/1.1" 200 69 "-" "curl/7.81.0" "-"
+192.168.0.81 - - [27/Aug/2023:17:04:16 +0000] "GET / HTTP/1.1" 200 69 "-" "curl/7.81.0" "-"
+192.168.0.81 - - [27/Aug/2023:17:04:16 +0000] "GET / HTTP/1.1" 200 69 "-" "curl/7.81.0" "-"
+shiva@wks01:~$ microk8s kubectl logs mydeployment-ch15pvc-fb65494b8-p9bph --tail 7
+2023/08/27 17:01:07 [notice] 1#1: start worker processes
+2023/08/27 17:01:07 [notice] 1#1: start worker process 29
+2023/08/27 17:01:07 [notice] 1#1: start worker process 30
+192.168.0.81 - - [27/Aug/2023:17:04:16 +0000] "GET / HTTP/1.1" 200 69 "-" "curl/7.81.0" "-"
+192.168.0.81 - - [27/Aug/2023:17:04:16 +0000] "GET / HTTP/1.1" 200 69 "-" "curl/7.81.0" "-"
+192.168.0.81 - - [27/Aug/2023:17:04:16 +0000] "GET / HTTP/1.1" 200 69 "-" "curl/7.81.0" "-"
+192.168.0.81 - - [27/Aug/2023:17:04:16 +0000] "GET / HTTP/1.1" 200 69 "-" "curl/7.81.0" "-"
+shiva@wks01:~$
+Listing 15-29
+Reviewing nginx logs via pod logs to confirm we accessed all the pods
+You can see that all the pods have been hit with the web requests, and all of them returned the same content, since all the pods are using the same mount point being served by the same underlying PVC, recalling that we just scaled the deployment using the same manifest file.
+Releasing the PVC and PV
+Now, let us release the
+PVC
+and the PV so as to learn about the cleanup process. First, all the pods using the PVC must be destroyed – destroy the deployment as shown in Listing
+15-30
+.
+microk8s kubectl delete deployment mydeployment-ch15pvc
+shiva@wks01:~$ microk8s kubectl delete deployment mydeployment-ch15pvc
+deployment.apps "mydeployment" deleted
+shiva@wks01:~$
+shiva@wks01:~$ microk8s kubectl get pvc
+NAME         STATUS  VOLUME     CAPACITY  ACCESS MODES  STORAGECLASS   AGE
+webcontent   Bound   nginxdata  2Gi       RWO           webcontent     9h
+shiva@wks01:~$
+Listing 15-30
+Destroying the mynginx deployment
+Next, we can delete the PVC itself, since no pod is using this claim, as shown in Listing
+15-31
+.
+microk8s kubectl delete pvc webcontent
+microk8s kubectl get pvc
+shiva@wks01:~$ microk8s kubectl delete pvc webcontent
+persistentvolumeclaim "webcontent" deleted
+shiva@wks01:~$
+shiva@wks01:~$ microk8s kubectl get pvc
+No resources found
+in
+default namespace.
+shiva@wks01:~$
+Listing 15-31
+Deleting the PVC and confirmation
+Next, we can delete the PV itself, since no PVC is present against this PV. Delete the PV as shown in Listing
+15-32
+.
+microk8s kubectl get pv
+microk8s kubectl delete pv nginxdata
+microk8s kubectl get pv
+shiva@wks01:~$ microk8s kubectl get pv
+NAME        CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS     CLAIM                STORAGECLASS   REASON   AGE
+nginxdata   2Gi        RWO            Retain           Released   default/webcontent   webcontent              9h
+shiva@wks01:~$
+shiva@wks01:~$ microk8s kubectl delete pv nginxdata
+persistentvolume "nginxdata" deleted
+shiva@wks01:~$ microk8s kubectl get pv
+No resources found
+shiva@wks01:~$
+Listing 15-32
+Deleting the PV and confirmation
+Great! Now, how do we do this in AWS? The process is very similar.
+Persistent Volumes in AWS EKS
+Let us first deploy a
+stock nginx
+container and access it to ensure we have our prerequisites covered. From the workstation where you have your kubectl and aws cli setup, create a deployment file with the contents from Listing
+15-33
+and have it ready for
+deployment
+.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: mydeployment
+spec:
+selector:
+matchLabels:
+app: label-nginx
+template:
+metadata:
+labels:
+app: label-nginx
+spec:
+containers:
+- ports:
+- containerPort: 80
+name: name-nginx
+image: nginx
+Listing 15-33
+Contents of mydeployment.yaml for use with AWS EKS
+With the deployment file ready, deploying is straightforward as we have done earlier; run the deployment command as “shiva,” “shiva-eks,” or another admin user who has admin rights on the AWS EKS cluster as shown in Listing
+15-34
+– note the switch to using kubectl commands, which is already aware of the EKS cluster.
+shiva@wks01:~/git/myeks01$ kubectl apply -f mydeployment.yaml
+deployment.apps/mydeployment created
+shiva@wks01:~/git/myeks01$
+Listing 15-34
+Deploying stock nginx to AWS EKS
+As before, we have to create a service to access the web server; thus, we create a service via the command line and get the details of the port as shown in Listing
+15-35
+.
+kubectl create service nodeport label-nginx --tcp=80:80
+kubectl get services
+shiva@wks01:~/git/myeks01$ kubectl create service nodeport label-nginx --tcp=80:80
+service/label-nginx created
+shiva@wks01:~/git/myeks01$
+shiva@wks01:~/git/myeks01$ kubectl get services
+NAME          TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE
+kubernetes    ClusterIP   10.100.0.1      <none>        443/TCP        40d
+label-nginx   NodePort    10.100.117.28   <none>        80:
+31747
+/TCP   116s
+primeornot    NodePort    10.100.17.135   <none>        80:
+30969
+/TCP   40d
+shiva@wks01:~/git/myeks01$
+Listing 15-35
+Creating the service and verifying
+We can see that the service is created and exposed on port :30969; now the only thing remaining is to access the website, for that we need the external IP of the node also, and as before, we can find the external IP of the node via the command shown in Listing
+15-36
+.
+kubectl describe nodes | grep -i ExternalIP
+shiva@wks01:~/git/myeks01$
+ExternalIP:   3.141.29.3
+shiva@wks01:~/git/myeks01$
+Listing 15-36
+Obtaining the node’s external IP
+Now that we have the node’s external
+IP
+, as before the format for accessing the web server is http://<Node’s External IP>:<NodePort where the service is exposed>; in our case, that would be
+http://3.141.29.3:31747
+. We can access it as shown in Listing
+15-37
+.
+shiva@wks01:~/git/myeks01$ curl 3.141.29.3:31747
+curl: (28) Failed to connect to 3.141.29.3 port 31747 after 130711 ms: Connection timed out
+shiva@wks01:~/git/myeks01$
+Listing 15-37
+Accessing the web server
+Remember that the security group needs to be updated to allow incoming traffic on port 31747, so let us update that as shown in Figure
+15-1
+. Go to EKS ➤ Clusters ➤ myeks01 ➤ Networking tab, then click Security Group under “Cluster security group,” which opens a new browser tab; there, select the “Inbound rules” tab.
+A screenshot of the Amazon a w s console represents a table under the Security Groups section providing the details of name, group I D, group name, V P C I D, and owner. A table under the inbound rule denotes the security group rule, I P version, type, protocol, port range, and source.
+Figure 15-1
+Editing the inbound rules of the Cluster Security Group
+Notice only 30969 is
+allowed
+, which we did earlier; since this new service is now running on port :31747, we need to add :31747 to the open port list, by clicking the “Edit inbound rules,” as shown in Figure
+15-2
+.
+A screenshot represents the interface to edit inbound rules. It comprises the settings to edit the type, protocol, port range, source, and description.
+Figure 15-2
+Adding a new rule
+As before, click “Add rule” with the following details:
+Type: Custom TCP
+Port range: 31747
+Source: Custom, 0.0.0.0/0
+Description (Optional): service mynginx
+Then click “Save rules” to update this security group, which now should permit inbound rules on the :31747 port where our
+nginx deployment
+is running. The updated rules are shown in Figure
+15-3
+.
+A screenshot of the Amazon a w s console represents the details of the security groups and inbound rules. A message at the top explains that the inbound security group rules are successfully modified on security group.
+Figure 15-3
+Updated inbound rules, including port :31747
+Once this security group is
+updated
+, we can retry our curl command as shown in Listing
+15-38
+.
+curl 3.141.29.3:31747
+shiva@wks01:~/git/myeks01$ curl 3.141.29.3:31747
+<!DOCTYPE html>
+<html>
+<head>
+<title>Welcome to nginx!</title>
+<style>
+<SNIP>
+<p><em>Thank you
+for
+using nginx.</em></p>
+</body>
+</html>
+shiva@wks01:~/git/myeks01$
+Listing 15-38
+Accessing nginx running on the AWS EKS cluster
+We can also do the same in a browser, which should yield identical results, albeit the browser one being a little user-friendly as shown in Figure
+15-4
+.
+A screenshot of a web browser represents the welcome screen of the n g i n x. A set of texts under the heading explains that the n g i n x web server is successfully installed. There are a couple of links for online documentation and commercial support.
+Figure 15-4
+Accessing nginx running on the AWS EKS cluster via a browser
+Now that we have a deployed nginx container and can access it from the Internet, we observe that the index.html is the stock version; which we now need to externalize from the container, so we can make updates to the index.html without having to burn the html files into the container and keep replacing them every
+time
+we need to make a change to the content.
+The question is where or what is the underlying storage mechanism for the persistent volumes going to come from? Recall that in our microk8s instance, we just created a directory on the host machine to act as our durable storage; that isn’t going to work in the AWS EKS instance, since we typically do not have access to the underlying compute nodes.
+Kubernetes supports multiple underlying storage mechanisms such as NFS, iSCSI, or a cloud provider–specific storage system.
+AWS also provides us with a couple of different options.
+As per the AWS documentation at
+https://aws.amazon.com/premiumsupport/knowledge-center/eks-persistent-storage/
+we have two choices: we can either utilize EBS or EFS for providing persistent storage; in our case, we’ll use EFS since it provides a filesystem akin to NFS, upon which we can store our webcontent (nginx html files).
+Thus, we should deploy the
+Amazon EFS
+CSI driver; here, CSI stands for Container Storage Interface, and this driver is needed for making Kubernetes aware of the underlying storage – think of it as the Fiber Channel drivers you had to install in the early days of the Fiber Channel connectivity to the back-end storage devices.
+Detailed specifications and limitations of this driver are listed here:
+https://docs.aws.amazon.com/eks/latest/userguide/efs-csi.html
+– for our purposes, the EFS CSI driver will do.
+Since we decided to use the EFS, we will follow the instructions given here:
+https://aws.amazon.com/premiumsupport/knowledge-center/eks-persistent-storage/
+First, we need an
+IAM role
+that allows the CSI driver service account to make calls on our behalf. We can download the policy file as shown in Listing
+15-39
+and as given in the preceding instruction set.
+curl -o iam-policy-example.json https://raw.githubusercontent.com/kubernetes-sigs/aws-efs-csi-driver/v1.2.0/docs/iam-policy-example.json
+shiva@wks01:~$ curl -o iam-policy-example.json https://raw.githubusercontent.com/kubernetes-sigs/aws-efs-csi-driver/v1.2.0/docs/iam-policy-example.json
+% Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+Dload  Upload   Total   Spent    Left  Speed
+0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--  100   732  100   732    0     0   3306      0 --:--:-- --:--:-- --:--:--  3312
+shiva@wks01:~$
+Listing 15-39
+IAM policy download
+You can also edit the example policy and/or create it yourself, but following the DRY (Don’t Repeat Yourself) principle, we will just use the existing policy which fits our use case nicely. Then we create the IAM policy with the aforementioned input file using the aws iam create-policy command as shown in Listing
+15-40
+.
+aws iam create-policy \
+--policy-name AmazonEKS_EFS_CSI_Driver_Policy \
+--policy-document file://iam-policy-example.json
+shiva@wks01:~$ aws iam create-policy \
+--policy-name AmazonEKS_EFS_CSI_Driver_Policy \
+--policy-document file://iam-policy-example.json
+{
+"Policy": {
+"PolicyName": "AmazonEKS_EFS_CSI_Driver_Policy",
+"PolicyId": "ANPAQAFVWO7YRV4CIXPPM",
+"Arn": "arn:aws:iam::000381057009:policy/AmazonEKS_EFS_CSI_Driver_Policy",
+"Path": "/",
+"DefaultVersionId": "v1",
+"AttachmentCount": 0,
+"PermissionsBoundaryUsageCount": 0,
+"IsAttachable": true,
+"CreateDate": "2022-12-25T22:42:34+00:00",
+"UpdateDate": "2022-12-25T22:42:34+00:00"
+}
+}
+shiva@wks01:~$
+Listing 15-40
+Creating the IAM policy required for the CSI driver
+The policy is created, and the policy ID and ARN are given as outputs to that command. Note them both; we will need them later. Now we will proceed with creating the iamservice account, which takes the format shown in Listing
+15-41
+.
+eksctl create iamserviceaccount \
+--cluster my-cluster \
+--namespace kube-system \
+--name efs-csi-controller-sa \
+--attach-policy-arn <ARN from Listing 15-40 where we created this policy> \
+--approve \
+--region region-code
+Listing 15-41
+The command to create the required iamserviceaccount
+The parameters my-cluster, policy-arn, and region need to be updated to match our instance of
+Kubernetes cluster
+; thus, the command becomes as shown in Listing
+15-42
+, where we also associate our EKS cluster with the AWS OIDC provider first.
+eksctl utils associate-iam-oidc-provider --region=us-east-2 --cluster=myeks01 --approve
+eksctl create iamserviceaccount \
+--cluster myeks01 \
+--namespace kube-system \
+--name efs-csi-controller-sa \
+--attach-policy-arn arn:aws:iam::000381057009:policy/AmazonEKS_EFS_CSI_Driver_Policy \
+--approve \
+--region us-east-2
+shiva-eks@wks01:~/eks$ eksctl utils associate-iam-oidc-provider --region=us-east-2 --cluster=myeks01 --approve
+2023-08-27 17:19:04 [
+ℹ
+]  will create IAM Open ID Connect provider for cluster "myeks01" in "us-east-2"
+2023-08-27 17:19:04 [✔]  created IAM Open ID Connect provider for cluster "myeks01" in "us-east-2"
+shiva-eks@wks01:~/eks$
+shiva@wks01:~$ eksctl create iamserviceaccount \
+--cluster myeks01 \
+--namespace kube-system \
+--name efs-csi-controller-sa \
+--attach-policy-arn arn:aws:iam::000381057009:policy/AmazonEKS_EFS_CSI_Driver_Policy \
+--approve \
+--region us-east-2 # press enter
+# System starts to output as it executes the above command
+2022-12-25 22:59:53 [
+ℹ
+]  1 existing iamserviceaccount(s) (kube-system/efs-csi-controller-sa) will be excluded
+2022-12-25 22:59:53 [
+ℹ
+]  1 iamserviceaccount (kube-system/efs-csi-controller-sa) was included (based on the include/exclude rules)
+2022-12-25 22:59:53 [!]  serviceaccounts that exist in Kubernetes will be excluded, use --override-existing-serviceaccounts to override
+2022-12-25 22:59:53 [
+ℹ
+]  1 task: {
+2 sequential sub-tasks: {
+create IAM role for serviceaccount "kube-system/efs-csi-controller-sa",
+create serviceaccount "kube-system/efs-csi-controller-sa",
+} }2022-12-25 22:59:53 [
+ℹ
+]  building iamserviceaccount stack "eksctl-myeks01-addon-iamserviceaccount-kube-system-efs-csi-controller-sa"
+2022-12-25 22:59:54 [
+ℹ
+]  deploying stack "eksctl-myeks01-addon-iamserviceaccount-kube-system-efs-csi-controller-sa"
+2022-12-25 22:59:54 [
+ℹ
+]  waiting for CloudFormation stack "eksctl-myeks01-addon-iamserviceaccount-kube-system-efs-csi-controller-sa"
+2022-12-25 23:00:24 [
+ℹ
+]  waiting for CloudFormation stack "eksctl-myeks01-addon-iamserviceaccount-kube-system-efs-csi-controller-sa"
+2022-12-25 23:00:24 [
+ℹ
+]  created serviceaccount "kube-system/efs-csi-controller-sa"
+shiva@wks01:~$
+Listing 15-42
+Creating the iamserviceaccount for use by the CSI driver
+From the output section in Listing
+15-42
+, we can observe that the IAM Service Account via a CloudFormation Stack and the command is completed. Most operations we perform via eksctl result in a CloudFormation Stack being created and executed, so you can always go into the CloudFormation Stack and read the execution logs if you need to in the future.
+We can verify that the IAM Service Account got created in kube-system by the command shown in Listing
+15-43
+.
+kubectl get serviceaccounts --namespace kube-system --field-selector metadata.name=efs-csi-controller-sa
+shiva@wks01:~$ kubectl get serviceaccounts --namespace kube-system --field-selector metadata.name=efs-csi-controller-sa
+NAME                    SECRETS   AGE
+efs-csi-controller-sa   1         6h18m
+shiva@wks01:~$
+Listing 15-43
+Confirming the Service Account is created
+We can also confirm the annotation is completed by describing the service account as shown in Listing
+15-44
+.
+kubectl describe serviceaccount efs-csi-controller-sa --namespace kube-system
+shiva@wks01:~$ kubectl describe serviceaccount efs-csi-controller-sa --namespace kube-system
+Name:                efs-csi-controller-sa
+Namespace:           kube-system
+Labels:              app.kubernetes.io/managed-by=eksctl
+app.kubernetes.io/name=aws-efs-csi-driver
+Annotations:         eks.amazonaws.com/role-arn: arn:aws:iam::000381057009:role/eksctl-myeks01-addon-iamserviceaccount-kube-Role1-15QIY5YYT6E9K
+Image pull secrets:  <none>
+Mountable secrets:   efs-csi-controller-sa-token-fntd5
+Tokens:              efs-csi-controller-sa-token-fntd5
+Events:              <none>
+shiva@wks01:~$
+Listing 15-44
+Confirming the annotation has been registered
+Note
+The annotation contains the role ARN, not the policy ARN that we created in step 1; when we ran the eksctl command, it created the role, took the ARN of that role, and annotated it for us.
+The next step is to install the Amazon EFS driver; we have three choices: (1) via a helm chart, (2) manifest using a private registry, and (3) manifest using a public registry. We will use option 3 in our example.
+Download the manifest file and save it as a public-ecr-driver.yaml file using the command shown in Listing
+15-45
+.
+kubectl kustomize \
+"github.com/kubernetes-sigs/aws-efs-csi-driver/deploy/kubernetes/overlays/stable/?ref=release-1.4" > public-ecr-driver.yaml
+shiva-eks@wks01:~/eks$ kubectl kustomize "github.com/kubernetes-sigs/aws-efs-csi-driver/deploy/kubernetes/overlays/stable/?ref=release-1.6" > public-ecr-driver.yaml
+# Warning: 'bases' is deprecated. Please use 'resources' instead. Run 'kustomize edit fix' to update your Kustomization automatically.
+shiva-eks@wks01:~/eks$
+Listing 15-45
+Downloading the EFS driver
+We then apply the file to install the
+Amazon EFS driver
+onto the cluster as shown in Listing
+15-46
+.
+kubectl apply -f public-ecr-driver.yaml
+shiva@wks01:~/git/myeks01$ kubectl apply -f public-ecr-driver.yaml
+serviceaccount/efs-csi-node-sa created
+clusterrole.rbac.authorization.k8s.io/efs-csi-external-provisioner-role created
+clusterrolebinding.rbac.authorization.k8s.io/efs-csi-provisioner-binding created
+deployment.apps/efs-csi-controller created
+Warning: spec.template.spec.nodeSelector[beta.kubernetes.io/os]: deprecated since v1.14; use "kubernetes.io/os" instead
+daemonset.apps/efs-csi-node created
+csidriver.storage.k8s.io/efs.csi.aws.com unchanged
+shiva@wks01:~/git/myeks01$
+shiva-eks@wks01:~/eks$ kubectl apply -f public-ecr-driver.yaml
+Warning: resource serviceaccounts/efs-csi-controller-sa is missing the kubectl.kubernetes.io/last-applied-configuration annotation which is required by kubectl apply. kubectl apply should only be used on resources created declaratively by either kubectl create --save-config or kubectl apply. The missing annotation will be patched automatically.
+serviceaccount/efs-csi-controller-sa configured
+serviceaccount/efs-csi-node-sa created
+clusterrole.rbac.authorization.k8s.io/efs-csi-external-provisioner-role created
+clusterrole.rbac.authorization.k8s.io/efs-csi-node-role created
+clusterrolebinding.rbac.authorization.k8s.io/efs-csi-node-binding created
+clusterrolebinding.rbac.authorization.k8s.io/efs-csi-provisioner-binding created
+deployment.apps/efs-csi-controller created
+daemonset.apps/efs-csi-node created
+csidriver.storage.k8s.io/efs.csi.aws.com configured
+shiva-eks@wks01:~/eks$
+Listing 15-46
+Creating the EFS driver on the cluster
+Delete the EBS driver pods, if any, by using the command shown in Listing
+15-47
+.
+kubectl delete pods \
+-n kube-system \
+-l=app=ebs-csi-controller
+Listing 15-47
+Deleting ebs-csi-controller pods, if any
+Now, we can go ahead and start setting up the EFS filesystem and test it out. First, we need to create a security group that grants
+NFS access
+, since EFS operates over NFS v4.
+1
+Let us get the vpc-id for the VPC, where our cluster is set up as the EFS should also be set up within the same VPC, as shown in Listing
+15-48
+.
+aws eks describe-cluster --name myeks01 --query "cluster.resourcesVpcConfig.vpcId" --output text
+shiva@wks01:~/git/myeks01$ aws eks describe-cluster --name myeks01 --query "cluster.resourcesVpcConfig.vpcId" --output text
+vpc-0170477d07283a976
+shiva@wks01:~/git/myeks01$
+Listing 15-48
+Obtaining the VPC ID where EFS needs to be set up
+Now we need the CIDR block in use within that VPC; we can obtain that by the command shown in Listing
+15-49
+.
+aws ec2 describe-vpcs --vpc-ids vpc-0170477d07283a976 --query "Vpcs[].CidrBlock" --output text
+shiva@wks01:~/git/myeks01$ aws ec2 describe-vpcs --vpc-ids vpc-0170477d07283a976 --query "Vpcs[].CidrBlock" --output text
+172.31.0.0/16
+shiva@wks01:~/git/myeks01$
+Listing 15-49
+Obtaining the CIDR for our VPC
+Now create the security group which requires for us to know the VPC ID, which we obtained earlier, using the command in Listing
+15-50
+.
+aws ec2 create-security-group --description efs-test-sg --group-name efs-sg --vpc-id vpc-0170477d07283a976
+shiva@wks01:~/git/myeks01$ aws ec2 create-security-group --description efs-test-sg --group-name efs-sg --vpc-id vpc-0170477d07283a976
+sg-0799e325100e750b8
+shiva@wks01:~/git/myeks01$
+Listing 15-50
+Creating the security group
+The
+security group
+is created; note down the security group ID, which will be required for the next command where we grant NFS access through that group as shown in Listing
+15-51
+.
+aws ec2 authorize-security-group-ingress --group-id sg-0799e325100e750b8 --protocol tcp --port 2049 --cidr 172.31.0.0/16
+#use the CIDR obtained from the above commands & the -group-id from the newly created security group, port 2049 remains the same which is the NFS port.
+{
+"Return": true,
+"SecurityGroupRules": [
+{
+"SecurityGroupRuleId": "sgr-01ed191f59cb54771",
+"GroupId": "sg-0799e325100e750b8",
+"GroupOwnerId": "000381057009",
+"IsEgress": false,
+"IpProtocol": "tcp",
+"FromPort": 2049,
+"ToPort": 2049,
+"CidrIpv4": "172.31.0.0/16"
+}
+]
+}
+Listing 15-51
+Adding the ingress rules to the security group
+Notice the system output, where the Return field is true – access granted! Now, on to creating the actual EFS filesystem as shown in Listing
+15-52
+.
+aws efs create-file-system --creation-token eks-efs
+shiva@wks01:~/git/myeks01$ aws efs create-file-system --creation-token eks-efs
+{
+"OwnerId": "000381057009",
+"CreationToken": "eks-efs",
+"FileSystemId": "fs-013a347478dfa307c",
+"FileSystemArn": "arn:aws:elasticfilesystem:us-east-2:000381057009:file-system/fs-013a347478dfa307c",
+"CreationTime": "2022-12-25T18:20:29+00:00",
+"LifeCycleState": "creating",
+"NumberOfMountTargets": 0,
+"SizeInBytes": {
+"Value": 0,
+"ValueInIA": 0,
+"ValueInStandard": 0
+},
+"PerformanceMode": "generalPurpose",
+"Encrypted": false,
+"ThroughputMode": "bursting",
+"Tags": []
+}
+Listing 15-52
+Creating the EFS filesystem
+While the EFS filesystem is being creating, we can quickly do another task. We need to add the
+AmazonEFSCSIDriverPolicy
+to the role
+myAWSEKSNodeRole
+; this is needed so that the nodes in the node group can access the EFS-based FS. Go to IAM ➤ Roles ➤ myAWSEKSNodeRole ➤ Attach policies.
+A screenshot titled my a w s E K S node role represents the summary and permission policies. The summary includes the creation date, A R N, and instance profile A R N. The permission policy denotes that you can attach up to 10 managed policies. It indicates the Attach Policies option on the right.
+In the
+Filter Policies
+search box, type in EFSCSI; the AmazonEFSCSIDriverPolicy will show in the results, select it, and click “Add permissions.”
+A screenshot represents the interface to attach policy to my a w s E K S node role. It denotes the selected policy name of Amazon E F S C S I driver policy, along with its type and description. The Add Permissions button is indicated at the bottom.
+If the filesystem is still “creating” as per the
+LifeCycleState field value
+, it is a good time to get some coffee.
+A few moments later… our filesystem is ready to use! We can confirm the EFS
+filesystem
+is ready to use by executing the command shown in Listing
+15-53
+.
+aws efs describe-file-systems --file-system-id fs-013a347478dfa307c
+shiva@wks01:~/git/myeks01$ aws efs describe-file-systems --file-system-id fs-013a347478dfa307c
+{
+"FileSystems": [
+{
+"OwnerId": "000381057009",
+"CreationToken": "eks-efs",
+"FileSystemId": "fs-013a347478dfa307c",
+"FileSystemArn": "arn:aws:elasticfilesystem:us-east-2:000381057009:file-system/fs-013a347478dfa307c",
+"CreationTime": "2022-12-25T18:20:29+00:00",
+"LifeCycleState": "available",
+"NumberOfMountTargets": 1,
+"SizeInBytes": {
+"Value": 1255424,
+"Timestamp": "2022-12-27T00:22:16+00:00",
+"ValueInIA": 0,
+"ValueInStandard": 1255424
+},
+"PerformanceMode": "generalPurpose",
+"Encrypted": false,
+"ThroughputMode": "bursting",
+"Tags": []
+}
+]
+}
+shiva@wks01:~/git/myeks01$
+Listing 15-53
+Describing and confirming the EFS filesystem is ready for use
+Note down the FileSystemId from the output shown in Listing
+15-53
+; we’ll need it later.
+Testing the EFS with Our EKS Cluster
+We will now be
+testing
+this in two ways: the first is the Amazon KT
+article
+way and then our way, mounting it to our nginx
+server
+!
+AWS KT Way:
+The example given in the Amazon KT article requires us to use the example in the repo, so we need to clone that repo as shown in Listing
+15-54
+.
+Note
+This example requires the git binaries to be available on our Linux workstation; if not already installed, use your OS package, or you can download it from
+https://git-scm.com/downloads
+.
+git clone https://github.com/kubernetes-sigs/aws-efs-csi-driver.git
+shiva@wks01:~/git/myeks01$ git clone https://github.com/kubernetes-sigs/aws-efs-csi-driver.git
+Cloning into 'aws-efs-csi-driver'...
+remote: Enumerating objects: 14907,
+done
+.
+remote: Counting objects: 100% (223/223),
+done
+.
+remote: Compressing objects: 100% (134/134),
+done
+.
+remote: Total 14907 (delta 95), reused 166 (delta 66), pack-reused 14684
+Receiving objects: 100% (14907/14907), 15.50 MiB | 22.57 MiB/s,
+done
+.
+Resolving deltas: 100% (7145/7145),
+done
+.
+shiva@wks01:~/git/myeks01$
+Listing 15-54
+Cloning the Amazon aws-efs-csi-driver repo
+The examples are inside the folder shown in Listing
+15-55
+; switch to that folder.
+cd aws-efs-csi-driver/examples/kubernetes/multiple_pods/
+shiva@wks01:~/git/myeks01$ cd aws-efs-csi-driver/examples/kubernetes/multiple_pods/
+shiva@wks01:~/git/myeks01/aws-efs-csi-driver/examples/kubernetes/multiple_pods$
+Listing 15-55
+Switching to the examples folder
+Using your favorite editor, edit the specs/pv.yaml file and update the specs.csi.volumeHandle field with the value from FileSystemId we
+obtained
+for our EFS filesystem we created earlier, that last line, as shown in Listing
+15-56
+.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+name: efs-pv
+spec:
+capacity:
+storage: 5Gi
+volumeMode: Filesystem
+accessModes:
+- ReadWriteMany
+persistentVolumeReclaimPolicy: Retain
+storageClassName: efs-sc
+csi:
+driver: efs.csi.aws.com
+volumeHandle: fs-013a347478dfa307c
+Listing 15-56
+Contents of the specs/pv.yaml file after updating the volumeHandle field value
+Again, notice the updated volumeHandle field value.
+The file is ready; save, exit, and apply!
+Note
+The AWS example directory specs/ has multiple files; all of them need to be applied, so rather than deploying one file at a time, we just ask kubernetes to apply all the files in that directory by just pointing it to the directory rather than a single file inside it as shown in Listing
+15-57
+.
+kubectl apply -f specs/
+shiva@wks01:~/git/myeks01/aws-efs-csi-driver.orig/examples/kubernetes/multiple_pods$ kubectl apply -f specs/
+persistentvolumeclaim/efs-claim created
+pod/app1 created
+pod/app2 created
+persistentvolume/efs-pv created
+storageclass.storage.k8s.io/efs-sc created
+shiva@wks01:~/git/myeks01/aws-efs-csi-driver.orig/examples/kubernetes/multiple_pods$
+Listing 15-57
+Applying the deployment files from the AWS example
+We can see that the storageclass, PV, PVC, and the pods are created all in one go!
+Now, we can check out the /data/out1.txt file from either pod after about a minute or so, giving the pod some time to write the timestamps as shown in Listing
+15-58
+.
+kubectl exec -it app1 -- tail /data/out1.txt
+shiva@wks01:~/git/myeks01/aws-efs-csi-driver.orig/examples/kubernetes/multiple_pods$ kubectl exec -it app1 -- tail /data/out1.txt
+Tue Dec 27 00:50:40 UTC 2022
+Tue Dec 27 00:50:45 UTC 2022
+Tue Dec 27 00:50:50 UTC 2022
+Listing 15-58
+Tailing a log file from pod/app1 located in /data/ which is stored in EFS
+Let us do the same from pod/app2 as shown in Listing
+15-59
+.
+kubectl exec -it app2 -- tail /data/out1.txt
+shiva@wks01:~/git/myeks01/aws-efs-csi-driver.orig/examples/kubernetes/multiple_pods$ kubectl exec -it app2 -- tail /data/out1.txt
+Tue Dec 27 00:50:40 UTC 2022
+Tue Dec 27 00:50:45 UTC 2022
+Tue Dec 27 00:50:50 UTC 2022
+Tue Dec 27 00:50:55 UTC 2022
+Tue Dec 27 00:51:00 UTC 2022
+shiva@wks01:~/git/myeks01/aws-efs-csi-driver.orig/examples/kubernetes/multiple_pods$
+Listing 15-59
+Tailing a log file from pod/app2 located in /data/ which is stored in EFS
+Both pods are writing datastamp to the file /data/out1.txt, which is not very helpful, since it’s hard to distinguish which pod is writing which entries.
+Since this is EFS, meaning NFS, anything we write on /data/ from pod/app1 should be visible from pod/app2 /data folder since they both point back to the same EFS. Let us now write something else to this file from pod/app1 to confirm we can see this output from pod/app2 as shown in Listing
+15-60
+.
+kubectl exec -it app1 -- /bin/sh -c 'echo "this is pod1/app1 writing" >> /data/out1.txt'
+shiva@wks01:~/git/myeks01/aws-efs-csi-driver.orig/examples/kubernetes/multiple_pods$ kubectl exec -it app1 -- /bin/sh -c 'echo "this is pod1/app1 writing" >> /data/out1.txt'
+shiva@wks01:~/git/myeks01/aws-efs-csi-driver.orig/examples/kubernetes/multiple_pods$
+Listing 15-60
+Writing from app/pod1 a custom message
+Let us give it 10–20 seconds and write the same message updating it for pod2 as shown in Listing
+15-61
+.
+kubectl exec -it app2 -- /bin/sh -c 'echo "this is pod2/app2 writing" >> /data/out1.txt'
+shiva@wks01:~/git/myeks01/aws-efs-csi-driver.orig/examples/kubernetes/multiple_pods$ kubectl exec -it app2 -- /bin/sh -c 'echo "this is pod2/app2 writing" >> /data/out1.txt'
+Listing 15-61
+Writing from app/pod2 a custom message
+Now, we can
+tail
+the file from both the pods and validate the content shows up as expected using the same command as before and as shown in Listings
+15-62
+and
+15-63
+.
+kubectl exec -it app1 -- tail /data/out1.txt
+shiva@wks01:~/git/myeks01/aws-efs-csi-driver.orig/examples/kubernetes/multiple_pods$ kubectl exec -it app1 -- tail /data/out1.txt
+Tue Dec 27 00:51:25 UTC 2022
+Tue Dec 27 00:51:30 UTC 2022
+Tue Dec 27 00:51:35 UTC 2022
+Tue Dec 27 00:51:40 UTC 2022
+this is pod1/app1 writing
+Tue Dec 27 00:51:45 UTC 2022
+Tue Dec 27 00:51:50 UTC 2022
+Tue Dec 27 00:51:55 UTC 2022
+this is pod2/app2 writing
+Tue Dec 27 00:52:00 UTC 2022
+Listing 15-62
+Observation from pod/app1
+kubectl exec -it app2 -- tail /data/out1.txt
+shiva@wks01:~/git/myeks01/aws-efs-csi-driver.orig/examples/kubernetes/multiple_pods$ kubectl exec -it app2 -- tail /data/out1.txt
+Tue Dec 27 00:51:35 UTC 2022
+Tue Dec 27 00:51:40 UTC 2022
+this is pod1/app1 writing
+Tue Dec 27 00:51:45 UTC 2022
+Tue Dec 27 00:51:50 UTC 2022
+Tue Dec 27 00:51:55 UTC 2022
+this is pod2/app2 writing
+Tue Dec 27 00:52:00 UTC 2022
+Tue Dec 27 00:52:05 UTC 2022
+Tue Dec 27 00:52:10 UTC 2022
+Listing 15-63
+Observation from pod/app2
+From both pods, we can see the messages we wrote, showing that the EFS filesystem is mounted across both pods and is shared among them! Now, it is time to reconfigure this PV for our nginx pod!
+Using EFS to Serve nginx Content
+We are going to leave the
+PVC
+and PV as is and make use of them from our nginx pod. Let us first delete our mydeployment (nginx) – just to be sure, since we’ll relaunch them with PVCs, as shown in Listing
+15-64
+.
+kubectl delete deployment/mydeployment
+shiva@wks01:~/git/myeks01$ kubectl delete deployment/mydeployment
+deployment.apps "mydeployment" deleted
+shiva@wks01:~/git/myeks01$
+Listing 15-64
+Deleting old mydeployment
+The updated mydeployment.yaml file to include the PVC fields is shown in Listing
+15-65
+; this is very similar to how we did earlier in the microk8s example. Since microk8s and EKS are both Kubernetes implementations, the deployment file syntax remains the same.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: mydeployment
+spec:
+selector:
+matchLabels:
+app: label-nginx
+template:
+metadata:
+labels:
+app: label-nginx
+spec:
+containers:
+- ports:
+- containerPort: 80
+name: name-nginx
+image: nginx
+volumeMounts:
+- name: persistent-storage
+mountPath: /usr/share/nginx/html
+volumes:
+- name: persistent-storage
+persistentVolumeClaim:
+claimName: efs-claim
+Listing 15-65
+Contents of mydeployment-eks-pvc.yaml updated with PVC fields
+Notice the mountpath and volumes this deployment will use; we are just reusing the volume from our previous example. Recall that the EFS is still mounted via pod/app1; we’ll just use that to write our index.html file, like given in Listing
+15-66
+. Take note of all those pesky apostrophes and double quotes; they have to be in the exact places for this to work as shown in Listing
+15-66
+.
+kubectl exec -it app1 -- /bin/sh -c 'echo "<html><title>Hello from EFS! </title><body>This content is served to you by the EFS that is mounted on this pod that is running this nginx! How cool, eh!</body></html>" > /data/index.html'
+shiva@wks01:~$ kubectl exec -it app1 -- /bin/sh -c 'echo "<html><title>Hello from EFS! </title><body>This content is served to you by the EFS that is mounted on this pod that is running this nginx! How cool, eh!</body></html>" > /data/index.html'
+shiva@wks01:~$
+Listing 15-66
+Creating an index.html file via an existing pod
+Now, we can redeploy the
+mydeployment-eks-pvc.yaml
+file as shown in Listing
+15-67
+.
+kubectl apply -f mydeployment-eks-pvc.yaml
+shiva@wks01:~/git/myeks01$ kubectl apply -f mydeployment-eks-pvc.yaml
+deployment.apps/mydeployment created
+shiva@wks01:~/git/myeks01$
+Listing 15-67
+Deploying mydeployment-eks-pvc.yaml which contains the PVC
+Recall the external IP of the node port; we can access our nginx site using the same URL of
+http://3.141.29.3:31747
+in my case, and voilà! The website is serving the content files from the EFS index.html file as shown in Figure
+15-5
+.
+A screenshot of a web browser exhibits a sentence, which explains that this content is served to you by the E F S that is mounted on this pod that runs this n g i n x.
+Figure 15-5
+Browser showing the index.html content we created inside of EFS
+To confirm this even further, we can make an edit to the index.html; make no other changes. We should see the refreshed content on the browser, so let us make a change to the index.html file and refresh; once again, we’ll use the existing pod to update this file, using the command shown in Listing
+15-68
+.
+kubectl exec -it app1 -- /bin/sh -c 'echo "<html><title>Hello from EFS! </title><body>This content is served to you by the EFS that is mounted on this pod that is running this nginx! <br/> we just inserted brs in this file <br/>How cool, eh!<br/></body></html>" > /data/index.html'
+shiva@wks01:~$ kubectl exec -it app1 -- /bin/sh -c 'echo "<html><title>Hello from EFS! </title><body>This content is served to you by the EFS that is mounted on this pod that is running this nginx! <br/> we just inserted brs in this file <br/>How cool, eh!<br/></body></html>" > /data/index.html'
+shiva@wks01:~$
+Listing 15-68
+Updating the index.html file
+Refresh the browser; the new output is shown in Figure
+15-6
+.
+A screenshot of a web browser exhibits a few lines of text, which read that this content is served to you by the E F S that is mounted on this pod that is running this n g i n x. We just inserted b r s in this file.
+Figure 15-6
+Browser showing the updated index.html content
+Nice! To test this even further, we can delete the pods and let the deployment recreate the pods. This time, due to persistence, since index.html is coming from EFS, which is mounted to the pods upon creation, the information should not be lost; let us test it out.
+Let us first delete the pod and let it recreate on its own (testing persistence) as shown in Listing
+15-69
+.
+kubectl get pods
+kubectl delete pod mydeployment-559c5c446b-9jgfm
+sleep 30; kubectl get pods
+shiva@wks01:~$ kubectl get pods
+NAME                            READY   STATUS    RESTARTS   AGE
+app1                            1/1     Running   0          36m
+app2                            1/1     Running   0          36m
+mydeployment-559c5c446b-9jgfm   1/1     Running   0          5m54s
+primeornot-79f775bb8c-7vc5n     1/1     Running   0          42d
+shiva@wks01:~$
+# Pods names are visible above, deleting them next
+shiva@wks01:~$ kubectl delete pod mydeployment-559c5c446b-9jgfm
+pod "mydeployment-559c5c446b-9jgfm" deleted
+# giving it some time and checking pod got recreated
+shiva@wks01:~/git/myeks01/aws-efs-csi-driver/examples/kubernetes/multiple_pods/specs$ sleep 30; kubectl get pods
+NAME                            READY   STATUS    RESTARTS   AGE
+app1                            1/1     Running   0          37m
+app2                            1/1     Running   0          37m
+mydeployment-559c5c446b-jbcpk   1/1     Running   0          50s
+primeornot-79f775bb8c-7vc5n     1/1     Running   0          42d
+shiva@wks01:~/git/myeks01/aws-efs-csi-driver/examples/kubernetes/multiple_pods/specs$
+Listing 15-69
+Obtaining pod names and deleting to test for persistence
+As we can see from the output in Listing
+15-69
+, the pod has been recreated on its own; now let us check our browser, the output of which is shown in Figure
+15-7
+.
+A screenshot of a web browser exhibits a few lines of text, which read that this content is served to you by the E F S that is mounted on this pod that is running this n g i n x. We just inserted b r s in this file.
+Figure 15-7
+Browser showing the updated index.html content even after pod recreation
+This confirms that persistence is working as expected; very cool, indeed!
+Summary
+In this chapter, we learned about how persistence works in the AWS EKS, by creating an EFS, mounting that EFS to our EKS-based cluster, then utilizing that filesystem in our workloads. This concept can be extended out to production workloads, where you will need to store transactional data on the persistent layer. Whether the durable/persistent storage is backed by EFS or EBS, the concept remains the same. EKS needs add-ons to utilize the storage layer; once they are provisioned, that storage can be utilized by the workloads using the regular PV and PVC concepts of Kubernetes.
+The beauty of AWS is all the elastic nature of the EFS and EBS are still applicable; you can scale your workload without having to worry about running out of storage space. These EBS and/or EFS volumes can be extended on demand, thereby providing relief for the Kubernetes engineers.
+In the next chapter, we will learn about ingress and ingress controllers; these are important topics for production-ready workloads will seek to utilize load balancing techniques to provide for fault tolerance.
+Footnotes
+1
+https://docs.aws.amazon.com/efs/latest/ug/how-it-works.html
+
+© The Author(s), under exclusive license to APress Media, LLC, part of Springer Nature 2023
+S. Subramanian
+Deploy Container Applications Using Kubernetes
+https://doi.org/10.1007/978-1-4842-9277-8_16
+16. Networking and Ingress
+Shiva Subramanian
+1
+(1)
+Georgia, GA, USA
+In this chapter, we will learn about Networking and Ingress concepts as they apply to AWS EKS. This is important because most of the applications in today’s world are Internet facing as well as tightly interconnected, especially with the adoption of microservices. Kubernetes is a great platform for hosting many
+microservices
+, allowing for each microservice to scale up or down as the transactional needs change over time. Networking and Ingress among these are an important part of setting up and operating the cluster.
+The Problem with Exposing Services via NodePort
+So far, we have been exposing our
+web applications
+as a NodePort service and accessing them via the formula http://<Node’s External IP>:<Applications NodePort>; this will work as long as the node’s external IP doesn’t change.
+This is not a guarantee though, since nodes can go offline, new nodes can be provisioned by the cluster, and pods may be shifted to other nodes, which means we cannot publish the node’s external IP as a long-running IP for our web application.
+To illustrate this problem, let us do a simple experiment; let us delete the nodegroup that our primeornot application is running and recreate a new nodegroup, forcing our cluster to move our deployment to the new node. This means the node’s external IP will change, and we will no longer be able to access our application via the old Node’s IP address.
+Let us continue with our
+nginx
+example from the previous chapter.
+Create a new nodegroup, in lieu of the node and nodegroup we will delete shortly, so that the workloads will shift; the command format is
+aws eks create-nodegroup \
+--cluster-name myeks01 \
+--nodegroup-name myng02 \
+--subnets subnet-046606aaf23a20416 subnet-068ac163d2cbd074b subnet-0f03119b46d02a63a \
+--instance-types t3.medium \
+--scaling-config minSize=1,maxSize=2,desiredSize=1 \
+--ami-type AL2_x86_64 \
+--node-role arn:aws:iam::000381057009:role/myAmazonEKSNodeRole
+The options are
+--cluster-name
+indicates the cluster where we want to create the nodegroup.
+--nodegroup-name
+is the proposed name for the new nodegroup to be created.
+–-subnets
+are the list of three public subnet IDs in our VPC, since in our exercise we are only using public subnets.
+–-instance-types
+is the list of compute instances to launch; we are using t3.medium.
+--scaling-config
+is the scaling configuration of the nodegroup; we are choosing to stay within one or two nodes.
+--node-role
+is the ARN of the EKSNodeRole we created earlier.
+The execution of this
+command
+is shown in Listing
+16-1
+.
+aws eks create-nodegroup --cluster-name myeks01 --nodegroup-name myEKSNodeGroup02 --subnets subnet-046606aaf23a20416 subnet-068ac163d2cbd074b subnet-0f03119b46d02a63a --instance-types t3a.medium --scaling-config minSize=1,maxSize=2,desiredSize=1 --ami-type AL2_x86_64 --node-role arn:aws:iam::000381057009:role/myAWSEKSNodeRole
+shiva-eks@wks01:~/eks$ aws eks create-nodegroup --cluster-name myeks01 --nodegroup-name myEKSNodeGroup02 --subnets subnet-046606aaf23a20416 subnet-068ac163d2cbd074b subnet-0f03119b46d02a63a --instance-types t3a.medium --scaling-config minSize=1,maxSize=2,desiredSize=1 --ami-type AL2_x86_64 --node-role arn:aws:iam::000381057009:role/myAWSEKSNodeRole
+{
+"nodegroup": {
+"nodegroupName": "myEKSNodeGroup02",
+"nodegroupArn": "arn:aws:eks:us-east-2:000381057009:nodegroup/myeks01/myEKSNodeGroup02/dcc51c1a-47f2-f3f4-feae-b93bc0015a99",
+"clusterName": "myeks01",
+"version": "1.27",
+"releaseVersion": "1.27.3-20230816",
+"createdAt": "2023-08-27T18:14:44.223000+00:00",
+"modifiedAt": "2023-08-27T18:14:44.223000+00:00",
+"status": "CREATING",
+"capacityType": "ON_DEMAND",
+"scalingConfig": {
+"minSize": 1,
+"maxSize": 2,
+"desiredSize": 1
+},
+"instanceTypes": [
+"t3a.medium"
+],
+"subnets": [
+"subnet-046606aaf23a20416",
+"subnet-068ac163d2cbd074b",
+"subnet-0f03119b46d02a63a"
+],
+"amiType": "AL2_x86_64",
+"nodeRole": "arn:aws:iam::000381057009:role/myAWSEKSNodeRole",
+"diskSize": 20,
+"health": {
+"issues": []
+},
+"updateConfig": {
+"maxUnavailable": 1
+},
+"tags": {}
+}
+}
+shiva-eks@wks01:~/eks$
+Listing 16-1
+Creating a new nodegroup via the AWS CLI
+Now that we have launched a task to create a new nodegroup named
+myEKSNodeGroup02
+, we can delete the existing nodegroup named
+myEKSNodeGroup01
+, so that the workloads will shift; the deletion command is given in Listing
+16-2
+.
+aws eks delete-nodegroup --cluster-name myeks01 --nodegroup-name myEKSNodeGroup01
+shiva-eks@wks01:~/eks$ aws eks delete-nodegroup --cluster-name myeks01 --nodegroup-name myEKSNodeGroup01
+{
+"nodegroup": {
+"nodegroupName": "myEKSNodeGroup01",
+"nodegroupArn": "arn:aws:eks:us-east-2:000381057009:nodegroup/myeks01/myEKSNodeGroup01/58c51a92-a13a-cbb7-b29b-57a56b40843d",
+"clusterName": "myeks01",
+"version": "1.27",
+"releaseVersion": "1.27.3-20230816",
+"createdAt": "2023-08-27T03:59:09.596000+00:00",
+"modifiedAt": "2023-08-27T18:16:00.299000+00:00",
+"status": "DELETING",
+"capacityType": "ON_DEMAND",
+<SNIP>
+}
+shiva-eks@wks01:~/eks$
+Listing 16-2
+Deleting the nodegroup myEKSNodeGroup01
+The output in Listing
+16-2
+shows the nodegroup is DELETING in status; we can confirm this also from the AWS Console as
+shown
+in Figure
+16-1
+.
+A screenshot represents a table comprising the details of two node groups. The column headers include group name, desired size, A M I release version, launch template, and status. Group 1 denotes the status as deleting, while Group 2 denotes active.
+Figure 16-1
+Status of the nodegroups
+After the myng02 nodegroup has been created, we can find out the external IP of the node by describing it, as shown in Listing
+16-3
+.
+kubectl get nodes
+kubectl describe node ip-172-31-45-58.us-east-2.compute.internal | grep -i [E]xternalIP
+shiva@wks01:~$ kubectl get nodes
+NAME                                          STATUS   ROLES    AGE     VERSION
+ip-172-31-46-137.us-east-2.compute.internal   Ready    <none>   3d23h   v1.22.15-eks-fb459a0
+shiva-eks@wks01:~/eks$ kubectl describe node ip-172-31-45-58.us-east-2.compute.internal | grep -i [E]xternalIP
+ExternalIP:   52.15.199.187
+shiva-eks@wks01:~/eks$
+Listing 16-3
+Describing the nodes
+Since Kubernetes will
+redeploy
+our
+deployment
+onto this new node, our service primeornot should be running on this new IP on port 30969, which we can access via the old formula http://<Node’s External IP>:<Application’s NodePort>; thus, it would be
+http://52.14.201.94:30969
+in our case; this is confirmed as shown in Figure
+16-2
+.
+A screenshot of a webpage denotes a series of numbers in the address bar. The text on the screen explains that the Restful service will determine whether a given number is prime or not. It provides two U R Ls as examples, along with a link to log issues.
+Figure 16-2
+Accessing the application using the new external IP address of the node
+This poses an issue for the application though; every time we update the nodegroup/nodes as the external IP of the nodes change, we need to find that IP to access our services, and that’s not good for production-type applications that need a consistent DNS name/IP address.
+Additionally, the nodes may not also have external facing IP addresses if they are launched on private subnets. So how do we address that?
+The Solution: Ingress and LoadBalancer
+Welcome to Ingress and
+LoadBalancer services
+. It is common in Kubernetes to expose services using Ingress and/or LoadBalancer constructs.
+First, we’ll take a look at the Ingress construct. As per the Kubernetes documentation at
+https://kubernetes.io/docs/concepts/services-networking/ingress/
+, Ingress is defined “as an API object that manages external access to the services in a cluster, typically HTTP.” And “Ingress exposes HTTP and HTTPS routes from outside the cluster to services within the cluster.”
+Thus, in its simplest form, Ingress relies on an ingress controller and a set of routing rules to allow external access onto services running inside the cluster.
+Unlike the previous chapters, in this chapter, we’ll expose our service using an Ingress Controller. We’ll start by doing that in our microk8s kubernetes setup.
+Connectivity Testing on the microk8s Services
+Before we enable the ingress
+controller
+on the
+microk8s
+Kubernetes, let us connect to the web server from various locations, that is, within the cluster network, within the pod, etc., to study where connection works, where it doesn’t, and how ingress and the ingress controller help enable outside cluster to inside cluster connectivity.
+To do that, first, let us check on the current deployments as shown in Listing
+16-4
+.
+microk8s kubectl get deployments
+shiva@wks01:~$ microk8s kubectl get deployments
+No resources found in default namespace.
+shiva@wks01:~$
+Listing 16-4
+Listing deployments in microk8s
+Recall that we deleted all the deployments
+in microk8s
+as we cleaned up the PVC and PVs. We can quickly recreate them so that we have our nginx web server back online to try out the access method using the LoadBalancer service. We do that using the commands given in Listing
+16-5
+.
+microk8s kubectl apply -f pv.yaml
+microk8s kubectl apply -f pvc.yaml
+microk8s kubectl apply -f mynginx-pvc.yaml
+microk8s kubectl get service
+curl -L localhost:32614
+shiva@:~$ microk8s kubectl apply -f pv.yaml
+persistentvolume/nginxdata created
+shiva@:~$
+shiva@:~$ microk8s kubectl apply -f pvc.yaml
+persistentvolumeclaim/webcontent created
+shiva@wks01:~$ microk8s kubectl apply -f mynginx-pvc.yaml
+deployment.apps/mydeployment created
+shiva@wks01:~$
+shiva@wks01:~$ microk8s kubectl get service
+NAME         TYPE          CLUSTER-IP     EXTERNAL-IP  PORT(S)       AGE
+kubernetes   ClusterIP     10.152.183.1   <none>       443/TCP       29h
+myservice    LoadBalancer  10.152.183.43  <pending>    80:
+32614
+/TCP  153m
+shiva@wks01:~$
+shiva@wks01:~$ curl -L localhost:32614
+<html>
+<title>
+new title
+</title>
+<body>
+new content
+</body>
+</html>
+shiva@wks01:~$
+Listing 16-5
+Creation of PV, PVC, deployment of nginx, and confirmation
+Let us describe the services running on this cluster as shown in Listing
+16-6
+.
+microk8s kubectl get services
+microk8s kubectl describe service myservice
+shiva@wks01:~$ microk8s kubectl get services
+NAME        TYPE           CLUSTER-IP      EXTERNAL-IP  PORT(S)       AGE
+kubernetes  ClusterIP      10.152.183.1    <none>       443/TCP       48d
+myservice   LoadBalancer   10.152.183.43   <pending>    80:32614/TCP  153m
+shiva@wks01:~$ microk8s kubectl describe service myservice
+Name:                     myservice
+Namespace:                default
+Labels:                   <none>
+Annotations:              <none>
+Selector:                 app=mynginx
+Type:                     LoadBalancer
+IP Family Policy:         SingleStack
+IP Families:              IPv4
+IP:                       10.152.183.43
+IPs:                      10.152.183.43
+Port:                     <unset>  80/TCP
+TargetPort:               80/TCP
+NodePort:                 <unset>  32614/TCP
+Endpoints:                10.1.139.86:80
+Session Affinity:         None
+External Traffic Policy:  Cluster
+Events:                   <none>
+shiva@wks01:~$
+Listing 16-6
+Describing the services running on the microk8s
+Connecting via NodePort
+And there is only one
+LoadBalancer
+service running that’s exposing the mynginx
+app
+on the nodeport; let’s verify we can still access the web server content via the NodePort as shown in Listing
+16-7
+.
+shiva@wks01:~$ curl localhost:32614
+<html>
+<title>
+new title
+</title>
+<body>
+new content
+</body>
+</html>
+shiva@wks01:~$
+Listing 16-7
+Accessing the nginx web server via the NodePort
+As expected, we are able to access the web server via the NodePort.
+Now let’s redeploy the service using ingress as the front end; to do that, we first need to delete the myservice and confirm CURL has stopped working as shown in Listing
+16-8
+.
+microk8s kubectl delete service myservice
+shiva@wks01:~$ microk8s kubectl delete service myservice
+service "myservice" deleted
+shiva@wks01:~$
+shiva@wks01:~$ curl -L localhost:32614
+curl: (7) Failed to connect to localhost port 32614 after 0 ms: Connection refused
+shiva@wks01:~$
+Listing 16-8
+Deleting myservice
+Create a new myservice02.yaml using your favorite editor, save, and keep ready; the contents of the
+myservice02.yaml
+is shown in Listing
+16-9
+.
+apiVersion: v1
+kind: Service
+metadata:
+name: "myservice"
+spec:
+ports:
+- port: 80
+targetPort: 80
+selector:
+app: "mynginx"
+Listing 16-9
+Contents of the new myservice02.yaml file
+Note that we don’t have the type LoadBalancer defined in this service; we then apply this deployment as shown in Listing
+16-10
+.
+microk8s kubectl apply -f myservice02.yaml
+microk8s kubectl get service myservice
+curl localhost:80
+shiva@wks01:~$ microk8s kubectl apply -f myservice02.yaml
+service/myservice created
+shiva@wks01:~$
+shiva@wks01:~$ microk8s kubectl get service myservice
+NAME        TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)   AGE
+myservice   ClusterIP
+10.152.183.153
+<none>        80/TCP    3m37s
+shiva@wks01:~$
+shiva@wks01:~$ curl localhost:80
+# times out.
+Listing 16-10
+Applying the new myservice02.yaml deployment and testing
+Even though the service is available within the cluster at port 80, we cannot access it from outside the cluster.
+Connecting from Inside the Pod
+Execute curl from inside the
+container
+that’s running
+nginx
+– this will work because regardless of what, nginx is listening on the local pod at port 80, so using the localhost will and should work, as shown in Listing
+16-11
+.
+microk8s kubectl exec -it mydeployment-ch15pvc-fb65494b8-mjkdn -- curl localhost:80
+shiva@wks01:~$ microk8s kubectl exec -it mydeployment-ch15pvc-fb65494b8-mjkdn -- curl localhost:80
+<html>
+<title>
+new title
+</title>
+<body>
+new content
+</body>
+</html>
+shiva@wks01:~$
+Listing 16-11
+Accessing the web server from inside the pod
+This is successful, as expected. Next, we try to access the web server using the cluster service IP as shown in Listing
+16-12
+.
+microk8s kubectl exec -it mydeployment-ch15pvc-fb65494b8-mjkdn -- curl 10.152.183.153:80
+shiva@wks01:~$ microk8s kubectl exec -it mydeployment-ch15pvc-fb65494b8-mjkdn -- curl 10.152.183.153:80
+<html>
+<title>
+new title
+</title>
+<body>
+new content
+</body>
+</html>
+shiva@wks01:~$
+Listing 16-12
+Accessing the web server via the ClusterIP from inside the pod
+This also works as expected as the ClusterIP is
+accessible
+from within the
+containers
+running within the cluster.
+Let us extend the testing further by executing the same command from the other pod that’s running currently; this should also work, since the other pod is also inside the cluster. Find any pod in our current deployment and use that pod, as shown in Listing
+16-13
+.
+shiva@wks01:~$ microk8s kubectl exec -it mydeployment-8566b984cc-c7b79 -- curl 10.152.183.153:80
+<html>
+<title>
+new title
+</title>
+<body>
+new content
+</body>
+</html>
+shiva@wks01:~$
+Listing 16-13
+Accessing the web server via the ClusterIP from inside another pod
+This also works as expected since, as we mentioned earlier, the ClusterIP is accessible from inside the cluster. It is just that we don’t have a way to access this service from our local workstation, which is on a different network. This is why we need the ingress controller and ingress service to expose services to outside the cluster.
+Ingress on microk8s
+Before we can use the ingress capability on the microk8s
+Kubernetes
+, we first need to enable the ingress add-on within microk8s. Let us check whether it is enabled or disabled currently by executing the command as shown in Listing
+16-14
+.
+microk8s status
+shiva@mk8s-01:~$ microk8s status
+microk8s is running
+high-availability: no
+datastore master nodes: 127.0.0.1:19001
+datastore standby nodes: none
+addons:
+enabled:
+ha-cluster
+# (core) Configure high availability on the current node
+helm
+# (core) Helm - the package manager for Kubernetes
+helm3
+# (core) Helm 3 - the package manager for Kubernetes
+disabled:
+<SNIP>
+directory
+ingress
+# (core) Ingress controller for external access
+kube-ovn
+# (core) An advanced network fabric for Kubernetes
+mayastor
+# (core) OpenEBS MayaStor
+<SNIP>
+shiva@mk8s-01:~$
+Listing 16-14
+Checking the status of the ingress add-on
+We can see that ingress service is available, but not enabled, so let us enable that by executing the command as shown in Listing
+16-15
+.
+microk8s enable ingress
+shiva@wks01:~$ microk8s enable ingress
+Infer repository core for addon ingress
+Enabling Ingress
+ingressclass.networking.k8s.io/public created
+ingressclass.networking.k8s.io/nginx created
+namespace/ingress created
+serviceaccount/nginx-ingress-microk8s-serviceaccount created
+clusterrole.rbac.authorization.k8s.io/nginx-ingress-microk8s-clusterrole created
+role.rbac.authorization.k8s.io/nginx-ingress-microk8s-role created
+clusterrolebinding.rbac.authorization.k8s.io/nginx-ingress-microk8s created
+rolebinding.rbac.authorization.k8s.io/nginx-ingress-microk8s created
+configmap/nginx-load-balancer-microk8s-conf created
+configmap/nginx-ingress-tcp-microk8s-conf created
+configmap/nginx-ingress-udp-microk8s-conf created
+daemonset.apps/nginx-ingress-microk8s-controller created
+Ingress is enabled
+shiva@wks01:~$
+Listing 16-15
+Enabling the ingress add-on
+Notice that this single command does two things; it enables the ingress service and deploys the ingress controller, making it ready for us. Now we can get an update on the services already running on this cluster as shown in Listing
+16-16
+.
+microk8s kubectl get service myservice
+shiva@wks01:~$ microk8s kubectl get service myservice
+NAME        TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)   AGE
+myservice   ClusterIP   10.152.183.153   <none>        80/TCP    7m22s
+shiva@wks01:~$
+Listing 16-16
+Obtaining the current status of services
+No changes yet, but we have not yet created an Ingress resource, so let us now create the ingress deployment file; using your favorite editor, copy the contents of the myingress01.yaml file as shown in Listing
+16-17
+, then create and save this file as myingress01.yaml.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+name: myingress01
+spec:
+defaultBackend:
+service:
+name: myservice
+port:
+number: 80
+Listing 16-17
+Contents of the myingress01.yaml file
+Explanation of the fields:
+apiVersion
+: This indicates the API version we are using as in all other deployment files.
+kind
+: This indicates the type of service we would like for the cluster to create, Ingress in this case.
+metadata
+: The name of this service which is myingress01 – can be arbitrary as your naming convention dictates.
+spec
+:
+defaultBackend
+: This section indicates the service we are trying to expose, which is myservice01 in our case.
+And the port is the port on which external sites will be accessing this service.
+Now we are ready to deploy this Ingress service; we do so as shown in Listing
+16-18
+.
+microk8s kubectl apply -f myingress01.yaml
+microk8s kubectl get service myservice
+microk8s kubectl get ingress
+shiva@wks01:~$ microk8s kubectl apply -f myingress01.yaml
+ingress.networking.k8s.io/myingress01 created
+shiva@wks01:~$
+shiva@wks01:~$ microk8s kubectl get service myservice
+NAME        TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)   AGE
+myservice   ClusterIP   10.152.183.153   <none>        80/TCP    8m34s
+shiva@wks01:~$
+shiva@wks01:~$ microk8s kubectl get ingress
+NAME          CLASS    HOSTS   ADDRESS   PORTS   AGE
+myingress01   public   *                 80      17s
+shiva@wks01:~$
+Listing 16-18
+Deploying the myingress01.yaml file and obtaining the status
+Notice that our services haven’t changed, but we now have an ingress service that’s proxying our traffic to the cluster service. It’s time to test via a simple CURL command on the localhost as shown in Listing
+16-19
+.
+shiva@wks01:~$ curl localhost:80
+<html>
+<title>
+new title
+</title>
+<body>
+new content
+</body>
+</html>
+shiva@wks01:~$
+Listing 16-19
+Accessing the web server via the Ingress port
+Perfect, after deploying the Ingress service, we can access this service from our
+Linux
+workstation directly.
+Does this mean we can access this Ingress from some other machine within the same network?
+To test, let us find out the IP of our workstation first; it’s the ens160, as shown in Listing
+16-20
+.
+ip -br -p -4 address
+shiva@wks01:~$ ip -br -p -4 address
+lo               UNKNOWN        127.0.0.1/8
+ens160           UP             192.168.0.81/24 metric 100
+docker0          DOWN           172.17.0.1/16
+vxlan.calico     UNKNOWN        10.1.166.0/32
+shiva@wks01:~$
+Listing 16-20
+Obtaining the IP address of the workstation
+So the cluster is on the machine with IP address
+192.168.0.81
+. Log in to another machine on this network; I found one. Let us confirm the IP is different and on the right network by executing the same command as before as this too is a Linux VM, as shown in Listing
+16-21
+.
+ip -br -p -4 address
+shiva@wks07:~$ ip -br -p -4 address
+lo               UNKNOWN        127.0.0.1/8
+ens160           UP             192.168.0.209/24 metric 100
+docker0          DOWN           172.17.0.1/16
+vxlan.calico     UNKNOWN        10.1.166.0/32
+shiva@wks07:~$
+Listing 16-21
+Confirming the other machine is on the same network
+Notice the other machine has a different IP address but on the same network; let’s try to access our nginx web server as shown in Listing
+16-22
+.
+shiva@wks07:~$ curl 192.168.0.81
+<html>
+<title>
+new title
+</title>
+<body>
+new content
+</body>
+</html>
+shiva@wks07:~$
+Listing 16-22
+Accessing the web server from another machine
+Nice! Our ingress is working well. We have established how to publish internal cluster resources via Ingress service to outside the cluster. We can now do the same in AWS EKS.
+Ingress on AWS EKS
+Switching to the AWS EKS
+setup
+, let us get the current list of services defined as shown in Listing
+16-23
+.
+kubectl get services
+shiva@wks01:~$ kubectl get services
+NAME          TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)        AGE
+kubernetes    ClusterIP   10.100.0.1       <none>        443/TCP        47d
+label-nginx   NodePort    10.100.5.40      <none>        80:30969/TCP   27m
+primeornot    NodePort    10.100.171.157   <none>        80:31747/TCP   26m
+shiva@wks01:~$
+Listing 16-23
+Obtaining the current list of services running on our AWS EKS cluster
+It is in the same state as we left it, that is, it has two services label-nginx and primeornot. Let us confirm that we can access these two services via the NodePort’s external IP before switching to Ingress. First, let us make sure our mydeployment is still healthy by describing it as shown in Listing
+16-24
+.
+kubectl describe deployment mydeployment
+shiva@wks01:~$ kubectl describe deployment mydeployment
+Name:                   mydeployment
+Namespace:              default
+CreationTimestamp:      Sat, 31 Dec 2022 17:16:46 +0000
+Labels:                 <none>
+Annotations:            deployment.kubernetes.io/revision: 1
+Selector:               app=label-nginx
+Replicas:               1 desired | 1 updated | 1 total |
+1 available
+| 0 unavailable
+StrategyType:           RollingUpdate
+MinReadySeconds:        0
+RollingUpdateStrategy:  25% max unavailable, 25% max surge
+Pod Template:
+Labels:  app=label-nginx
+Containers:
+name-nginx:
+Image:        public.ecr.aws/nginx/nginx:stable
+Port:         80/TCP
+Host Port:    0/TCP
+Environment:  <none>
+Mounts:
+/usr/share/nginx/html from persistent-storage (rw)
+Volumes:
+persistent-storage:
+Type:       PersistentVolumeClaim (a reference to a PersistentVolumeClaim
+in
+the same namespace)
+ClaimName:  efs-claim
+ReadOnly:   false
+Conditions:
+Type           Status  Reason
+----           ------  ------
+Available      True    MinimumReplicasAvailable
+Progressing    True    NewReplicaSetAvailable
+OldReplicaSets:  <none>
+NewReplicaSet:   mydeployment-64845ffdff (1/1 replicas created)
+Events:
+Type    Reason             Age   From                   Message
+----    ------             ----  ----                   -------
+Normal  ScalingReplicaSet  36m   deployment-controller  Scaled up replica set mydeployment-64845ffdff to 1
+shiva@wks01:~$
+Listing 16-24
+Describing deployment
+Replicas are available and still healthy! Since both services are exposed by the NodePort, we can and should be able to access them via the node’s external IP; let us find out the external IP of the node as shown in Listing
+16-25
+.
+kubectl describe nodes | grep -i ExternalIP
+shiva@wks01:~$ kubectl describe nodes | grep -i ExternalIP
+ExternalIP:   18.218.183.7
+shiva@wks01:~$
+Listing 16-25
+Obtaining the external IP of the node
+Using the old formula of http://<Node’s External IP>:<Application’s NodePort>, combining the ExternalIP and the NodePorts of each of the service, that is, 31747 and 30969, we get
+http://18.218.183.7:31747
+http://18.218.183.7:30969
+which we can access through curl as shown in Listing
+16-26
+or via a browser. We will do both.
+curl 18.218.183.7:30969
+shiva@wks01:~$ curl 18.218.183.7:30969
+<html><title>Hello from EFS! </title><body>This content is served to you by the EFS that is mounted on this pod that is running this nginx! <br/> we just inserted brs
+in
+this file <br/>How cool, eh!<br/></body></html>
+shiva@wks01:~$
+Listing 16-26
+Accessing the web server via CURL
+Accessing the same web server via the browser is shown in Figure
+16-3
+.
+A screenshot of a webpage denotes the following text. This content is served to you by the E F S that is mounted on this pod that is running this n g i n x. We just inserted b r s in this file. How cool.
+Figure 16-3
+Accessing the web server via a browser
+We will repeat the same for the other application, primeornot service as shown in Listing
+16-27
+.
+curl 18.218.183.7:31747
+shiva@wks01:~$ curl 18.218.183.7:31747
+<html>
+<body>
+<p>
+This RESTful service will determine whether a given number is prime or not. <br/>
+<SNIP>
+</script>
+</p>
+</body>
+</html>shiva@wks01:~$
+Listing 16-27
+Accessing the primeornot application via CURL
+Accessing the primeornot application via a browser is shown in Figure
+16-4
+.
+A screenshot of a webpage denotes a series of numbers in the address bar. The text on the screen explains that the Restful service will determine whether a given number is prime or not. It provides two U R Ls as examples, along with a link to log issues.
+Figure 16-4
+Accessing the primeornot application via a browser
+Let us now create an Ingress resource for our nginx service so that we can expose the nginx server to the outside world. The deployment file contents are shown in Listing
+16-28
+; using your favorite editor, place the contents of this listing in it, save it as eks-myingress01.yaml, and have it ready.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+name: myingress01
+spec:
+defaultBackend:
+service:
+name: label-nginx
+port:
+number: 80
+Listing 16-28
+Contents of the eks-myingress01.yaml file
+Now let us create the Ingress resource by deploying it as shown in Listing
+16-29
+.
+kubectl apply -f eks-myingress01.yaml
+shiva@wks01:~$ kubectl apply -f eks-myingress01.yaml
+ingress.networking.k8s.io/myingress01 created
+shiva@wks01:~$
+Listing 16-29
+Deploying the Ingress resource
+The Ingress resource is created and working; we can confirm this as shown in Listing
+16-30
+.
+kubectl get ingress
+shiva@wks01:~$ kubectl get ingress
+NAME          CLASS    HOSTS   ADDRESS   PORTS   AGE
+myingress01   <none>   *                 80      24s
+shiva@wks01:~$
+Listing 16-30
+Obtaining details of the newly created Ingress resource
+Now let us try to connect to the web server as shown in Listing
+16-31
+.
+curl localhost
+shiva@wks01:~$ curl localhost
+curl: (7) Failed to connect to localhost port 80 after 0 ms: Connection refused
+shiva@wks01:~$
+Listing 16-31
+Attempting to connect to the web server
+It did not work. This is because the worker node is inside the AWS VPC network, while our workstation is in our local network; there isn’t any network path/connection between our two machines.
+Recall that such a similar setup worked in our microk8s setup because both the Ingress resource and our workstation were on the same network; thus, it worked. However, with AWS, the networks are different; that’s why this isn’t working.
+However, one way we can confirm the service is running as defined is by executing the same command inside the pod; let us get the pod name to execute the command from inside it, as shown in Listing
+16-32
+.
+kubectl get pods
+shiva@wks01:~$ kubectl get pods
+NAME                            READY   STATUS    RESTARTS   AGE
+mydeployment-64845ffdff-c2677   1/1     Running   0          48m
+primeornot-79f775bb8c-8hjq2     1/1     Running   0          92m
+Listing 16-32
+Obtaining the pod name
+Running the CURL command in any pod should do; we will choose the
+mydeployment-64845ffdff-c2677
+pod and execute the
+CURL
+command from inside it as shown in Listing
+16-33
+.
+kubectl exec -i -t mydeployment-64845ffdff-c2677 -- curl localhost
+shiva@wks01:~$ kubectl exec -i -t mydeployment-64845ffdff-c2677 -- curl localhost
+<html><title>Hello from EFS! </title><body>This content is served to you by the EFS that is mounted on this pod that is running this nginx! <br/> we just inserted brs
+in
+this file <br/>How cool, eh!<br/></body></html>
+shiva@wks01:~$
+Listing 16-33
+Accessing the nginx web server from inside the pod
+As expected, it is working from inside the
+container
+.
+How do we expose this service to the Internet? Notice that in the ingress output from Listing
+16-30
+, there isn’t an address defined; the ADDRESS field is empty. This is because we have not deployed an ingress-controller.
+Recall that when we enabled the ingress add-on in microk8s, it did two things. First, it enabled the ingress service module and second, it also deployed the ingress-controllers for us – in AWS, this is a two-step process – while we have enabled the ingress service; this is why when we defined the ingress service, it worked. The ingress-controller isn’t deployed yet; that’s why there isn’t an external address for our defined ingress service. Let us go ahead and deploy an ingress-controller.
+Deploying an Ingress Controller for EKS
+The question then becomes which ingress
+controllers
+are available? There are so many to choose from per
+https://kubernetes.io/docs/concepts/services-networking/ingress-controllers/
+. For our purposes, we will use the contour ingress-controller; it’s easy to get started and has power capabilities as we advance our purposes. We will follow the instructions as per
+https://projectcontour.io/getting-started/
+.
+The first thing is to deploy all the necessary roles, rolebindings, and deployments created; we do this all in one go by executing the deployment files as shown in Listing
+16-34
+.
+kubectl apply -f https://projectcontour.io/quickstart/contour.yaml
+shiva@wks01:~$ kubectl apply -f https://projectcontour.io/quickstart/contour.yaml
+namespace/projectcontour created
+serviceaccount/contour created
+serviceaccount/envoy created
+configmap/contour created
+customresourcedefinition.apiextensions.k8s.io/contourconfigurations.projectcontour.io created
+customresourcedefinition.apiextensions.k8s.io/contourdeployments.projectcontour.io created
+customresourcedefinition.apiextensions.k8s.io/extensionservices.projectcontour.io created
+customresourcedefinition.apiextensions.k8s.io/httpproxies.projectcontour.io created
+customresourcedefinition.apiextensions.k8s.io/tlscertificatedelegations.projectcontour.io created
+serviceaccount/contour-certgen created
+rolebinding.rbac.authorization.k8s.io/contour created
+role.rbac.authorization.k8s.io/contour-certgen created
+job.batch/contour-certgen-v1.23.2 created
+clusterrolebinding.rbac.authorization.k8s.io/contour created
+rolebinding.rbac.authorization.k8s.io/contour-rolebinding created
+clusterrole.rbac.authorization.k8s.io/contour created
+role.rbac.authorization.k8s.io/contour created
+service/contour created
+service/envoy created
+deployment.apps/contour created
+daemonset.apps/envoy created
+shiva@wks01:~$
+Listing 16-34
+Deploying pre-requirements for the contour ingress-controller
+This created a
+namespace
+called
+projectcontour
+with the contour pods running; we can confirm this as shown in Listing
+16-35
+.
+kubectl get pods -n projectcontour
+shiva@wks01:~$ kubectl get pods -n projectcontourur
+NAME                            READY   STATUS      RESTARTS   AGE
+contour-684bc99dd9-9ls8s        1/1     Running     0          12m
+contour-684bc99dd9-ln4dm        1/1     Running     0          12m
+contour-certgen-v1.23.2-fr25g   0/1     Completed   0          12m
+envoy-f9tq9                     2/2     Running     0          12m
+shiva@wks01:~$
+Listing 16-35
+Confirming contour Ingress controller pods are running
+Notice that this is running two contour pods and an envoy pod; the certgen is okay to be completed since it’s used only during initialization, not needed after that.
+Notice that immediately after deploying the contour Ingress controller, we get an external address for our Ingress service that we can access from the outside world, as shown in Listing
+16-36
+.
+kubectl get ingress
+shiva@wks01:~$ kubectl get ingress
+NAME        CLASS  HOSTS  ADDRESS                         PORTS   AGE
+myingress01 <none> *      aa1555cf26850457789cb252f01a8e1b-851197561.us-east-2.elb.amazonaws.com   80      35m
+shiva@wks01:~$
+Listing 16-36
+Obtaining details of the Ingress resource
+We get an ADDRESS,
+aa1555cf26850457789cb252f01a8e1b-851197561.us-east-2.elb.amazonaws.com
+, for our ingress that’s already running, which means we can access our service via this address; we can curl to the address and test this out, as shown in Listing
+16-37
+. Note that the DNS name replication might take five to ten minutes; now is a good time to grab another cup of your favorite beverage.
+curl aa1555cf26850457789cb252f01a8e1b-851197561.us-east-2.elb.amazonaws.com
+shiva@wks01:~$ curl aa1555cf26850457789cb252f01a8e1b-851197561.us-east-2.elb.amazonaws.com
+<html><title>Hello from EFS! </title><body>This content is served to you by the EFS that is mounted on this pod that is running this nginx! <br/> we just inserted brs
+in
+this file <br/>How cool, eh!<br/></body></html>
+shiva@wks01:~$
+Listing 16-37
+Accessing nginx via the Ingress controller–provided external address
+Good, we have provided a way for the services inside the cluster to be exposed to outside the cluster via the Ingress and Ingress Controller resources. Let us now describe the Ingress to obtain additional information about it as shown in Listing
+16-38
+.
+kubectl describe ingress
+shiva@wks01:~$ kubectl describe ingress
+Name:             myingress01
+Namespace:        default
+Address:
+aa1555cf26850457789cb252f01a8e1b-851197561.us-east-2.elb.amazonaws.com
+Default backend:  label-nginx:80 (172.31.7.31:80)
+Rules:
+Host        Path  Backends
+----        ----  --------
+*           *     label-nginx:80 (172.31.7.31:80)
+Annotations:  <none>
+Events:       <none>
+shiva@wks01:~$
+Listing 16-38
+Describing our Ingress resource
+We can see that all paths lead to the back end where our nginx service is running. What if we wanted to expose our primeornot service also? Let us try. Using your favorite editor, create the eks-myingress02.yaml file, contents shown in Listing
+16-39
+, then save and apply it as shown in Listing
+16-40
+.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+name: myingress02
+spec:
+defaultBackend:
+service:
+name: primeornot
+port:
+number: 8080
+Listing 16-39
+Contents of the eks-myingress02.yaml file
+kubectl apply -f eks-myingress02.yaml
+shiva@wks01:~$ kubectl apply -f eks-myingress02.yaml
+ingress.networking.k8s.io/myingress02 created
+shiva@wks01:~$
+Listing 16-40
+Applying myingress02.yaml
+Since we have two virtual hosts that we need to expose via a single LoadBalancer, we will use the
+HTTPProxy construct
+, which works similar to the virtual host construct in http servers such as
+nginx
+and/or apache2/httpd.
+Let us expose both services via the HTTPProxy construct; the deployment file is shown in Listing
+16-41
+; create the file and apply it. Ensure you update the first fqdn to match your output from Listing
+16-38
+.
+apiVersion: projectcontour.io/v1
+kind: HTTPProxy
+metadata:
+name: myingress01
+spec:
+virtualhost:
+fqdn: <YOUR Ingress address HERE>
+routes:
+- conditions:
+- prefix: /
+services:
+- name: primeornot
+port: 80
+---
+apiVersion: projectcontour.io/v1
+kind: HTTPProxy
+metadata:
+name: myingress02
+spec:
+virtualhost:
+fqdn: myeksnginx.example.org
+routes:
+- conditions:
+- prefix: /
+services:
+- name: label-nginx
+port: 80
+Listing 16-41
+Contents of the eks-myingress03.yaml file
+Delete the old ingress, apply this new ingress, and obtain the ingress addresses as shown in Listing
+16-42
+.
+kubectl delete ingress myingress01 myingress02
+kubectl apply -f eks-myingress03.yaml
+kubectl get ingress
+kubectl get httpproxy
+shiva-eks@wks01:~/eks$ kubectl delete ingress myingress01 myingress02
+ingress.networking.k8s.io "myingress01" deleted
+ingress.networking.k8s.io "myingress02" deleted
+shiva-eks@wks01:~/eks$
+# Applying the deployment file
+shiva@wks01:~$ kubectl apply -f eks-myingress03.yaml
+httpproxy.projectcontour.io/myhttppxy01 created
+httpproxy.projectcontour.io/myhttppxy02 created
+shiva@wks01:~$
+# confirming ingress resource is not created
+shiva@wks01:~$ kubectl get ingress
+No resources found
+in
+default namespace.
+# obtaining external addresses
+shiva@wks01:~$ kubectl get httpproxy
+NAME          FQDN                                                                     TLS SECRET   STATUS   STATUS DESCRIPTION
+myingress01   aa1555cf26850457789cb252f01a8e1b-851197561.us-east-2.elb.amazonaws.com                valid    Valid HTTPProxy
+myingress02   nginx.labs.subbu.us                                                                   valid    Valid HTTPProxy
+shiva@wks01:~$
+Listing 16-42
+Deleting old ingress and applying HTTPProxy-based ingress
+Note that we now have two virtual hosts defined with addresses, one for each service; myingress01 points to the primeornot service, and myingress02 points to the nginx web server:
+myingress01 maps to this external address aa1555cf26850457789cb252f01a8e1b-851197561.us-east-2.elb.amazonaws.com
+and
+myingress02 maps to this external address myeksnginx.example.org
+While aa1555cf26850457789cb252f01a8e1b-851197561.us-east-2.elb.amazonaws.com is publicly resolvable:
+shiva@wks01:~$ host aa1555cf26850457789cb252f01a8e1b-851197561.us-east-2.elb.amazonaws.com
+aa1555cf26850457789cb252f01a8e1b-851197561.us-east-2.elb.amazonaws.com has address 3.139.126.72
+aa1555cf26850457789cb252f01a8e1b-851197561.us-east-2.elb.amazonaws.com has address 18.219.103.230
+shiva@wks01:~$
+nginx.labs.subbu.us is not, so either we have to make a new DNS entry for nginx.labs.subbu.us or create a host entry for it; in our case, let us just create a host entry for it to save time. The DNS approach will equally work.
+On your
+Linux
+workstation, execute the command, using one of the IPs from the DNS resolution of the
+LoadBalancer
+, as shown in Listing
+16-43
+to add the host entry.
+sudo bash -c "echo '3.139.126.72 myeksnginx.example.org' >> /etc/hosts"
+Listing 16-43
+Adding the host entry for the second service
+Now we are ready to test things out; we should be able to access the primeornot service using the amazonaws.com DNS entry and the nginx web server using the nginx.labs.subbu.us DNS name as shown in Listing
+16-44
+.
+shiva@wks01:~$ curl myeksnginx.example.org
+<html><title>Hello from EFS! </title><body>This content is served to you by the EFS that is mounted on this pod that is running this nginx! <br/> we just inserted brs
+in
+this file <br/>How cool, eh!<br/></body></html>
+shiva@wks01:~$
+Listing 16-44
+Accessing nginx service via DNS
+Now for the primeornot service as shown in Listing
+16-45
+.
+shiva@wks01:~$ curl aa1555cf26850457789cb252f01a8e1b-851197561.us-east-2.elb.amazonaws.com
+<html>
+<body>
+<p>
+This RESTful service will determine whether a given number is prime or not. <br/>
+send number like so ... /determineprime?number=&ltsome number> to try <br/>
+for
+e.g. <p id="eglink"></p><br/>
+<SNIP>
+document.getElementById("eglink").innerHTML = y1;
+document.getElementById("readme").innerHTML = z1;
+</script>
+</p>
+</body>
+</html>shiva@wks01:~$
+Listing 16-45
+Accessing primeornot service via DNS
+Voilà! We now have two services from our cluster exposed to the Internet traffic via httpproxy/ingress service!
+In this way, you can publish multiple service back ends to the Internet to suit your application needs.
+Summary
+In this chapter, we learned about how to work with LoadBalancers, Ingress Controllers, and Services to provide a path for inside cluster services to be exposed to outside cluster users. Along the way, we deployed a popular open source Ingress Controller, namely, contour. The features of contour extend far beyond what we have explored in this chapter; please read through the contour projects’ website for additional information.
+In the next chapter, we will look at some of the popular tools available to manage Kubernetes, giving a Kubernetes engineer a boost to productivity and simplifying mundane operational tasks.
+
+© The Author(s), under exclusive license to APress Media, LLC, part of Springer Nature 2023
+S. Subramanian
+Deploy Container Applications Using Kubernetes
+https://doi.org/10.1007/978-1-4842-9277-8_17
+17. Kubernetes Tools
+Shiva Subramanian
+1
+(1)
+Georgia, GA, USA
+In this chapter, we will review a few popular and commonly used tools to administer and operate the kubernetes cluster, making your life as a Kubernetes engineer a bit easier.
+K9S
+The first of them is the
+K9S
+, which can be used to administer the kubernetes cluster. It can be downloaded from
+https://k9scli.io/
+. The binary release can be downloaded from
+https://github.com/derailed/k9s/releases
+.
+Let us install the Linux x86_64 version on our Linux workstation, the same workstation where we have our microk8s installed.
+Thank you:
+https://frontside.com/blog/2021-01-29-kubernetes-wet-your-toes/
+.
+To install the Linux x86_64 version of K9S, run the command shown in Listing
+17-1
+.
+curl -L https://github.com/derailed/k9s/releases/download/v0.26.7/k9s_Linux_x86_64.tar.gz -o k9s_Linux_x86_64.tar.gz
+shiva@mk8s-01:~$ curl -L https://github.com/derailed/k9s/releases/download/v0.26.7/k9s_Linux_x86_64.tar.gz -o k9s_Linux_x86_64.tar.gz
+% Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+Dload  Upload   Total   Spent    Left  Speed
+0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+100 16.8M  100 16.8M    0     0  35.5M      0 --:--:-- --:--:-- --:--:-- 35.5M
+shiva@mk8s-01:~$
+Listing 17-1
+Downloading the K9S package
+The downloaded file is saved as k9s_Linux_x86_64.tar.gz; we need to decompress the file, then we can execute it as shown in Listing
+17-2
+.
+tar zxvf k9s_Linux_x86_64.tar.gz
+shiva@mk8s-01:~$ tar zxvf k9s_Linux_x86_64.tar.gz
+LICENSE
+README.md
+k9s
+shiva@mk8s-01:~$
+Listing 17-2
+Decompressing the k9s package
+Notice the k9s file; this is the binary file that is the K9S tool, which you can move to the /usr/local/bin directory by running this command as shown in Listing
+17-3
+, so that the file is in your PATH, making it easy to execute.
+sudo mv k9s /usr/local/bin/
+shiva@mk8s-01:~$ sudo mv k9s /usr/local/bin/
+shiva@mk8s-01:~$
+Listing 17-3
+Moving the k9s binary to /usr/local/bin
+Just like before, K9S needs to connect to our cluster, so we need to set the contexts; since microk8s is self-contained, there isn’t a default ~/.kube/config written. We do so by executing the command in Listing
+17-4
+, which shows the cluster information, which we can copy to configure the K9S to connect to it.
+microk8s config
+shiva@mk8s-01:~$ microk8s config
+apiVersion: v1
+clusters:
+- cluster:
+certificate-authority-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUREekNDQWZlZ0F3SUJBZ0lVZlFkREpXS1p1TlUxOG<SNIP>
+RVJUSUZJQ0FURS0tLS0tCg==
+server: https://192.168.235.224:16443
+name: microk8s-cluster
+contexts:
+- context:
+cluster: microk8s-cluster
+user: admin
+name: microk8s
+current-context: microk8s
+kind: Config
+preferences: {}
+users:
+- name: admin
+user:
+token: WE<SNIP>0K
+shiva@mk8s-01:~$
+Listing 17-4
+Displaying the microk8s Kubernetes configuration
+We need this information inside our ~/.kube/config, which we do by running the command shown in Listing
+17-5
+.
+mkdir ~/.kube
+microk8s config > ~/.kube/config
+k9s
+shiva@wks01:~$ mkdir ~/.kube
+shiva@wks01:~$ microk8s config >> ~/.kube/config
+shiva@wks01:~$ k9s
+Listing 17-5
+Writing the .kube/config file
+Now launch k9s by executing the binary /usr/local/bin/k9s or just k9s as /usr/local/bin is typically in the system’s path, the tool launches and shows its landing page as seen in Figure
+17-1
+.
+A screenshot of K 9 S tool represents the data of the context, cluster, user, C P U, memory, and K 9 S and K 8 S versions at the top. A table at the bottom represents the details of the namespace, name, P F, ready, restart status, I P, node, and age.
+Figure 17-1
+K9S tool in action
+Here, in one screen you can see all the pods that are running; let us launch some more
+pods
+on another screen and watch it update. Launch another
+terminal window
+and/or SSH to your microk8s server, then launch a stock nginx as shown in Listing
+17-6
+.
+microk8s kubectl run stocknginx01 --image nginx
+shiva@wks01:~$ microk8s kubectl run stocknginx01 --image nginx
+pod/stocknginx01 created
+shiva@wks01:~$
+Listing 17-6
+Redeploying mynginx to the cluster
+Back on the k9s screen, you should see the new pod show up on the display as shown in Figure
+17-2
+.
+A screenshot of the K 9 S tool represents the data of the context, cluster, user, C P U, memory, and K 9 S and K 8 S versions at the top. A table at the bottom highlights the details of a default namespace named stock n g i n x 0 1 in the fourth row.
+Figure 17-2
+Updated k9s screen showing a new pod
+We can press “d” to describe this pod; the describe details pop up as shown in Figure
+17-3
+.
+A screenshot of the K 9 S tool represents the data of the context, cluster, user, C P U, memory, and versions at the top. At the bottom, it denotes the priority, service account, node, start time, labels, annotations, and a few other details about the default namespace named stock n g i n x 0 1.
+Figure 17-3
+Pod describe screen
+Press <ESC> to go back to the original
+pod
+listing screen, then press <l> for logs and then <0> for tail; you can then see the pod logs as shown in Figure
+17-4
+.
+A screenshot of the K-9 tool represents the logs under the default namespace named stock n g i n x 0 1. The logs denote the status of auto-scroll, full screen, timestamps, and wraps. At the top, it denotes the shortcut keys for a set of different actions.
+Figure 17-4
+Logs from the selected pod
+Now we can see the entire log stream, which makes it easy to obtain details about a pod without typing a whole bunch of commands one after the other, making your life, the Kubernetes engineer’s life, easier!
+This tool comes in handy for the command line driven and a simple panel that’s terminal driven to manage our K8S cluster.
+Open Lens for Kubernetes
+Open Lens for Kubernetes is another powerful tool for visualizing and managing Kubernetes clusters. You can
+download
+the desktop version of Open Lens at
+https://k8slens.dev/desktop.html
+– this requires you to register for a free personal license (please ensure you respect their licensing terms), or you can buy a copy or you can use Open Lens Core, which is available at
+https://github.com/lensapp/lens
+. Here, we are using the Open Lens Desktop Personal Edition.
+Once you have downloaded, installed, and finished with the registration process, you can see the welcome screen as shown in Figure
+17-5
+.
+A screenshot of a dashboard indicates the icon for the catalog on the left panel and the settings for clusters under the categories. The main screen represents a blank table with columns for name, source, labels, version, distro, and status. A plus icon is denoted at the bottom.
+Figure 17-5
+Lens – Kubernetes default landing screen
+Before you add the “+” sign, ensure that on the workstation this Lens application is running you have a valid .kube/config configured for the cluster you’d like to add. In our case, we will continue with the .kube/config file we are using to manage our AWS EKS
+cluster
+; thus, the workstation has all the valid information already in its .kube/config file.
+Click the “+” sign at the bottom right as shown in Figure
+17-6
+.
+A partial screenshot denotes three icons arranged vertically. It indicates an icon at the top labeled Sync Kube configs.
+Figure 17-6
+Adding a kube context to Lens – Kubernetes
+Then choose “
+Sync kubeconfig(s)
+”; select the location of your .kube/config file, which is typically under your user’s home directory, which then adds the cluster. In our case, the AWS EKS cluster shows up since Lens picked up the context for that cluster from the .kube/config file as shown in Figure
+17-7
+.
+A screenshot of the dashboard highlights the clusters option under the catalog. The main screen denotes a table under the clusters comprising the details of name, source, labels, version, distro, and status. The status is denoted as disconnected.
+Figure 17-7
+The Kubernetes cluster is visible after adding context
+Click the name of the cluster to connect to it. Lens connects to the cluster as shown in Figure
+17-8
+.
+A screenshot exhibits a list of messages denoting the status of the connection, authentication proxy, refreshing connection, and refreshing cluster accessibility. The last text reads, Connected, waiting for view to load.
+Figure 17-8
+Lens is connecting to the K8s cluster
+Once Lens is connected to the cluster, we can visually view the cluster information, similar to what we saw in the AWS Web Console, node, pod detailed information are all visible. If you are managing multiple clusters, you can easily connect and switch between multiple clusters that you are working with. For working with nodes in the nodegroup, the Nodes screen comes in handy; you can see the nodes and detailed information about the nodes and even conduct operations such as cordon using the GUI as shown in Figure
+17-9
+.
+A screenshot of a dashboard indicates the nodes option from the left panel. The main screen indicates the name of the node, along with the creation date and labels under the pods. The Cordon icon is denoted at the top.
+Figure 17-9
+Lens screen showing details of the nodes in the cluster
+Close the node details and select the Workloads ➤ Pods
+option
+on the left-hand-side navigation bar as shown in Figure
+17-10
+. All the pods and their information are shown in one place.
+A screenshot of the dashboard indicates the pods option under workloads on the left panel. The main screen represents a table under the pods comprising the details of name, namespace, containers, C P U, memory, restarts, controlled by, node, Q O S, age, and status.
+Figure 17-10
+All the pods in the cluster in one screen
+All the storage-related information is in one place, including the PVC that we set up in an earlier chapter, as shown in Figure
+17-11
+.
+A screenshot of the dashboard indicates the storage option on the left panel. The main screen comprises the name and namespace of the persistent volume claims. A dialog box on the right denotes the creation time, annotations, finalizers, access modes, storage class name, storage, pods, and status.
+Figure 17-11
+All the storage-related information in one place
+Feel free to explore the tool further to get the maximum usage out of the tool to make your life easier. Next, we move on to helm, a popular package manager for Kubernetes.
+HELM
+Another popular
+toolset
+in the Kubernetes world is HELM, which is a package manager for Kubernetes. Just like how you have Debian or RedHat packages, HELM packages are for Kubernetes which you can use to install software as containers; you can read more details about HELM at its official website:
+https://helm.sh
+.
+HELM3 Basics
+To list the helm3 charts (packages)
+repo
+list, execute the repo list command as shown in Listing
+17-7
+.
+microk8s helm3 repo list
+shiva@wks01:~$ microk8s helm3 repo list
+Error: no repositories to show
+shiva@wks01:~$
+Listing 17-7
+Listing the known helm3 repos
+To list any helm packages already installed, use the command shown in Listing
+17-8
+.
+microk8s helm3 list
+shiva@wks01:~$ microk8s helm3 list
+NAME  NAMESPACE  REVISION    UPDATED    STATUS    CHART      APP VERSION
+shiva@wks01:~$
+Listing 17-8
+Obtaining information about installed helm charts
+To add a repo, use the repo add command as shown in Listing
+17-9
+; one popular helm chart source is from bitnami, and it is available at
+https://charts.bitmani.com/bitnami
+– add it to your helm repo as shown in Listing
+17-9
+.
+Note
+Please always use your discretion when adding third-party repos, as there is always the injecting unknown software that may have cyber risks.
+microk8s helm3 repo add bitnami
+https://charts.bitnami.com/bitnami
+microk8s helm3 repo update
+shiva@wks01:~$ microk8s helm3 repo add bitnami https://charts.bitnami.com/bitnami
+"bitnami" has been added to your repositories
+shiva@wks01:~$ microk8s helm3 repo update
+Hang tight
+while
+we grab the latest from your chart repositories...
+<SNIP>
+...Successfully got an update from the "bitnami" chart repository
+Update Complete. ⎈Happy Helming!⎈
+shiva@wks01:~$
+Listing 17-9
+Adding bitnami as a helm repo
+To search HELM charts available in this repository, use the command as shown in Listing
+17-10
+.
+microk8s helm3  search  repo postgresql
+shiva@wks01:~$ microk8s helm3  search  repo postgresql
+NAME                      CHART VERSION    APP VERSION    DESCRIPTION
+bitnami/postgresql        12.10.0          15.4.0         PostgreSQL (Postgres) is an open source object-...
+bitnami/postgresql-ha     11.9.0           15.4.0         This PostgreSQL cluster solution includes the P...
+bitnami/supabase          0.4.1            0.23.6         Supabase is an open source Firebase alternative...
+shiva@wks01:~$
+Listing 17-10
+Searching for helm charts
+Deploying postgresql Using HELM3 in microk8s
+To observe how easy it is to deploy, for example, the postgresql database server on our microk8s cluster, let us go through with this exercise.
+First, we
+need
+to enable the hostpath-storage add-on in microk8s, which allows microk8s to provide PVs to
+deployments
+that require them. Recall that in earlier chapters, we created a directory on the node to act as the PV, then we created a storage class and deployed it so containers can use this storage – we used this as our persistent storage for our nginx container. The hostpath-storage works in a very similar fashion automating the provisioning of the underlying PV. You can get more details here:
+https://microk8s.io/docs/addon-hostpath-storage
+. Enabling the hostpath-storage can be done as shown in Listing
+17-11
+.
+microk8s enable hostpath-storage
+microk8s status
+shiva@wks01:~$ microk8s enable hostpath-storage
+Infer repository core
+for
+addon hostpath-storage
+Enabling default storage class.
+WARNING: Hostpath storage is not suitable for production environments.
+A hostpath volume can grow beyond the size limit set
+in
+the volume claim manifest.
+deployment.apps/hostpath-provisioner created
+storageclass.storage.k8s.io/microk8s-hostpath unchanged
+serviceaccount/microk8s-hostpath unchanged
+clusterrole.rbac.authorization.k8s.io/microk8s-hostpath unchanged
+clusterrolebinding.rbac.authorization.k8s.io/microk8s-hostpath unchanged
+Storage will be available soon.
+shiva@wks01:~$ microk8s status
+microk8s is running
+high-availability: no
+datastore master nodes: 192.168.0.81:19001
+datastore standby nodes: none
+addons:
+enabled:
+dns
+# (core) CoreDNS
+ha-cluster
+# (core) Configure high availability on the current node
+helm
+# (core) Helm - the package manager for Kubernetes
+helm3
+# (core) Helm 3 - the package manager for Kubernetes
+hostpath-storage
+# (core) Storage class; allocates storage from host
+directory
+rbac
+# (core) Role-Based Access Control for authorisation
+storage
+# (core) Alias to hostpath-storage add-on, deprecated
+disabled:
+cert-manager
+# (core) Cloud native certificate management
+<SNIP>
+registry
+# (core) Private image registry exposed on localhost:32000
+shiva@wks01:~$
+Listing 17-11
+Enabling the hostpath add-on in microk8s
+Since we are going to deploy a PostgreSQL server, it is prudent to install the PSQL client software on our workstation also, since we’ll need that to connect to the PGSQL server as a test. Install this as shown in Listing
+17-12
+.
+sudo apt-get install postgresql-client-common -y
+sudo apt-get install postgresql-client -y
+shiva@wks01:~$ sudo apt-get install postgresql-client-common -y
+Reading package lists... Done
+<SNIP>The following NEW packages will be installed:
+postgresql-client-common
+0 upgraded, 1 newly installed, 0 to remove and 102 not upgraded.
+Need to get 29.6 kB of archives.
+<SNIP>No VM guests are running outdated hypervisor (qemu) binaries on this host.
+shiva@wks01:~$
+shiva@wks01:~$ sudo apt-get install postgresql-client -y
+Reading package lists... Done
+Building dependency tree... Done
+Reading state information... Done
+The following additional packages will be installed:
+libpq5 postgresql-client-14
+Suggested packages:
+postgresql-14 postgresql-doc-14
+The following NEW packages will be installed:
+libpq5 postgresql-client postgresql-client-14
+0 upgraded, 3 newly installed, 0 to remove and 102 not upgraded.
+<SNIP>
+No VM guests are running outdated hypervisor (qemu) binaries on this host.
+shiva@wks01:~$
+Listing 17-12
+Installing PostgreSQL client binaries
+Now onto deploying the PGSQL server via a helm chart as shown in Listing
+17-13
+.
+microk8s helm3 install bitnami/postgresql --generate-name
+shiva@wks01:~$ microk8s helm3 install bitnami/postgresql --generate-name
+NAME: postgresql-1693397974
+LAST DEPLOYED: Wed Aug 30 12:19:36 2023
+NAMESPACE: default
+STATUS: deployed
+REVISION: 1
+TEST SUITE: None
+NOTES:
+CHART NAME: postgresql
+CHART VERSION: 12.10.0
+APP VERSION: 15.4.0
+** Please be patient
+while
+the chart is being deployed **
+PostgreSQL can be accessed via port 5432 on the following DNS names from within your cluster:
+postgresql-1693397974.default.svc.cluster.local - Read/Write connection
+To get the password
+for
+"postgres" run:
+export POSTGRES_PASSWORD=$(kubectl get secret --namespace default postgresql-1693397974 -o jsonpath="{.data.postgres-password}" | base64 -d)
+To connect to your database run the following command:
+kubectl run postgresql-1693397974-client --rm --tty -i --restart='Never' --namespace default --image docker.io/bitnami/postgresql:15.4.0-debian-11-r10 --env="PGPASSWORD=$POSTGRES_PASSWORD" \
+--command -- psql --host postgresql-1693397974 -U postgres -d postgres -p 5432
+> NOTE: If you access the container using bash, make sure that you execute "/opt/bitnami/scripts/postgresql/entrypoint.sh /bin/bash"
+in
+order to avoid the error "psql: local user with ID 1001} does not exist"
+To connect to your database from outside the cluster execute the following commands:
+kubectl port-forward --namespace default svc/postgresql-1693397974 5432:5432 &
+PGPASSWORD="$POSTGRES_PASSWORD" psql --host 127.0.0.1 -U postgres -d postgres -p 5432
+WARNING: The configured password will be ignored on new installation
+in case
+when previous PostgreSQL release was deleted through the helm command. In that
+case
+, old PVC will have an old password, and setting it through helm won't take effect. Deleting persistent volumes (PVs) will solve the issue.
+Listing 17-13
+Installing PostgreSQL in Kubernetes via HELM
+Testing PGSQL Deployment
+On one terminal
+window
+, let us set up port-forwarding to expose the PGSQL port to outside the cluster by using the kubernetes command as shown in Listing
+17-14
+.
+microk8s kubectl get services
+microk8s kubectl port-forward service/postgresql-1693397974
+shiva@wks01:~$ microk8s kubectl get services
+NAME                      TYPE          CLUSTER-IP      EXTERNAL-IP  PORT(S)       AGE
+kubernetes                ClusterIP     10.152.183.1    <none>       443/TCP       2d18h
+dep-webserver             LoadBalancer  10.152.183.230  <pending>    80:30332/TCP  2d18h
+myservice                 LoadBalancer  10.152.183.244  <pending>    80:32246/TCP  2d18h
+postgresql-1693397974
+ClusterIP     10.152.183.203  <none>
+5432/TCP
+5h53m
+postgresql-1693397974-hl  ClusterIP     None            <none>       5432/TCP      5h53m
+shiva@wks01:~$
+shiva@wks01:~$ microk8s kubectl port-forward service/postgresql-1693397974 5432:5432
+Forwarding from 127.0.0.1:5432 -> 5432
+Forwarding from [::1]:5432 -> 5432
+Listing 17-14
+Obtaining the PostgreSQL port and setting up port-forwarding
+Port-forward is running. Now we can obtain the password for the database user postgresql so that we can connect to the database, as indicated in the instructions shown in Listing
+17-15
+.
+export POSTGRES_PASSWORD=$(kubectl get secret --namespace default postgresql-1693397974 -o jsonpath="{.data.postgres-password}" | base64 -d)
+export PGPASSWORD=$POSTGRES_PASSWORD
+postgres=# \db
+postgres=# \q
+shiva@wks01:~$ export POSTGRES_PASSWORD=$(kubectl get secret --namespace default postgresql-1693397974 -o jsonpath="{.data.postgres-password}" | base64 -d)
+shiva@wks01:~$ echo $POSTGRES_PASSWORD
+L5<SNIP>E7
+shiva@wks01:~$ export PGPASSWORD=$POSTGRES_PASSWORD
+Listing 17-15
+Obtaining the db user password
+Connectivity Testing to PGSQL
+We have the pgsql
+client
+installed, and we have the database user postgresql’s password in an environment variable; now we can proceed with the db connection as shown in Listing
+17-16
+.
+psql --host=localhost --port=5432 -U postgres
+postgres=
+# \db # to list the default databases
+postgres=
+# \q # to quit psql client program
+shiva@wks01:~$ psql --host=localhost --port=5432 -U postgres
+psql (14.9 (Ubuntu 14.9-0ubuntu0.22.04.1), server 15.4)
+WARNING: psql major version 14, server major version 15.
+Some psql features might not work.
+Type "help"
+for
+help.
+postgres=
+# \db
+List of tablespaces
+Name    |  Owner   | Location
+------------+----------+----------
+pg_default | postgres |
+pg_global  | postgres |
+(2 rows)
+postgres=
+# \q
+shiva@wks01:~$
+Listing 17-16
+Connecting to the database via the psql client
+What happened under the hood when we deployed this helm chart? It provisioned a PVC to use as the permanent/durable storage for the
+postgresql
+pods, as shown in Listing
+17-17
+.
+microk8s kubectl get pvc
+shiva@wks01:~$ microk8s kubectl get pvc
+NAME                          STATUS VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS        AGE
+data-postgresql-1693397974-0  Bound  pvc-46783c92-2487-4858-b947-3dc44bda842b   8Gi        RWO            microk8s-hostpath   6h6m
+shiva@wks01:~$
+Listing 17-17
+PVC setup by the helm chart for PostgreSQL install
+The helm chart also deployed a service to expose the postgresql port as shown in Listing
+17-18
+.
+microk8s kubectl get service
+shiva@wks01:~$ microk8s kubectl get service
+NAME                      TYPE          CLUSTER-IP      EXTERNAL-IP  PORT(S)       AGE
+kubernetes                ClusterIP     10.152.183.1    <none>       443/TCP       2d18h
+dep-webserver             LoadBalancer  10.152.183.230  <pending>    80:30332/TCP  2d18h
+myservice                 LoadBalancer  10.152.183.244  <pending>    80:32246/TCP  2d18h
+postgresql-1693397974     ClusterIP     10.152.183.203  <none>       5432/TCP      6h7m
+postgresql-1693397974-hl  ClusterIP     None            <none>       5432/TCP      6h7m
+shiva@wks01:~$
+Listing 17-18.
+postgresql service setup by helm
+All in one go making it easy for deploying commonly used software in a standardized format. You can find more charts on the Internet and use them as you see fit. Again, exercise caution when using unknown repositories.
+CNCF
+Finally,
+CNCF
+is not a tool by itself, but it is a community of cloud-native developers including Kubernetes to come together, learn, exchange ideas, and find new and innovative ways to deploy, manage, and utilize Kubernetes. You can access their website at
+https://cncf.io
+.
+You can gain one of the most impressive pieces of information about the ecosystem by visiting their
+CNCF Cloud Native Interactive Landscape
+page at
+https://landscape.cncf.io/?project=graduated,member
+, which appears similar to the screenshot shown in Figure
+17-12
+, highlighting the several tools we have come across in this book. There are more tools, vendors, services, and software waiting to be discovered by you; go check them out!
+A screenshot of the C N F C webpage highlights a set of tools. The left panel indicates the C N C F graduated projects. The main screen indicates different logos under application definition, platform, streaming and messaging, service proxy, and container runtime in the landscape tab.
+Figure 17-12
+Shows the CNCF Interactive Landscape
+More Tools
+More tools for you to explore
+https://monokle.io/
+https://collabnix.github.io/kubetools/
+www.rancher.com/
+Summary
+In this chapter, we looked at a few tools available to create, maintain, and manage Kubernetes clusters. There are plenty more tools out there as the Kubernetes ecosystem is in an active development phase, and new tools are being developed and introduced each and every day. Please explore the tools in the “More Tools” section to explore further, and utilize the tools that will make your life easier maintaining and managing your Kubernetes cluster.
+
+Index
+A
+Access key
+AmazonEC2ContainerRegistryReadOnly
+Amazon EFS
+AmazonEFSCSIDriverPolicy
+AmazonEKSClusterPolicy
+AmazonEKS_CNI_Policy
+AmazonEKSServiceRolePolicy
+AmazonEKSWorkerNodePolicy
+API Client Utility
+apiVersion
+Artifact repository
+CI/CD parlance
+Docker Hub
+ECR
+JFrog container registry
+storage and retrieval of containers
+Automation
+AWS CLI
+AWS CLI v2
+AWS Console
+AWS Elastic Container Registry (ECR)
+AWS Elastic Kubernetes Service (EKS)
+clusters
+See also
+Clusters
+deployment
+EFS, nginx content
+EFS testing
+file system
+Filter Policies
+IAM role
+IAM user
+inbound rules
+Kubernetes cluster
+NFS access
+nginx container
+nginx deployment
+nodes
+OS users
+See also
+Elastic Kubernetes Service (EKS)
+AWS IAM user
+access key wizard
+API keys
+create user
+IAM Service
+landing page
+login details
+PowerUserAccess policy
+power user permissions
+retrieving access keys
+root user credentials
+user wizard
+AWS managed node groups
+Azure Container Registry
+B
+Business units (BU)
+C
+calico-node-tkzbg
+CenOS
+Clusters
+add node group
+admin access
+admin role
+compute tab
+creation
+EKS
+EKS screen
+EKS service
+endpoint access
+IAM PassRole
+IAM role, node group
+microK8s deployment
+networking information
+parent node
+security group
+single node
+VPC, subnets and security group
+worker node
+rolebinding
+CNCF Cloud Native Interactive Landscape
+Command Line Interface (CLI)
+Connectivity testing
+Container Registry
+Container Repository
+Container Runtime Interface (CRI)
+Containers
+API server
+custom content (index.html)
+Docker Hub
+Hello-World command
+image
+image, command
+K8S cluster
+k8sdevops
+kubectl get pods
+kubernetes
+memory
+microk8s
+nginx
+OS
+ports (services)
+repository software
+resources
+single static-website application
+stock nginx
+storage and retrieval of
+tagging image
+TAGS
+testing
+for troubleshooting
+ubuntu/nginx
+See also
+Dockerfile
+Contexts
+Coredns pod
+Create Repository screen
+CURL command
+D
+Deployment
+HELM3 in microk8s
+Ingress controller for EKS
+in microk8s
+PGSQL
+pod
+scaling
+pods
+ReplicaSets
+See
+ReplicaSets
+Deployment files
+configuration options
+kubernetes
+service
+Dep-webserver
+DevOps
+iamidentitymapping entries
+k8sdevops01 user testing
+Docker
+images command
+Kubernetes relationship
+See
+Kubernetes (K8S)
+tar file
+technology
+active (running)
+description
+users
+workstation
+Docker Client
+Dockerfile
+commands
+COPY statement
+ENTRYPOINT command
+FROM statement
+image build command
+index.html incorporating
+running, image command
+testing image
+Docker Hub
+DRAIN command
+E
+Ecosystem
+EKS cluster
+AWS CLI v2
+deploying pod
+eksctl program
+kubectl configuring
+kubectl program
+new OS User
+eksctl program
+eksPassRoleAccess
+EKS RBAC
+DevOps
+group to cluster role(s)
+grp-k8s-admins
+mapping IAM user
+three classes of IAM users
+Elastic Container Registry (ECR)
+Elastic Kubernetes Service (EKS)
+cluster
+IAM PassRole
+IAM role
+add-ons settings
+add-ons version compatibility issues
+AmazonEKSServiceRolePolicy
+cluster screen
+cluster service
+creation
+launching
+logging screen
+navigating
+review screen
+role name field
+use case selection
+VPC, subnets and security group
+IAM user
+landing page
+pods
+ErrImagePull
+EXTERNAL-IP field
+F
+FileSystemId
+G
+GithHub
+Google Cloud’s GCR
+Google Container Registry (GCP)
+grp-k8s-admins
+H
+Hello-World command
+HELM3 (packages)
+connectivity testing to PGSQL
+deploying postgresql
+testing PGSQL deployment
+Horizontal scaling
+HTTPProxy construct
+I
+IAM PassRole
+IAM users
+classes
+IMAGE ID
+Ingress
+on AWS EKS
+connecting
+pods
+via NodePort
+connectivity testing
+deploying, EKS
+on microk8s
+Inline policy
+J
+Java
+JFrog Artifactory
+JFrog Container Registry
+cloud provider
+Docker Client
+hostname
+password set up
+registration screen
+repository creation
+setup
+K
+k8sadmin01 user testing
+k8sdevops01 user testing
+k8sreadonly01 user
+k8sreadonly02 user
+K9S
+Kubelet
+Kubernetes (K8S)
+api-server
+clusters
+command-line
+contexts
+distributions
+Docker relationship
+documentation
+draining a node
+Kubelet
+microk8s
+nodes
+pod-public nginx
+pods
+See
+Pods
+and PV
+See
+Persistent volume (PV)
+RBAC
+See
+Role-Based Access Control (RBAC)
+redeploy
+resource availability
+resource requirements
+service & testing
+storage volumes
+tools
+CNCF
+HELM
+See
+HELM3 (packages)
+and K9S
+Open Lens
+workstation
+kube-system
+L
+label-nginx
+LifeCycleState field value
+Linux
+LoadBalancer service
+M
+Mapping IAM user
+k8sadmin01 user
+k8sadmin02 user testing
+metadata
+Microk8s
+admin user
+context
+HELM3 (packages)
+Ingress
+services
+terminal window
+Microservices
+mkdir command
+mkdir container-static-website
+myAWSEKSNodeRole
+mydep01.yaml
+mydeployment pod
+myEKSNodeGroup01
+myEKSNodeGroup02
+mynginx
+myservice02.yaml file
+N
+Namespaces
+business units
+creation
+deletion
+running commands
+workloads
+Networking
+NodePort
+web applications
+nginx
+application installation
+container
+container image
+package incorporation
+pod-public
+pod-public running
+PVC
+stock application
+nginx-light package
+Node group
+addition
+IAM role
+scaling configuration
+NODENAME column
+NodePort
+Ingress connection
+Nodes
+command option
+draining
+management
+pod creation
+O
+Open Lens
+Open source system
+Operating system (OS)
+ARCH
+containerized base
+package repository
+perspective
+users
+VMs
+P, Q
+Parent node
+PassRole permissions
+Persistent volume claim (PVC)
+creation
+nginx content
+and PV
+Persistent volume (PV)
+AWS EKS
+creation
+storage volumes
+microk8s
+pods
+Pods
+command line
+connection
+container for troubleshooting
+creation
+deployment
+EKS
+information
+kubectl binary
+logs
+mydeployment
+option
+port-forward
+postgresql
+PV
+self-explanatory
+web server service
+Port 4567
+Port 8080
+Port 8083
+Power node03
+PowerUsers
+Projectcontour
+Public subnets
+R
+ReadOnlyMany
+Read-only user setup
+ReadWriteMany
+ReadWriteOnce
+ReadWriteOncePod
+ReplicaSets
+availability and scalability
+container resources
+deployment
+disk pressure
+horizontal scaling
+K8S management plan
+Kubernetes cluster
+mydep-atscale.yaml
+node
+one-pod deployment
+pods command
+scalability factor
+scale-deployment.sh script
+vertical scaling
+VMs
+worker node
+Repo creation
+REPOSITORY column
+Retrieve access keys
+Role-Based Access Control (RBAC)
+admin role
+authentication
+authorization
+available/pre-defined
+cluster admin
+echo string
+get-contexts command
+Linux user
+microk8s
+OS users
+quality check
+rolebinding updation
+static token
+test
+users classes
+RoleBinding
+S
+Security credentials
+Security group
+Service access
+Service command
+Service file deployment
+Service, K8S
+Sonatype Nexus
+Spring Boot application
+storageClassName
+Sync kubeconfig(s)
+T
+TARGET_IMAGE
+U
+Ubuntu
+docker official image
+nginx package
+server
+Ubuntu 22.04
+Ubuntu 22.04 LTS
+V, W, X, Y, Z
+Vertical scaling
+Virtual machines (VMs)
+containers
+container technology.
+dependency hell
+efficiency & and cost control
+Linux
+nginx (web server) application installation
+OS
+ps command
+rebooting
+scale of pods
+static website
+time-to-deploy perspective
+Visual editor
+volumeHandle

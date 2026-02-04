@@ -1,0 +1,3870 @@
+ network round trips to the broker to deliver events. It also enables the broker to perform fewer, larger writes when appending event batches to the topic. Together, these efficiency measures are responsible for much of the high throughput that a Kafka system can achieve. Buffering events on producers allows you to trade off the additional latency that is incurred while batches are accumulated (the
+linger.ms
+value) for improved system throughput.
+The following code snippet shows a simple method that sends a ski lift ride event to a topic that represents the resort on the broker. The
+send()
+method returns a
+Future
+of type
+RecordMetaData
+. Calls to
+Future.get()
+will block until the broker has appended the event to the topic and returns a
+RecordMetaData
+object. This contains information about the event in the log such as its timestamp and offset:
+public Future<RecordMetadata> sendToBroker(final String skierID, final String 
+                                                 liftRideEvent) {
+
+       // initialization of producer and resortTopic omitted for brevity
+       final ProducerRecord<String, String> producerRecord = new    
+          ProducerRecord<>(resortTopic, skierID, liftRideEvent);  
+       return producer.send(producerRecord);                 
+}
+Kafka supports different event delivery guarantees
+for producers through the
+acks
+configuration parameter. A value of zero provides no delivery guarantee. This is a “fire-and-forget” option—events can be lost. A value of one means an event will be acknowledged by the broker once it has been persisted to the destination topic. Transient network failures may cause the producer to retry failed events, leading to duplicates. If you can’t accept duplicates, you can set the
+enable-idempotence
+configuration parameter to
+true
+. This causes the broker to filter out duplicate events and provide exactly-once delivery semantics.
+Kafka consumers utilize the pull model
+to retrieve events in batches from a topic. When a consumer first subscribes to a topic, its offset is set to the first event in the log. You then call the
+poll()
+method of the consumer object in an event loop. The
+poll()
+method returns one or more events starting from the current offset. Similarly to producers, you can tune consumer throughput using configuration parameters that specify how long a consumer waits for events to be available and the number of events returned on each call to
+poll()
+.
+The following simple consumer code example shows an event loop that retrieves and processes a batch of events:
+while (alive) {
+  ConsumerRecords<K, V> liftRideEvents = consumer.poll(LIFT_TOPIC_TIMEOUT);
+  analyze(liftRideEvents); 
+  consumer.commitSync();
+}
+Kafka increments the consumer’s offset in
+the topic automatically to point to the next unprocessed event in the topic. By default Kafka will automatically commit this value such that the next request to fetch events will commence at the new offset. The commit message is actually sent as part of the
+poll()
+method, and this commits the offset returned by the previous
+poll()
+request. Should your consumer fail while processing the batch of events, the offset is not committed as
+poll()
+is not called. This gives your consumer at-least-once delivery guarantees, as the next fetch will start at the same offset as the previous one.
+You can also choose to manually commit the offset in consumers. You do this by calling the
+consumer.commitSync()
+API, as shown in the example. If you call
+commitSync()
+before you process the events in a batch, the new offset will be committed. This means if the consumer fails while processing the event batch, the batch will not be redelivered. Your consumers now have at-most-once delivery guarantees.
+Calling
+commitSync()
+after you have
+processed all the events in a batch, as in the example, gives your consumers at-least-once delivery guarantees. If your consumer crashes while processing a batch of events, the offset will not be committed and when the consumer restarts the events will be redelivered. Consumers can also at any time explicitly set the offset for the topic using the
+consumer.seek(topic, offset)
+API.
+Note the Kafka consumer API is not thread safe. All network interactions with the broker occur in the same client
+thread that retrieves events. To process events concurrently, the consumer needs to implement a threading scheme. A common approach is a thread-per-consumer model, which provides a simple solution at the cost of managing more TCP connections and fetch requests at the broker. An alternative is to have a single thread fetch events and offload event processing to a pool of processing threads. This potentially provides greater scalability, but makes manually committing events more complex as the threads somehow need to coordinate to ensure all events are processed for a topic before a commit is issued.
+Scalability
+The primary scalability mechanism in
+Kafka is topic partitioning. When you create a topic, you specify the number of partitions that should be used for storing events and Kafka distributes partitions across the brokers in a cluster. This provides horizontal scalability, as producers and consumers respectively can write to and read from different partitions in parallel.
+When a producer starts, you specify a list of host/port pairs to connect to the cluster using the
+Properties
+object, as shown in the following Java snippet:
+Properties props = new Properties();
+props.put("bootstrap.servers", "IPbroker1,IPBroker2");
+The producer connects to these servers to discover the cluster configuration in terms of broker IP addresses and which partitions are allocated to which brokers.
+In tune with the “dumb broker” architecture
+that Kafka implements, producers, not the broker, are responsible for choosing the partition that an event is allocated to. This enables the broker to focus on its primary purpose of receiving, storing, and delivering events. By default, your producers use the
+DefaultPartitioner
+class provided by the Kafka API.
+If you do not specify an event key (i.e., the key is
+null
+), the
+DefaultPartitioner
+sends batches of messages to topic partitions in a round-robin fashion. When you specify an event key, the partitioner uses a hash function on the key value to choose a partition. This directs events with the same key to the same partition, which can be useful for consumers that process events in aggregates. For example, in the ski resort system, you could use a
+liftID
+as a key to ensure all lift ride events on the same lift at the same resort are sent to the same partition. Or you could use
+skierID
+to ensure all lift rides for the same skier are sent to the same partition. This is commonly called semantic partitioning.
+Partitioning a topic has an implication for event ordering. Kafka will write events to a single partition in the order they are generated by a producer, and events will be consumed from the partition in the order they are written. This means events in each partition are ordered by time, and provide a partial ordering of the event stream.
+4
+However, there is no total order of events across partitions. You have to design your applications to be cognizant of this restriction. In
+Figure 14-5
+, consumers will see lift ride events for each lift hashed to a partition in order, but determining the lift ride event order across partitions is not possible.
+Figure 14-5.
+Distributing events to topic partitions using hashing
+You can also increase—but not decrease—the number of topic partitions after initial deployment. Existing events in the partitions remain in place, but new events with the same keys  may  potentially be hashed to a different partition. In the example, suddenly lift rides with the key value
+liftID
+=
+2
+could be hashed to a different partition. You must therefore design your consumers so that they do not expect to process the same set of key values indefinitely from a partition.
+5
+Partitions also enable concurrent
+event delivery to multiple consumers. To achieve this, Kafka introduces the concept of consumer groups for a topic. A consumer group comprises one or more consumers for a topic, up to a maximum of the number of partitions configured for a topic. There are basically three consumer allocation alternatives depending on the number of topic partitions and the number of subscribers in the group:
+If the number of consumers in the
+group is equal to the number of partitions, Kafka allocates each consumer in the group to exactly one partition.
+If the number of consumers in the group is less than the number of partitions, some consumers will be allocated to consume messages from multiple partitions.
+If the number of consumers in the group exceeds the number of partitions, some consumers will not be allocated a partition and remain idle.
+Figure 14-6
+illustrates these allocation possibilities when (a) the consumer group size is equal to the number of partitions and (b) the consumer group size is less than the number of partitions.
+Figure 14-6.
+Kafka consumer groups where (a) group size = number of partitions, and (b) group size  < number of partitions
+Kafka implements a rebalancing mechanism for consumer groups.
+6
+This is triggered when a new consumer joins or an existing consumer leaves the group, or new partitions are added to a topic. For each consumer group, Kafka allocates one broker as the group coordinator. The coordinator tracks the partitions of topics and the members and subscriptions in the consumer group. If the number of topic partitions or group membership changes, the coordinator commences a rebalance. The rebalance must ensure that all topic partitions are allocated to a consumer from the group and all consumer group members are allocated one or more partitions.
+To perform a rebalance, Kafka chooses one
+consumer from a group chosen as the group leader. When the rebalance is invoked, the group coordinator on the broker informs the consumer group leader of the existing partition assignments to the group members and the configuration changes needed. The consumer group leader decides how to allocate new partitions and group members, and may need to reassign existing partitions across group members. Moving a partition between consumers requires the current owner to first relinquish its subscription. To trigger this change, the group leader simply removes these subscriptions from the consumer’s allocations and sends the new partition assignments to each consumer.
+Each consumer processes the new allocation from the leader:
+For partitions that are not moved between consumers, event processing can continue with no downtime.
+New partitions that are allocated to the consumer are simply added.
+For any of the consumer’s existing partitions that do not appear in their new allocation, consumers complete processing the current batch of messages, commit the offset, and relinquish their subscription.
+Once a consumer relinquishes a subscription, that partition is marked as unassigned. A second round of rebalancing then proceeds to allocate the unassigned partitions, ensuring each partition is assigned to a member of the group.
+Figure 14-7
+shows how the rebalancing occurs when you add a consumer to a group.
+Figure 14-7.
+Kafka partition rebalancing when a new consumer is added to a group
+In reality, most rebalances require very few partition reassignments. Kafka’s rebalancing approach exploits this fact and enables consumers to keep processing messages while the rebalance proceeds. The group coordinator on the broker also has minimal involvement, basically just orchestrating the rebalances. The group leader is responsible for making partition reassignments. This simplifies the broker—dumb broker architecture, remember—and makes it possible to inject custom partition allocation algorithms for groups through a pluggable client framework. Kafka provides a
+CooperativeStickyAssignor
+out of the box, which maintains as many existing partition
+assignments as possible during a rebalance.
+Availability
+When you create a topic in Kafka, you
+can specify a replication factor of
+N
+. This causes Kafka
+to replicate every partition in the topic
+N
+times using a leader-follower architecture. Kafka attempts to allocate leaders to different brokers and deploy replicas to different broker instances to provide crash resilience. An example of a replicated partition for the skier management system topics with
+N
+= 3 is shown in
+Figure 14-8
+.
+Figure 14-8.
+Kafka topic replication
+Producers and consumers always write and read from the leader partitions, as shown just for the
+WhitePassTopic
+in
+Figure 14-8
+. Followers also behave as consumers from their associated leader, fetching messages at a period specified by the
+replica.fetch.wait.max.ms
+configuration parameter (default 500 ms).
+If a leader fails, Kafka can
+automatically failover to one of the followers so that the partition remains available. The leader broker dynamically maintains a list of replicas that are up to date with the leader. This list, known as the in-sync replica (ISR) list, is persisted in ZooKeeper so that
+it is available in the event of leader failure. Kafka’s custom leader election algorithm ensures that only members of the ISR can become leaders.
+In a replicated deployment, producers can specify
+acks=all
+for data safety when publishing events. With this setting, the leader will not acknowledge a batch of events until they have been persisted by all ISRs. A topic can specify the minimum ISRs (
+min.insync.replicas
+) required to acknowledge a successful write. If the number of ISRs falls below this value, writes will fail. For example, you can create a topic with a replication factor of 3, and set
+min.insync.replicas
+to 2. Send operations will succeed as long as the majority, namely the leader and one follower, have received the write. Applications can therefore trade off data safety and latency versus availability by tuning the minimum ISRs value to meet requirements.
+In the Wild: Event-Processing Systems
+Kafka is widely deployed as the underlying messaging fabric for event-processing systems across multiple business verticals. Here are two prominent examples:
+Big Fish Games is a leading
+producer of consumer games. Big Fish
+uses Kafka
+for high throughput event capture from game usage. This data is known as game telemetry, and includes a diverse set of events such as game device and session information, in-app purchases and responses to marketing campaigns, and game-specific events. This stream of events is fed into a series of downstream analytics to provide Big Fish with real-time insights into game feature usage and patterns of user behavior.
+Slack utilizes Kafka to capture
+events from their web clients that are too expensive to process synchronously. A custom web-facing gateway writes events to Kafka partitions and consumers retrieve these events and relay them to the appropriate processing logic. When an event surge occurs, and events cannot be processed as quickly as they arrive, Kafka topic partitions act as a buffer, protecting the downstream processing from overload until the arrival rate drops and processing can catch up. The
+2018 iteration of this system
+was able to process more than a billion messages per day on
+16 brokers deployed on AWS, with 32 partitions per topic.
+Summary and Further Reading
+Event-driven architectures are suitable for many use cases in the modern business landscape. You can use events to capture external activities and stream these into analytical systems to give real-time insights into user and system behaviors. You can also use events to describe state changes that are published to support integration across disparate systems or coupled microservices.
+Event-processing systems require a reliable, robust, and scalable platform to capture and disseminate events. In this chapter, I’ve focused on Apache Kafka because it has been widely adopted in recent years and is suitable for high-throughput, scalable application deployments. In contrast to most messaging systems, Kafka persists events in topics that are processed in a nondestructive manner by consumers. You can partition and replicate topics to provide greater scalability and availability.
+There’s no better source of Kafka knowledge than
+Kafka: The Definitive Guide: Real-Time Data and Stream Processing at Scale
+, 2nd ed., by Gwen Shapira, Todd Palino, Rajini Sivaram, and Krit Petty (O’Reilly, 2021). For more general information on event-based architectures, Adam Bellemare’s
+Building Event-Driven Microservices: Leveraging Organizational Data at Scale
+(O’Reilly, 2020) is full of insights and
+wisdom.
+Kafka is a particularly highly configurable platform. This can be both a blessing and a curse. By changing various configuration parameters, you can tune throughput, scalability, data safety, retention, and topic size. But with so many interdependent parameters at your disposal, the best approach is not always obvious. This is why I recommend looking at some of the studies that have been conducted on Kafka performance and tuning. The list below are really interesting reads, and can help guide you tune Kafka’s behavior to meet your needs:
+Paul Brebner’s blog post
+The Power of Apache Kafka Partitions: How to Get the Most Out of Your Kafka Cluster
+shows results from a series of experiments that explore the various configuration options for topic partitioning.
+Konstantine Karantasis’ blog post
+Incremental Cooperative Rebalancing in Apache Kafka: Why Stop the World When You Can Change It?
+provides a great overview of rebalancing and explores through experiments the impact of rebalancing on Kafka systems.
+For a performance comparison, Alok Nikhil and Vinoth Chandar’s benchmarking study,
+Benchmarking Apache Kafka, Apache Pulsar, and RabbitMQ: Which Is the Fastest?
+, has some pearls of wisdom on Kafka performance tuning. This is an excellent, thorough study, but the usual proviso for benchmarks applies. This study was performed by a Kafka vendor, so results should be viewed through that lens. Remember there are lies, damn lies, and benchmarks!
+1
+Jay Kreps, one of the inventors of Kafka, wrote this
+excellent article
+going into detail about logs and the project’s development.
+2
+Confluent is a major provider of
+Kafka connectors
+.
+3
+The ZooKeeper dependency is
+likely to be removed in a future version
+.
+4
+Kafka producers will retry sending events that are not acknowledged by the broker. This may lead to events being stored in a different order from that in which they were originally produced.
+5
+To avoid this complexity completely, it is common for systems to slightly overprovision (e.g., 20%) the number of partitions for a topic so you can accommodate growth without increasing partitions post-deployment.
+6
+Kafka rebalancing is a complex process;
+this blog post
+by Konstantine Karantasis gives a good description of how it works.
+
+Chapter 15.
+Stream Processing Systems
+Time is money. The faster you can extract insights and knowledge from your data, the more quickly you can respond to the changing state of the world your systems are observing. Think of credit card fraud detection, catching anomalous network traffic for cybersecurity, real-time route planning in GPS-enabled driving applications, and identifying trending topics on social media sites. For all of these use cases, speed is of the essence.
+These disparate applications have the common requirement of needing to perform computations on the most recent set of observations. Do you care if there was a minor accident that caused a 3-hour traffic backlog on your usual driving route earlier in the day, or that yesterday a snowstorm closed the road overnight? As long as your driving app tells you the highway is clear, you’re on the way. Such computations are time sensitive and need access to recent data to be relevant.
+Traditionally, you build such applications by persisting data from external feeds into a database and devising queries that can extract the information you need. As the arrival rate of the information your systems process increases, this becomes progressively harder to do. You need fast, scalable write performance from your database, and indexes to achieve low latency aggregate reads and joins for recent data points. After the database writes and the reads complete, you are finally ready to perform useful analysis. Sometimes, “finally” comes after a long wait, and in today’s world, late results—even a few seconds late—are as bad as no results at all.
+In the face of an ever-growing number of high-volume data sources from sensors, devices, and users, we’ve seen
+the emergence of a new class of technologies known as stream processing systems. These aim to provide you with the capabilities to process data streams in memory, without the need to persist the data to get the required results. This is often called
+data-in-motion
+, or real-time analytics. Stream processing platforms are becoming common parts of scalable systems. Not surprisingly, there’s a highly competitive technology landscape that gives you plenty of choice about how to design and deploy your systems.
+In this chapter I’ll describe the basic concepts of stream processing platforms, and the common application architectures they enable. I’ll then illustrate these concepts using Apache Flink, which is one of the leading open source streaming technologies.
+Introduction to Stream Processing
+Since the dawn of time in software systems, batch processing has played a major role in the processing of newly available data. In a batch processing system, raw data representing new and
+updated objects are accumulated into files. Periodically, a software component known as a batch data load job processes this newly available data and inserts it into the application’s databases. This is commonly known as an extract, transform, load (ETL) process. ETL
+means the batch files containing new data are processed, aggregating and transforming the data into a format amenable for insertion into your storage layer.
+Once a batch has been processed, the data is available to your analytics and external users. You can fire off queries to your databases that produce useful insights from the newly inserted data. This scheme is shown in
+Figure 15-1
+.
+A good example of batch processing is a real estate website. All new listings, rentals, and sales are accumulated from various data sources into a batch. This batch is applied periodically to the underlying databases and subsequently becomes visible to users. The new information also feeds analytics like how many new listings are available each day in each region, and how homes have sold in the previous day.
+Figure 15-1.
+Batch processing
+Batch processing is reliable, effective, and a vital component of large-scale systems. The downside, however, is the time lag between new data arriving and it being available for querying and analysis. Once you have accumulated a new batch of data, which might take an hour or a day depending on your use case, you must wait until:
+Your ETL job has finished ingesting the new data into your repository
+Your analysis job(s) complete(s)
+At scale, it can take anywhere from several minutes to several hours for this whole process to run. This is not a problem for many use cases where absolute data freshness is not required. If you put your home on the market, it’s not the end of the world if your listing doesn’t appear on your favorite real estate site for a few hours. Even the next day works. But if someone steals your credit card information, waiting up to 24 hours to identify the fraud can cost your credit card provider a lot of money, and everyone a lot of inconvenience. For such use cases, you need streaming analytics.
+Streaming systems process
+new data and events in
+real time
+. When you make a credit card purchase, the credit provider can utilize streaming analytics to run your transaction through a fraud detection model. This will use a fast statistical model prediction technique such as a support vector machine to evaluate whether a transaction is potentially fraudulent. The system can then flag and deny these transactions instantaneously. In this case, time really is money. “Real time” here is highly application dependent, and can mean processing latencies from less than a second to a few seconds.
+Streaming systems can also work on batches, or windows of new data. These are sometimes called microbatches. For example, a public transportation monitoring system wants to update the location of all buses every 30 seconds. Buses send location updates every few seconds, and these are processed as a stream. The stream processor aggregates all the updates from each bus. Every 30 seconds the latest location is used to update the location that is made visible to transportation customers on their app. The series of updates for each bus can also be sent for further processing to calculate speed and predict arrival times at locations on the route. You can see an overview of how such a streaming system looks in
+Figure 15-2
+.
+Figure 15-2.
+Stream processing example
+Both batch and stream processing architectures, as well as hybrids like the Lambda architecture (see
+“The Lambda Architecture”
+) have their place in modern scalable systems.
+Table 15-1
+summarizes the batch and streaming approaches, highlighting their essential characteristics.
+Table 15-1.
+Comparing stream and batch processing
+Characteristic
+Stream processing
+Batch processing
+Batch size
+From individual events to microbatches, typically thousands to tens of thousands in size
+Essentially unlimited and commonly millions to billions of records at scale
+Latency
+Subsecond to seconds
+Minutes to hours
+Analytics
+Relatively simple event detection, event aggregation, and metric calculations over rolling time intervals for newly arrived data
+Complex, incorporating both new batch data and existing data
+The Lambda Architecture
+The
+Lambda architecture
+emerged around 2011 as a hybrid incorporating both traditional batch and emerging stream processing approaches. It comprises three layers:
+The batch layer
+This layer periodically processes
+massive quantities of new event data and updates the application’s databases. At the time Lambda emerged, the dominant technology used for scalable batch processing was Apache Hadoop. As with any batch system, database update frequencies are on the order of minutes to hours depending on how often batches are processed.
+The speed layer
+This layer complements the batch layer
+by providing low latency results based on the new arrived events. While a new batch is accumulating for periodic processing, the speed layer processes the events, giving rapid insights into the latest data. You can think of the speed layer as compensating for the time lag between successive batches being processed. Apache Storm was a widely used technology for the speed layer.
+The serving layer
+This layer is where both the batch
+and speed layers store their results, and is responsible for handling queries and generating results. Results can be based on the outputs of either the batch or speed layer, or by computing a result that combines the two.
+More recently, with new scalable streaming technologies available, the Lambda architecture has become less prominent. New events are stored in immutable log-based storage (e.g., Apache Kafka) and are continually processed as a data stream. You’ll see this design referred to as
+the
+Kappa architecture
+.
+Stream Processing Platforms
+Stream processing platforms have proliferated
+in recent years. Multiple open source, proprietary, and cloud provider–supplied solutions exist, all with their own pros and cons. The underlying architecture and mechanisms across platforms are similar, however.
+Figure 15-3
+illustrates the basic streaming application anatomy.
+Data is made available to the platforms through various data sources. Commonly, these are queues such as a Kafka topic, or files in distributed storage systems such as S3. Stream processing
+nodes ingest data objects from data sources and perform transformations, aggregations, and application-specific business logic. Nodes are organized as a
+directed acyclic graph (DAG). Data objects originating from the source are processed as a stream. A data stream is an unbounded sequence of individual data objects. As data objects conceptually are passed, or flow, between processing nodes, streaming applications are also known as dataflow systems.
+Stream processing systems provide the capabilities for processing nodes to transform an input stream at one node into a new stream that is processed by one or more downstream nodes. For example, your transport application can produce a new stream of the current bus locations every 30 seconds from a stream of bus location change events.
+Figure 15-3.
+Generic stream processing platform architecture
+Stream processing applications have two general flavors. The first simply processes and transforms individual events in the stream, without requiring any context, or state, about each event. You might input a stream of the latest data updates from wearable devices and transform the individual data objects into several others representing the user’s latest step counts, heart rate, and hourly activity data. The results are written to data sinks such as a database or a queue for downstream asynchronous processing that calculates resting heart rate, calories burned, and so on.
+In contrast, some streaming applications need to maintain state that persists across the processing of individual data objects in the stream. The transport monitoring application must know about all the buses in motion and maintain state representing the position updates in the last 30 seconds. A fraud detection application must maintain state representing the current model parameters needed to identify suspicious transactions. A retail store streaming application must maintain information representing the number of each individual item sold in the last hour to identify goods in high demand. This flavor of applications is known as stateful streaming applications.
+Finally, stream processing platforms need capabilities to enable applications to scale out their processing and be resilient to failures. This is typically achieved by executing multiple instances of processing nodes across a cluster of computational resources, and implementing a state checkpointing mechanism to support recovery after failure. How this is achieved is extremely platform dependent.
+As an example of scaling, the
+following Apache Storm code creates a stream processing application (called a
+topology
+in Storm) with a single data source and two processing nodes arranged as a simple pipeline:
+TopologyBuilder builder = new TopologyBuilder();        
+builder.setSpout("purchasesSpout", new PurchasesSpout());        
+builder.setBolt("totalsBolt", new PurchaseTotals(), numTotalsBolts)
+        fieldsGrouping("purchasesSpout", new Fields("itemKey"));
+builder.setBolt("topSellersBolt", new TopSellers())
+        .globalGrouping("totalsBolt");
+It works as follows.
+A
+PurchasesSpout
+object emits purchase records as a stream from a data source. A spout in Storm connects the streaming applications to a data source such as a queue.
+The stream of purchases is passed from the spout to a processing node object, known as a bolt.  This is the
+PurchaseTotals
+object. It maintains purchase totals for all items. Multiple instances of the bolt, defined by the
+numTotalsBolts
+parameter, are executed by Storm as independent threads. The
+fieldsGrouping
+ensures that purchases with the same
+itemKey
+value are always sent from the spout to the same bolt instance so that the total for every key is managed by a single bolt.
+The
+PurchaseTotals
+bolt sends a stream of changed total purchases to the
+TopSellers
+bolt. This creates a leaderboard of the best-selling items in the stream. The
+globalGrouping
+routes the output of all
+PurchaseTotals
+instances to a single
+TopSellers
+bolt instance.
+The logical Storm topology is depicted in
+Figure 15-4
+. Depending on the underlying cluster configuration that the topology is deployed on, Storm will execute the specified number of bolt instances as threads in one or more available JVMs. This enables topologies to take advantage of the computational resources available in the deployment environment.
+Figure 15-4.
+Example Apache Storm topology
+Apache Storm is a powerful and scalable streaming platform. Its API is relatively simple, however, and places the responsibility for explicit topology definition on the application designer. In the
+remainder of this chapter, I’ll focus instead on the more contemporary Apache Flink, which provides
+functional programming APIs for building streaming applications.
+Case Study: Apache Flink
+Apache Flink emerged in 2014 based on original research performed in the
+European Union Stratosphere project
+. At its core, Flink is a distributed stream processing system designed for high throughput and low latencies. Flink provides a collection of operations for filtering, aggregating, mapping, and joining streams of data from data sources. Unlike explicitly defined Apache Storm topologies, Flink programs are compiled and automatically transformed into data flow programs that can be deployed on a clustered computational environment.
+Flink provides a number of distinct APIs. I’ll briefly give an example of the DataStream API in the following subsection. Flink also supports two APIs based on relational concepts, namely the Table and SQL APIs. You can build streaming applications that perform a subset of SQL
+SELECT
+queries on data streams that accumulate in tables with defined schemas.
+DataStream API
+The Flink DataStream API provides
+stream processing capabilities for Java and Scala systems. You can utilize a rich collection of stream processing operations for splitting, filtering, aggregating, and transforming streams of events, and creating periodic processing of batches of events in the stream using bounded time windows.
+In Flink, a data stream is the logical representation of a stream of typed events, namely
+DataStream<T>
+in Java. Each stage in a data stream application applies functions to events and produces a stream of typed output events. Flink can process streams in parallel by replicating the functions in a processing pipeline and distributing events to different replicas.
+The first thing you need to do in a
+Flink system is to create an execution environment. The execution environment for your application can be local, causing execution is a single JVM, or remote, which will invoke execution on a compute cluster. The Flink environment object gives you the ability to specify various job execution parameters that control the scalability and fault tolerance of your application on a cluster. An example is shown in the following:
+final StreamExecutionEnvironment env =
+                StreamExecutionEnvironment.getExecutionEnvironment();
+Once you have an execution environment, you can specify a data source. Flink supports a number of native data sources including files, and has connectors for various external technologies. The following example illustrates how to use the Flink Kafka connector to enable your application to ingest data from a Kafka topic using a Flink
+DataStream
+:
+KafkaSource<LiftRide> source = KafkaSource.<LiftRide>builder()
+    .setBootstrapServers(brokerList)
+    .setTopics("resort-topic")
+    .setGroupId("liftConsumers")
+    .setStartingOffsets(OffsetsInitializer.earliest())
+    .setValueOnlyDeserializer(new LiftRideSchema())
+    .build();
+
+DataStream<LiftRide> liftRideStream = 
+env.fromSource(source, WatermarkStrategy.noWatermarks(), 
+"Resort Lifts");
+In this example, Flink:
+Starts reading at the start of the topic -
+OffsetsInitializer.earliest()
+Uses the Kafka event timestamp as the message time -
+WatermarkStrategy.noWatermarks()
+Next you specify the transformations to perform on events that are received from the source. The following example shows how to count the number of individual lift rides on every ski lift in a resort:
+DataStream<Tuple2<String, Integer>> liftCounts =
+        liftRideStream
+        .map(i -> Tuple2.of(i.getLiftID(), 1))
+        .returns(Types.TUPLE(Types.STRING, Types.INT))
+        .keyBy(value -> value.f0)
+        .sum(1)
+        .window(SlidingProcessingTimeWindows.of(Time.minutes(10), 
+                                                Time.minutes(5)));
+The basic way this code works is as follows:
+Flink extracts each
+LiftRide
+event from the source and passes it to a
+map()
+function.
+map()
+generates a new object of type
+Tuple2
+. This contains two typed elements, the
+liftID
+of type
+STRING
+and a value of 1 (of type
+INT
+) representing a single lift ride.
+keyBy()
+partitions the map outputs using the
+liftID
+(field 0 in the tuple) as the key, and the
+sum(1)
+operator keeps a total of the number of individual lift rides (field 1 in the tuple) for each key.
+A sliding window defines when Flink generates results. Flink maintains a window of all the events it processes in the previous 10 minutes—this is the window size. Flink then generates, every 5 minutes, a set of results of type
+Tuple2
+<
+String
+,
+Integer>
+. These represent the number of skier lift rides for each lift based on the events processed in the previous 10-minute interval. This is known as the
+window slide
+.
+In general, window operations define the boundaries of finite sets of events and perform operations over this set of events. Sliding windows are extremely useful for performing calculations such as weighted averages. In this example, the results of each 5-minute window would show if the average number of skiers using the lift is increasing, decreasing, or stable. In contrast, a tumbling window defines distinct window boundaries and every event can only belong to a single window.
+You also add a destination known as a
+sink for Flink to write the outputs of processing the messages in the stream:
+liftRideStream.addSink( … ) // parameters omitted
+Finally, you can kick off the stream processing. Flink programs are executed lazily. This means nothing happens until your code calls
+the following:
+env.execute();
+Scalability
+Your Flink programs are transformed
+into a logical DAG. Data streams move from sources to sinks through transformations that you define in your code. These are represented as nodes in the DAG. At deployment time, Flink maps your logical graph to physical resources that execute the system. These physical resources can range from your local node to a large cluster running the application across hundreds of computation nodes. This is illustrated in
+Figure 15-5
+for a simple deployment of two nodes.
+Figure 15-5.
+Example of mapping a Flink logical data flow to physical resources
+You can influence how Flink deploys
+the logical DAG to physical resources in two main ways. These are by specifying the level of parallelism for various transformations in your program, and configuring the amount of concurrency allowed in the execution environment on each cluster node.
+In your code, there are also two ways to inform the Flink runtime of the number of concurrent instances of your operators to execute. The following code example shows one way, which specifies that 10 parallel instances of the
+.sum
+transformation should be utilized:
+.sum(1).setParallelism(10);
+This results in Flink creating an execution DAG as shown in
+Figure 15-6
+. The key-value pairs emitted by the
+.map()
+function are hash partitioned across the 10 instances of the
+.sum()
+operator.
+Figure 15-6.
+Specifying operator parallelism in Flink
+You can also specify the default level of parallelism for all operators, data sources, and data sinks in a program using the execution environment object. This is shown in the following example, which sets the default parallelism level to 5:
+final StreamExecutionEnvironment env = 
+        StreamExecutionEnvironment.getExecutionEnvironment();
+env.setParallelism(5);
+The default parallelism level is overridden by any operators that you explicitly define a level of parallelism for.
+When you submit an application, Flink maps your logical DAG to the physical nodes that are available in your target cluster. Every compute node in the cluster runs a Flink task manager
+that is responsible for executing components of your streaming system. Each task manager is a JVM that by default can run one parallel task defined in your system. This is known as a task slot.
+You can specify how many
+tasks Flink may deploy to a task manager by defining the
+taskmanager.numberOfTaskSlots
+configuration parameter in the
+flink-conf.yaml
+file. The default value for task slots is 1. This means each task manager runs a component of your system in a single thread in the JVM. If you increase the default value to
+N
+, the task manager can run
+N
+components of your dataflow in different threads, with each thread allocated 1/
+N
+of the available JVM memory. One common strategy is to allocate the same number of slots as CPU cores available on each task manager node.
+The overall architecture is depicted in
+Figure 15-7
+. This also depicts the Flink job manager, which is responsible for cluster management, sharing of cluster resources between multiple jobs, monitoring for node failures, and managing recovery. A high availability configuration can be created that has multiple job managers deployed in a leader-follower architecture.
+Figure 15-7.
+Flink runtime architecture
+Flink implements a sophisticated transformation algorithm that maps a logical DAG to available physical resources. This includes optimizations, known as operator chaining, to colocate operators in a single task slot to minimize data communication costs. You influence how the physical mapping occurs by specifying parallelism levels, but in general it is not necessary for you to thoroughly understand the specifics of the algorithms
+employed. I’ll point you to excellent resources in
+“Conclusions and Further Reading”
+that describe the details.
+Data Safety
+Handling failures is an issue that
+you need to consider for any streaming systems. If one part of the deployed streaming application fails due to a node crash, network failure, or application exception, any state that is held in memory is lost. In the ski lift rides example, the lift ride counts for the 10-minute window are maintained in memory. If a task manager fails, the local state it manages is lost.
+There are two mechanisms necessary in Flink to support data safety. These are persistent state storage and periodically invoking checkpoints for the complete stream.
+First, you need to configure stateful operators to periodically persist their state as key-value pairs. By default, Flink supports a
+RocksDB storage backend
+. You can configure this as follows in the
+flink-conf.yaml
+file:
+state.backend: rocksdb
+state.checkpoints.dir: file:///checkpt-mystream/
+The persistent store makes it possible to restore state from snapshots in the case of stream processing failures. In streaming applications, however, the challenge is to ensure that all operators have a consistent checkpoint. Specifically, this means that the snapshots across all operators are based on processing the exact same input event from the stream source.
+Flink ensures snapshots are consistent using a concept known as
+stream barriers
+.
+1
+The Flink job manager periodically injects events known as barriers into the source stream. These barriers flow strictly in order with events from the source stream. When a stateful operator inputs a barrier event on all its input streams, it writes its local state to the persistent storage. It then echoes the barrier on its outputs so that downstream operators in the stream processing can also persist their state.
+This checkpointing mechanism is depicted in
+Figure 15-8
+. The barriers contain an identifier that represents their position in the source input stream. For example, if the input source is a Kafka topic, the barrier identifier represents the offset,
+N
+, of the event that precedes the barrier in the stream. This ensures all the checkpointed state is based on processing all events from the source up to and including offset
+N
+. Once a barrier is delivered on all the inputs to the stream sink, the checkpoint is marked complete. This becomes the latest state that the application can recover, should any failure occur.
+Figure 15-8.
+Barrier messages for Flink stream checkpointing.
+Recovery involves restoring the state of the application after failure across the complete distributed dataflow. Flink achieves this by first stopping and redeploying the entire application. Flink then informs each stateful operator to restore its state from the latest completed snapshot. Finally, Flink informs the stream consumer to resume processing from position
+N
++ 1 in the data source.
+Checkpointing effectively makes Flink applications fault tolerant. The trade-off is the cost of periodic state checkpointing and recovery. If the managed state is small, this will have minimal impact on throughput. However, if operators maintain large state spaces, frequent checkpointing may significantly impact stream throughput.
+You can control when checkpoints are triggered through various configuration parameters. A frequently utilized parameter specifies the minimum time that must elapse between checkpoints. Setting this value to, for example, 2 seconds ensures that the next checkpoint will not start until at least 2 seconds after the previous one has completed. By default, checkpointing is not enabled for Flink applications.
+Conclusions and Further Reading
+The ability of streaming systems to produce relevant and timely results is highly attractive in many application domains. You can transform, aggregate, and analyze incoming data in real time. Your applications can perform analyses on finite batches of data based on time windows or message volumes. This makes it possible to identify trends in data and calculate metrics based on values in the most recent windows
+of data.
+There are numerous streaming platforms that you can utilize to build fault-tolerant, scalable applications. Scalability is achieved by transforming your logical dataflow application architecture into a physical equivalent that distributes and connects processing nodes in the system across computational resources in a cluster. Fault tolerance mechanisms persist processing node state and track which messages have been successfully processed through the complete dataflow application. When failures occur, the streams can be restarted from the first outstanding message.
+A great book that covers the broad spectrum of design and development issues for streaming applications is
+Streaming Systems: The What, Where, When, and How of Large-Scale Data Processing
+by Tyler Akidau, Slava Chernyak, and Reuven Lax (O’Reilly, 2018).
+The books below are excellent sources of knowledge for a number of the leading contenders in this space. These include Apache Flink, Apache Storm, Kinesis, Apache Kafka Streams, Apache Spark Streams, and Spring Cloud Data Flow:
+Fabian Hueske and Vasiliki Kalavri,
+Stream Processing with Apache Flink: Fundamentals, Implementation, and Operation of Streaming Applications
+(O’Reilly, 2019)
+Mitch Seymour,
+Mastering Kafka Streams and ksqlDB: Building Real-Time Data Systems by Example
+(O’Reilly, 2021)
+Tarik Makota, Brian Maguire, Danny Gagne, and Rajeev Chakrabarti,
+Scalable Data Streaming with Amazon Kinesis
+(Packt, 2021)
+Sean T. Allen, Matthew Jankowski, and Peter Pathirana,
+Storm Applied: Strategies for Real-Time Event Processing
+(Manning, 2015)
+Gerard Maas and Francois Garillot,
+Stream Processing with Apache Spark: Mastering Structured Streaming and Spark Streaming
+(O’Reilly, 2019)
+Felipe Gutierrez,
+Spring Cloud Data Flow: Native Cloud Orchestration Services for Microservice Applications on Modern Runtimes
+(Apress, 2021)
+1
+The approach is based on the paper
+“Lightweight Asynchronous Snapshots for Distributed Dataflows”
+by Paris Carbone et al.
+
+Chapter 16.
+Final Tips for Success
+Let’s be blunt. Building scalable distributed systems is hard!
+Distributed systems by their very nature are complex, with multiple failure modes that you must take into consideration, and design to handle all eventualities. It gets even trickier when your applications are stressed by high request volumes and rapidly growing data resources.
+Applications at scale require numerous, cooperating hardware and software components that collectively create the capacity to achieve low latencies and high throughput. Your challenge is to compose all these moving parts into an application that satisfies requirements and doesn’t cost you the earth to run.
+In this book I’ve covered the broad landscape of principles, architectures, mechanisms, and technologies that are foundational to scalable distributed systems. Armed with this knowledge, you can start to design and build large-scale applications.
+I suspect that you will not be surprised to hear that this is not the end of the story. We all operate in an ever-changing landscape of new application requirements and new hardware and software technologies. While the underlying principles of distributed systems still hold (for the foreseeable future anyway—
+quantum physics
+might change things one day), new programming abstractions, platform models, and hardware make it easier for you to build more complex systems with increased performance, scalability, and resilience. The metaphorical train that propels us through this technology landscape will never slow down, and probably only get faster. Be prepared for a wild ride of constantly learning new stuff.
+In addition, there are numerous essential ingredients for successful scalable systems that I have not covered in this book. Four of these are depicted in
+Figure 16-1
+, and I briefly describe the salient issues of each in the following subsections.
+Figure 16-1.
+Scalable distributed systems
+Automation
+Engineers are rather expensive but
+essential resources when building large-scale systems. Any system that needs to be deployed at scale is quickly going to require hundreds of talented engineers. At the scale of the internet giants, this number grows to many thousands. Your engineers then need to be able to rapidly roll out changes, fixes, and new features to growing, complex codebases. The ability to efficiently push hundreds of changes per day to a deployed system without downtime is key at scale. You need to deploy frequent changes to improve the client experience and ensure reliable and scalable operations.
+Automation makes it possible for developers to rapidly and reliably make changes to operational systems. The set of tools and practices that facilitate such automation are embodied in the discipline of DevOps. In
+DevOps: A Software Architect’s Perspective
+(O’Reily, 2015), Len Bass et al. define DevOps as “a set of practices intended to reduce the time between committing a change to a system and the change being placed into normal production, while ensuring high quality.”
+DevOps encompasses a set of practices
+and tooling that are based on automation at all levels of the development and deployment process. At the heart of DevOps are continuous delivery (CD) practices,
+1
+supported by sophisticated toolchains for code configuration management, automated testing, deployment, and monitoring. DevOps extends these practices by making the management of the deployment environment the responsibility of the development teams. This typically includes rotating 24-hour on-call responsibilities for team members to respond to incidents or failures in production.
+DevOps practices are essential for successful scalable systems. Teams have responsibilities for designing, developing, and operating their own microservices, which interact with the rest of the system through well-defined interfaces. With automated toolchains, they can independently deploy local changes and new features without perturbing the system operations. This reduces coordination overheads, increases productivity, and facilitates fast release cycles. All of which means you get a much bigger bang for your
+engineering dollars.
+Observability
+“You can’t manage what you can’t measure,” so
+goes the saying. In large-scale software systems, this is indeed the truth. With multitudes of moving parts, all operating under variable load conditions and all unpredictably error-prone, you need insights gained through measurements on the health and behavior of your systems. An observability solution encompasses this spectrum of needs, including:
+The infrastructure to capture a system’s current state based on constantly generated fine-grained metrics and log data
+The capabilities to analyze and act on aggregated real-time metrics and react to alerts indicating actual or pending failures
+The first essential element of observability is an instrumented system that constantly emits system telemetry in the form of metrics and log entries. The sources of this telemetry are many and varied. It can be sourced from operating systems, the foundational platforms (e.g., messaging, databases) you utilize in your applications, and the application code you deploy. Metrics represent resource utilizations and the latencies, response times, and throughput the various parts of your system are delivering.
+Code instrumentation is mandatory, and you can use open source frameworks (e.g.,
+OpenTelemetry
+) or proprietary solutions (e.g., AWS CloudWatch) to emit application-specific metrics. These metrics and log entries form a continuous stream of time-series based data that characterizes your application behavior over time.
+Capturing raw metrics data is simply a prerequisite for the situational awareness that observability infers. You need to rapidly process this stream of data so that it becomes actionable for systems operations. This includes both continuous monitoring of current state, exploring historical data to understand or diagnose some unexpected system behavior, and sending real-time alerts when thresholds are
+exceeded
+or failures occur. You can choose from a number of sophisticated solutions that support monitoring and exploration of time-series data for observability.
+Prometheus
+,
+Grafana
+, and
+Graphite
+are three widely used technologies that provide out-of-the-box solutions for various parts of an observability stack.
+Observability is a necessary component of scalable distributed systems. Ignore it at your peril! You’ll find a great
+source for learning more about observability is the book by Charity Majors et al.,
+Observability Engineering
+(O’Reilly).
+Deployment Platforms
+Scalable systems need extensive, elastic,
+and reliable compute and data platforms. Modern public clouds and private data centers are packed to the walls and ceilings with hardware you can provision with the click or two of a mouse. Even better, provisioning is invoked automatically using scripting languages designed for operations. This is known as
+infrastructure as code (IaC)
+, an essential ingredient of DevOps.
+Virtual machines were traditionally the unit of deployment for applications. However, the last few years have seen the proliferation of new lighter-weight approaches based on container technologies, with
+Docker
+being the preeminent example. Container
+images enable the packaging of application code and dependencies into a single deployable unit. When deployed on a container engine such as the Docker Engine, containers run as isolated processes that share the host operating systems with other containers. Compared to virtual machines, containers consume considerably fewer resources, and hence make it possible to utilize hardware resources more efficiently by packing multiple containers on a single virtual machine.
+Containers are typically utilized in concert with a cluster management platform such as Kubernetes or Apache Mesos. These orchestration platforms provide APIs for you to control how, when, and where your containers execute. They make it possible to automate your deployment of containers to support varying system loads using autoscaling and simplify the management of deploying multiple containers across multiple nodes in a cluster.
+Data Lakes
+How often do you scroll back in time on your
+favorite social media feed to look for photos you posted 5, 10, or even more years ago? Not very often, I bet. And I bet your connections do it even less. If you give it a try, you’ll probably find, in general, that the further you go back in time, the longer your photos will take to render.
+This is an example of the historical data management challenges faced at scale. Your systems will generate many petabytes or more of data over time. Much of this data is rarely, if ever accessed by your users. But for reasons that your application domain dictates (e.g., regulatory, contractual, popularity), you need to keep historical data available for the few occasions it is requested.
+Managing, organizing, and storing these historical data repositories is the domain of data warehousing, big data, and (more recently) data lakes. While there are technical and philosophical differences between these approaches, their essence is storage of historical data in a form it can be retrieved, queried, and analyzed.
+Data lakes are usually characterized by storing and cataloging data in heterogeneous formats, from native blobs to JSON to relational database extracts. They leverage low-cost object storage such as Apache Hadoop, Amazon S3, or Microsoft Azure Data Lake. Flexible query engines support analysis and transformation of the data. You can also use different
+storage classes, essentially providing longer retrieval times for lower cost, to optimize your costs.
+Further Reading and Conclusions
+There’s a lot more to designing, building, operating, and evolving software systems at massive scale than can be covered in a single book. This chapter briefly describes four intrinsic elements of scalable systems that you need to be aware of and address in production systems. Add these elements to the ever-expanding palette of knowledge that modern software architects need to possess.
+I’ll leave you with a couple of recommendations for books I think everyone should have on their (virtual) bookshelf.
+First, the classic book
+Site Reliability Engineering: How Google Runs Production Systems
+, edited by Betsy Beyer et al. (O’Reilly) describes the set of practices and tooling that Google developed to run their production systems. It is an extensive, thorough, and cross-cutting description of the approaches needed to keep massive-scale system infrastructures operating and healthy.
+In a similar vein of wide-ranging knowledge,
+Software Architecture: The Hard Parts
+, by Neal Ford et al. (O’Reilly) is chock-full with insights and examples of how to address the many design conundrums that modern systems present. There’s rarely, if ever, simple, correct solutions to these design problems. To this end, the authors describe how to apply contemporary architecture design knowledge and trade off analysis to reach satisfactory solutions.
+Happy reading!
+1
+The classic book in this area is Jez Humble and David Farley’s
+Continuous Delivery: Reliable Software Releases through Build, Test, and Deployment Automation
+(Addison-Wesley Professional, 2010).
+
+Index
+Symbols
+2PC (two-phase commit)
+,
+Two-Phase Commit
+-
+Two-Phase Commit
+Cloud Spanner
+,
+Google Cloud Spanner
+failure modes
+coordinator failure
+,
+2PC Failure Modes
+participant failure
+,
+2PC Failure Modes
+3NF (third normal form)
+,
+The Movement to NoSQL
+5G cellular networks
+,
+Communications Hardware
+A
+ACID (atomicity, consistency, isolation, durability)
+,
+Strong Consistency
+MongoDB
+,
+Data Model and API
+transactions
+,
+Introduction to Strong Consistency
+active repair
+,
+Active Repair
+Advanced Message Queuing Protocol (AMQP)
+,
+Example: RabbitMQ
+ALB (Application Load Balancer), Lambda functions and
+,
+Lambda Function Life Cycle
+algorithms
+(
+see
+distributed consensus algorithms)
+Amazon SQS (Simple Queue Service)
+,
+Poison Messages
+AMQP (Advanced Message Queuing Protocol)
+,
+Example: RabbitMQ
+Apache Flink
+DAG (directed acyclic graph)
+,
+Scalability
+data safety
+,
+Data Safety
+DataStream API
+,
+DataStream API
+-
+DataStream API
+execution environment
+,
+DataStream API
+scalability
+,
+Scalability
+-
+Scalability
+sink
+,
+DataStream API
+tasks
+,
+Scalability
+Apache Storm
+,
+Stream Processing Platforms
+-
+Stream Processing Platforms
+Apache Tomcat server
+,
+Applications Servers
+API (application programming interface)
+CRUD (create, read, update, delete)
+,
+Application Programming Interface (API)
+HTTP APIs
+,
+Application Programming Interface (API)
+-
+Application Programming Interface (API)
+requests
+,
+Application Programming Interface (API)
+RESTful
+,
+Application Programming Interface (API)
+application caching
+,
+Application Caching
+-
+Application Caching
+cache hits
+,
+Application Caching
+cache misses
+,
+Application Caching
+cache-aside pattern
+,
+Application Caching
+keys
+,
+Application Caching
+memcached
+,
+Application Caching
+Redis
+,
+Application Caching
+application container threads
+,
+Applications Servers
+application layer
+,
+Communications Software
+Application Load Balancer (ALB))
+(
+see
+ALB (Application Load Balancer))
+application programming interface (API)
+(
+see
+API (application programming interface))
+application servers
+,
+Applications Servers
+Apache Tomcat
+,
+Applications Servers
+Express.js
+,
+Applications Servers
+JEE (Java Enterprise Edition)
+,
+Applications Servers
+application services
+,
+Application Services
+(
+see also
+services)
+application-level load balancers
+,
+Load Balancing
+asynchronous messaging
+,
+Asynchronous Messaging
+asynchronous networks
+,
+Partial Failures
+atomicity, ACID transcations
+,
+Introduction to Strong Consistency
+automation
+,
+Automation
+-
+Automation
+autoscaling
+GAE (Google App Engine)
+,
+Autoscaling
+-
+Autoscaling
+serverless platforms
+,
+The Attractions of Serverless
+availability
+DynamoDB
+,
+Availability
+Kafka
+,
+Availability
+-
+Availability
+MongoDB
+,
+Availability
+RabbitMQ
+,
+Availability and Performance Trade-Offs
+Redis
+,
+Availability
+AWS Lambda
+,
+The Attractions of Serverless
+,
+AWS Lambda
+cold start
+,
+Lambda Function Life Cycle
+execution
+,
+Execution Considerations
+freezing execution environment
+,
+Lambda Function Life Cycle
+function lifecycle
+,
+Lambda Function Life Cycle
+-
+Lambda Function Life Cycle
+functions, concurrency
+,
+Scalability
+scalability
+,
+Scalability
+-
+Scalability
+supported languages
+,
+Lambda Function Life Cycle
+thawed execution environment
+,
+Lambda Function Life Cycle
+B
+bandwidth
+,
+Communications Hardware
+barrier synchronization
+,
+Race Conditions
+,
+Barrier Synchronization
+-
+Barrier Synchronization
+base collection class
+,
+Thread-Safe Collections
+batch processing, ETL (extract, transform, load)
+,
+Introduction to Stream Processing
+best-effort delivery
+,
+Internet Protocol (IP)
+Big Fish Games
+,
+Availability
+blocked (thread state)
+,
+Thread States
+bulkhead pattern, microservices
+,
+Bulkhead Pattern
+-
+Bulkhead Pattern
+business logic, reusable
+,
+Monolithic Applications
+busy waiting
+,
+Thread Coordination
+C
+Cache Fusion
+,
+Example: Oracle RAC
+cache hits
+,
+Application Caching
+cache misses
+,
+Application Caching
+cache-aside pattern
+,
+Application Caching
+Cache-Control HTTP header
+,
+Cache-Control
+caching
+application caching
+,
+Application Caching
+-
+Application Caching
+distributed
+,
+Distributed Caching
+read-through
+,
+Application Caching
+TTL (time to live) and
+,
+Application Caching
+web caching
+,
+Web Caching
+Cache-Control HTTP header
+,
+Cache-Control
+CDNs (content delivery networks)
+,
+Web Caching
+edge caches
+,
+Web Caching
+Etag HTTP header
+,
+Etag
+-
+Etag
+Expires HTTP header
+,
+Expires and Last-Modified
+HTTP caching directives
+,
+Web Caching
+Last Modified HTTP header
+,
+Expires and Last-Modified
+latencies and
+,
+Etag
+write-behind
+,
+Application Caching
+write-through
+,
+Application Caching
+CAP theorem, database replication
+,
+The CAP Theorem
+-
+The CAP Theorem
+,
+Tunable Consistency
+CDNs (content delivery networks)
+,
+Web Caching
+cellular wireless networks
+,
+Communications Hardware
+centralized orchestration, microservices workflow
+,
+Principles of Microservices
+circuit breaker pattern, microservices
+,
+Circuit breaker pattern
+-
+Circuit breaker pattern
+clocks, logical
+,
+Version Vectors
+cloud platforms
+attraction
+,
+The Attractions of Serverless
+costs
+,
+The Attractions of Serverless
+IaaS (infrastructure as a service)
+,
+The Attractions of Serverless
+VMs (virtual machines)
+,
+The Attractions of Serverless
+Cloud Spanner
+,
+Google Cloud Spanner
+-
+Google Cloud Spanner
+clusters, Kafka
+,
+Apache Kafka
+ClusterWare
+,
+Example: Oracle RAC
+code, critical sections
+,
+Race Conditions
+communicating sequential processes (CSP) model
+,
+Why Concurrency?
+communications
+,
+Communications Basics
+-
+Communications Basics
+hardware
+,
+Communications Hardware
+-
+Communications Hardware
+software
+IP (Internet Protocol)
+,
+Internet Protocol (IP)
+-
+Internet Protocol (IP)
+TCP (Transmission Control Protocol)
+,
+Transmission Control Protocol (TCP)
+-
+Transmission Control Protocol (TCP)
+concurrency
+AWS Lambda functions
+,
+Scalability
+Java 7.0
+,
+An Overview of Concurrent Systems
+machine instructions and
+,
+Why Concurrency?
+multicore processors
+,
+Why Concurrency?
+RabbitMQ and
+,
+Distribution and Concurrency
+-
+Distribution and Concurrency
+reasons for
+,
+Why Concurrency?
+-
+Why Concurrency?
+threads and
+,
+Why Concurrency?
+concurrency models
+Erlang
+,
+Why Concurrency?
+Go
+,
+Why Concurrency?
+Node.js
+,
+Why Concurrency?
+conflict resolution
+last writer wins
+,
+Last Writer Wins
+-
+Last Writer Wins
+timestamps
+,
+Last Writer Wins
+-
+Last Writer Wins
+version vectors
+,
+Version Vectors
+-
+Version Vectors
+conflict-free replicated data types (CRDTs)
+,
+Version Vectors
+consensus
+,
+Consensus in Distributed Systems
+-
+Consensus in Distributed Systems
+consensus algorithms
+,
+Introduction to Strong Consistency
+2PC (two-phase commit)
+,
+Two-Phase Commit
+distributed consensus algorithm
+,
+Distributed Consensus Algorithms
+fault tolerant consensus approach
+,
+Distributed Consensus Algorithms
+Multi-Paxos
+,
+Distributed Consensus Algorithms
+Paxos
+,
+Distributed Consensus Algorithms
+Raft
+,
+Raft
+-
+Leader Election
+consistency
+,
+Strong Consistency
+(
+see also
+eventual consistency; strong consistency)
+ACID transactions
+,
+Introduction to Strong Consistency
+DynamoDB
+,
+Consistency
+MongoDB
+,
+Consistency
+Redis
+,
+Consistency
+replica
+,
+Introduction to Strong Consistency
+transactional
+,
+Introduction to Strong Consistency
+consistency models
+,
+Consistency Models
+linearizability
+,
+Consistency Models
+serializability
+,
+Consistency Models
+consumers
+,
+Thread Coordination
+message patterns
+,
+Competing Consumers
+-
+Competing Consumers
+message queues
+,
+Messaging Primitives
+thread pools and
+,
+Thread Pools
+consumers, message queues
+,
+Messaging Primitives
+container images
+,
+Deployment Platforms
+content delivery networks (CDNs)
+,
+Web Caching
+conversational state
+,
+State Management
+counters, incrementing
+,
+Race Conditions
+CRDTs (conflict-free replicated data types)
+,
+Version Vectors
+created (thread state)
+,
+Thread States
+critical sections
+,
+Race Conditions
+CRUD (create, read, update, delete)
+,
+Application Programming Interface (API)
+CSP (communicating sequential processes) model
+,
+Why Concurrency?
+D
+DAG (directed acyclic graph)
+Flink
+,
+Scalability
+stream processing nodes
+,
+Stream Processing Platforms
+DAO (data access object) layer
+,
+Monolithic Applications
+data distribution, NoSQL databases
+,
+Data Distribution
+data lakes
+,
+Data Lakes
+-
+Data Lakes
+data link layer
+,
+Communications Software
+data safety
+,
+Message Persistence
+Flink
+,
+Data Safety
+RabbitMQ
+,
+Data Safety and Performance Trade-offs
+-
+Data Safety and Performance Trade-offs
+data structures, shared
+,
+Race Conditions
+data types, DynamoDB
+,
+Data Model and API
+data-in-motion
+,
+Stream Processing Systems
+database engines
+,
+Distributed Databases
+databases
+,
+Scalable Database Fundamentals
+distributed
+(
+see
+distributed databases)
+eventual consistency
+(
+see
+eventual consistency)
+internet-scale
+,
+The CAP Theorem
+NoSQL
+,
+The Movement to NoSQL
+data model normalization
+,
+The Movement to NoSQL
+-
+The Movement to NoSQL
+joins
+,
+The Movement to NoSQL
+movement characteristics
+,
+The Movement to NoSQL
+solution domain
+,
+The Movement to NoSQL
+partitioning data, scaling out
+,
+Scale Out: Partitioning Data
+-
+Scale Out: Partitioning Data
+read replicas, scaling out
+,
+Scaling Out: Read Replicas
+relational
+(
+see
+relational databases)
+strong consistency
+(
+see
+strong consistency)
+DataStream API, Apache Flink
+,
+DataStream API
+-
+DataStream API
+deadlocks, threads
+,
+Deadlocks
+-
+Deadlocks
+deadly embrace
+,
+Deadlocks
+(
+see also
+deadlocks, threads)
+deployment, platforms
+,
+Deployment Platforms
+destructive consumer semantics
+,
+Scalable Event-Driven Processing
+DevOps, automation and
+,
+Automation
+direct exchanges, RabbitMQ
+,
+Messages, Exchanges, and Queues
+distributed caching
+,
+Distributed Caching
+distributed consensus algorithm
+,
+Distributed Consensus Algorithms
+fault tolerant consensus approach
+,
+Distributed Consensus Algorithms
+Multi-Paxos
+,
+Distributed Consensus Algorithms
+Paxos
+,
+Distributed Consensus Algorithms
+Raft
+,
+Raft
+-
+Leader Election
+distributed databases
+,
+Distributed Databases
+DynamoDB
+,
+Amazon DynamoDB
+API
+,
+Data Model and API
+-
+Data Model and API
+availability
+,
+Availability
+consistency
+,
+Consistency
+data model
+,
+Data Model and API
+-
+Data Model and API
+data safety
+,
+Data safety
+distribution
+,
+Distribution and Replication
+-
+Distribution and Replication
+performance
+,
+Performance
+provisioned capacity mode
+,
+Amazon DynamoDB
+replication
+,
+Distribution and Replication
+-
+Distribution and Replication
+scalability
+,
+Scalability
+storage
+,
+Amazon DynamoDB
+transactions
+,
+Data Model and API
+MongoDB
+ACID support
+,
+Data Model and API
+API
+,
+Data Model and API
+-
+Data Model and API
+availability
+,
+Availability
+collections
+,
+Data Model and API
+consistency
+,
+Consistency
+data model
+,
+Data Model and API
+-
+Data Model and API
+data safety
+,
+Data safety
+distribution
+,
+Distribution and Replication
+-
+Distribution and Replication
+documents
+,
+Data Model and API
+MMAPv1
+,
+MongoDB
+performance
+,
+Performance
+replication
+,
+Distribution and Replication
+-
+Distribution and Replication
+scalability
+,
+Scalability
+write operations
+,
+Data Model and API
+Redis
+,
+Redis
+availability
+,
+Availability
+consistency
+,
+Consistency
+data safety
+,
+Data safety
+distribution
+,
+Distribution and Replication
+-
+Distribution and Replication
+hashes
+,
+Data Model and API
+linked lists
+,
+Data Model and API
+performance
+,
+Performance
+replication
+,
+Distribution and Replication
+-
+Distribution and Replication
+scalability
+,
+Scalability
+sets
+,
+Data Model and API
+single-key operations
+,
+Data Model and API
+strings
+,
+Data Model and API
+transactions
+,
+Data Model and API
+replica consistency
+,
+Introduction to Strong Consistency
+replication
+,
+Data Distribution
+CAP theorem
+,
+The CAP Theorem
+-
+The CAP Theorem
+consistency
+,
+Data Distribution
+leader-follower architecture
+,
+Data Distribution
+leaderless architecture
+,
+Data Distribution
+sharding
+,
+Data Distribution
+hash key
+,
+Data Distribution
+range-based
+,
+Data Distribution
+value-based
+,
+Data Distribution
+shared everything architecture
+,
+Data Distribution
+shared nothing architecture
+,
+Data Distribution
+transactional consistency
+,
+Introduction to Strong Consistency
+distributed joins, databases
+,
+Scale Out: Partitioning Data
+distributed systems
+communications
+,
+Communications Basics
+-
+Communications Basics
+hardware
+,
+Communications Hardware
+-
+Communications Hardware
+consensus
+,
+Consensus in Distributed Systems
+-
+Consensus in Distributed Systems
+failures, partial
+,
+Partial Failures
+-
+Partial Failures
+time
+,
+Time in Distributed Systems
+drift
+,
+Time in Distributed Systems
+monotonic clock
+,
+Time in Distributed Systems
+NTP (Network Time Protocol)
+,
+Time in Distributed Systems
+-
+Time in Distributed Systems
+time of day clock
+,
+Time in Distributed Systems
+distributed transactions
+,
+Distributed Transactions
+-
+Distributed Transactions
+2PC failure modes
+coordinated failure failure
+,
+2PC Failure Modes
+participant failure
+,
+2PC Failure Modes
+consensus algorithms
+,
+Two-Phase Commit
+(
+see also
+2PC (two-phase commit))
+transaction coordinator recovery
+,
+2PC Failure Modes
+two-phase commit (2PC)
+,
+Two-Phase Commit
+-
+Two-Phase Commit
+DNS (Domain Name System)
+,
+Internet Protocol (IP)
+replication, geographical
+,
+Internet Protocol (IP)
+DNS server hierarchy
+,
+Internet Protocol (IP)
+document databases
+,
+NoSQL Data Models
+dumb broker/smart clients architecture, Kafka
+,
+Apache Kafka
+partitioning and
+,
+Scalability
+durability, ACID transactions
+,
+Introduction to Strong Consistency
+DynamoDB
+,
+Amazon DynamoDB
+availability
+,
+Availability
+consistency
+,
+Consistency
+data model
+,
+Data Model and API
+data safety
+,
+Data safety
+data types
+,
+Data Model and API
+distribution
+,
+Distribution and Replication
+-
+Distribution and Replication
+latencies
+,
+Distribution and Replication
+partitions
+,
+Distribution and Replication
+performance
+,
+Performance
+provisioned capacity mode
+,
+Amazon DynamoDB
+replication
+,
+Distribution and Replication
+-
+Distribution and Replication
+scalability
+,
+Scalability
+storage
+,
+Amazon DynamoDB
+tables
+,
+Distribution and Replication
+transactions
+,
+Data Model and API
+E
+EJBs (Enterprise JavaBeans)
+,
+Remote Method Invocation
+Elastic Load Balancers (ELB)
+(
+see
+ELBs (Elastic Load Balancers))
+elasticity
+,
+Elasticity
+-
+Elasticity
+ELBs (Elastic Load Balancers)
+,
+Load Balancing
+sticky sessions
+,
+Session Affinity
+entropy
+,
+Replica Repair
+Erlang
+concurrency
+,
+Why Concurrency?
+RabbitMQ broker
+,
+Example: RabbitMQ
+Etag HTTP header
+,
+Etag
+revalidation
+,
+Etag
+ETL (extract, transform, load)
+,
+Introduction to Stream Processing
+event logs
+events, deleting
+,
+Event-Driven Architectures
+persistence
+,
+Event-Driven Architectures
+event-driven architecture
+,
+Event-Driven Architectures
+-
+Event-Driven Architectures
+events, Kafka
+,
+Scalability
+eventual consistency
+,
+What Is Eventual Consistency?
+,
+Introduction to Strong Consistency
+Cassandra
+,
+Version Vectors
+inconsistency window
+operational environment
+,
+Inconsistency Window
+replicas
+,
+Inconsistency Window
+Netflix
+,
+Version Vectors
+quorum reads and writes
+,
+Quorum Reads and Writes
+-
+Quorum Reads and Writes
+RYOW (read your own writes)
+,
+Read Your Own Writes
+-
+Read Your Own Writes
+stale reads
+,
+Read Your Own Writes
+tunable consistency
+,
+Tunable Consistency
+-
+Tunable Consistency
+exactly-one processing, message patterns
+,
+Exactly-Once Processing
+-
+Exactly-Once Processing
+exchanges, RabbitMQ
+,
+Messages, Exchanges, and Queues
+-
+Messages, Exchanges, and Queues
+ExecutorService
+,
+Thread Pools
+Expires HTTP header
+,
+Expires and Last-Modified
+Express.js
+,
+Applications Servers
+F
+Facebook, MySQL and
+,
+The CAP Theorem
+Faculty microservice
+,
+Principles of Microservices
+failures, partial
+,
+Partial Failures
+-
+Partial Failures
+FIFO (first-in, first-out), thread execution
+,
+Thread States
+G
+GAE (Google App Engine)
+,
+The Attractions of Serverless
+application building
+,
+The Basics
+application execution
+,
+The Basics
+autoscaling
+,
+Autoscaling
+deploying instances
+,
+Autoscaling
+maximum concurrent requests
+,
+Autoscaling
+target CPU utilization
+,
+Autoscaling
+target throughput utilization
+,
+Autoscaling
+flexible environment
+,
+The Basics
+parameter study design
+,
+GAE Autoscaling Parameter Study Design
+standard environment
+,
+The Basics
+,
+GAE Standard Environment
+GCE (Google Compute Engine)
+,
+The Basics
+GCP (Google Cloud Platform)
+,
+Google App Engine
+GDPR (General Data Protection Regulation)
+,
+Event-Driven Architectures
+Go, concurrency and
+,
+Why Concurrency?
+Google App Engine (GAE)
+(
+see
+GAE (Google App Engine))
+Google Cloud Platform (GCP)
+,
+Google App Engine
+Google Cloud Spanner
+,
+Google Cloud Spanner
+-
+Google Cloud Spanner
+Google Compute Engine (GCE)
+,
+The Basics
+graph databases
+,
+NoSQL Data Models
+distributing
+,
+Data Distribution
+partitioning
+,
+Data Distribution
+queries
+,
+Query Languages
+guarded blocks
+,
+Thread Coordination
+H
+hardware, communications and
+,
+Communications Hardware
+-
+Communications Hardware
+hash tables
+,
+Thread-Safe Collections
+hash trees, Merkle tree
+,
+Passive Repair
+hash values, passive repair and
+,
+Passive Repair
+hashes, Redis
+,
+Data Model and API
+health monitoring
+,
+Health Monitoring
+horizontal partitioning
+,
+Scale Out: Partitioning Data
+horizontal scaling
+,
+Horizontal Scaling
+-
+Horizontal Scaling
+service replicas
+,
+Horizontal Scaling
+HTTP APIs
+,
+Application Programming Interface (API)
+-
+Application Programming Interface (API)
+HTTP header field load distribution
+,
+Load Distribution Policies
+HTTP operation load distribution
+,
+Load Distribution Policies
+HTTP State Management Mechanism
+,
+State Management
+I
+IaaS (infrastructure-as-a-service)
+,
+The Attractions of Serverless
+idempotency keys
+,
+Partial Failures
+-
+Partial Failures
+IGBankServer
+,
+Remote Method Invocation
+inconsistency window
+replicas
+,
+Inconsistency Window
+distance between
+,
+Inconsistency Window
+operational environment
+,
+Inconsistency Window
+incrementing, machine level
+,
+Race Conditions
+infrastructure as a service (IaaS)
+(
+see
+IaaS (infrastructure-as-a-service))
+interleaved execution, threads
+,
+Race Conditions
+internet layer
+,
+Communications Software
+IP (Internet Protocol)
+,
+Internet Protocol (IP)
+addresses
+,
+Internet Protocol (IP)
+sockets and
+,
+Remote Method Invocation
+best-effort deliver
+,
+Internet Protocol (IP)
+DNS (Domain Name System)
+,
+Internet Protocol (IP)
+IPv4 (Internet Protocol version 4)
+,
+Internet Protocol (IP)
+IP suite
+application layer
+,
+Communications Software
+data link layer
+,
+Communications Software
+internet layer
+,
+Communications Software
+transport layer
+,
+Communications Software
+IPv4 (Internet Protocol version 4)
+,
+Internet Protocol (IP)
+isolation, ACID transactions
+,
+Introduction to Strong Consistency
+iterators, hash tables
+,
+Thread-Safe Collections
+J
+Java
+BlockingQueue
+,
+Thread Coordination
+concurrency and
+,
+An Overview of Concurrent Systems
+currentThread method
+,
+Threads
+Expression Language (EL)
+,
+Applications Servers
+JEE servlets
+,
+Designing Services
+keywords, synchronized
+,
+Race Conditions
+primitives
+barrier synchronization and
+,
+Barrier Synchronization
+guarded blocks and
+,
+Thread Coordination
+notify
+,
+Thread Coordination
+wait
+,
+Thread Coordination
+Runnable interface
+,
+Threads
+Spring Framework
+,
+Designing Services
+@GetMapping
+,
+Designing Services
+@PathVariable
+,
+Designing Services
+@RestController
+,
+Designing Services
+threads
+defining
+,
+Threads
+executing
+,
+Threads
+instantiation
+,
+Threads
+order of execution
+,
+Order of Thread Execution
+-
+Order of Thread Execution
+WebSocket technologies
+,
+Applications Servers
+Java Messaging Service (JMS)
+,
+Introduction to Messaging
+Java RMI
+,
+Remote Method Invocation
+java.util.concurrent, thread pools and
+,
+Thread Pools
+JavaServer Pages (JSP)
+,
+Applications Servers
+JEE (Java Enterprise Edition)
+,
+Applications Servers
+JEE servlets
+,
+Designing Services
+containers
+,
+Designing Services
+JMS (Java Messaging Service)
+,
+Introduction to Messaging
+joins
+distributed databases
+,
+Scale Out: Partitioning Data
+NoSQL
+,
+The Movement to NoSQL
+JSP (JavaServer Pages)
+,
+Applications Servers
+K
+Kafka
+availability
+,
+Availability
+-
+Availability
+clusters
+,
+Apache Kafka
+ZooKeeper
+,
+Apache Kafka
+commitSync
+,
+Producers and Consumers
+consumers
+events, pull model
+,
+Producers and Consumers
+offset, incrementing
+,
+Producers and Consumers
+threads
+,
+Producers and Consumers
+topic partitioning and
+,
+Scalability
+dumb broker/smart clients architecture
+,
+Apache Kafka
+event delivery, concurrent
+,
+Scalability
+LinkedIn and
+,
+Apache Kafka
+log entries, deletion
+,
+Event-Driven Architectures
+producers
+event batches
+,
+Producers and Consumers
+event delivery
+,
+Producers and Consumers
+producer.send code
+,
+Producers and Consumers
+rebalancing
+,
+Scalability
+replication and
+,
+Availability
+scalability, topic partitioning
+,
+Scalability
+-
+Scalability
+Slack and
+,
+Availability
+topics
+,
+Topics
+-
+Topics
+consumer's offset
+,
+Producers and Consumers
+leader partition
+,
+Availability
+partition replication
+,
+Availability
+scalability and
+,
+Scalability
+-
+Scalability
+Kafka broker
+,
+Apache Kafka
+Kafka Connect
+,
+Apache Kafka
+Kafka Streams
+,
+Apache Kafka
+Kafka Connect
+,
+Apache Kafka
+Kafka Streams
+,
+Apache Kafka
+keys, application caching
+,
+Application Caching
+keywords, Java, synchronized
+,
+Race Conditions
+KV (key-value) databases
+,
+NoSQL Data Models
+L
+Lambda
+(
+see
+AWS Lambda)
+Lambda architecture
+batch layer
+,
+Introduction to Stream Processing
+serving layer
+,
+Introduction to Stream Processing
+speed layer
+,
+Introduction to Stream Processing
+Lamport clocks
+,
+Version Vectors
+LANs (local area networks)
+,
+Communications Hardware
+last writer wins conflict resolution
+,
+Last Writer Wins
+-
+Last Writer Wins
+Last-Modified HTTP header
+,
+Expires and Last-Modified
+latency
+WANs (wide area networks)
+,
+Communications Hardware
+web caching and
+,
+Etag
+leader election, Raft
+,
+Leader Election
+-
+Leader Election
+leader-follower architecture, distributed databases
+,
+Data Distribution
+leader-follower replication
+,
+Read Your Own Writes
+leaderless architecture, distributed databases
+,
+Data Distribution
+least connection load distribution
+,
+Load Distribution Policies
+libraries, socket library
+,
+Remote Method Invocation
+linearizability, consistency models
+,
+Consistency Models
+linked lists, Redis
+,
+Data Model and API
+LinkedIn, Kafka and
+,
+Apache Kafka
+load balancers
+application-level
+,
+Load Balancing
+elasticity
+,
+Elasticity
+-
+Elasticity
+ELBs (Elastic Load Balancers)
+,
+Load Balancing
+health monitoring
+,
+Health Monitoring
+load distribution policies
+HTTP header field
+,
+Load Distribution Policies
+HTTP operation
+,
+Load Distribution Policies
+least connections
+,
+Load Distribution Policies
+round-robin
+,
+Load Distribution Policies
+NAT (network address translation)
+,
+Load Balancing
+network level and
+,
+Load Balancing
+session affinity
+,
+Session Affinity
+-
+Session Affinity
+stateful services
+,
+Horizontal Scaling
+load balancing
+,
+Load Balancing
+elasticity
+,
+Elasticity
+-
+Elasticity
+health monitoring
+,
+Health Monitoring
+microservices
+,
+Fail fast pattern
+load distribution policies
+HTTP header field
+,
+Load Distribution Policies
+HTTP operation
+,
+Load Distribution Policies
+least connections
+,
+Load Distribution Policies
+round-robin
+,
+Load Distribution Policies
+local area networks (LANs)
+,
+Communications Hardware
+logical clocks
+,
+Version Vectors
+M
+machine instructions, concurrency and
+,
+Why Concurrency?
+memcached
+,
+Application Caching
+Merkle trees
+,
+Passive Repair
+message brokers, message queues
+,
+Messaging Primitives
+,
+Messaging Primitives
+message queues
+,
+Messaging Primitives
+publish-subscribe architecture pattern
+,
+Publish–Subscribe
+RabbitMQ
+,
+Data Safety and Performance Trade-offs
+replication
+,
+Message Replication
+topics, publish-subscribe pattern
+,
+Publish–Subscribe
+messaging
+,
+Asynchronous Messaging
+(
+see also
+asynchronous messaging)
+consumers
+,
+Messaging Primitives
+,
+Messaging Primitives
+JMS (Java Messaging Service)
+,
+Introduction to Messaging
+message brokers
+,
+Messaging Primitives
+,
+Messaging Primitives
+message queues
+,
+Messaging Primitives
+publish-subscribe architecture pattern
+,
+Publish–Subscribe
+patterns
+competing consumers
+,
+Competing Consumers
+-
+Competing Consumers
+exactly-one processing
+,
+Exactly-Once Processing
+-
+Exactly-Once Processing
+poison messages
+,
+Poison Messages
+-
+Poison Messages
+persistence
+,
+Message Persistence
+data safety
+,
+Message Persistence
+persistence queues
+,
+Message Persistence
+RabbitMQ
+,
+Data Safety and Performance Trade-offs
+poison messages
+,
+Poison Messages
+-
+Poison Messages
+polling
+,
+Messaging Primitives
+primitives
+,
+Messaging Primitives
+-
+Messaging Primitives
+producers
+,
+Messaging Primitives
+,
+Messaging Primitives
+pull mode
+,
+Messaging Primitives
+,
+Distribution and Concurrency
+push mode
+,
+Messaging Primitives
+RabbitMQ messages
+,
+Messages, Exchanges, and Queues
+-
+Messages, Exchanges, and Queues
+replication
+,
+Message Replication
+-
+Message Replication
+single threaded
+,
+Distribution and Concurrency
+store-and-forward functionality
+,
+Messages, Exchanges, and Queues
+microservices
+,
+Microservices
+automation and
+,
+Principles of Microservices
+bulkhead pattern
+,
+Bulkhead Pattern
+-
+Bulkhead Pattern
+business domain and
+,
+Principles of Microservices
+circuit breaker pattern
+,
+Circuit breaker pattern
+-
+Circuit breaker pattern
+code base and
+,
+Breaking Up the Monolith
+decentralization and
+,
+Principles of Microservices
+deploying
+,
+Deploying Microservices
+-
+Deploying Microservices
+independence
+,
+Principles of Microservices
+Faculty
+,
+Principles of Microservices
+failure, isolating
+,
+Principles of Microservices
+failures, cascading
+,
+Cascading Failures
+-
+Circuit breaker pattern
+implementation
+,
+Principles of Microservices
+load balancing and
+,
+Fail fast pattern
+monolithic applications and
+,
+Monolithic Applications
+-
+Monolithic Applications
+observability and
+,
+Principles of Microservices
+popularity
+,
+Microservices
+request load
+,
+Cascading Failures
+resilience and
+,
+Resilience in Microservices
+-
+Bulkhead Pattern
+Resources
+,
+Principles of Microservices
+scaling out
+,
+Breaking Up the Monolith
+Timetable
+,
+Principles of Microservices
+workflow
+centralized orchestration
+,
+Principles of Microservices
+peer-to-peer choreography
+,
+Principles of Microservices
+MongoDB
+ACID support
+,
+Data Model and API
+API
+,
+Data Model and API
+-
+Data Model and API
+availability
+,
+Availability
+collections
+,
+Data Model and API
+configuration
+,
+Distribution and Replication
+consistency
+,
+Consistency
+data model
+,
+Data Model and API
+-
+Data Model and API
+data safety
+,
+Data safety
+distribution
+,
+Distribution and Replication
+-
+Distribution and Replication
+documents
+,
+Data Model and API
+MMAPv1
+,
+MongoDB
+mongos process
+,
+Distribution and Replication
+performance
+,
+Performance
+read preferences
+,
+Distribution and Replication
+replication
+,
+Distribution and Replication
+-
+Distribution and Replication
+scalability
+,
+Scalability
+sharding
+,
+Distribution and Replication
+write operations
+,
+Data Model and API
+monolith architectures
+breaking up
+,
+Breaking Up the Monolith
+-
+Breaking Up the Monolith
+code base
+,
+Breaking Up the Monolith
+monolithic applications
+code base complexity
+,
+Monolithic Applications
+microservices and
+,
+Monolithic Applications
+-
+Monolithic Applications
+scaling out and
+,
+Monolithic Applications
+scaling up and
+,
+Monolithic Applications
+monotonic clock
+,
+Time in Distributed Systems
+MPI (Multi-Partition Initiator)
+,
+VoltDB
+Multi-Paxos
+,
+Distributed Consensus Algorithms
+multicore processors
+,
+Why Concurrency?
+multithreaded systems
+barrier synchronization
+,
+Barrier Synchronization
+-
+Barrier Synchronization
+thread execution order
+,
+Order of Thread Execution
+-
+Order of Thread Execution
+thread pools
+,
+Thread Pools
+-
+Thread Pools
+thread states
+blocked
+,
+Thread States
+created
+,
+Thread States
+runnable
+,
+Thread States
+terminated
+,
+Thread States
+thread-safe collections
+,
+Thread-Safe Collections
+-
+Thread-Safe Collections
+threads
+coordinating
+,
+Thread Coordination
+-
+Thread Coordination
+problems with
+,
+Problems with Threads
+-
+Deadlocks
+MySQL, Facebook and
+,
+The CAP Theorem
+N
+NAT (network address translation)
+,
+Load Balancing
+network address translation (NAT)
+,
+Load Balancing
+network level load balancers
+,
+Load Balancing
+networks
+asynchronous
+,
+Partial Failures
+bandwidth
+,
+Communications Hardware
+LANs (local area networks)
+,
+Communications Hardware
+routers
+,
+Communications Hardware
+WANs (wide area networks)
+,
+Communications Hardware
+wireless
+,
+Communications Hardware
+Node.js
+,
+Why Concurrency?
+normalization, relational databases
+,
+The Movement to NoSQL
+NoSQL
+,
+The Movement to NoSQL
+,
+The Movement to NoSQL
+data model normalization
+,
+The Movement to NoSQL
+-
+The Movement to NoSQL
+data models
+document
+,
+NoSQL Data Models
+graph databases
+,
+NoSQL Data Models
+-
+Data Distribution
+KV (key-value)
+,
+NoSQL Data Models
+wide column
+,
+NoSQL Data Models
+,
+Query Languages
+databases
+data distribution
+,
+Data Distribution
+query languages
+,
+Query Languages
+-
+Query Languages
+joins
+,
+The Movement to NoSQL
+solution domain
+,
+The Movement to NoSQL
+NTP (Network Time Protocol)
+,
+Time in Distributed Systems
+-
+Time in Distributed Systems
+O
+observability
+microservices and
+,
+Principles of Microservices
+tips
+,
+Observability
+-
+Observability
+operational environment, inconsistency window
+,
+Inconsistency Window
+Oracle RAC (Real Applications Cluster)
+,
+Example: Oracle RAC
+Cache Fusion
+,
+Example: Oracle RAC
+ClusterWare
+,
+Example: Oracle RAC
+physical storage
+,
+Example: Oracle RAC
+P
+partial failures
+,
+Partial Failures
+-
+Partial Failures
+partitioning
+,
+Data Distribution
+(
+see also
+sharding)
+graph databases
+,
+Data Distribution
+partitioning data
+,
+Scale Out: Partitioning Data
+-
+Scale Out: Partitioning Data
+horizontal
+,
+Scale Out: Partitioning Data
+vertical
+,
+Scale Out: Partitioning Data
+partitions
+AP (available)
+,
+The CAP Theorem
+CP (consistent)
+,
+The CAP Theorem
+DynamoDB
+,
+Distribution and Replication
+passive repair
+,
+Passive Repair
+Paxos
+,
+Distributed Consensus Algorithms
+peer-to-peer choreography
+,
+Principles of Microservices
+performance
+DynamoDB
+,
+Performance
+MongoDB
+,
+Performance
+RabbitMQ
+,
+Data Safety and Performance Trade-offs
+-
+Availability and Performance Trade-Offs
+Redis
+,
+Performance
+persistence, event logs
+,
+Event-Driven Architectures
+philosophers problem, deadlocks and
+,
+Deadlocks
+poison messages
+,
+Poison Messages
+-
+Poison Messages
+polling
+,
+Thread Coordination
+prepare phase, 2PC (two-phase commit)
+,
+Two-Phase Commit
+primitives
+Java
+barrier synchronization and
+,
+Barrier Synchronization
+guarded blocks and
+,
+Thread Coordination
+notify
+,
+Thread Coordination
+wait
+,
+Thread Coordination
+messaging
+,
+Messaging Primitives
+-
+Messaging Primitives
+processors, multicore systems
+,
+Why Concurrency?
+producers
+,
+Thread Coordination
+thread pools and
+,
+Thread Pools
+producers, message queues
+,
+Messaging Primitives
+,
+Messaging Primitives
+protocols, stateless
+,
+State Management
+publish-subscribe architecture pattern
+,
+Publish–Subscribe
+publishers, RabbitMQ
+,
+Data Safety and Performance Trade-offs
+pull model
+,
+Distribution and Concurrency
+Q
+query languages, NoSQL databases
+,
+Query Languages
+-
+Query Languages
+queues, RabbitMQ
+,
+Messages, Exchanges, and Queues
+-
+Messages, Exchanges, and Queues
+quorum intuition
+,
+Quorum Reads and Writes
+quorum reads and writes
+,
+Quorum Reads and Writes
+-
+Quorum Reads and Writes
+quorums, sloppy
+,
+Quorum Reads and Writes
+R
+RabbitMQ
+,
+Asynchronous Messaging
+AMQP (Advanced Message Queuing Protocol)
+,
+Example: RabbitMQ
+availability, performance and
+,
+Availability and Performance Trade-Offs
+channel abstraction
+,
+Messages, Exchanges, and Queues
+concurrency
+,
+Distribution and Concurrency
+-
+Distribution and Concurrency
+consumers, manual acknowledge
+,
+Data Safety and Performance Trade-offs
+data safety, performance and
+,
+Data Safety and Performance Trade-offs
+-
+Data Safety and Performance Trade-offs
+distribution
+,
+Distribution and Concurrency
+-
+Distribution and Concurrency
+event-based architecture implementation
+,
+Event-Driven Architectures
+example
+,
+Example: RabbitMQ
+-
+Availability and Performance Trade-Offs
+exchanges
+,
+Messages, Exchanges, and Queues
+-
+Messages, Exchanges, and Queues
+direct exchanges
+,
+Messages, Exchanges, and Queues
+message queues
+,
+Data Safety and Performance Trade-offs
+messages
+,
+Messages, Exchanges, and Queues
+-
+Messages, Exchanges, and Queues
+persistent messages
+,
+Data Safety and Performance Trade-offs
+publishers
+,
+Data Safety and Performance Trade-offs
+queues
+,
+Messages, Exchanges, and Queues
+-
+Messages, Exchanges, and Queues
+TCP/IP and
+,
+Distribution and Concurrency
+throughput increase
+,
+Distribution and Concurrency
+race conditions, threads
+,
+Race Conditions
+-
+Race Conditions
+Raft
+,
+Raft
+-
+Leader Election
+read replicas
+,
+Scaling Out: Read Replicas
+-
+Scaling Out: Read Replicas
+read your own rights (RYOW)
+,
+Read Your Own Writes
+-
+Read Your Own Writes
+read-through caches
+,
+Application Caching
+reads, quorum reads and writes
+,
+Quorum Reads and Writes
+-
+Quorum Reads and Writes
+real-time analytics
+,
+Stream Processing Systems
+Redis
+,
+Application Caching
+,
+Redis
+availability
+,
+Availability
+Cluster
+,
+Distribution and Replication
+resizing
+,
+Distribution and Replication
+Cluster bus
+,
+Distribution and Replication
+consistency
+,
+Consistency
+data safety
+,
+Data safety
+distribution
+,
+Distribution and Replication
+hashes
+,
+Data Model and API
+linked lists
+,
+Data Model and API
+performance
+,
+Performance
+scalability
+,
+Scalability
+sets
+,
+Data Model and API
+single-key operations
+,
+Data Model and API
+strings
+,
+Data Model and API
+transactions
+,
+Data Model and API
+relational databases
+joins, distributed
+,
+Scale Out: Partitioning Data
+normalization
+,
+The Movement to NoSQL
+Oracle RAC (Real Applications  Cluster)
+,
+Example: Oracle RAC
+Cache Fusion
+,
+Example: Oracle RAC
+ClusterWare
+,
+Example: Oracle RAC
+physical storage
+,
+Example: Oracle RAC
+scaling
+scaling out
+,
+Scaling Out: Read Replicas
+-
+Scale Out: Partitioning Data
+scaling up
+,
+Scaling Up
+-
+Scaling Up
+remote method invocation
+,
+Remote Method Invocation
+-
+Remote Method Invocation
+replica consistency
+,
+Introduction to Strong Consistency
+consensus algorithms
+,
+Introduction to Strong Consistency
+replicas, databases
+inconsistency window
+,
+Inconsistency Window
+distance between
+,
+Inconsistency Window
+tunable consistency
+,
+Tunable Consistency
+repairs
+,
+Replica Repair
+active repair
+,
+Active Repair
+passive repair
+,
+Passive Repair
+-
+Passive Repair
+replication
+distributed databases
+,
+Data Distribution
+CAP theorem
+,
+The CAP Theorem
+-
+The CAP Theorem
+consistency
+,
+Data Distribution
+DynamoDB
+,
+Distribution and Replication
+-
+Distribution and Replication
+Kafka
+,
+Availability
+leader-follower
+,
+Read Your Own Writes
+messages
+,
+Message Replication
+-
+Message Replication
+MongoDB
+,
+Distribution and Replication
+-
+Distribution and Replication
+resilience, microservices
+,
+Resilience in Microservices
+-
+Bulkhead Pattern
+resolve phase, 2PC (two-phase commit)
+,
+Two-Phase Commit
+Resources microservices
+,
+Principles of Microservices
+REST
+,
+Application Programming Interface (API)
+right to be forgotten
+,
+Event-Driven Architectures
+RMI (Remote Method Invocation)
+,
+Remote Method Invocation
+RMI registry
+,
+Remote Method Invocation
+round-robin load distribution
+,
+Load Distribution Policies
+routers
+,
+Communications Hardware
+RPC (Remote Procedure Call)
+,
+Remote Method Invocation
+RPC/RMI technologies
+,
+Remote Method Invocation
+mechanism implementation
+,
+Remote Method Invocation
+runnable (thread state)
+,
+Thread States
+RYOW (read your own writes)
+,
+Read Your Own Writes
+-
+Read Your Own Writes
+S
+scalability
+Apache Flink
+,
+Scalability
+-
+Scalability
+AWS Lambda
+,
+Scalability
+-
+Scalability
+distributed caching
+,
+Distributed Caching
+DynamoDB
+,
+Scalability
+Kafka, topic partitioning
+,
+Scalability
+-
+Scalability
+MongoDB
+,
+Scalability
+Redis
+,
+Scalability
+stateless services
+,
+Session Affinity
+scalable services, stateless APIs
+,
+State Management
+scaling
+horizontal
+,
+Horizontal Scaling
+-
+Horizontal Scaling
+monolithic applications
+,
+Monolithic Applications
+relational databases
+scaling out
+,
+Scaling Out: Read Replicas
+-
+Scale Out: Partitioning Data
+scaling up
+,
+Scaling Up
+-
+Scaling Up
+scaling out
+microservices
+,
+Breaking Up the Monolith
+monolithic applications
+,
+Monolithic Applications
+serializability, consistency models
+,
+Consistency Models
+serverless platforms
+,
+The Attractions of Serverless
+autoscaling and
+,
+The Attractions of Serverless
+serverless processing systems
+attraction
+,
+The Attractions of Serverless
+-
+The Attractions of Serverless
+AWS Lambda
+,
+AWS Lambda
+-
+Scalability
+costs
+,
+Case Study: Balancing Throughput and Costs
+-
+Results
+GAE (Google App Engine)
+,
+Google App Engine
+-
+Autoscaling
+parameter study design
+,
+GAE Autoscaling Parameter Study Design
+parameter values
+,
+Choosing Parameter Values
+-
+Choosing Parameter Values
+throughput balancing
+,
+Case Study: Balancing Throughput and Costs
+-
+Results
+servers, application
+,
+Applications Servers
+Apache Tomcat
+,
+Applications Servers
+Express.js
+,
+Applications Servers
+JEE (Java Enterprise Edition)
+,
+Applications Servers
+service replicas, horizontal scaling
+,
+Horizontal Scaling
+services
+API (application programming interface)
+,
+Application Programming Interface (API)
+designing
+,
+Designing Services
+-
+State Management
+state management
+,
+State Management
+-
+State Management
+weights
+,
+Load Distribution Policies
+session affinity
+,
+Session Affinity
+-
+Session Affinity
+sets, Redis
+,
+Data Model and API
+sharding
+,
+Data Distribution
+Cloud Spanner
+,
+Google Cloud Spanner
+hash key
+,
+Data Distribution
+MongoDB
+,
+Distribution and Replication
+range-based
+,
+Data Distribution
+value-based
+,
+Data Distribution
+shared data structures, threads and
+,
+Race Conditions
+shared nothing architecture
+,
+Data Distribution
+Single Partition Initiator (SPI)
+,
+VoltDB
+single point of failure (SPoF)
+,
+Horizontal Scaling
+single threaded messaging
+,
+Distribution and Concurrency
+single-key operations, Redis
+,
+Data Model and API
+Slack, Kafka and
+,
+Availability
+sloppy quorums
+,
+Quorum Reads and Writes
+sockets
+,
+Remote Method Invocation
+library
+,
+Remote Method Invocation
+software communications
+IP (Internet Protocol)
+,
+Internet Protocol (IP)
+-
+Internet Protocol (IP)
+TCP (Transmission Control Protocol)
+,
+Transmission Control Protocol (TCP)
+-
+Transmission Control Protocol (TCP)
+SPI (Single Partition Initiator)
+,
+VoltDB
+SPoF (single point of failure)
+,
+Horizontal Scaling
+Spring Framework
+,
+Designing Services
+@GetMapping
+,
+Designing Services
+@PathVariable
+,
+Designing Services
+@RestController
+,
+Designing Services
+Spring Session
+,
+Horizontal Scaling
+SQS (Simple Queue Service)
+,
+Poison Messages
+state management
+,
+State Management
+-
+State Management
+conversational state
+,
+State Management
+stateful services, load balancers and
+,
+Horizontal Scaling
+stateless protocols
+,
+State Management
+stateless services
+scalability and
+,
+Session Affinity
+sticky sessions
+,
+Session Affinity
+-
+Session Affinity
+storage
+DynamoDB
+,
+Amazon DynamoDB
+Oracle RAC (Real Applications  Cluster)
+,
+Example: Oracle RAC
+stream processing
+,
+Stream Processing Systems
+batch processing
+,
+Introduction to Stream Processing
+DAG (directed acyclic graph)
+,
+Stream Processing Platforms
+Flink
+DAG (directed acyclic graph)
+,
+Scalability
+data safety
+,
+Data Safety
+DataStream API
+,
+DataStream API
+-
+DataStream API
+execution environment
+,
+DataStream API
+scalability
+,
+Scalability
+-
+Scalability
+sink
+,
+DataStream API
+tasks
+,
+Scalability
+nodes
+,
+Stream Processing Platforms
+overview
+,
+Introduction to Stream Processing
+-
+Introduction to Stream Processing
+platforms
+,
+Stream Processing Platforms
+-
+Stream Processing Platforms
+Storm
+,
+Stream Processing Platforms
+-
+Stream Processing Platforms
+streaming, Kafka Stream
+,
+Apache Kafka
+strings, Redis
+,
+Data Model and API
+strong consistency
+,
+Strong Consistency
+replica consistency
+,
+Introduction to Strong Consistency
+transactional consistency
+,
+Introduction to Strong Consistency
+synchronized keyword
+,
+Race Conditions
+synchronized methods
+,
+Thread-Safe Collections
+T
+TCP (Transmission Control Protocol)
+,
+Communications Software
+,
+Transmission Control Protocol (TCP)
+-
+Transmission Control Protocol (TCP)
+terminated (thread state)
+,
+Thread States
+thread pools
+,
+Thread Pools
+-
+Thread Pools
+,
+Applications Servers
+thread states
+blocked
+,
+Thread States
+created
+,
+Thread States
+runnable
+,
+Thread States
+terminated
+,
+Thread States
+thread-safe collections
+,
+Thread-Safe Collections
+-
+Thread-Safe Collections
+threads
+,
+Why Concurrency?
+,
+Threads
+-
+Threads
+application container threads
+,
+Applications Servers
+coordinating
+,
+Thread Coordination
+-
+Thread Coordination
+deadlocks
+,
+Deadlocks
+-
+Deadlocks
+FIFO (first-in, first-out) execution
+,
+Thread States
+interleaved execution
+,
+Race Conditions
+Java
+defining
+,
+Threads
+executing
+,
+Threads
+instantiation
+,
+Threads
+order of execution
+,
+Order of Thread Execution
+-
+Order of Thread Execution
+Node.js
+,
+Why Concurrency?
+problems with
+,
+Problems with Threads
+-
+Deadlocks
+race conditions
+,
+Race Conditions
+-
+Race Conditions
+shared data structures
+,
+Race Conditions
+worker threads, barrier synchronization and
+,
+Barrier Synchronization
+throughput balancing, serverless processing
+,
+Case Study: Balancing Throughput and Costs
+-
+Results
+tid (transaction identifier)
+,
+Two-Phase Commit
+time
+,
+Time in Distributed Systems
+drift
+,
+Time in Distributed Systems
+monotonic clock
+,
+Time in Distributed Systems
+NTP (Network Time Protocol)
+,
+Time in Distributed Systems
+-
+Time in Distributed Systems
+time-of-day clock
+,
+Time in Distributed Systems
+time to live (TTL)
+,
+Application Caching
+time-of-day clock
+,
+Time in Distributed Systems
+timestamps, conflict resolution and
+,
+Last Writer Wins
+-
+Last Writer Wins
+Timetable microservice
+,
+Principles of Microservices
+topics, publish-subscribe pattern
+,
+Publish–Subscribe
+transaction coordinator recovery
+,
+2PC Failure Modes
+transaction identifier (tid)
+,
+Two-Phase Commit
+transactional consistency
+,
+Introduction to Strong Consistency
+consensus algorithms
+,
+Introduction to Strong Consistency
+serializability
+,
+Consistency Models
+transactions
+distributed
+,
+Distributed Transactions
+-
+Distributed Transactions
+2PC failure modes
+,
+2PC Failure Modes
+-
+2PC Failure Modes
+two-phase commit (2PC)
+,
+Two-Phase Commit
+-
+Two-Phase Commit
+DynamoDB
+,
+Data Model and API
+Redis
+,
+Data Model and API
+Transmission Control Protocol (TCP)
+(
+see
+TCP (Transmission Control Protocol))
+transport layer
+,
+Communications Software
+TTL (time to live), caching and
+,
+Application Caching
+tunable consistency
+,
+Tunable Consistency
+-
+Tunable Consistency
+two-phase commit (2PC)
+,
+Two-Phase Commit
+-
+Two-Phase Commit
+U
+UDP (User Datagram Protocol)
+,
+Communications Software
+V
+version vectors, conflict resolution
+,
+Version Vectors
+-
+Version Vectors
+vertical partitioning
+,
+Scale Out: Partitioning Data
+VMs (virtual machines)
+,
+The Attractions of Serverless
+VoltDB
+,
+VoltDB
+linearizability
+,
+VoltDB
+MPI (Multi-Partition Initiator)
+,
+VoltDB
+SPI (Single Partition Initiator)
+,
+VoltDB
+W
+WANs (wide area networks)
+,
+Communications Hardware
+latency
+,
+Communications Hardware
+web caching
+,
+Web Caching
+Cache-Control HTTP header
+,
+Cache-Control
+Etag HTTP header
+,
+Etag
+revalidation
+,
+Etag
+Expires HTTP header
+,
+Expires and Last-Modified
+HTTP caching directives
+,
+Web Caching
+Last-Modified HTTP header
+,
+Expires and Last-Modified
+latencies
+,
+Etag
+wide area networks (WANs)
+,
+Communications Hardware
+wide column databases
+,
+NoSQL Data Models
+queries
+,
+Query Languages
+wireless networks
+,
+Communications Hardware
+cellular wireless technology
+,
+Communications Hardware
+worker threads, barrier synchronization
+,
+Barrier Synchronization
+workflow
+microservices and
+centralized orchestration
+,
+Principles of Microservices
+peer-to-peer choreography
+,
+Principles of Microservices
+write-behind caches
+,
+Application Caching
+write-through caches
+,
+Application Caching
+writes
+quorum reads and writes
+,
+Quorum Reads and Writes
+-
+Quorum Reads and Writes
+Z
+ZooKeeper
+,
+Apache Kafka
+
+About the Author
+Ian Gorton
+has 30 years’ experience as a software architect, author, computer science professor, and consultant. He has focused on distributed technologies since his days in graduate school and has worked on large-scale software systems in areas such as banking, telecommunications, government, health care, and scientific modeling and simulation. During this time, he has seen software systems evolve to the massive scale they routinely operate at today.
+Ian has written three books, including
+Essential Software Architecture
+and
+Data Intensive Computing
+, and is the author of over 200 scientific and professional publications on software architecture and software engineering. At the Carnegie Mellon Software Engineering Institute, he led R&D projects in big data and massively scalable systems, and he has continued working, writing, and speaking on these topics since joining Northeastern University as a professor of computer science in 2015. He has a PhD from Sheffield Hallam University, UK, and is a senior member of the IEEE Computer Society.
+
+Colophon
+The animal on the cover of
+Foundations of Scalable Systems
+is a dusky grouper (
+Epinephelus marginatus
+), also known as the yellowbelly rock cod or yellowbelly grouper. It is common in the Mediterranean Sea, and its range stretches from the Iberian Peninsula along the coast of Africa to Mozambique and from Brazil to northern Argentina. Dusky groupers are normally found in rocky marine areas from the surface down to a depth of about 300 meters. They are ambush feeders, hiding among the rocks and then sucking in prey and swallowing it whole.
+Like other groupers, they have large, oval bodies and wide mouths with protruding lower jaws. Dusky groupers have dark reddish-brown or grayish heads with yellow bellies and pale blotches on the head and body. They can reach up to five feet long and can weigh over a hundred pounds. All dusky groupers begin adult life as females and begin to breed at around five years of age, but they develop into males between their ninth and sixteenth years. They live up to 50 years in the wild.
+The dusky grouper is a popular food fish, leading it to become a victim of overfishing. Although conservation efforts are being taken, the species is classified as vulnerable.  Many of the animals on O’Reilly covers are endangered; all of them are important to the world.
+The cover illustration is by Karen Montgomery, based on an antique line engraving from
+Johnson’s Natural History
+. The cover fonts are Gilroy Semibold and Guardian Sans. The text font is Adobe Minion Pro; the heading font is Adobe Myriad Condensed; and the code font is Dalton Maag’s Ubuntu Mono.

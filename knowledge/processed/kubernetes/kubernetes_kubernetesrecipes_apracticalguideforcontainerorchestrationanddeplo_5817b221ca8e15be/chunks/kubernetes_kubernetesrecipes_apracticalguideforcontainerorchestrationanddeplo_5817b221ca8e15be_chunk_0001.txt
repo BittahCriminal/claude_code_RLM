@@ -1,0 +1,2758 @@
+ tools like kubectl, with features like aliases, autocompletion, and plugins through krew to simplify tasks like context and namespace switching. Helm and Kustomize are also emphasized for managing deployments and customizing configurations effectively.
+Lens IDE is presented as a dedicated Kubernetes tool for visual management, offering real-time resource insights, visual debugging, and streamlined configuration modification. DevSpace is introduced as a solution for simplifying Kubernetes workflows, enabling declarative configurations, team collaboration, and automation and reducing the need for extensive Kubernetes expertise.
+VS Code, with its extensibility and Kubernetes-related extensions, is highlighted as an integrated development environment for efficient cluster management, offering features like a cluster explorer, terminal integration, and YAML editing. Together, these tools enhance productivity, reduce complexity, and provide a cohesive development environment for Kubernetes.
+
+© The Author(s), under exclusive license to APress Media, LLC, part of Springer Nature 2025
+G. Stencel, L. Berton
+Kubernetes Recipes
+https://doi.org/10.1007/979-8-8688-1325-2_6
+6. Scaling and Resiliency
+Grzegorz Stencel
+1
+and
+Luca Berton
+2
+(1)
+Bournemouth, UK
+(2)
+BOURNEMOUTH, UK
+This chapter aims to build confidence by offering strategies for managing resources, scaling deployments, and implementing resilience mechanisms in a Kubernetes environment. It discusses setting resource limits and requests, utilizing deployment strategies, exploring customization for efficient configuration management, and implementing various forms of autoscaling. Furthermore, it delves into securing the control plane, managing container image registries, and strategies for updating applications, all of which contribute to the resilience of your applications.
+6.1 Create Resource Limits and Requests in Pods and Containers
+Problem
+In a Kubernetes environment, managing resource allocation for pods and
+containers
+is crucial for scalability and application resiliency. Resource limits and requests help avoid contention, inefficient utilization, and potential downtime. Define resource limits and requests to ensure the Kubernetes scheduler assigns enough resources and prevents pods from consuming more than their allocated share, protecting cluster stability.
+Solution
+Defining and managing resource requests and limits is crucial for improving application
+scalability and resilience
+when working with a Kubernetes cluster. This ensures that your applications have the necessary resources to operate efficiently while preventing any single pod from using up all the cluster resources, thus maintaining overall system stability and performance.
+To implement resource limits and requests in Kubernetes, it’s important to understand their differences and
+assess
+your application’s needs:
+1.
+Identify Resource Requirements
+: Analyze your application’s resource requirements to determine suitable CPU and memory requests and limits.
+2.
+Define Resource Requests and Limits in Pod
+Specifications
+:
+Resource requests specify the minimum CPU and memory required for a container.
+Resource limits define the maximum CPU and memory a container can use.
+3.
+Update Deployment YAML Files
+: Incorporate the resource requests and limits into the deployment
+YAML files
+of your pods and containers.
+4.
+Apply and Test the Configuration
+: Deploy the updated YAML files to your Kubernetes cluster and monitor the resource usage to ensure the configurations are practical.
+limitsexample.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+name: example-pod
+spec:
+containers:
+- name: example-container
+image: nginx:latest
+resources:
+requests:
+memory: "64Mi"
+cpu: "250m"
+limits:
+memory: "128Mi"
+cpu: "500m"
+After creating the above
+YAML file
+, we can apply it using the following command:
+kubectl apply -f limitsexample.yaml
+A terminal window displays Kubernetes commands. On the left, the command `kubectl apply -f limitsexample.yaml` is executed, creating a pod named `example-pod`. On the right, a command runs every two seconds to check pod status, showing `example-pod` is ready and running with zero restarts and an age of 15 minutes. The bottom shows a status bar with file details and a timestamp.
+Figure 6-1
+Applying
+limits
+example.yaml while monitoring it on the right
+Explanation
+memory: “64Mi” and cpu: “250m” under requests specify that the container requires 64 MiB of memory and 250 milliCPU to be scheduled.
+memory: “128Mi” and cpu: “500m” under limits ensure that the container cannot use more than 128 MiB of memory and 500 milliCPU.
+Monitoring and
+Adjusting
+After deploying the pod, monitor its resource usage using Kubernetes tools like kubectl top or the metrics server. Based on the observed usage, you may need to adjust the resource requests and limits to optimize performance and resource utilization:
+kubectl top pod example-pod
+A terminal window displays a sequence of Kubernetes commands. The first command, "kubectl apply -f limitsexample.yaml," successfully creates a pod named "example-pod." Subsequent commands, "kubectl top pod example-pod," return an error message stating "Metrics API not available," indicating an issue with accessing metrics data.
+Figure 6-2
+Unexpected error from a
+non-existing metrics
+server
+If we have a fresh Kubernetes installation (e.g., KinD, Minikube, k3s, etc.) and encounter an error when running “kubectl top”, it means we need the metrics server installed. You can install the metrics server using the official Kubernetes metrics server manifests:
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+After applying, we need to verify the
+installation
+:
+kubectl get deployment metrics-server -n kube-system
+Ensure the metrics server
+deployment
+is running and all its pods are up with a one-liner like the one below (which gets the name of the pod and then runs the logs command on it):
+kubectl logs -n kube-system $(kubectl get pods -n kube-system -l k8s-app=metrics-server -o name)
+If you can see an error
+"Metrics server error Warning Unhealthy 25s (x21 over 3m25s) kubelet Readiness probe failed: HTTP probe failed with statuscode: 500"
+that also means you are getting an SSL certification issue because the metrics server requires secure communication with the kubelet. Still, you might need to configure it to skip
+Transport Layer Security (TLS)
+verification or use internal IPs (not advised for production environments). Still, for our learning, we are allowed with this approach, so what we need to do next is to edit metrics server deployment by adding arguments to handle insecure TLS and using internal IPs:
+kubectl edit deployment metrics-server -n kube-system
+And locate the path below in the
+deployment
+:
+spec:
+containers:
+- name: metrics-server
+args:
+Make sure these arguments are under
+metrics-server:
+- --kubelet-insecure-tls
+- --kubelet-preferred-address-types=InternalIP
+So it should look similar to
+spec:
+containers:
+- name: metrics-server
+args:
+- --kubelet-insecure-tls
+- --kubelet-preferred-address-types=InternalIP
+When we save, Kubernetes will redeploy the new pod and kill the old one.
+We just need to check when it’s available.
+A terminal window displays Kubernetes commands and their outputs. The command `kubectl get pods -n kube-system | grep metrics-server` is executed twice. Initially, two pods named `metrics-server-6b9dcd9ff-9vxhj` and `metrics-server-77f4ccddc6-pg4z9` show a status of `0/1 Running` with times `21s` and `7m53s`, respectively. After re-execution, the first pod's status updates to `1/1 Running` with a time of `9m43s`.
+Figure 6-3
+Monitoring
+presence of the metrics server
+Now, we can run the top command.
+Command line interface displaying Kubernetes pod resource usage. The command `kubectl top pod example-pod` is executed. The output shows the pod name "example-pod" with CPU usage at 0m cores and memory usage at 44 bytes.
+Figure 6-4
+Checking the Kubernetes pod with the
+top command
+6.2 Deployment, ReplicaSet, Replication Controller, or Job
+Problem
+Maintaining high availability and resilience is critical in a cloud-native application. The application must scale dynamically based on the load, ensure zero downtime during updates, and recover quickly from failures.
+A company has
+deployed
+a microservices-based application on a Kubernetes cluster. This application is designed to handle varying loads, particularly during peak times (e.g., sales events or new feature releases). However, the current setup does not handle scaling efficiently and faces downtime issues during updates. Additionally, the application fails to recover promptly from pod failures, impacting the user experience.
+Dynamic Scaling
+: The application cannot automatically scale based on load, leading to performance degradation during high-traffic periods.
+Zero-Downtime Updates
+: The deployment process occasionally causes downtime, affecting the application’s availability.
+Pod Resilience
+: Failed pods are not replaced promptly, which decreases the service’s overall reliability.
+Solution
+Implement autoscaling to adjust the number of running pods based on the current load.
+Ensure zero downtime during application updates by configuring rolling updates.
+Improve the resiliency by configuring pod health checks and auto-replacement of failed pods.
+Dynamic Scaling with Horizontal Pod Autoscaling (HPA)
+:
+Configure HPA
+: Use Kubernetes Horizontal Pod Autoscaling to adjust the number of pods based on CPU utilization or other custom metrics. To discover more about HPA, head to section “Application Horizontal Pod Autoscaling.”
+Zero-Downtime Updates with Rolling Updates
+:
+Configure Deployment for Rolling Updates
+: Ensure the deployment strategy is set to
+rolling updates
+to avoid downtime during updates.
+#6.2/rolling.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: my-app-deployment
+spec:
+replicas: 3
+strategy:
+type: RollingUpdate
+rollingUpdate:
+maxUnavailable: 1
+maxSurge: 1
+selector:
+matchLabels:
+app: my-app
+template:
+metadata:
+labels:
+app: my-app
+spec:
+containers:
+- name: my-app-container
+image: nginx:latest
+ports:
+- containerPort: 80
+We will apply the above with kubectl apply -f rolling.yaml.
+To check if our deployment is running, we will run
+kubectl get pods -l app=my-app
+A terminal screenshot displays the command `kubectl get pods -l app=my-app` and its output. Three pods are listed under the deployment `my-app-deployment`, each with a unique identifier. All pods have a status of "Running," with no restarts, and an age of 7 minutes and 34 seconds. The columns shown are NAME, READY, STATUS, RESTARTS, and AGE.
+Figure 6-5
+Getting pods by
+label
+Our app was nicely scaled to three running pods.
+To test the rolling update, you need to update the deployment. For example, update the container image to a different version of Nginx (e.g., nginx:1.21.0).
+We can do it with the
+set image command
+or with the edit command:
+kubectl set image deployment/my-app-deployment my-app-container=nginx:1.21.0
+or
+kubectl edit deployment my-app-deployment
+And let’s change the image from the latest to 1.21.0:
+image: nginx:1.21.0
+If we save the deployment, it will automatically pick up changes and will apply them to the cluster.
+Pods with the old version will be gradually terminated. Pods with the new
+version
+will be created and running before the old ones are fully terminated.
+A terminal window displays the output of the command `kubectl get pods -w`, showing the status of Kubernetes pods. The table includes columns for NAME, READY, STATUS, RESTARTS, and AGE. The pod names start with "my-app-deployment" followed by unique identifiers. The STATUS column shows various states such as Running, Pending, Terminating, ContainerCreating, and Completed. The AGE column indicates the time since each pod was created, ranging from a few seconds to over 100 seconds. The output reflects real-time updates of pod statuses.
+Figure 6-6
+Getting pods with -w (watch, live-refresh)
+flag
+Let’s check rollout:
+kubectl rollout status deployment/my-app-deployment
+A terminal window displays Kubernetes commands and their outputs. The first command checks the rollout status of "my-app-deployment," confirming it was successfully rolled out. The second command sets up port forwarding for "my-app-deployment" from port 8080 to 80, with connections being handled for port 8080.
+Figure 6-7
+Checking
+rollout status
+of the deployment
+If we additionally want to check the
+web server status
+, we can
+kubectl port-forward deployment/my-app-deployment 8080:80
+and access the
+browser
+from your machine (you need to run kubectl on the same machine).
+The image shows a webpage with the message "Welcome to nginx!" indicating successful installation of the nginx web server. It notes that further configuration is required. It provides links for online documentation at nginx.org and commercial support at nginx.com. The page concludes with "Thank you for using nginx."
+Figure 6-8
+Nginx default welcome
+page
+Improving Pod Resiliency
+:
+Health Checks
+: Define liveness and readiness probes to detect and replace unhealthy pods.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: my-app-deployment
+spec:
+replicas: 3
+selector:
+matchLabels:
+app: my-app
+template:
+metadata:
+labels:
+app: my-app
+spec:
+containers:
+- name: my-app-container
+image: nginx:latest
+ports:
+- containerPort: 80
+livenessProbe:
+httpGet:
+path: /
+port: 80
+initialDelaySeconds: 3
+periodSeconds: 3
+readinessProbe:
+httpGet:
+path: /
+port: 80
+initialDelaySeconds: 3
+periodSeconds: 3
+Let’s apply the above:
+kubectl apply -f healthchecks.yaml
+A terminal screenshot showing the output of a Kubernetes command to list pods. The command executed is "kc get pods -w". Three pods are listed under "my-app-deployment", each with a unique identifier. All pods have a status of "Running", with "1/1" readiness, "0" restarts, and an age of "9 seconds".
+Figure 6-9
+Getting status of live pods
+To check how health checks are working, we are going to simulate health check failure.
+Let’s exec into one of the pods:
+kubectl exec -it my-app-deployment-6fcbd7cf87-dgtpz -- /bin/sh\
+and stop nginx
+nginx -s stop
+We can see that the health check failed and a new pod was instantiated.
+A terminal screenshot displaying Kubernetes pod statuses. It shows five entries for "my-app-deployment" with unique identifiers. Four pods are in "Running" status with ages ranging from 9 seconds to 3 minutes and 54 seconds. One pod is "Completed" with an age of 3 minutes and 49 seconds. The "READY" column indicates readiness, and the "RESTARTS" column shows zero or one restart.
+Figure 6-10
+New pod instantiation after
+health check
+failure
+Let’s break the health check by removing the file from the path.
+A terminal window displays a command execution in a Kubernetes environment. The command `kubectl exec -it my-app-deployment-6fcbd7c9f7-dtgp -- /bin/sh` is run, followed by `rm /usr/share/nginx/html/index.html`. The process terminates with exit code 137, indicating an error. The prompt returns to the directory path `/mnt/g/My Drive/kubernetesRecipes/book/scaling/6.2#`.
+Figure 6-11
+Forcing health check failure for debug purposes
+We can see, the second pod that we were exec into was killed.
+A terminal screenshot displaying the status of several deployments. Each row lists a deployment name, readiness status, current status, number of restarts, and age. All deployments are running, with readiness mostly at 1/1, except for one at 0/1. Restart counts vary, with one deployment having restarted twice. Ages range around 7 minutes.
+Figure 6-12
+The pod’s status
+Using Jobs for Batch Processing and Resilience
+:
+Implement Jobs
+: Use Kubernetes
+jobs
+for
+batch processing
+tasks and ensure they are retried in case of failure.
+apiVersion: batch/v1
+kind: Job
+metadata:
+name: my-batch-job
+spec:
+template:
+metadata:
+labels:
+job-name: my-batch-job
+spec:
+containers:
+- name: my-job-container
+image: busybox
+command: ["echo", "Hello, World!"]
+restartPolicy: OnFailure
+backoffLimit: 4
+A terminal screenshot showing Kubernetes commands and output. The command `kc apply -f jobs.yaml` is executed, creating a job named `my-batch-job`. The subsequent command `kc get jobs` lists the job with details: Name is `my-batch-job`, Status is `Complete`, Completions are `1/1`, Duration is `6s`, and Age is `7s`.
+Figure 6-13
+Applying above file (jobs.yaml)
+By implementing HPA, configuring rolling updates, defining health checks, and using Kubernetes jobs for batch processing, the application can achieve better scaling, zero downtime during updates, and improved resiliency. These steps will ensure the application is robust, highly available, and capable of handling varying loads efficiently.
+6.3 Kustomize: Do More with Less
+Problem
+Organizations
+that adopt Kubernetes for container orchestration often face challenges in scaling applications efficiently and ensuring their resiliency. As the number of microservices grows, managing configurations across multiple environments becomes increasingly complex. Traditional handling of configuration files can lead to redundancy, increased errors, and difficulties maintaining consistency across different application lifecycle stages.
+Kustomize
+, a configuration management tool native to Kubernetes, promises to alleviate these challenges. However, many organizations may feel uncertain about fully harnessing its capabilities due to a lack of understanding of its features and best practices. The
+key challenges
+it can help address include the following:
+Managing multiple configurations for different environments (development, testing, production) is a common and significant challenge. It often leads to duplicated efforts and increases the potential for errors, underscoring the need for a more efficient solution like Kustomize.
+Maintaining configuration consistency while ensuring efficient resource utilization becomes difficult as applications scale.
+Ensuring applications remain resilient during scaling and configuration changes is not just a challenge; it’s critical. This is especially true in dynamic environments, where adapting quickly is paramount. Kustomize can play a significant role in this aspect.
+Solution
+Organizations can adopt a
+systematic approach
+to leveraging Kustomize to address these challenges. This involves utilizing its robust features to simplify configuration management, boost scalability, and enhance application resilience. Here’s a suggested solution.
+Leveraging Kustomize for Enhanced Scaling and Resiliency
+Leveraging Kustomize for enhanced scaling and
+resiliency
+in Kubernetes involves utilizing Kustomize’s configuration management capabilities to create reusable, composable, and environment-specific Kubernetes manifests.
+1.
+Basic Kustomize Structure
+First, let’s set up a basic Kustomize
+structure
+:
+my-app/
+├── base
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   └── kustomization.yaml
+├── overlays
+│   ├── production
+│   │   ├── kustomization.yaml
+│   │   ├── replicas-patch.yaml
+│   │   └── resource-requests-patch.yaml
+│   ├── staging
+│   │   ├── kustomization.yaml
+│   │   ├── replicas-patch.yaml
+│   │   └── resource-requests-patch.yaml
+2.
+Base Deployment
+The
+base directory
+contains the standard configuration:
+# base/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: nginx-deployment
+labels:
+app: nginx
+spec:
+replicas: 1
+selector:
+matchLabels:
+app: nginx
+template:
+metadata:
+labels:
+app: nginx
+spec:
+containers:
+- name: nginx
+image: nginx:1.21.1
+ports:
+- containerPort: 80
+# base/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+name: nginx-service
+spec:
+selector:
+app: nginx
+ports:
+- protocol: TCP
+port: 80
+targetPort: 80
+# base/kustomization.yaml
+resources:
+- deployment.yaml
+- service.yaml
+3.
+Overlays for Production
+The
+overlays/production directory
+contains environment-specific customizations:
+# overlays/production/replicas-patch.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: nginx-deployment
+spec:
+replicas: 5
+# overlays/production/resource-requests-patch.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: nginx-deployment
+spec:
+template:
+spec:
+containers:
+- name: nginx
+resources:
+requests:
+memory: "64Mi"
+cpu: "250m"
+limits:
+memory: "128Mi"
+cpu: "500m"
+# overlays/production/kustomization.yaml
+resources:
+- ../../base
+patchesStrategicMerge:
+- replicas-patch.yaml
+- resource-requests-patch.yaml
+4.
+Overlays for Staging
+Similarly, the overlays/
+staging directory
+contains customizations for the staging environment:
+# overlays/staging/replicas-patch.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: nginx-deployment
+spec:
+replicas: 2
+# overlays/staging/resource-requests-patch.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: nginx-deployment
+spec:
+template:
+spec:
+containers:
+- name: nginx
+resources:
+requests:
+memory: "32Mi"
+cpu: "125m"
+limits:
+memory: "64Mi"
+cpu: "250m"
+# overlays/staging/kustomization.yaml
+resources:
+- ../../base
+patchesStrategicMerge:
+- replicas-patch.yaml
+- resource-requests-patch.yaml
+5.
+Applying Configurations
+To validate Kubernetes files without applying them, we can run
+kubectl apply --dry-run=client
+To apply the
+configurations
+for a specific environment, you navigate to the appropriate overlay directory and apply the Kustomize configuration.
+For production:
+kustomize build overlays/production | kubectl apply -f -
+For staging:
+kustomize build overlays/staging | kubectl apply -f -
+A terminal window displays a series of Kubernetes commands and outputs. The user runs `kustomize build overlays/staging | kubectl apply -f -`, resulting in the creation of `nginx-service` and `nginx-deployment`. A warning indicates that 'patchesStrategicMerge' is deprecated. An attempt to use `kc get pods` returns "command not found." The correct command, `kubectl get pods`, lists two running `nginx-deployment` pods, each with a status of "1/1 Running," zero restarts, and an age of seven seconds.
+Figure 6-14
+Applying Kustomize for staging YAMLs
+We can see we have a staging version running with two replica sets specified in the staging.
+If our pipeline runs production overlay, we can see five replica sets.
+A terminal window displays commands and outputs related to Kubernetes. The user runs `kustomize build overlays/production | kubectl apply -f -`, receiving a warning about deprecated usage of `patchesStrategicMerge`. An attempt to use `kc get pods` results in "command not found." The correct command `kubectl get pods` shows five `nginx-deployment` pods, each with a status of "Running," no restarts, and ages ranging from 7 to 8 seconds.
+Figure 6-15
+Checking staging status
+6.
+Enhanced Resiliency with Health Checks
+Add liveness and readiness probes to the deployment for enhanced
+resiliency
+:
+# base/deployment.yaml (updated)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: nginx-deployment
+labels:
+app: nginx
+spec:
+replicas: 1
+selector:
+matchLabels:
+app: nginx
+template:
+metadata:
+labels:
+app: nginx
+spec:
+containers:
+- name: nginx
+image: nginx:1.21.1
+ports:
+- containerPort: 80
+livenessProbe:
+httpGet:
+path: /
+port: 80
+initialDelaySeconds: 10
+periodSeconds: 10
+readinessProbe:
+httpGet:
+path: /
+port: 80
+initialDelaySeconds: 5
+periodSeconds: 5
+Liveness Probe:
+The
+livenessProbe checks
+if the application is running properly. If the liveness probe fails, Kubernetes will restart the container.
+httpGet specifies that the liveness probe should send an HTTP GET request to the root path (/) on port 80.
+initialDelaySeconds
+: The number of seconds after the container has started before the probe is initiated.
+periodSeconds
+: How often (in seconds) is the probe performed?
+Readiness Probe:
+The
+readinessProbe checks
+if the application is ready to accept traffic. If the readiness probe fails, Kubernetes will stop sending traffic to the container until it passes.
+httpGet
+: Like the liveness probe, it sends an
+HTTP GET request
+to the root path (/) on port 80.
+initialDelaySeconds
+: The number of seconds after the container has started before the probe is initiated.
+periodSeconds
+: How often (in seconds) is the probe performed?
+These probes ensure that Kubernetes can automatically detect and respond to problems with your application, helping maintain the availability and reliability of your services.
+Using Kustomize in this manner, you can efficiently manage different environments, ensure scalability by adjusting replicas and resources, and enhance resiliency with proper health checks. This approach simplifies managing complex configurations and makes your Kubernetes deployments more robust and adaptable to various environments.
+Hierarchical Configuration Management
+Utilize Kustomize’s base and overlay features to manage configurations hierarchically. Define a common base
+configuration
+for all environments and create environment-specific overlays to customize settings without duplicating the base configuration.
+Example
+: Define a base configuration for a microservice with common settings. Create overlays for development, staging, and production environments, each adjusting only the necessary parameters.
+Environment-Specific Customizations
+Use Kustomize transformers and patches to apply environment-specific changes dynamically. This allows for a clean separation of common and environment-specific
+configurations
+.
+Example
+: Use transformers to modify resource limits or replica counts based on the environment, ensuring efficient resource use and better scalability.
+Version Control and Consistency
+Store Kustomize configurations in
+version control systems
+(e.g., Git) to maintain a history of changes and ensure consistency across deployments. Implement GitOps practices to automate the deployment process, reducing the risk of human error.
+Example
+: Use Git repositories to manage Kustomize configurations and employ
+continuous integration/continuous deployment (CI/CD)
+pipelines to automate deployments based on changes in the repository.
+Store all base and overlay configurations in a Git repository.
+Here’s an example
+repository structure
+:
+kustomize-config/
+├── base/
+│   └── deployment.yaml
+├── overlays/
+│   ├── development/
+│   │   ├── kustomization.yaml
+│   │   └── deployment-patch.yaml
+│   ├── staging/
+│   │   ├── kustomization.yaml
+│   │   └── deployment-patch.yaml
+│   └── production/
+│       ├── kustomization.yaml
+│       └── deployment-patch.yaml
+Implement CI/CD pipeline (e.g., using GitHub Actions, GitLab CI, or Jenkins) to automate deployments.
+Resiliency Enhancements
+Implement health checks, liveness probes, and readiness probes within Kustomize configurations to ensure that applications remain resilient and recover quickly from failures.
+Example
+: Configure liveness and readiness
+probes
+in the base configuration to monitor application health, ensuring that the service is only considered available when it is ready to handle traffic. Let’s add “liveness and readiness” probes (base/deployment.yaml):
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: my-app
+spec:
+replicas: 2
+selector:
+matchLabels:
+app: my-app
+template:
+metadata:
+labels:
+app: my-app
+spec:
+containers:
+- name: my-app
+image: my-app:1.0
+ports:
+- containerPort: 80
+livenessProbe:
+httpGet:
+path: /healthz
+port: 80
+initialDelaySeconds: 30
+periodSeconds: 10
+readinessProbe:
+httpGet:
+path: /readyz
+port: 80
+initialDelaySeconds: 5
+periodSeconds: 10
+Automation and Validation
+Utilize Kustomize plugins and external
+tools
+to automate configuration validation and testing before applying them to clusters. This reduces the likelihood of configuration errors impacting live environments.
+Example
+: Integrate Kustomize with tools like kubeval or kube-score kubeconform to validate Kubernetes manifests and ensure they adhere to best practices and standards:
+kustomize build overlays/production | kubeconform
+A terminal window displays a series of commands and error messages related to Kubernetes. The user attempts to build a Kubernetes deployment using Kustomize, but encounters warnings and errors. The warning indicates that "patchesStrategicMerge" is deprecated, suggesting the use of "patches" instead. An error message states that the "nginx-deployment" is invalid due to a missing "selector" property in the JSON schema. The user is prompted to check JSON formatting and update the Kustomize configuration.
+Figure 6-16
+Applying production YAMLs with later verification with
+plugin kubeconform
+Integrate Kubeval/Kubeconform for validation (CI/CD pipeline example).
+These examples demonstrate practical uses of Kustomize for managing configurations, customizing environments, maintaining version control, improving resiliency, and automating validation. These aspects effectively address the challenges of scaling and resiliency in Kubernetes environments.
+6.4 Cluster Autoscaler (Google, Azure, AWS, DigitalOcean, OVH Cloud)
+Problem
+As organizations increasingly adopt containerized applications, managing the infrastructure to support
+dynamic workloads
+becomes a critical challenge. Kubernetes, a popular container orchestration platform, provides robust solutions for deploying, managing, and scaling containerized applications. However, ensuring that a Kubernetes cluster can efficiently scale and remain resilient under varying load conditions requires effectively utilizing cluster autoscaler mechanisms.
+Different
+cloud providers
+, such as Google Cloud Platform (GCP), Microsoft Azure, Amazon Web Services (AWS), DigitalOcean, and OVH Cloud, offer their implementations of cluster autoscalers. These autoscalers dynamically adjust the number of nodes in a Kubernetes cluster based on the demands of the workloads. Despite their availability, many organizations need help configuring and optimizing these autoscalers to achieve optimal performance, cost efficiency, and resiliency.
+Challenges
+:
+Dynamic Workloads
+: Handling unpredictable and fluctuating workloads without over-provisioning or under-provisioning resources
+Cost Management
+: Balancing the need for high availability and performance with the cost of running additional resources
+Cross-Provider Differences
+: Configuring and managing autoscalers across cloud platforms with varying features and limitations
+Resiliency
+: Ensuring the cluster remains
+resilient
+during scaling events, preventing downtime and maintaining service quality
+Resource Limits
+: Dealing with cloud provider–specific
+resource limits and quotas
+that can impact scaling capabilities
+Solution
+Solution: Implementing and Optimizing Cluster Autoscaler for Kubernetes
+To address these challenges, organizations need a well-defined strategy for implementing and optimizing cluster autoscalers across different cloud platforms. Here are the
+key steps
+and best practices to achieve this:
+Cluster Autoscaler Configuration
+:
+Google Cloud Platform (GCP)
+: Use the
+Google Kubernetes Engine (GKE)
+autoscaler.
+Configure node pools
+with autoscaling enabled, set minimum and maximum node limits, and choose the appropriate machine types based on workload requirements.
+Azure
+: Utilize the
+Azure Kubernetes Service (AKS)
+autoscaler. Set up node pools, configure scaling parameters, and monitor scaling activities through Azure Monitor.
+AWS
+: Implement the
+AWS
+Elastic Kubernetes Service (EKS)
+autoscaler. Use autoscaling groups, configure scaling policies, and leverage AWS CloudWatch for monitoring.
+DigitalOcean
+: Use the
+DigitalOcean
+Kubernetes autoscaler. Define node pool scaling settings, set appropriate limits, and monitor cluster health through DigitalOcean’s monitoring tools.
+OVH Cloud
+: Implement the
+OVH Cloud
+Kubernetes autoscaler. Configure node pool settings, set scaling parameters, and monitor them through OVH Cloud’s management interface.
+Monitoring and Metrics
+:
+Integrate
+monitoring tools
+like Prometheus and Grafana to gather real-time metrics on cluster performance and scaling activities.
+Set up alerts for critical events like node failures, scaling errors, and resource saturation.
+Cost Optimization
+:
+Use cloud provider–specific
+cost management
+tools to track spending and identify opportunities for cost savings.
+Implement policies to prevent over-provisioning, such as setting reasonable scaling limits and leveraging spot instances where applicable.
+Resiliency Strategies
+:
+Design stateless and horizontally scalable applications, reducing node failures’ impact during scaling events.
+Implement automated backups and disaster recovery plans to ensure data integrity and availability.
+Cross-Provider Management
+:
+Use multi-cloud management tools like Rancher or Anthos to manage clusters across different providers from a single interface.
+Standardize configuration and management practices to reduce complexity and improve operational efficiency.
+Implementing these strategies, organizations can effectively utilize cluster autoscale to handle dynamic workloads, optimize costs, and maintain high resiliency in their Kubernetes environments. This approach ensures the infrastructure adapts to changing demands while providing a seamless and reliable user experience.
+6.5 Kubernetes Event-Driven Autoscaling (KEDA)
+Problem
+High availability, responsiveness, and resource efficiency are essential in modern cloud-native applications. Traditional autoscaling based on CPU and memory usage may need to be revised for
+event-driven workloads
+that experience bursty and unpredictable traffic patterns.
+Scenario
+:
+A company runs a real-time
+analytics platform
+on a Kubernetes cluster. The platform processes events from various sources, such as user interactions, IoT devices, and third-party integrations. During peak periods, the volume of events can surge dramatically, leading to performance bottlenecks and delayed processing. Based on CPU utilization, the current scaling mechanism needs to be improved for these event-driven workloads. Additionally, the platform must ensure quick failure recovery to maintain high availability.
+Challenges
+:
+Event-Driven Scaling
+: The current CPU-based scaling does not effectively respond to fluctuating
+event-driven
+traffic, causing performance issues during peak loads.
+Resource Efficiency
+: Inefficient
+resource
+usage during low-traffic periods leads to unnecessary costs.
+Resiliency
+: The system must ensure quick failure recovery to maintain uninterrupted service.
+Solution
+Implement event-driven autoscaling to dynamically adjust the number of running pods based on the volume of events.
+Ensure efficient resource utilization by scaling down during periods of low traffic.
+Improve resiliency by configuring
+KEDA
+to handle pod failures and ensure quick recovery.
+Install
+KEDA (Kubernetes Event-Driven Autoscaling
+)
+:
+kubectl apply -f https://github.com/kedacore/keda/releases/download/v2.5.0/keda-2.5.0.yaml
+Configure an Event Source for Scaling
+:
+Define an
+event source
+(e.g., a message queue like Kafka, RabbitMQ, or Azure Event Hubs) that KEDA will monitor for scaling.
+Create a ScaledObject
+:
+Implementation
+: Define a
+ScaledObject
+to scale the deployment based on the number of events in the message queue.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+name: my-scaledobject
+spec:
+scaleTargetRef:
+apiVersion: apps/v1
+kind: Deployment
+name: my-app-deployment
+minReplicaCount: 1
+maxReplicaCount: 10
+triggers:
+- type: kafka
+metadata:
+bootstrapServers: my-kafka-broker:9092
+topic: my-topic
+consumerGroup: my-group
+lagThreshold: "100"
+Deploy the Application
+:
+Implementation
+: Define the
+deployment
+for the application that KEDA will scale.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: my-app-deployment
+spec:
+replicas: 1
+selector:
+matchLabels:
+app: my-app
+template:
+metadata:
+labels:
+app: my-app
+spec:
+containers:
+- name: my-app-container
+image: my-app:latest
+ports:
+- containerPort: 80
+Define
+Health Checks
+for Resiliency
+:
+Implementation
+: Configure liveness and readiness probes to ensure the application pods are healthy and replaced if they fail.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: my-app-deployment
+spec:
+replicas: 1
+template:
+metadata:
+labels:
+app: my-app
+spec:
+containers:
+- name: my-app-container
+image: my-app:latest
+ports:
+- containerPort: 80
+livenessProbe:
+httpGet:
+path: /healthz
+port: 80
+initialDelaySeconds: 3
+periodSeconds: 3
+readinessProbe:
+httpGet:
+path: /ready
+port: 80
+initialDelaySeconds: 3
+periodSeconds: 3
+By implementing KEDA, the application can dynamically scale based on the volume of events, ensuring efficient resource utilization and improved performance during peak loads. Configuring health checks will enhance the system’s resiliency, providing quick recovery from pod failures. This solution addresses the challenges of scaling and resiliency in an event-driven architecture, maintaining the high availability and responsiveness of the real-time analytics platform.
+6.6 Application Horizontal Pod Autoscaling
+Problem
+In modern cloud-native environments, applications must handle varying loads efficiently while maintaining high availability and performance. Kubernetes provides a mechanism called
+Horizontal Pod Autoscaling (HPA)
+to address these needs. HPA automatically adjusts the number of pod replicas in a Kubernetes deployment based on observed CPU utilization or other select metrics. However, implementing and optimizing
+HPA
+poses several challenges, including configuring appropriate scaling metrics, ensuring cost-effectiveness, and maintaining application resiliency during scaling events.
+Challenges
+:
+Metric Selection
+: Choosing the right
+metrics
+(CPU, memory, custom metrics) to trigger scaling actions.
+Threshold Configuration
+: Setting appropriate threshold values for scaling up and down to avoid thrashing and ensure stability.
+Resource Allocation
+: Balancing
+resource allocation
+to avoid over-provisioning or under-provisioning, impacting cost and performance.
+Scaling Latency
+: Minimize the
+latency
+in scaling actions to ensure a timely response to changes in load.
+Resiliency
+: Ensuring the application remains resilient and available during scaling operations, including handling pod restarts and network disruptions.
+Solution
+Implementing and Optimizing Kubernetes Horizontal Pod Autoscaling
+To effectively utilize HPA for enhancing application scalability and resiliency, the following steps and best practices should be adopted:
+Metric Selection and Monitoring
+:
+CPU/Memory Utilization
+: Start with CPU and memory metrics, commonly used and supported by default in Kubernetes. These metrics are good indicators of pod resource demands.
+Custom Metrics
+: Use custom metrics to gain more granular control over scaling decisions. Tools like Prometheus and custom metrics adapters can help expose application-specific metrics (e.g., request count and latency).
+Metrics Server
+: Ensure the Kubernetes metrics server is properly installed and configured to collect and expose the required metrics.
+Configuring
+HPA
+:
+Define HPA Resources
+: Create HorizontalPodAutoscaler resources in Kubernetes, specifying the target deployment, metric types, and scaling thresholds.
+Threshold Values
+: Set appropriate
+threshold values
+for scaling up and down. Avoid setting thresholds too low to prevent thrashing (frequent scaling actions) or too high to ensure timely scaling.
+Min/Max Replicas
+: Define minimum and maximum replica counts to control the scaling range and avoid excessive resource consumption.
+Advanced HPA Configurations
+:
+Multiple Metrics
+: Configure HPA to use various metrics for a more balanced and accurate scaling strategy. This can include combining CPU usage with custom application metrics.
+Rate Limiting
+: Implement
+rate limiting
+on scaling actions to prevent rapid scaling changes that could destabilize the application.
+Testing and Optimization
+:
+Load Testing
+: Conduct load testing to simulate different load scenarios and observe how HPA responds. Tools like Apache JMeter or K6 can be used for load testing.
+Tuning Parameters
+: Monitor application performance and adjust HPA parameters based on observed behaviors and metrics.
+Debugging
+: Use Kubernetes events and logs to debug and understand the behavior of HPA during scaling events.
+Ensuring Resiliency
+:
+Graceful Shutdown
+: Implement graceful shutdown mechanisms in applications to handle pod terminations smoothly and ensure no in-flight requests are lost.
+Pod Disruption Budgets
+: Define
+PodDisruptionBudget (PDB)
+to limit the number of pods that can be taken down simultaneously during scaling events, maintaining application availability.
+Health Checks
+: Ensure robust readiness and liveness probes are in place to detect and mitigate issues promptly during scaling.
+Cost Management
+:
+Resource Requests and Limits
+: Properly configure resource requests and limits for each pod to optimize resource utilization and control costs.
+Monitoring Costs
+: Use
+cost management
+tools and dashboards to monitor the cost implications of scaling actions and adjust policies accordingly.
+6.7 Application Vertical Pod Autoscaling
+Problem
+In dynamic cloud-native environments, ensuring optimal resource allocation for applications is critical for maintaining performance and efficiency. Kubernetes
+Vertical Pod Autoscaling (VPA)
+automatically adjusts the resource requests and limits (CPU and memory) of containers running in pods. This helps to optimize resource utilization, improve performance, and reduce costs. However, implementing and optimizing
+VPA
+presents several challenges, including configuring appropriate resource limits, managing scaling latency, and ensuring application resiliency during scaling adjustments.
+Challenges
+:
+Resource Allocation
+: Determining the appropriate CPU and memory requests and limits to prevent under-provisioning (causing performance issues) or over-provisioning (leading to resource wastage)
+Scaling Impact
+: Minimizing the impact on running applications during
+scaling
+adjustments, especially since VPA can restart pods to apply new resource configurations
+Latency in Scaling
+: Ensuring timely adjustments to resource allocation to respond to workload changes without significant delays
+Cost Management
+: Balancing the need for sufficient resources with
+cost efficiency
+to avoid unnecessary spending
+Application Resiliency
+: Maintaining application availability and performance during and after VPA adjustments, including handling pod restarts and disruptions
+Solution
+Implementing and Optimizing Kubernetes Vertical Pod Autoscaling
+To effectively utilize VPA for enhancing application performance and resiliency, the following steps and best practices should be adopted:
+VPA
+Configuration
+:
+Install VPA
+: Deploy the Vertical Pod Autoscaler components in the Kubernetes cluster, ensuring the VPA Admission Controller, Recommender, and Updater are properly configured.
+Define VPA Resources
+: Create VerticalPodAutoscaler
+custom resources (CRs)
+specifying the target deployment, resource policy, and update mode (e.g., “Auto,” “Off,” or “Initial”).
+Resource Policy and Limits
+:
+Resource Policy
+: Define
+resource policies
+to control how VPA makes recommendations and updates resource requests and limits. This includes specifying minimum and maximum allowed resource values.
+Update Mode
+: Choose the appropriate
+update mode
+for the VPA:
+"Auto"
+: VPA automatically updates resource requests and limits, potentially restarting pods.
+"Initial"
+: VPA sets resource requests and limits only at pod creation time, not affecting running pods.
+"Off"
+: VPA makes recommendations but does not apply changes automatically.
+Monitoring and Metrics
+:
+Collect Metrics
+: Use
+monitoring
+tools like Prometheus to collect CPU and memory usage metrics. These metrics inform VPA recommendations.
+Analyze Usage Patterns
+: Regularly analyze resource usage patterns to understand the application’s resource needs and adjust VPA configurations accordingly.
+Testing and Optimization
+:
+Load Testing
+: Conduct
+load testing
+to observe how VPA recommendations impact application performance and resource usage. Tools like Apache JMeter or K6 can simulate different load scenarios.
+Tuning Parameters
+: Continuously monitor VPA recommendations and application performance and tune VPA parameters based on observed behaviors and metrics.
+Dry-Run Mode
+: Use the
+dry-run mode
+to observe VPA recommendations without applying them, allowing for safe testing and analysis.
+Ensuring
+Resiliency
+:
+Graceful Shutdown
+: Implement graceful shutdown mechanisms in applications to handle pod restarts smoothly and ensure no in-flight requests are lost.
+Pod Disruption Budgets
+: Define a
+PodDisruptionBudget (PDB)
+to limit the number of pods that can be disrupted simultaneously during scaling events while maintaining application availability.
+Health Checks
+: Ensure robust readiness and liveness probes are in place to detect and mitigate issues promptly during scaling.
+Cost Management
+:
+Resource Requests and Limits
+: Configure each pod’s initial resource requests and limits based on historical usage and VPA recommendations to optimize resource utilization and control costs.
+Monitoring Costs
+: Use cost management tools and dashboards to monitor the cost implications of VPA adjustments and adjust policies accordingly.
+Organizations can implement and optimize Vertical Pod Autoscaling in Kubernetes by following these best practices to enhance application performance and resiliency. This ensures that the applications can dynamically adapt to changing resource demands while maintaining efficiency and cost-effectiveness.
+6.8 High-Performance Kubernetes Cluster Autoscaler with Karpenter
+Problem
+As organizations strive to meet dynamic and unpredictable workloads in their Kubernetes environments, efficient autoscaling becomes critical. Traditional cluster autoscalers often need more latency, flexibility, and resource optimization support.
+Karpenter
+, an open source high-performance Kubernetes cluster autoscaler, aims to address these limitations by providing faster and more efficient scaling, better resource utilization, and enhanced integration with cloud providers. However, implementing and optimizing Karpenter poses challenges, including configuring it for optimal performance, managing cost-effectiveness, and ensuring the resiliency of applications during
+scaling events
+.
+Challenges
+:
+Latency in Scaling
+: Minimizing the time taken to scale up or down in response to workload changes, ensuring timely resource availability
+Resource Optimization
+: Efficiently utilizing resources to prevent over-provisioning or under-provisioning, impacting performance and cost
+Configuration Complexity
+: Configuring Karpenter to integrate seamlessly with existing Kubernetes clusters and cloud provider APIs
+Cost Management
+: Balancing the need for high availability and performance with the cost of additional resources
+Resiliency
+: Ensuring the cluster and applications remain resilient during scaling events, avoiding downtime and performance degradation
+Solution
+Implementing and
+Optimizing
+Karpenter for High-Performance Kubernetes Cluster Autoscaling
+Karpenter automatically launches the right compute resources to handle your cluster’s applications. It is designed to let you take full advantage of the cloud with fast and straightforward computing provisioning for Kubernetes clusters.
+Diagram titled "How It Works" illustrating the process of optimizing computing capacity. It shows pending pods being scheduled into existing capacity, while unschedulable pods are managed through just-in-time capacity. Both capacities are optimized using a central component labeled "K," resulting in an optimized capacity. The diagram highlights the role of Karpenter in managing resource requests and optimizing node usage to reduce latencies and costs.
+Figure 6-17
+Karpenter
+logical decision flow
+src:karpenter.sh
+To leverage Karpenter for high-performance autoscaling, the following steps and best practices should be adopted:
+Karpenter
+Installation and Configuration
+:
+Install Karpenter
+: Deploy Karpenter in the Kubernetes cluster, ensuring all necessary components are correctly installed and configured.
+Cloud Provider Integration
+: Configure Karpenter to integrate with your
+cloud provider
+(e.g., AWS, GCP). This includes setting up necessary permissions, credentials, and API access.
+Defining Scaling Policies
+:
+Provisioner Configuration
+: Define Karpenter
+Provisioners
+that specify scaling policies, including instance types, zones, and resource limits. Provisioners help manage how and when Karpenter scales nodes.
+Scheduling Constraints
+: Use
+scheduling constraints
+to ensure that the right types of nodes are provisioned based on the workload requirements (e.g., GPU instances for machine learning workloads).
+Resource Optimization
+:
+Efficient Node Utilization
+: Configure Karpenter to optimize node utilization by efficiently packing pods on fewer nodes, reducing the number of nodes needed.
+Instance Flexibility
+: Enable Karpenter to dynamically use various instance types and sizes to match workloads, improving cost efficiency and performance.
+Monitoring and Metrics
+:
+Collect Metrics
+: Use monitoring tools like Prometheus and Grafana to gather real-time metrics on cluster performance, resource usage, and scaling activities.
+Analyze Performance
+: Continuously analyze performance metrics to fine-tune Karpenter configurations and ensure optimal resource utilization.
+Testing and Optimization
+:
+Load Testing
+: Conduct load testing to simulate different scenarios and observe how Karpenter responds. This helps you understand the scaling behavior and make necessary adjustments.
+Tuning Parameters
+: Adjust Karpenter parameters based on testing results and ongoing monitoring to achieve the desired balance between performance, cost, and resiliency.
+Ensuring
+Resiliency
+:
+Graceful Shutdown
+: Implement graceful shutdown mechanisms in applications to handle node terminations smoothly and ensure no in-flight requests are lost.
+Pod Disruption Budgets
+: Define
+PodDisruptionBudget (PDB)
+to control the number of pods that can be disrupted simultaneously during scaling events, maintaining application availability.
+Health Checks
+: Ensure robust readiness and liveness probes are in place to detect and mitigate issues promptly during scaling.
+Cost Management
+:
+Spot Instances
+: Leverage
+spot instances
+where appropriate to reduce costs. Karpenter can automatically replace interrupted spot instances with on-demand instances to maintain availability.
+Cost Monitoring
+: Cloud provider cost management tools monitor spending and identify opportunities for cost savings. Based on cost insights, Karpenter configurations are adjusted to optimize resource allocation.
+Following these best practices, organizations can implement and optimize Karpenter for high-performance autoscaling in their Kubernetes environments. This ensures the cluster can dynamically adapt to changing workloads while maintaining performance, cost efficiency, and application resiliency.
+6.9 Ensuring Application Resiliency and Efficiency in Constrained Environments with Kubernetes PodTopologySpread
+Problem
+In Kubernetes environments, maintaining high availability and resiliency of applications often requires distributing workloads across different nodes and zones. This is particularly crucial in constrained environments where resources are limited and the risk of resource contention and single points of failure is higher. Kubernetes
+PodTopologySpread
+(PTS)
+allows administrators to define rules that spread pods across various topology domains, such as nodes, zones, or regions, to ensure balanced resource utilization and fault tolerance. However, implementing and optimizing PodTopologySpread in constrained environments poses challenges, including setting appropriate spread constraints, managing resource limitations, and maintaining application performance and resiliency.
+Challenges
+:
+Resource Limitations
+: Managing limited
+resources
+effectively to avoid overloading specific nodes or zones while ensuring application performance.
+Setting Spread Constraints
+: Defining appropriate
+spread constraints
+to balance pods across different topology domains without causing resource fragmentation.
+Single Points of Failure
+: Preventing
+single points
+of failure by ensuring that pods are adequately distributed to handle node or zone failures.
+Performance Management
+: Ensuring performance is not compromised due to pod spreading, especially in latency-sensitive applications.
+Complex Configuration
+: Configuring PodTopologySpread policies that align with the specific needs of constrained environments, ensuring compatibility with existing deployments.
+Solution
+Implementing and Optimizing PodTopologySpread for Constrained Environments
+To leverage PodTopologySpread for enhancing application resiliency and efficiency in constrained environments, the following steps and best practices should be adopted:
+Understanding PodTopologySpread
+:
+PodTopologySpread Constraints
+: These
+constraints control
+how pods are distributed across topology domains, such as nodes or zones. Constraints can be based on labels, max skew, and topology keys.
+Configuring PodTopologySpread
+:
+Define Topology Keys
+: Identify the
+topology domains
+(e.g., node, zone, region) relevant to your deployment. Use topology keys like kubernetes.io/hostname for nodes and topology.kubernetes.io/zone for zones.
+Set Max Skew
+: Determine the maximum allowable difference in the number of pods between topology domains. This helps prevent uneven distribution and resource contention.
+Label Nodes and Pods
+: Ensure
+nodes and pods
+are appropriately labeled to enable effective topology spreading based on defined constraints.
+Creating PodTopologySpread
+Constraints
+:
+apiVersion: v1
+kind: Pod
+metadata:
+name: example-pod
+spec:
+topologySpreadConstraints:
+- maxSkew: 1
+topologyKey: "kubernetes.io/hostname"
+whenUnsatisfiable: DoNotSchedule
+labelSelector:
+matchLabels:
+app: example
+maxSkew
+: Set to 1 to ensure that the number of pods per node does not differ by more than one.
+topologyKey
+: Set to kubernetes.io/hostname to spread pods across different nodes.
+whenUnsatisfiable
+: Set it to DoNotSchedule to prevent pods from being scheduled if the constraints cannot be satisfied.
+Monitoring and Metrics
+:
+Collect Metrics
+: Use
+monitoring tools
+like Prometheus and Grafana to gather metrics on pod distribution, node utilization, and application performance.
+Analyze Spread
+: Continuously analyze the distribution of pods across topology domains to ensure that the constraints are being met effectively.
+Testing and Optimization
+:
+Simulate Failures
+: Conduct failure simulations to test your application’s resiliency when nodes or zones fail. This helps validate the effectiveness of PodTopologySpread constraints.
+Adjust Constraints
+: Based on monitoring and testing results, adjust PodTopologySpread constraints to optimize resource utilization and application resiliency.
+Ensuring
+Performance
+:
+Resource Requests and Limits
+: Properly configure resource requests and limits for pods to ensure they receive adequate resources without overloading nodes.
+Health Checks
+: Implement robust readiness and liveness probes to detect and mitigate issues promptly, ensuring pods remain healthy and available.
+Managing Resource Constraints
+:
+Efficient Utilization
+: Ensure that resource requests and limits are set appropriately to maximize
+resource utilization
+while preventing contention.
+Node Affinity and Anti-affinity
+: Use
+node affinity and anti-affinity
+rules in conjunction with PodTopologySpread to further control pod placement and avoid overloading specific nodes.
+By following these best practices, organizations can implement and optimize PodTopologySpread in constrained environments, enhancing application resiliency and efficiency. This ensures that applications are distributed across topology domains in a balanced manner, preventing resource contention and improving fault tolerance.
+6.10 Securing the Control Plane with Additional Resources
+Problem
+Organizations face significant challenges in securing the control plane of their infrastructure, particularly in cloud environments, container orchestration platforms (e.g., Kubernetes), or network systems. The
+control plane
+is critical for managing configurations, communications, and resource provisioning. If compromised, it can lead to severe consequences, including data breaches, service disruptions, and unauthorized access to critical systems. Common issues include weak access control, poor encryption practices, insufficient network segmentation, lack of logging and monitoring, and vulnerabilities in APIs and software components. Additionally, inadequate resource management and a lack of disaster recovery plans can expose the control plane to performance bottlenecks and potential attacks.
+Solution
+To address these security challenges, organizations can implement a
+multilayered approach
+to fortifying the control plane by utilizing the following key measures:
+Identity and Access Management (IAM)
+: Implement role-based access control (RBAC) and multi-factor authentication (MFA) to ensure only authorized users have access while enforcing least privilege principles.
+Network Security
+:
+Isolate the control plane through network segmentation, enforce ingress and egress policies, and use VPNs and firewalls to prevent unauthorized access.
+Encryption
+:
+Ensure all data in transit and at rest is encrypted with strong encryption protocols, including using TLS for communication.
+Audit Logging and Monitoring
+:
+Enable comprehensive and centralized monitoring to detect suspicious activities and respond to security incidents.
+Secure API Management:
+Secure
+the control plane’s APIs by leveraging an API gateway with robust authentication protocols and limiting public API exposure.
+Resource Quotas and Rate Limiting:
+Implement
+rate limiting
+and set appropriate resource quotas for the control plane to protect against resource exhaustion and
+denial-of-service (DoS)
+attacks.
+Patching and Updates
+:
+Regularly update and patch the control plane software and components to mitigate known vulnerabilities.
+High Availability and Disaster Recovery:
+Implement redundancy across multiple
+availability
+zones and maintain regular backups of control plane data to ensure resilience and disaster recovery.
+Security Posture Management:
+Apply configuration hardening and compliance scanning to align with industry
+security standards
+and best practices.
+Secret Management:
+Use centralized
+secret management
+tools with strict access controls to securely handle sensitive information such as API keys and passwords.
+By implementing these security measures, organizations can significantly reduce the risk of control plane compromises, ensuring a strong and resilient infrastructure capable of withstanding internal and external threats.
+6.11 Container Image Registries (AWS ECR, DockerHub, GCR, Quay.io, Harbor, JFrog)
+Problem
+Container image registries
+are critical for storing and distributing container images in a cloud-native environment. Popular registries include AWS Elastic Container Registry (ECR), DockerHub, Google Container Registry (GCR), Quay.io, Harbor, and JFrog Artifactory. These
+registries
+are crucial in the CI/CD pipeline, enabling seamless containerized application deployment. However, managing and securing container image registries poses several challenges, including access control, vulnerability scanning, image tagging, and compliance with security policies.
+Challenges
+:
+Access Control
+: Ensuring that only authorized users and systems can push, pull, and manage container images
+Vulnerability Management
+: Identifying and mitigating
+vulnerabilities
+in container images
+Image Tagging and Versioning
+: Managing image
+tags and versions
+effectively to ensure consistency and traceability
+Compliance and Security
+: Ensuring compliance with
+security
+policies and industry standards
+Performance and Availability
+: Maintaining the registry’s high availability and
+performance
+to support continuous integration and deployment
+Solution
+Implementing and Optimizing Container Image Registries
+To effectively manage and secure container image registries, the following steps and best practices should be adopted.
+AWS ECR
+A white geometric logo resembling an abstract cube with an open side, set against a gradient orange background.
+Figure 6-18
+AWS ECR
+logo
+A flowchart illustrating the process of using Amazon ECR for container management. It begins with writing and packaging code as a Docker image, followed by storing it in Amazon ECR. The next steps involve compressing, encrypting, and controlling access to images, then versioning, tagging, and managing image lifecycles. Finally, containers are run by pulling images and executing them on platforms like Amazon ECS, Amazon EKS, AWS, or on-premises.
+Figure 6-19
+AWS ECR workflow
+Access Control
+Best Practices
+Use AWS Identity and Access Management (IAM) policies to control access to ECR repositories.
+Use lifecycle policies to manage image cleanup and retention.
+Enable multi-factor authentication (MFA) for added security.
+Enable encryption at rest and in transit for added security.
+DockerHub
+Logo of Docker Hub featuring a white whale with shipping containers on its back, followed by the text "docker hub" in lowercase letters on a blue background.
+Figure 6-20
+DockerHub
+logo
+Access Control
+Best Practices
+Use DockerHub teams and organizations to manage access control.
+Use private repositories for sensitive or proprietary images.
+Enable two-factor authentication (2FA) for all user accounts.
+Take advantage of DockerHub's automated build and scan features.
+GCR
+A blue hexagon with three white hexagons inside, surrounded by white brackets.
+Figure 6-21
+GCR
+logo
+Access Control
+Best Practices
+Use Google Cloud IAM to manage access control for GCR.
+Leverage Google Cloud's security features, such as VPC Service Controls and Private Google Access.
+Implement least privilege access by assigning appropriate roles to users and service accounts.
+Use GCR's native vulnerability scanning features.
+Quay.io
+Flowchart illustrating a code deployment process. The process starts with "Commit Code," followed by an arrow pointing to "Quay," which handles "Automated Builds," "Storage," and "Security Scanning." Another arrow points to the final step, "Deploy Container."
+Figure 6-22
+Quay
+workflow
+Access Control
+Best Practices
+Use Quay.io teams and organizations to manage access control.
+Use Quay.io’s integrated security scanning to obtain a vulnerability report, and leverage its automated tag expiration features.
+Enable SSO (Single Sign-On) and 2FA for enhanced security.
+Use Quay.io's repository mirroring to enhance redundancy.
+Harbor
+Logo featuring a green lighthouse with blue light beams inside a circular design, followed by the word "HARBOR" in gray capital letters.
+Figure 6-23
+Harbor
+logo
+Access Control
+Best Practices
+Use Harbor's built-in
+role-based access control (RBAC)
+to manage access.
+Use Harbor's built-in security features, including content trust and Notary for image signing.
+Integrate with LDAP/AD for centralized user management.
+Use Harbor's replication capabilities to synchronize images across multiple registries.
+JFrog Artifactory
+Green logo of JFrog featuring a stylized splash above the company name.
+Figure 6-24
+JFrog
+logo
+Access Control
+Best Practices
+Use JFrog's RBAC to manage permissions.
+Utilize Artifactory's advanced features like Xray for deep security and compliance scanning.
+Integrate with SSO and LDAP for centralized access management.
+Implement repository sharding and replication for high availability and disaster recovery.
+Vulnerability Management
+Automated Scanning
+: Enable automated vulnerability scanning for images stored in the registry. Use tools like Clair, Trivy, or Aqua Security to scan images.
+Regular Updates
+: Update images regularly to include the latest security patches and fixes. Set up notifications and alerts for detected
+vulnerabilities
+to ensure timely remediation.
+Image Tagging and Versioning
+Follow a consistent
+tagging
+convention (e.g., semantic versioning) to manage image versions.
+Immutable Tags
+: Avoid overwriting tags to ensure traceability and consistency.
+Retention Policies
+: Implement retention policies to clean up old and unused images, freeing up storage space.
+Compliance and Security
+Policy Enforcement
+:
+Use tools like Open Policy Agent (OPA) or Kyverno to enforce image
+security
+policies.
+Audit Logs
+:
+Enable and regularly review audit logs for registry operations to detect and investigate suspicious activities.
+Compliance Checks
+:
+Regularly run
+compliance
+checks to ensure adherence to industry standards and organizational policies.
+Performance and Availability
+Deploy the registry in a highly available configuration using multiple replicas and load balancers.
+Caching and Mirroring
+: Use caching and mirroring to improve
+performance
+and reduce latency for frequently accessed images.
+Implement monitoring and alerting to track registry performance and availability using tools like Prometheus and Grafana.
+By following these best practices, organizations can effectively manage and secure their container image registries, ensuring that containerized applications are deployed safely, efficiently, and in compliance with security policies. This approach enhances the containerized environment’s overall security posture and operational efficiency.
+Integrating Vulnerability Scanning into CI/CD: A DevSecOps Perspective
+By incorporating automated vulnerability scanning into your
+CI/CD
+pipelines
+, you enhance security and streamline remediation efforts, embodying the core
+DevSecOps
+principle of integrating security throughout the software delivery lifecycle.
+Early and
+Frequent Scanning
+: You can catch vulnerabilities as early as possible by embedding security checks in every stage of your CI/CD pipeline. Each code commit and container image build can trigger automated scanning, reducing the risk of shipping insecure artifacts.
+Pipeline Gating
+: Configure your pipeline to “fail fast” if scans detect severe vulnerabilities. This helps ensure that builds do not proceed to later stages (e.g., staging or production) unless critical issues are remediated.
+Tooling and Automation
+:
+CI/CD Platforms
+: Jenkins, GitLab CI, GitHub Actions, and others commonly provide plugins or integrations for popular vulnerability scanning tools.
+Scanning Tools
+: Clair, Trivy, or Aqua Security can be run within pipeline stages to analyze dependencies, images, and code for known vulnerabilities.
+DevSecOps Culture
+: By making security a shared responsibility among developers, operations, and security teams, you foster transparency and collaboration. Vulnerability reports become part of standard feedback mechanisms, helping teams fix issues quickly and continuously improve overall security posture.
+Continuous Feedback Loop
+: The results of scans and compliance checks should feed
+back
+into your development cycle. This loop helps developers understand the root causes of vulnerabilities and apply secure coding practices in the future.
+6.12 Update Your App: Deployment Strategy Types
+Problem
+Regularly
+updating applications
+in a dynamic cloud-native environment is crucial for deploying new features, security patches, and bug fixes. Kubernetes offers a range of
+deployment strategies
+to manage application updates, each tailored to specific scenarios and requirements. These
+strategies
+include Recreate deployment, rolling deployment, ramped slow rollout, best-effort controlled rollout, blue/green deployment, canary deployment, shadow deployment, A/B testing, rollback deployments, and DaemonSets. However, the challenge lies in selecting and implementing the right deployment strategy to ensure minimal downtime, maintain application performance, and avoid disruptions.
+Challenges involve minimizing application downtime during updates to ensure uninterrupted availability and safeguarding against any decline in application performance. Properly configuring deployment strategies to align with specific application and operational requirements may take time and effort. Effectively managing the risks associated with deploying new versions, including potential bugs and incompatibilities, is essential. Furthermore, implementing robust rollback mechanisms to swiftly revert to a stable state in case of deployment issues is paramount.
+Solution
+To successfully oversee application updates in Kubernetes, it is essential to adopt the following steps and best practices for various deployment strategies.
+Recreate Deployment
+Suitable for applications where downtime is acceptable and there is no need for seamless updates.
+Deploying the “
+Recreate
+” strategy in Kubernetes involves shutting down the existing pods before creating new ones. This strategy ensures no overlap between old and new versions, which can be helpful when the latest version is not backward compatible or when you want to ensure that no two versions run simultaneously.
+First, ensure you have a deployment
+YAML file
+. This file defines your Kubernetes deployment. Here’s an example of a deployment YAML with the Recreate strategy:
+recreate_deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: nginx-app
+spec:
+replicas: 3
+strategy:
+type: Recreate
+selector:
+matchLabels:
+app: nginx-app
+template:
+metadata:
+labels:
+app: nginx-app
+spec:
+containers:
+- name: nginx-container
+image: nginx:1.26.1
+ports:
+- containerPort: 80
+Let’s prepare some terminals.
+To check the deployment status, we can type
+kubectl get deployments
+kubectl get pods
+kubectl rollout status deployment/nginx-app
+or we can use it with tmux to have more commands running and observe the live status change of pods:
+tmux
+tmux split -h && tmux spit -v
+Then, in each tmux window, we can run commands for apply in another one command for watch and status rollout like on the image attached:
+kubectl get pods -l ‘app=nginx-app’ -w
+Let’s apply the YAML with the following:
+kubectl apply -f recreate_deployment.yaml
+A screenshot of a code editor and terminal window. The code editor displays a YAML configuration file for deploying an Nginx app, specifying metadata, labels, and container details. The terminal shows commands and outputs for Kubernetes, including `kubectl rollout status deployment/nginx-app` and `kubectl get pods -l "app=nginx-app" -w`. The output lists multiple pods with their names, readiness status, and age, indicating some are pending and others are running.
+Figure 6-25
+Checking status of live pods while applying rollout
+Now, let’s edit the image to recreate the strategy in action.
+Let’s change the image to nginx:1.27.0 so the deployment image should look like
+- name: nginx-container
+image: nginx:1.27.0
+And let’s observe the rollout run:
+kubectl rollout status deployment/nginx-app
+A screenshot of a code editor and terminal window. The editor displays a Kubernetes deployment YAML file for an Nginx application, specifying metadata, labels, and container details such as image and ports. The terminal shows the execution of Kubernetes commands, including applying the deployment and checking rollout status. The rollout process updates replicas, with logs indicating the status of each replica, such as "Terminating," "Pending," and "Running." The deployment eventually rolls out successfully.
+Figure 6-26
+Rollout status
+visible with termination of old pods and creation of new ones
+Rolling Update Deployment
+It is ideal for minimizing downtime and maintaining application availability during updates.
+Let’s start with our rollingupdatedeployment.yaml:
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: nginx-ru-app
+labels:
+app: nginx-ru-app
+spec:
+replicas: 3
+strategy:
+type: RollingUpdate
+rollingUpdate:
+maxUnavailable: 1
+maxSurge: 1
+selector:
+matchLabels:
+app: nginx-ru-app
+template:
+metadata:
+labels:
+app: nginx-ru-app
+spec:
+containers:
+- name: my-app-container
+image: nginx:1.26.1
+ports:
+- containerPort: 80
+In the example above
+maxUnavailable
+: 1 means one pod can be unavailable during the update process.
+maxSurge
+: 1 means that, at most, one additional pod (above the desired number of replicas) can be created during the update process.
+Let’s set watch with
+kubectl get pods -l 'app=nginx-ru-app' -w
+A screenshot of a terminal window displaying Kubernetes commands and outputs. The top section shows a YAML file for a deployment named "nginx-ru-app." Below, terminal commands are executed, including `kubectl get pods` and `kubectl rollout status`. The output lists multiple pods with names starting with "nginx-ru-app," showing their readiness, status, restarts, and age. Some pods are running, while others are pending or terminating. The deployment "nginx-ru-app" is successfully rolled out.
+Figure 6-27
+Rollout changes with live watch
+In our live pod watch, we can see Kubernetes gradually replacing old pods with new pods, ensuring that a specified number of pods are always running.
+Let’s verify the update with
+kubectl get pods -l app=nginx-ru-app -o jsonpath="{.items[*].spec.containers[*].image}"
+The image shows a terminal output indicating the successful rollout of the "nginx-ru-app" deployment. A command is executed to list pods with the label "app=nginx-ru-app" using `kubectl`, displaying the image version "nginx:1.27.0" for each pod.
+Figure 6-28
+Checking Nginx pod image version
+We can see the pods were successfully upgraded with a new image.
+In case something goes wrong or a new image is faulty, we can always do a rollback operation with
+kubectl rollout undo deployment/ngingx-ru-app
+A terminal window displays Kubernetes commands and their outputs. On the left, commands like `kubectl get pods` and `kubectl rollout status deployment/nginx-ru-app` are shown, indicating actions related to managing Kubernetes pods and deployments. The right side lists pod statuses, including identifiers like `nginx-ru-app-6b89f5fbb6-5ff7v`, with states such as "Running," "Pending," and "Terminating," alongside time durations like "6m51s." The image illustrates the process of rolling out and undoing deployments in Kubernetes.
+Figure 6-29
+Undoing deployment rollout
+Blue–Green Deployment
+Blue–green
+deployment
+is a technique that reduces downtime and risk by running two identical production environments, referred to as blue and green. At any time, only one of these environments is live, with the live environment serving all production traffic. The other environment is updated to the new application version and rigorously tested. Once the latest version is verified, traffic is switched from the live environment to the updated environment, ensuring a high-quality update.
+Let’s start with the blue deployment:
+#
+blue_deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: nginx-blue
+spec:
+replicas: 3
+selector:
+matchLabels:
+app: nginx
+version: blue
+template:
+metadata:
+labels:
+app: nginx
+version: blue
+spec:
+containers:
+- name: nginx
+image: nginx:1.26.1
+ports:
+- containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+name: nginx-service
+spec:
+selector:
+app: nginx
+version: blue
+ports:
+- protocol: TCP
+port: 80
+targetPort: 80
+Apply the above YAML with kubectl apply -f blue_deployment.yaml.
+A screenshot of a code editor and terminal window. The editor displays a Kubernetes YAML configuration for deploying an Nginx application labeled "blue" with version 1.26.1. The terminal shows the creation of "nginx-blue" deployment and "nginx-service." Below, a table lists several Nginx pods with their statuses, including "Pending," "ContainerCreating," and "Running." The terminal prompt is visible at the bottom.
+Figure 6-30
+Applying blue deployment
+Let’s test the above pod image running and the
+Nginx response
+:
+kubectl get svc nginx-service
+Best-Effort Controlled Rollout
+:
+Use Case
+: Ensures a
+controlled rollout
+with fallback mechanisms.
+Implementation
+: Integrate with custom controllers or tools like Argo Rollouts to manage the rollout process.
+Canary Deployment
+:
+Use Case
+: Ideal for testing new versions with a subset of users before a full rollout.
+Implementation
+: Gradually shift traffic to the new version and monitor.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: my-app-canary
+spec:
+replicas: 1
+...
+Shadow Deployment
+:
+Use Case
+: Testing new versions with live traffic without impacting users.
+Implementation
+: Route a copy of the live traffic to the new version for testing.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: my-app-shadow
+spec:
+replicas: 1
+...
+A/B Testing
+:
+Use Case
+: Compare different versions of an application to determine the one that performs better.
+Implementation
+: Route a percentage of users to different versions using ingress controllers or service meshes.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+name: my-app-ab
+spec:
+rules:
+- host: myapp.example.com
+http:
+paths:
+- path: /a
+backend:
+service:
+name: my-app-v1
+port:
+number: 80
+- path: /b
+backend:
+service:
+name: my-app-v2
+port:
+number: 80
+To test with curl, we need Kubernetes DNS; our host is unaware of that to curl from the pod. Knowing k8s infrastructure, we will deploy our test pod to curl afterward. We will use curl image curlimages/curl.
+Rollback Deployments
+:
+Use Case
+: Quickly revert to a previous stable version in case of issues.
+Implementation
+: Use Kubernetes’ rollback feature to revert to an earlier replica set.
+kubectl rollout undo deployment/my-app
+DaemonSets
+:
+Use Case
+: Ensuring that specific updates are applied to all nodes, particularly for system-level applications.
+Implementation
+: Deploy updates to all or a subset of nodes in the cluster.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+name: my-daemon-app
+spec:
+...
+Best Practices for Deployment Strategies
+Monitoring and Metrics
+:
+Use tools like Prometheus and Grafana to monitor deployment health, performance, and success rates.
+Implement alerts to detect issues quickly during rollouts.
+Testing and Validation
+:
+Use CI/CD pipelines to automate
+testing and validation
+before production deployment.
+Implement integration and end-to-end tests to ensure new versions work as expected.
+Rollback Mechanisms
+:
+Always have a
+rollback plan
+in place and test it regularly.
+Use Kubernetes’ built-in rollback features to quickly revert to previous stable states.
+Traffic Management
+:
+Use ingress controllers, service meshes, or load balancers to manage
+traffic
+during canary, blue/green, and A/B testing deployments.
+Documentation and Training
+:
+Document deployment strategies and processes to ensure team alignment and understanding.
+Provide training to teams on using different deployment strategies and handling rollback scenarios.
+By following these best practices, organizations can implement and optimize various deployment strategies in Kubernetes, ensuring smooth application updates with minimal downtime and disruptions. This approach enhances the applications’ reliability, performance, and user experience.
+6.13 vCluster: Instantly Spin Up Hundreds of Kubernetes Virtual Clusters in Seconds
+In this Kubernetes chapter, one common challenge is managing multi-tenancy in large-scale Kubernetes environments. Multi-tenancy occurs when multiple users or teams share the same Kubernetes
+cluster
+but need isolation, performance guarantees, and application scaling flexibility. Achieving this in a traditional Kubernetes setup can be challenging due to the complexities of isolating resources, managing namespace conflicts, and maintaining security.
+Problem
+As organizations scale their Kubernetes usage, managing multiple teams and applications within a single cluster becomes more difficult. Key challenges include
+Resource Contention
+: Multiple teams sharing the same cluster may compete for resources, leading to performance degradation or “noisy neighbor” problems.
+Isolation
+: Traditional namespaces within Kubernetes do not provide complete
+isolation
+. A misconfigured or rogue application could affect others in the same cluster.
+Cluster
+Management Overhead
+: Running multiple physical clusters for each team or environment (e.g., dev, staging, prod) increases operational overhead, including costs, maintenance, and monitoring complexity.
+Customization
+: Each team may require specific Kubernetes configurations, policies, or versions, which can be difficult to achieve without running separate clusters.
+Scaling
+: With growing workloads, managing
+horizontal scaling
+across multiple teams without impacting each other’s operations becomes a bottleneck.
+Solution
+vCluster (Virtual Cluster) is an innovative solution to address these issues by allowing you to create lightweight virtual Kubernetes clusters within a single physical Kubernetes cluster. This enhances scaling and resiliency while addressing multi-tenancy challenges effectively.
+Key benefits
+of vCluster in scaling and resiliency include
+Full Isolation
+: Each virtual cluster runs in its own namespace within the physical cluster but behaves as a fully isolated Kubernetes environment. This provides complete
+isolation
+of resources, security policies, and configurations per team or environment.
+Improved Resource Utilization
+: Instead of deploying multiple physical clusters, vClusters allow multiple isolated virtual clusters to run on the same physical infrastructure. This optimizes
+resource utilization
+and reduces operational costs while maintaining scalability.
+Simplified Multi-tenancy
+: vClusters provide an easy way to manage multiple tenants (teams or environments) in a Kubernetes environment. Each tenant gets its own virtual cluster, avoiding conflicts in namespace, RBAC policies, or resource quotas.
+Comparison table of Namespace, vCluster, and Cluster per tenant. For isolation, Namespace is very weak, vCluster is strong, and Cluster is very strong. Access for tenants is very restricted in Namespace, vCluster admin in vCluster, and cluster admin in Cluster. Cost is very cheap for Namespace, cheap for vCluster, and expensive for Cluster. Resource sharing is easy for Namespace and vCluster, but very hard for Cluster. Overhead is very low for both Namespace and vCluster, and very high for Cluster.
+Figure 6-31
+vCluster
+features comparison
+Version and Configuration Flexibility
+: Teams can run different Kubernetes versions or
+configurations
+within their own virtual clusters without affecting others. This is especially useful in scenarios where one team needs to upgrade to a newer Kubernetes version, while another team continues using an older one.
+Resiliency and Fault Isolation
+: Since each virtual cluster is independent, issues like resource exhaustion, application crashes, or misconfigurations in one virtual cluster do not affect the other virtual clusters. This provides better fault tolerance and operational resiliency in large-scale environments.
+Scalability
+: With vCluster, scaling becomes more granular and efficient. Each virtual cluster can be scaled independently based on workload requirements, allowing fine-tuned scaling policies without affecting the physical cluster’s performance.
+Consider a large organization with multiple development teams working on different microservices. Each team needs isolated Kubernetes
+environments
+for development, testing, and production, and each might require different Kubernetes versions or configurations. Using vClusters, the organization can deploy a single physical Kubernetes cluster while giving each team its own virtual cluster. Teams can operate independently, with the flexibility to scale and configure their virtual clusters without impacting the others, and the organization avoids the overhead of managing multiple physical clusters.
+vCluster provides a scalable, resilient solution to the challenges of managing large, multi-tenant Kubernetes environments. By offering isolation, better resource utilization, and operational simplicity, it enhances both scaling and resiliency in Kubernetes-based infrastructure.
+How vCluster
+Works
+Diagram illustrating a virtual cluster setup. A user interacts with the system using "kubectl" to access the vCluster control plane within a physical host cluster. Inside the virtual cluster, there are two namespaces: ns-1 and ns-2. Each namespace contains high-level resources (deployment, crd, statefulset, job) and low-level resources (pod-1, svc-a). The syncer connects these resources to their corresponding counterparts in the physical host cluster, labeled as pod-1-x-ns-1, svc-a-x-ns-1, pod-1-x-ns-2, and svc-a-x-ns2, using regular networking.
+Figure 6-32
+vCluster
+business logic
+We will install vCluster first.
+Depending on your host system/Kubernetes distribution, please follow instructions on the vCluster page:
+https://vcluster.com/docs/vcluster?x0=4#deploy-vcluster
+We will use the
+Linux version
+, which we run on wsl2:
+curl -L -o vcluster "https://github.com/loft-sh/vcluster/releases/latest/download/vcluster-linux-amd64" && sudo install -c -m 0755 vcluster /usr/local/bin && rm -f vcluster
+A terminal window displays the process of downloading and installing the "vcluster" tool from GitHub using a curl command. The download shows a progress bar with 100% completion, indicating a file size of 60.4 MB. The terminal then prompts for a password, followed by the execution of the "vcluster" command. The output includes usage instructions and a list of available commands such as "completion," "connect," "convert," "create," "credits," "delete," and "describe."
+Figure 6-33
+vCluster
+CLI execution
+Let’s create the first vCluster within namespace team-x:
+vcluster create my-vcluster --namespace team-x
+A terminal window displays the process of creating a virtual Kubernetes cluster named "my-vcluster" in the "team-x" namespace. Key steps include downloading the command helm, detecting the local Kubernetes cluster, and creating the vcluster. The process involves upgrading the helm, waiting for the vcluster to initialize, and starting the proxy container. The vcluster is successfully created and running, with instructions to switch the kube context and access the vcluster using specific commands.
+Figure 6-34
+Creating
+vCluster
+The example in Figure
+6-35
+is output from the vCluster.
+A terminal window displays commands and outputs related to Kubernetes. The user creates a namespace called "demo-nginx" and a deployment named "nginx-deployment" with two replicas using the Nginx image. The command `kc get pods` shows no resources in the default namespace, but when specifying the "demo-nginx" namespace, it lists two running pods with names starting with "nginx-deployment-5bbc8d4u64u4" and a status of "Running" for 12 seconds.
+Figure 6-35
+Creating
+namespace
+demo-nginx, applying pods in it, and listing pods
+Now working on one cluster, we are not interfering with the other vCluster.
+Now let’s create a second cluster within ns team-z.
+A terminal window displays the process of creating a virtual Kubernetes cluster named "my-vcluster" in the namespace "team-z." The user is prompted about creating a vcluster inside another vcluster, with the response "No, switch back to context kind-kind." The process includes creating the namespace, deploying the vcluster, and executing a Helm upgrade command. The cluster is successfully created, and the active Kubernetes context is switched. Instructions are provided for disconnecting and accessing the vcluster.
+Figure 6-36
+Creating a second virtual cluster
+We can see our second cluster environment is completely isolated from any workload or even CRDs or
+controllers
+we created any in the first cluster.
+A terminal window displays a command and its output. The command `kc get pods -n demo-nginx` is executed, and the output states, "No resources found in demo-nginx namespace." The prompt shows the username "greg" on the system "gregPowerPC."
+Figure 6-37
+Getting
+pods
+from the new cluster
+Let’s prove it. We couldn’t isolate CRDs
+with namespaces as they are installed cluster-wide—this is super useful for our use case with vCluster. Below we create two vClusters within our master cluster, which runs on KinD.
+A terminal window displays the process of creating two virtual clusters named "my-vcluster1" and "my-vcluster2" using the `vcluster` command. The output includes steps like creating namespaces, detecting the local Kubernetes cluster kind, deploying the vclusters, and starting proxy containers. It also shows switching active kube contexts and provides instructions to access the vclusters.
+Figure 6-38
+Listing cluster
+resources
+like CRDs
+Let’s consider below
+CRD:
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+name: myresources.example.com
+spec:
+group: example.com
+versions:
+- name: v1
+served: true
+storage: true
+schema:
+openAPIV3Schema:
+type: object
+properties:
+spec:
+type: object
+properties:
+name:
+type: string
+size:
+type: integer
+scope: Namespaced
+names:
+plural: myresources
+singular: myresource
+kind: MyResource
+shortNames:
+- mr
+Let’s apply CRD in the first cluster:
+sudo kubectl apply -f crd.yaml
+A terminal window displays commands and outputs related to Kubernetes. The first command, `sudo kubectl apply -f crd.yaml`, results in the creation of a custom resource definition at `apiextensions.k8s.io/myresources.example.com`. The second command, `sudo kubectl get crd`, lists the resource `myresources.example.com` with a creation date of `2024-09-20T22:31:01Z`.
+Figure 6-39
+Applying CRD in one of the
+clusters
+Now we will switch to the second cluster to prove CRD is not visible there, which would not be possible using a native “physical” Kubernetes cluster.
+A terminal window displays a list of virtual clusters using the command "sudo vcluster list." The table includes four clusters: "my-vcluster" in namespace "team-x," "my-vcluster" in "team-z," "my-vcluster1" in "vcluster-my-vcluster1" with "Connected" status as "True," and "my-vcluster2" in "vcluster-my-vcluster2." All clusters are running version 0.20.0. Below the table, commands are shown to connect to "my-vcluster1," indicating the vCluster is up and running, and to switch the active Kubernetes context. A command "sudo kubectl get crd" returns "No resources found."
+Figure 6-40
+Checking if CRD applied in the first cluster wasn't created in the second
+cluster
+In the output we can see there are no CRDs installed in our second cluster or within our master cluster.
+A terminal window displays commands and outputs related to Kubernetes. The user runs `sudo kubectl cluster-info --context kind=kind`, showing the Kubernetes control plane and CoreDNS running at specific local URLs. A suggestion to use `kubectl cluster-info dump` for debugging is provided. The user then executes `sudo kubectl get crd`, resulting in "No resources found."
+Figure 6-41
+Checking CRDs in the
+master cluster
+Scaling and Resiliency Chapter Summary
+This chapter provides strategies to enhance scalability and resilience in Kubernetes environments. Key topics include setting resource limits and requests for efficient resource allocation, implementing deployment strategies like rolling updates and blue–green deployments, and leveraging autoscaling mechanisms such as HPA, VPA, and KEDA. Advanced configuration management with Kustomize and PodTopologySpread ensures efficient scaling and fault tolerance. The chapter also explores securing the control plane, optimizing container image registries, and deployment strategies for zero-downtime updates. Tools like Karpenter and vCluster are introduced for high-performance scaling and multi-tenancy management, addressing complex workloads while maintaining resiliency and operational efficiency.
+
+© The Author(s), under exclusive license to APress Media, LLC, part of Springer Nature 2025
+G. Stencel, L. Berton
+Kubernetes Recipes
+https://doi.org/10.1007/979-8-8688-1325-2_7
+7. Storage in Kubernetes
+Grzegorz Stencel
+1
+and
+Luca Berton
+2
+(1)
+Bournemouth, UK
+(2)
+BOURNEMOUTH, UK
+As applications evolve, the demands for data storage for persistent and non-persistent data grow increasingly complex. In the dynamic environment of
+Kubernetes
+, managing persistent storage presents unique challenges, such as ensuring data consistency, handling the lifecycle of storage resources, and optimizing performance. Kubernetes offers robust solutions to these problems through its storage management
+features
+, including
+persistent volumes (PVs)
+,
+Persistent Volume Claims (PVCs)
+, and storage classes.
+This chapter guides us into the intricacies of managing storage in Kubernetes, providing practical steps and insights for effectively leveraging these storage mechanisms. Whether we are dealing with stateful applications that require data persistence or seeking to automate storage provisioning for scalable applications, this chapter offers the guidance we need.
+7.1 Storage for Containerized Workloads
+Effectively managing storage for
+containerized workloads
+is crucial for ensuring data persistence, consistency, and optimal performance in dynamic and scalable environments like Kubernetes.
+Problem
+Containerized applications
+often require persistent storage to retain data beyond the lifespan of individual containers. This persistent storage need presents challenges in dynamic and scalable environments like Kubernetes. Specifically, managing the lifecycle of storage resources, ensuring data consistency, and optimizing performance are common problems.
+Solution
+Kubernetes manages storage via persistent volumes (PVs), Persistent Volume Claims (PVCs), and storage classes. Here’s how we can manage storage for containerized workloads:
+1.
+Define a Persistent Volume (PV)
+: Create a YAML file to define a persistent volume, for example:
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+name: pv-example
+spec:
+capacity:
+storage: 10Gi
+accessModes:
+- ReadWriteOnce
+persistentVolumeReclaimPolicy: Retain
+storageClassName: standard
+hostPath:
+path: "/mnt/data"
+2.
+Define a Persistent Volume Claim (PVC)
+: Create a YAML file to define a Persistent Volume Claim, for example:
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+name: pvc-example
+spec:
+accessModes:
+- ReadWriteOnce
+resources:
+requests:
+storage: 10Gi
+storageClassName: standard
+3.
+Deploy an Application Using the PVC
+: Modify our application
+deployment
+YAML file to use the PVC, for example:
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: nginx-deployment
+spec:
+replicas: 1
+selector:
+matchLabels:
+app: nginx
+template:
+metadata:
+labels:
+app: nginx
+spec:
+containers:
+- name: nginx
+image: nginx:latest
+volumeMounts:
+- mountPath: "/usr/share/nginx/html"
+name: storage
+volumes:
+- name: storage
+persistentVolumeClaim:
+claimName: pvc-example
+4.
+Apply the Configurations
+: Apply the PV, PVC, and application deployment configurations using
+kubectl
+:
+kubectl apply -f pv.yaml
+kubectl apply -f pvc.yaml
+kubectl apply -f deployment.yaml
+Discussion
+Managing storage in Kubernetes involves understanding and correctly implementing persistent volumes, Persistent Volume Claims, and storage classes. PVs are storage resources in the cluster, while PVCs are requests for those resources. Storage classes provide a way to define different types of storage (e.g., fast SSDs, slow HDDs) and their provisioning parameters.
+Persistent Volumes
+(PV)
+PVs are resources in the cluster that provide durable storage. They have a lifecycle independent of any individual pod that uses the PV. They are defined by a YAML file and include details such as storage capacity and access modes (e.g.,
+ReadWriteOnce
+,
+ReadOnlyMany
+,
+ReadWriteMany
+).
+Persistent Volume Claims
+(PVC)
+PVCs are requests for storage by a user. They are similar to a pod in that they consume resources in the cluster. PVCs can request specific sizes and access modes, and Kubernetes will bind the PVC to an available PV that meets the requirements.
+Storage Classes
+Storage classes allow administrators to define different types of storage offered in a cluster. Each storage class might map to a different quality-of-service level, such as IOPS performance or backup policies.
+7.2 Defining StorageClass
+Problem
+Manually provisioning
+persistent volumes (PVs)
+can be time-consuming and error-prone, especially in dynamic environments where storage needs frequently change. This approach lacks flexibility and can lead to inefficiencies in resource utilization.
+Solution
+Use a
+StorageClass
+to enable dynamic provisioning of PVs. A
+StorageClass
+defines the parameters and provisioner for storage backends, allowing Kubernetes to automatically create PVs on demand based on PVC requests.
+Here’s an example
+StorageClass
+definition:
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+name: fast-storage
+provisioner: kubernetes.io/aws-ebs
+provisioner
+parameters:
+type: gp2
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+This configuration sets up a
+storage class
+named
+fast-storage
+, which uses AWS EBS as the storage backend and
+gp2
+as the storage type. Adjust the provisioner and parameters based on your environment (e.g., GCP PD, Azure Disk, or Network File System (NFS)).
+Discussion
+Dynamic Provisioning
+: A StorageClass eliminates the need for predefined PVs by dynamically creating them when PVCs request storage. This significantly reduces administrative overhead and supports scalability.
+Reclaim Policy
+: The
+reclaimPolicy
+determines what happens to the PV when the PVC is deleted. Common options are
+Retain
+,
+Delete
+, and
+Recycle
+. Choose the policy based on your retention requirements.
+Volume Binding Mode
+: Modes like
+Immediate
+or
+WaitForFirstConsumer
+control when and where the volume is provisioned. Use
+WaitForFirstConsumer
+in environments where the volume must be provisioned close to the requesting workload (e.g., for zone-aware provisioning).
+Flexibility
+: Different StorageClasses can be defined to meet varying workload requirements, such as performance or cost considerations.
+7.3 Static Provisioning
+Problem
+Deploying a stateful application, like a MySQL database, on Kubernetes can be challenging, especially when it comes to ensuring data
+persistence
+.
+Solution
+The solution involves using a PersistentVolumeClaim
+(PVC)
+object. Here’s a step-by-step guide:
+Create a PVC Request:
+Prepare a YAML manifest (
+data.yaml
+) to request storage, for example, 1 GB.
+Here’s an example of
+data.yaml
+:
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+name: data
+spec:
+accessModes:
+- ReadWriteOnce
+resources:
+requests:
+storage: 1Gi
+Apply this manifest using the Kubernetes command line:
+$ kubectl apply -f data.yaml
+Verify Creation of PVC and PV:
+Check the status of PVC and corresponding persistent volume
+(PV)
+using
+$ kubectl get pvc
+$ kubectl get pv
+These commands display the details of the PV, including its status, access modes, and reclaim policy. The default value for the reclaim policy for a PersistentVolume is “Delete,” which means the PV and its data are deleted when the PVC is deleted. To ensure data persists beyond the lifecycle of the PVC, set the persistentVolumeReclaimPolicy to the “Retain” value in the PV manifest. More insights are available using the “
+describe
+” parameter:
+kubectl describe PersistentVolume data
+We should see the
+STATUS
+of our PV change to
+Bound
+, which indicates a successful claim.
+Utilize the Claim in Our Pod:
+In our pod’s YAML, under the volumes section, reference the PVC.
+Mount this volume inside the container, for example, for MySQL, at
+/var/lib/mysql
+.
+Here’s an example snippet for a pod manifest:
+apiVersion: v1
+kind: Pod
+metadata:
+name: db
+spec:
+containers:
+- image: mysql:8.3.0
+name: db
+volumeMounts:
+- mountPath: /var/lib/mysql
+name: data
+env:
+- name: MYSQL_ROOT_PASSWORD
+value: root
+volumes:
+- name: data
+persistentVolumeClaim:
+claimName: data
+Discussion
+In Kubernetes, the default storage class automatically creates a matching PV when a PVC is requested. This dynamic provisioning is crucial for data persistence in stateful applications. The storage class in Minikube typically uses a
+hostPath
+provisioner, which means the data is stored on the Minikube virtual machine itself. This setup allows for data persistency, ensuring that if the pod restarts or is deleted, the data remains intact.
+See Also
+Kubernetes Persistent Volume Claim Documentation
+(
+https://kubernetes.io/docs/concepts/storage/persistent-volumes/
+): For more details on how PVC works and how to configure it for different needs
+Kubernetes Storage Class Documentation
+(
+https://kubernetes.io/docs/concepts/storage/storage-classes/
+): To understand storage classes and how they provide abstraction over physical storage
+7.4 Local Persistent Volumes
+Problem
+Interact with a local persistent
+volume
+as a local disk directly attached to a single Kubernetes node. This is necessary for scenarios where high-performance, low-latency storage is required and using remote storage solutions would introduce unacceptable overhead.
+Solution
+Step 1: Create the StorageClass
+Define a
+StorageClass
+that uses the
+kubernetes.io/no-provisioner
+provisioner, which indicates that the volume will not be dynamically provisioned and must be manually created.
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+name: sc-local
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+Step 2: Create a Local PersistentVolume
+Create a
+PersistentVolume
+that references a local path on the node. Ensure that the node affinity is set so that the volume is only used by pods on the specified node.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+name: pv-local
+spec:
+capacity:
+storage: 10Gi
+accessModes:
+- ReadWriteOnce
+persistentVolumeReclaimPolicy: Retain
+storageClassName: sc-local
+local:
+path: /data/volume1
+nodeAffinity:
+required:
+nodeSelectorTerms:
+- matchExpressions:
+- key: kubernetes.io/hostname
+operator: In
+values:
+- worker-01
+Step 3: Create a PersistentVolumeClaim
+Create a
+PersistentVolumeClaim
+to request the local storage defined in the PersistentVolume.
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+name: pvc-local
+spec:
+accessModes:
+- ReadWriteOnce
+storageClassName: sc-local
+resources:
+requests:
+storage: 10Gi
+Step 4: Deploy the Configurations
+Apply the configurations using
+kubectl
+:
+kubectl apply -f storageclass.yaml
+kubectl apply -f persistentvolume.yaml
+kubectl apply -f persistentvolumeclaim.yaml
+Discussion
+Local persistent volumes (PVs) are useful for workloads that require high-performance and low-latency access to storage. These volumes are physically attached to the Kubernetes nodes, and as such, they are limited by the node’s lifecycle. If the node goes down, the data on the local PV may become unavailable.
+The
+key components
+in this setup are
+StorageClass
+: Defines the class of storage and specifies that no dynamic provisioning should occur (
+kubernetes.io/no-provisioner
+). The
+WaitForFirstConsumer
+volume binding mode ensures that the PersistentVolumeClaim is only bound to a PersistentVolume when a pod that uses the PVC is scheduled, which helps in ensuring that the pod and volume are co-located on the same node.
+PersistentVolume
+: Represents a piece of storage in the cluster that has been manually created and made available to the cluster. It includes node affinity settings to restrict the use of the volume to a specific node.
+PersistentVolumeClaim
+: A user’s request for storage that consumes the resources offered by a PersistentVolume.
+Here’s an example output after creating the PV and PVC:
+kubectl get pv
+NAME       CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS      CLAIM   STORAGECLASS   AGE
+pv-local   10Gi       RWO            Retain           Available           sc-local       43s
+kubectl get pvc
+$ kubectl get pvc
+NAME        STATUS   VOLUME     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+pvc-local   Bound    local-pv   10Gi       RWO            sc-local       2m
+The “Pending”
+status
+indicates that the
+PersistentVolume
+is available but has not yet been bound to a
+PersistentVolumeClaim
+, which will happen when a pod requests storage. The “Pending” status of a PVC typically indicates that Kubernetes cannot find a matching PV to bind to the PVC. Ensuring that the StorageClass is correctly configured and that there are matching PVs available are critical steps in resolving this issue. Checking events and logs provides additional insight into any underlying problems. The desired status for a PVC is “Bound,” which indicates that the PVC has been successfully matched to a PersistentVolume (PV) and is ready for use by a pod.
+7.5 Dynamic Provisioning Volumes
+Problem
+In a Kubernetes environment, applications often need persistent storage that survives pod restarts and failures. Manually provisioning storage
+volumes
+and binding them to specific pods is time-consuming and not scalable. There is a need for a system that can dynamically provision storage volumes based on the demands of the pods, ensuring data persistence while maintaining the flexibility and scalability that containerized applications require.
+Solution
+The solution involves creating a
+StorageClass
+resource that uses the NFS
+Container Storage Interface (CSI)
+driver for dynamic volume provisioning. When a pod requests persistent storage through a PVC, Kubernetes uses the specified
+StorageClass
+to automatically create the necessary storage on the NFS server and bind it to the pod. This approach streamlines storage management and integrates seamlessly with Kubernetes deployments.
+Here’s how to implement it:
+1.
+Install the
+NFS CSI driver
+to enable Kubernetes to manage NFS-based persistent storage.
+kubectl apply -k "github.com/kubernetes-csi/csi-driver-nfs/deploy/kubernetes/overlays/stable?ref=master"
+2.
+Define the NFS StorageClass
+Create a
+storageclass.yaml
+file to define a
+StorageClass
+that uses the NFS CSI provisioner. This StorageClass points to our NFS server and specifies the NFS version, among other mount options.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+name: nfs-csi
+provisioner: nfs.csi.k8s.io
+parameters:
+server: nfs-server
+share: /export/volumes/pod
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+mountOptions:
+- nfsvers=4.1
+3.
+Deploy a
+PersistentVolumeClaim
+Create a
+nfs-csi.nginx.yaml
+file that includes a PVC definition. This PVC uses the previously defined
+StorageClass
+to request a 10 Gi volume.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+name: pvc-nfs-csi
+spec:
+accessModes:
+- ReadWriteOnce
+storageClassName: nfs-csi
+resources:
+requests:
+storage: 10Gi
+4.
+Deploy an Application Using the PVC
+The same
+nfs-csi.nginx.yaml
+file
+should also define a deployment that mounts the dynamically provisioned volume into a Nginx container. This demonstrates how an application can use the NFS-backed persistent storage.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: nginx-nfs-csi-deployment
+spec:
+replicas: 1
+selector:
+matchLabels:
+app: nginx
+template:
+metadata:
+labels:
+app: nginx
+spec:
+volumes:
+- name: webcontent
+persistentVolumeClaim:
+claimName: pvc-nfs-csi
+containers:
+- name: nginx
+image: nginx
+ports:
+- containerPort: 80
+volumeMounts:
+- name: webcontent
+mountPath: "/usr/share/nginx/html/web-app"
+Additionally, a service is defined as exposing the Nginx deployment.
+5.
+Apply the Configuration
+Apply the
+configurations
+using the following:
+kubectl apply -f storageclass.yaml
+kubectl apply -f nfs-csi.nginx.yaml
+Discussion
+Kubernetes supports dynamic volume configuration, allowing us to create storage volumes on demand when needed. Therefore, administrators do not have to manually create new storage volumes and then create a
+PersistentVolume
+object for use in the cluster. When the user requests a specific type of storage, the entire process runs automatically.
+This setup automates the provisioning of NFS-backed volumes for Kubernetes pods. When the pod that uses the PVC is deleted, the dynamic volume is also automatically deleted due to the
+reclaimPolicy
+: Delete
+. This behavior ensures efficient use of resources and simplifies cleanup. However, we can change the
+reclaimPolicy
+to Retain if we need to retain the data.
+It’s important to have our NFS server configured and accessible from within our Kubernetes cluster. Ensure proper network configurations and permissions are in place for seamless operation.
+See Also
+Kubernetes Documentation on Persistent Volumes
+: For a deeper understanding of PVs, PVCs, and dynamic provisioning
+NFS CSI Driver GitHub Repository
+: To explore the driver’s capabilities, configuration options, and updates
+Ansible for Kubernetes
+: Automate the deployment and management of our Kubernetes clusters and NFS configurations
+7.6 NFS Volume
+Problem
+We need to deploy a Nginx application in Kubernetes with persistent storage provided by a
+NFS
+(Network File
+System
+) using the
+Container Storage Interface (CSI)
+. This setup ensures that our Nginx deployment can store and retrieve data persistently across pod restarts and rescheduling.
+Solution
+Define the Kubernetes resources in a
+YAML file
+(
+nfs-csi.nginx.yaml
+), which include
+PersistentVolumeClaim
+(PVC)
+using the NFS CSI StorageClass
+Nginx deployment that mounts the volume from the PVC
+Service to expose the Nginx application
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+name: pvc-nfs-csi
+spec:
+accessModes:
+- ReadWriteMany
+storageClassName: nfs-csi
+resources:
+requests:
+storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: nginx-nfs-csi-deployment
+spec:
+replicas: 1
+selector:
+matchLabels:
+app: nginx-nfs-csi
+template:
+metadata:
+labels:
+app: nginx-nfs-csi
+spec:
+containers:
+- name: nginx
+image: nginx:latest
+volumeMounts:
+- mountPath: "/usr/share/nginx/html"
+name: nfs-csi-volume
+volumes:
+- name: nfs-csi-volume
+persistentVolumeClaim:
+claimName: pvc-nfs-csi
+---
+apiVersion: v1
+kind: Service
+metadata:
+name: nginx-nfs-csi-service
+spec:
+selector:
+app: nginx-nfs-csi
+ports:
+- protocol: TCP
+port: 80
+targetPort: 80
+Apply the
+YAML file
+:
+kubectl apply -f nfs-csi.nginx.yaml
+Here’s an expected output:
+persistentvolumeclaim/pvc-nfs-csi created
+deployment.apps/nginx-nfs-csi-deployment created
+service/nginx-nfs-csi-service created
+Inspect the PersistentVolume (PV)
+and PersistentVolumeClaim (PVC)
+Verify the PVC and its binding to the PV:
+kubectl get PersistentVolume
+kubectl get PersistentVolumeClaim
+Check the
+Bound
+status to ensure the PVC is properly bound to the PV.
+Retrieve the Service IP
+Get the external IP address to access the Nginx service:
+SERVICEIP=$(kubectl get service | grep nginx-nfs-csi-service | awk '{ print $3 }')
+echo $SERVICEIP
+Check the status of the Nginx pod to ensure it is running:
+kubectl get pods
+Copy the Web Page into the PVC Volume
+List the volumes and get the PVC directory
+name
+:
+ls /export/volumes/pod/
+This will return the directory name prefixed by
+pvc
+. Note this name for the following command to copy our web page (e.g.,
+demo.html
+) into the PVC directory:
+sudo cp -v /export/volumes/pod/demo.html /export/volumes/pod/<<pvc_directory_name>>/
+Verify the
+HTML File Contents
+in the Pod
+Enter the Nginx pod and list the HTML directory:
+kubectl exec -it <<pod_name>> -- /bin/bash
+ls /usr/share/nginx/html/web-app
+cat /usr/share/nginx/html/web-app/demo.html
+exit
+Access the Rendered Web Page
+Use a browser to access the web page:
+http://$SERVICEIP/web-app/demo.html
+Discussion
+Using NFS CSI for storage in a Kubernetes deployment allows for persistent storage that can be shared across multiple pods. This is particularly useful for applications that require shared access to the same storage volume. NFS CSI provides a flexible and scalable solution for such needs.
+7.7 Azure Dynamic Provisioning
+Problem
+We need to set up and use
+Azure Kubernetes Service (AKS)
+to manage persistent storage using StorageClasses and
+dynamic provisioning
+. This involves creating, describing, and utilizing storage resources with the storage account type for the managed disk, which can be set only during the creation of the scale set, with
+various options
+like Standard HDD (Standard_LRS), Standard SSD (StandardSSD_LRS), Premium SSD (Premium_LRS), Ultra disk (UltraSSD_LRS for data disks only), and zone-redundant storage options (Premium_ZRS and StandardSSD_ZRS).
+Solution
+Step 1: Define the Custom StorageClass
+1.
+Create a YAML file for the custom
+StorageClass
+:
+Create a file named
+CustomStorageClass.yaml
+with the following content:
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+name: managed-standard-ssd
+parameters:
+cachingmode: ReadOnly
+kind: Managed
+storageaccounttype: StandardSSD_LRS
+provisioner: kubernetes.io/azure-disk
+2.
+Apply the custom
+StorageClass
+configuration:
+kubectl apply -f CustomStorageClass.yaml
+Step 2: Verify the Custom StorageClass
+1.
+List the current StorageClasses:
+kubectl get storageclass
+2.
+Describe the custom StorageClass:
+kubectl describe storageclass managed-standard-ssd
+Step 3: Use the Custom StorageClass
+1.
+Create a
+PersistentVolumeClaim
+and deployment using the custom StorageClass:
+Create a file named
+AzureDiskCustomStorageClass.yaml
+with the following content:
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+name: pvc-azure-standard-ssd
+spec:
+accessModes:
+- ReadWriteOnce
+storageClassName: managed-standard-ssd
+resources:
+requests:
+storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+name: nginx-azdisk-deployment-standard-ssd
+spec:
+replicas: 1
+selector:
+matchLabels:
+app: nginx
+template:
+metadata:
+labels:
+app: nginx
+spec:
+volumes:
+- name: webcontent
+persistentVolumeClaim:
+claimName: pvc-azure-standard-ssd
+containers:
+- name: nginx
+image: nginx
+ports:
+- containerPort: 80
+volumeMounts:
+- name: webcontent
+mountPath: "/usr/share/nginx/html/web-app"
+2.
+Apply the
+deployment configuration
+:
+kubectl apply -f AzureDiskCustomStorageClass.yaml
+Step 4: Verify
+Resources
+1.
+Check the PersistentVolumeClaim:
+kubectl get persistentvolumeclaim
+2.
+Check the PersistentVolume:
+kubectl get persistentvolume
+3.
+Verify the pod creation:
+kubectl get pods
+Discussion
+StorageClasses provide a way for administrators to describe the different types of storage available in the cluster. Each StorageClass can specify a different provisioner that knows how to create volumes of that type. Defining custom StorageClasses allows us to tailor the storage behavior to the specific needs of our applications, such as setting specific parameters for performance or redundancy. Dynamic provisioning allows Kubernetes to automatically provision storage resources when a PersistentVolumeClaim (PVC) is created. This removes the need for a cluster administrator to create storage resources manually. The same process applies to Amazon Web Services and Google Cloud Platform.
+7.8 Amazon EFS
+Problem
+We need to dynamically provision storage for our Kubernetes applications using Amazon
+Elastic File System (EFS)
+. Dynamic
+provisioning
+simplifies the process by automatically creating access points and PersistentVolumes
+(PVs)
+as needed. This approach avoids the manual intervention required for static provisioning.
+Solution
+To dynamically provision storage with Amazon EFS in Kubernetes, follow these
+steps
+:
+1.
+Set up the Amazon EFS CSI driver to allow Kubernetes to handle EFS-based persistent storage. Verify that the appropriate security groups and network configurations are in place.
+kubectl apply -k "github.com/kubernetes-sigs/aws-efs-csi-driver/deploy/kubernetes/overlays/stable/ecr/?ref=release-2.x"
+2.
+Create an Amazon EFS
+File System
+:
+Go to the Amazon EFS console and create a new file system (
+myEFS2
+).
+3.
+Ensure you set up the necessary security groups and network
+configurations
+, including VPC and subnets, to allow access to the EFS file system from your Kubernetes cluster.
+aws ec2 create-security-group \
+--group-name EFSAccessSecurityGroup \
+--description "Security group for EFS access from Kubernetes cluster" \
+--vpc-id <your-vpc-id>
+aws ec2 authorize-security-group-ingress \
+--group-id <security-group-id> \
+--protocol tcp \
+--port 2049 \
+--cidr <kubernetes-cluster-cidr>
+Replace
+<your-vpc-id>
+with your VPC ID,
+<security-group-id>
+with the ID from the first command, and
+<kubernetes-cluster-cidr>
+with your cluster’s CIDR block.
+aws efs create-mount-target \
+--file-system-id <efs-id> \
+--subnet-id <subnet-id> \
+--security-groups <security-group-id>
+Replace
+<efs-id>
+with your EFS file system ID,
+<subnet-id>
+with the appropriate subnet ID in your VPC, and
+<security-group-id>
+with the ID of the security group created earlier.
+4.
+Create a StorageClass for EFS:
+Define a
+sc.yaml
+StorageClass
+that references the EFS file system.
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+name: efs-sc
+provisioner: efs.csi.aws.com
+parameters:
+provisioningMode: efs-ap
+fileSystemId: fs-029bb6e31bea97453
+directoryPerms: "700"
+5.
+Deploy
+the StorageClass:
+Apply the StorageClass configuration to our cluster.
+$ kubectl apply -f sc.yaml
+Create a PersistentVolumeClaim (PVC) and a Pod:
+Define a
+pvc_pod.yaml
+PVC and a pod that will use the dynamically provisioned EFS storage.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+name: efs-claim-1
+spec:
+accessModes:
+- ReadWriteMany
+storageClassName: efs-sc
+resources:
+requests:
+storage: 5Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+name: efs-app-1
+spec:
+containers:
+- name: app
+image: centos
+command: ["/bin/sh"]
+args: ["-c", "while true; do echo $(date -u) >> /data/out; sleep 5; done"]
+volumeMounts:
+- name: persistent-storage
+mountPath: /data
+volumes:
+- name: persistent-storage
+persistentVolumeClaim:
+claimName: efs-claim-1
+6.
+Deploy the PVC and Pod
+: Apply the PVC and pod
+configuration
+to our cluster.
+$ kubectl apply -f pvc_pod.yaml
+7.
+Verify the Deployment:
+Check the status of the PVC, PV, and pod.
+$ kubectl get pvc
+$ kubectl get pv | grep efs-sc
+$ kubectl get pods
+8.
+Monitor the Pod's Output:
+Use
+kubectl exec
+to
+monitor
+the output generated by the pod, ensuring it is writing to the EFS volume.
+$ kubectl exec -ti efs-app-1 -- tail -f /data/out
+Discussion
+Dynamic provisioning using the Amazon EFS CSI driver allows Kubernetes to handle the creation and management of storage resources. By specifying
+provisioningMode: efs-ap
+, the driver creates a unique access point for each PersistentVolumeClaim, ensuring multiple applications can share the same EFS file system while maintaining isolation through different POSIX UID/GID configurations. This method streamlines the deployment process by automating the setup of storage, which is especially beneficial in environments that require frequent provisioning of storage resources. It also enhances scalability and flexibility, as new applications can be deployed to create storage resources without manual intervention.
+7.9 Regional Persistent Disks in GKE
+Problem
+Ensuring the high availability of stateful applications in
+Google Kubernetes Engine (GKE)
+requires the use of persistent storage that can tolerate zone failures.
+Regional persistent disks
+provide this capability by replicating data across multiple zones. The challenge lies in efficiently provisioning these disks to meet application demands.
+Solution
+To provision regional persistent disks in GKE, we can either dynamically provision them using a StorageClass or manually create them in advance. Dynamic provisioning is recommended for its flexibility and ease of management. Here’s how to do both:
+Dynamic Provisioning
+of Regional Persistent Disks
+1.
+Create a StorageClass:
+Define a
+regionalpd-storageclass.yaml
+StorageClass
+that specifies the replication type and allowed topologies (zones).
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+name: regionalpd-storageclass
+provisioner: pd.csi.storage.gke.io
+parameters:
+type: pd-balanced
+replication-type: regional-pd
+volumeBindingMode: WaitForFirstConsumer
+allowedTopologies:
+- matchLabelExpressions:
+- key: topology.gke.io/zone
+values:
+- europe-west1-b
+- europe-west1-c
+Apply the
+StorageClass
+:
+$ kubectl apply -f regionalpd-storageclass.yaml
+2.
+Create a PersistentVolumeClaim (PVC)
+:
+Define a PVC that
+references
+the StorageClass.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+name: regional-pvc
+spec:
+accessModes:
+- ReadWriteOnce
+resources:
+requests:
+storage: 500Gi
+storageClassName: regionalpd-storageclass
+Apply the PVC
+:
+$ kubectl apply -f regional-pvc.yaml
+3.
+Create a Pod
+:
+Define a
+task-pv-pod.yaml
+pod that uses the PVC.
+kind: Pod
+apiVersion: v1
+metadata:
+name: task-pv-pod
+spec:
+volumes:
+- name: task-pv-storage
+persistentVolumeClaim:
+claimName: regional-pvc
+containers:
+- name: task-pv-container
+image: nginx
+ports:
+- containerPort: 80
+name: "http-server"
+volumeMounts:
+- mountPath: "/usr/share/nginx/html"
+name: task-pv-storage
+Apply the Pod Definition
+:
+$ kubectl apply -f task-pv-pod.yaml
+Manual Provisioning
+of Regional Persistent Disks
+If dynamic provisioning does not meet our needs, we can manually create and configure
+regional persistent disks
+:
+1.
+Create a Regional Persistent Disk:
+Use the Google Cloud Console or
+gcloud
+CLI to create a regional persistent disk. Ensure the disk is available in the desired zones.
+$ gcloud compute disks create regional-disk \
+--type=pd-balanced \
+--size=500GB \
+--region=europe-west1 \
+--replica-zones=europe-west1-b,europe-west1-c
+2.
+Create PersistentVolume (PV)
+:
+Define a
+regional-pv.yaml
+PV that references the manually created disk.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+name: regional-pv
+spec:
+capacity:
+storage: 500Gi
+accessModes:
+- ReadWriteOnce
+gcePersistentDisk:
+pdName: regional-disk
+fsType: ext4
+persistentVolumeReclaimPolicy: Retain
+Apply the PV Definition
+:
+$ kubectl apply -f regional-pv.yaml
+3.
+Create PVC and Pod:
+Define a PVC that binds to the manually created PV, and then create a pod to use the PVC as demonstrated in the dynamic provisioning steps.
+Discussion
+Using regional persistent disks in GKE ensures that our data is replicated across multiple zones, providing high availability and resilience against zone failures. Dynamic provisioning is generally preferred because it simplifies management and scales with application demands. The CSI driver over the in-tree provisioner is recommended due to better support and ongoing updates. The lifecycle of a PersistentVolume in Kubernetes is managed by the platform itself. This includes dynamic provisioning and deletion of storage resources, eliminating the need for manual intervention. PersistentVolumes can be backed by various storage solutions, including Google Cloud’s persistent disks, NFS solutions like Filestore, and managed services like
+Cloud Volumes Service
+.
+Filestore
+: A managed NFS solution on Google Cloud. For setup instructions, refer to the Filestore documentation.
+Cloud Volumes Service
+: A fully managed cloud-based data storage service offering advanced data management capabilities and highly scalable performance.
+Summary
+Kubernetes storage management uses efficient storage solutions to ensure the stability and scalability of containerized applications. With its
+robust mechanisms
+, such as persistent volumes (PVs), Persistent Volume Claims (PVCs), and storage classes, Kubernetes offers a comprehensive suite of tools to manage persistent and ephemeral storage needs effectively. One of the significant advancements discussed is the Container Storage Interface (CSI), which decouples storage plugins from Kubernetes core and allows storage vendors to develop independently and innovate faster. This separation enhances the modularity and flexibility of Kubernetes, enabling users to adopt the latest storage technologies without waiting for Kubernetes’ release cycles. The dynamic provisioning capabilities provided by CSI and other Kubernetes features streamline storage management by automating the creation and management of storage volumes based on user-defined specifications. This automation is crucial for modern applications that demand agile and scalable storage solutions. The ability to define custom StorageClasses tailored to specific application needs is another powerful feature that enables applications to leverage storage optimized for performance, redundancy, or other particular requirements. The dynamic nature of Kubernetes storage provisioning, which automatically allocates resources as needed, significantly reduces the operational overhead on administrators and allows for more efficient resource utilization. Practical examples and use cases demonstrate the real-world application of these concepts, from setting up NFS-backed persistent storage to leveraging local persistent volumes for high-performance needs. These examples underscore the flexibility and power of Kubernetes in managing diverse storage requirements seamlessly. Effective storage management is integral to the success of containerized applications in Kubernetes. The features and tools provided by Kubernetes simplify the storage provisioning process and ensure that storage solutions are scalable, reliable, and aligned with the dynamic nature of modern applications. As Kubernetes continues to evolve, its storage capabilities provide robust support for the next generation of cloud-native applications.

@@ -32,9 +32,9 @@ capabilities:
   - NSG/UDR design
   - DNS architecture
   - Load balancing strategies
-knowledge_sources: []
----
-
+knowledge_sources:
+  - azure-networking_azurenetworkingcookbook_46847f104fcd3f85
+  - azure-networking_examrefaz-700designingandimplementingmicrosoftazurenetworks_d6393be86b8ec848
 # Azure Networking Agent
 
 <!-- KNOWLEDGE SOURCES WILL BE ADDED HERE AFTER IMPORT -->

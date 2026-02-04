@@ -1,0 +1,3921 @@
+’ve looked at process isolation, resource limits, network isolation, and container storage, we’ve covered the main features of containers that make them so valuable for packaging, distributing, updating, and running application components. It’s time to move on to the critical features that we can get only from a container orchestration environment like Kubernetes. We’ll do that in
+Part II
+.
+
+PART II
+CONTAINERS IN KUBERNETES
+Computers have finite processing, storage, and memory, and are built of parts that fail, especially at the wrong time. To build a scalable, reliable application, we can’t be limited by the resources of a single host or dependent on a single point of failure. At the same time, we don’t want to give up the modularity and flexibility that containers provide. In
+Part II
+, we’ll see how Kubernetes meets the essential requirements to run containers across a cluster of machines, with cross-host container networking, scalability, automated failover, and distributed storage.
+
+6
+WHY KUBERNETES MATTERS
+Containers enable us to transform the way we package and deploy application components, but orchestration of containers in a cluster enables the real advantage of a containerized microservice architecture. As described in
+Chapter 1
+, the main benefits of modern application architecture are scalability, reliability, and resiliency, and all three of those benefits require a container orchestration environment like Kubernetes in order to run many instances of containerized application components across many different servers and networks.
+In this chapter, we’ll begin by looking at some cross-cutting concerns that exist when running containers across multiple servers in a cluster. We’ll then describe the core Kubernetes concepts designed to address those concerns. With that introduction complete, we’ll spend the bulk of the chapter actually installing a Kubernetes cluster, including important add-on components like networking and storage.
+Running Containers in a Cluster
+The need to distribute our application components across multiple servers is not new to modern application architecture. To build a scalable and reliable application, we have always needed to take advantage of multiple servers to handle the application’s load and preclude a single point of failure. The fact that we are now running these components in containers does not change the need for multiple servers; we are still ultimately using CPUs and we are still ultimately dependent on hardware.
+At the same time, a container orchestration environment brings challenges that may not have existed with other kinds of application infrastructure. When the container is the smallest individual module around which we build our system, we end up with application components that are much more self-contained and “opaque” from the perspective of our infrastructure. This means that instead of having a static application architecture through which we choose in advance what application components are assigned to specific servers, with Kubernetes, we try to make it possible for any container to run anywhere.
+Cross-Cutting Concerns
+The ability to run any container anywhere maximizes our flexibility, but it adds complexity to Kubernetes itself. Kubernetes does not know in advance what containers it will be asked to run, and the container workload is continuously changing as new applications are deployed or applications experience changes in load. To rise to this challenge, Kubernetes needs to account for the following design parameters that apply to all container orchestration software, no matter what containers are running:
+Dynamic scheduling
+New containers must be allocated to a server, and allocations can change due to configuration changes or failures.
+Distributed state
+The entire cluster must keep information about what containers are running and where, even during hardware or network failures.
+Multitenancy
+It should be possible to run multiple applications in a single cluster, with isolation for security and reliability.
+Hardware isolation
+Clusters must run in cloud environments and on regular servers of various types, isolating containers from the differences in these environments.
+The best term to use to refer to these design parameters is
+cross-cutting concern
+, because they apply to any kind of containerized software that we might need to deploy, and even to the Kubernetes infrastructure itself. These parameters work together with the container orchestration requirements we saw in
+Chapter 1
+and ultimately drive the Kubernetes architecture and key design decisions.
+Kubernetes Concepts
+To address these cross-cutting concerns, the Kubernetes architecture allows anything to come and go at any time. This includes not only the containerized applications deployed to Kubernetes, but also the fundamental software components of Kubernetes itself, and even the underlying hardware such as servers, network connections, and storage.
+Separate Control Plane
+Obviously, for Kubernetes to be a container orchestration environment, it requires the ability to run containers. This ability is provided by a set of worker machines called
+nodes
+. Each node runs a
+kubelet
+service that interfaces with the underlying container runtime to start and monitor containers.
+Kubernetes also has a set of core software components that manage the worker nodes and their containers, but these software components are deployed separately from the worker nodes. These core Kubernetes software components are together referred to as the
+control plane
+. Because the control plane is separate from the worker nodes, the worker nodes can run the control plane, gaining the benefits of containerization for the Kubernetes core software components. A separate control plane also means that Kubernetes itself has a microservice architecture, which allows customization of each Kubernetes cluster. For example, one control plane component, the
+cloud controller manager
+, is used only when deploying Kubernetes to a cloud provider, and it’s customized based on the cloud provider used. This design provides hardware isolation for application containers and the rest of the Kubernetes control plane, while still allowing us to take advantage of the specific features of each cloud provider.
+Declarative API
+One critical component of the Kubernetes control plane is the
+API server
+. The API server provides an interface for cluster control and monitoring that other cluster users and control plane components use. In defining the API, Kubernetes could have chosen an
+imperative
+style, in which each API endpoint is a command such as “run a container” or “allocate storage.” Instead, the API is
+declarative
+, providing endpoints such as
+create
+,
+patch
+,
+get
+, and
+delete
+. The effect of these commands is to create, read, update, and delete
+resources
+from the cluster configuration—the specific configuration of each resource tells Kubernetes what we want the cluster to do.
+This declarative API is essential to meet the cross-cutting concerns of dynamic scheduling and distributed state. Because a declarative API simply reports or updates cluster configuration, reacting to server or network failures that might cause a command to be missed is very easy. Consider an example in which the API server connection is lost just after an
+apply
+command is issued to change the cluster configuration. When the connection is restored, the client can simply query the cluster configuration and determine whether the command was received successfully. Or, even easier, the client can just issue the same
+apply
+command again, knowing that as long as the cluster configuration ends up as desired, Kubernetes will be trying to do
+the “right thing” to the actual cluster. This core principle is known as
+idempotence
+, meaning it is safe to issue the same command multiple times because it will be applied at most once.
+Self-Healing
+Building on the declarative API, Kubernetes is designed to be
+self-healing
+. This means that the control plane components continually monitor both the cluster configuration and the actual cluster state and try to bring them into alignment. Every resource in the cluster configuration has an associated status and event log reflecting how the configuration has actually caused a change in the cluster state.
+The separation of configuration and state makes Kubernetes very resilient. For example, a resource representing containers may be in a
+Running
+state if the containers have been scheduled and are actually running. If the Kubernetes control plane loses connection to the server on which the containers are running, it can immediately set the status to
+Unknown
+and then work to either reestablish connection or treat the node as failed and reschedule the containers.
+At the same time, using a declarative API and self-healing approach has important implications. Because the Kubernetes API is declarative, a “success” response to a command means only that the cluster configuration was updated. It does not mean that the actual state of the cluster was updated, as it might take time to achieve the requested state, or there might be issues that prevent the cluster from achieving that state. As a result, we cannot assume that just because we created the appropriate resources, the cluster is running the containers we expect. Instead, we must watch the status of the resources and explore the event log to diagnose any issues that the Kubernetes control plane had in making the actual cluster state match the configuration we specified.
+Cluster Deployment
+With some core Kubernetes concepts under our belts, we’ll use the
+kubeadm
+Kubernetes administration tool to deploy a highly available Kubernetes cluster across multiple virtual machines.
+CHOOSING A KUBERNETES DISTRIBUTION
+Rather than using a particular Kubernetes distribution as we did in
+Chapter 1
+, we’ll deploy a “vanilla” Kubernetes cluster using the generic upstream repository. This approach gives us the best opportunity to follow along with the cluster deployment and will make it easier to explore the cluster in-depth in the next several chapters. However, when you’re ready to deploy a Kubernetes cluster of your own, especially for production work, consider using a prebuilt Kubernetes distribution for ease of management and built-in security. The Cloud
+Native Computing Foundation (CNCF) publishes a set of conformance tests that you can use to ensure that the Kubernetes distribution you choose is conformant to the Kubernetes specification.
+Our Kubernetes cluster will be split across four virtual machines, labeled
+host01
+through
+host04
+. Three of these,
+host01
+through
+host03
+, will run control plane components, whereas the fourth will act solely as a worker node. We’ll have three control plane nodes because that is the smallest number required to run a highly available cluster. Kubernetes uses a voting scheme to provide failover, and at least three control plane nodes are required; this allows the cluster to detect which side should keep running in the event of a network failure. Also, to keep the cluster as small as possible for our examples, we’ll configure Kubernetes to run regular containers on the control plane nodes even though we would avoid doing that for a production cluster.
+NOTE
+The example repository for this book is at
+https://github.com/book-of-kubernetes/examples
+.
+See “Running Examples” on
+page xx
+for details on getting set up.
+Start by following the instructions for this chapter to get all four virtual machines up and running, either in Vagrant or AWS. The automated provisioning will set up all four machines with
+containerd
+and
+crictl
+, so we don’t need to do it manually. The automated provisioning script will also set up either
+kube-vip
+or an AWS network load balancer to provide required high-availability functionality, as discussed below.
+NOTE
+You can install Kubernetes automatically using the
+extra
+provisioning script provided with this chapter’s examples. See the README file for this chapter for instructions.
+You’ll need to run commands on each of the four virtual machines, so you might want to open terminal tabs for each one. However, the first series of commands needs to be run on all of the hosts, so the automation sets up a command called
+k8s-all
+to do that from
+host01
+. You can explore the content of this script in
+/usr/local/bin/k8s-all
+or by looking at the
+k8s
+Ansible role in the
+setup
+directory of the examples.
+Prerequisite Packages
+The first step is to make sure the
+br_netfilter
+kernel module is enabled and set to load on boot. Kubernetes uses advanced features of the Linux firewall to handle networking across the cluster, so we need this module. Run these two commands:
+root@host01:~#
+k8s-all modprobe br_netfilter
+...
+root@host01:~#
+k8s-all "echo 'br_netfilter' > /etc/modules-load.d/k8s.conf"
+The first command ensures that the module is installed for the currently running kernel, and the second command adds it to the list of modules to run on boot. The slightly odd quoting in the second command ensures that the shell redirection happens on the remote hosts.
+Next, in
+Listing 6-1
+, we’ll set some Linux kernel parameters to enable advanced network features that are also needed for networking across the cluster by using the
+sysctl
+command:
+root@host01:~#
+k8s-all sysctl -w net.ipv4.ip_forward=1 \
+net.bridge.bridge-nf-call-ip6tables=1 \
+net.bridge.bridge-nf-call-iptables=1
+Listing 6-1: Kernel settings
+This command enables the following Linux kernel network features:
+net.ipv4.ip_forward
+Transfer packets from one network interface to another (for example, from an interface inside a container’s network namespace to a host network).
+net.bridge.bridge-nf-call-ip6tables
+Run IPv6 bridge traffic through the
+iptables
+firewall.
+net.bridge.bridge-nf-call-iptables
+Run IPv4 bridge traffic through the
+iptables
+firewall.
+The need for the last two items will become clear in
+Chapter 9
+when we discuss how Kubernetes provides networking for Services.
+These
+sysctl
+changes in
+Listing 6-1
+do not persist after a reboot. The automated scripts do handle making the changes persistent, so if you reboot your virtual machines, either run the
+extra
+provisioning script, or run these commands again.
+We’ve now finished configuring the Linux kernel to support our Kubernetes deployment and are almost ready for the actual install. First we need to install some prerequisite packages:
+root@host01:~#
+k8s-all apt install -y apt-transport-https \
+open-iscsi nfs-common
+The
+apt-transport-https
+package ensures that
+apt
+can support connecting to repositories via secure HTTP. The other two packages are needed for one of the cluster add-ons that we’ll install after our cluster is up and running.
+Kubernetes Packages
+We can now add the Kubernetes repository to install the
+kubeadm
+tool that will set up our cluster. First, add the GPG key used to check the package signatures:
+root@host01:~#
+k8s-all "curl -fsSL \
+https://packages.cloud.google.com/apt/doc/apt-key.gpg | \
+gpg --dearmor -o /usr/share/keyrings/google-cloud-keyring.gpg"
+This command uses
+curl
+to download the GPG key. It then uses
+gpg
+to reformat it, and then it writes the result to
+/usr/share/keyrings
+. The command line flags
+fsSL
+put
+curl
+in a mode that behaves better for chained commands, including avoiding unnecessary output, following server redirects, and terminating with an error if there is a problem.
+Next, we add the repository configuration:
+root@host01:~#
+k8s-all "echo 'deb [arch=amd64' \
+'signed-by=/usr/share/keyrings/google-cloud-keyring.gpg]' \
+'https://apt.kubernetes.io/ kubernetes-xenial main' > \
+/etc/apt/sources.list.d/kubernetes.list"
+As before, the quoting is essential to ensure that the command is passed correctly via SSH to all the other hosts in the cluster. The command configures
+kubernetes-xenial
+as the distribution; this distribution is used for any version of Ubuntu, starting with the older Ubuntu Xenial.
+After we have created this new repository, we then need to run
+apt update
+on all hosts to download the list of packages:
+root@host01:~#
+k8s-all apt update
+...
+Now we can install the packages we need using
+apt
+:
+root@host01:~#
+source /opt/k8sver
+root@host01:~#
+k8s-all apt install -y kubelet=$K8SV kubeadm=$K8SV kubectl=$K8SV
+The
+source
+command loads a file with a variable to install a specific Kubernetes version. This file is created by the automated scripts and ensures that we use a consistent Kubernetes version for all chapters. You can update the automated scripts to choose which Kubernetes version to install.
+The
+apt
+command installs the following three packages along with some dependencies:
+kubelet
+Service for all worker nodes that interfaces with the container engine to run containers as scheduled by the control plane
+kubeadm
+Administration tool that we’ll use to install Kubernetes and maintain our cluster
+kubectl
+Command line client that we’ll use to inspect our Kubernetes cluster and to create and delete resources
+The
+kubelet
+package starts its service immediately, but because we haven’t installed the control plane yet, the service will be in a failed state at first:
+root@host01:~#
+systemctl status kubelet
+kubelet.service - kubelet: The Kubernetes Node Agent
+...
+   Main PID: 75368 (code=exited, status=1/FAILURE)
+We need to control the version of the packages we just installed because we want to upgrade all of the components of our cluster together. To protect ourselves from accidentally updating these packages, we’ll hold them at their current version:
+root@host01:~#
+k8s-all apt-mark hold kubelet kubeadm kubectl
+This command prevents the standard
+apt full-upgrade
+command from updating these packages. Instead, if we upgrade our cluster, we’ll need to specify the exact version that we want by using
+apt install
+.
+Cluster Initialization
+The next command,
+kubeadm init
+, initializes the control plane and provides the
+kubelet
+worker node service configuration for all the nodes. We’ll run
+kubeadm init
+on one node in our cluster and then use
+kubeadm join
+on each of the other nodes so that they join the existing cluster.
+To run
+kubeadm init
+, we first create a YAML configuration file. This approach has a few advantages. It greatly shortens the number of command line flags that we need to remember, and it lets us keep the cluster configuration in a repository, giving us configuration control over the cluster. We then can update the YAML file and rerun
+kubeadm
+to make cluster configuration changes.
+The automation scripts for this chapter have populated a YAML configuration file in
+/etc/kubernetes
+, so it’s ready to use. The following shows the contents of that file:
+kubeadm-init.yaml
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: InitConfiguration
+bootstrapTokens:
+- groups:
+  - system:bootstrappers:kubeadm:default-node-token
+  token: 1d8fb1.2875d52d62a3282d
+  ttl: 2h0m0s
+  usages:
+  - signing
+  - authentication
+nodeRegistration:
+  kubeletExtraArgs:
+    node-ip: 192.168.61.11
+taints: []
+localAPIEndpoint:
+  advertiseAddress: 192.168.61.11
+certificateKey: "5a7e07816958efb97635e9a66256adb1"
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+kubernetesVersion: 1.21.4
+apiServer:
+  extraArgs:
+    service-node-port-range: 80-32767
+networking:
+  podSubnet: "172.31.0.0/16"
+controlPlaneEndpoint: "192.168.61.10:6443"
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+serverTLSBootstrap: true
+This YAML file has three documents, separated by dashes (
+---
+). The first document is specific to initializing the cluster, the second has more generic configuration, and the third is used to provide settings for
+kubelet
+across all the nodes. Let’s look at the purpose of each of these configuration items:
+apiVersion / kind
+Tells Kubernetes about the purpose of each YAML document, so it can validate the contents.
+bootstrapTokens
+Configures a secret that other nodes can use to join the cluster. The
+token
+should be kept secret in a production cluster. It is set to expire automatically after two hours, so if we want to join more nodes later, we’ll need to make another one.
+nodeRegistration
+Configuration to pass to the
+kubelet
+service running on
+host01
+. The
+node-ip
+field ensures that
+kubelet
+registers the correct IP address with the API server so that the API server can communicate with it. The
+taints
+field ensures that regular containers can be scheduled onto control plane nodes.
+localAPIEndpoint
+The local IP address that the API server should use. Our virtual machine has multiple IP addresses, and we want the API server listening on the correct network.
+certificateKey
+Configures a secret that other nodes will use to gain access to the certificates for the API server. It’s needed so that all of the API server instances in our highly available cluster can use the same certificate. Keep it secret in a production cluster.
+networking
+All containers in the cluster will get an IP address from the
+podSubnet
+, no matter what host they run on. Later, we’ll install a network driver that will ensure that every container on all hosts in the cluster can communicate.
+controlPlaneEndpoint
+The API server’s external address. For a highly available cluster, this IP address needs to reach any API server instance, not just the first one.
+serverTLSBootstrap
+Instructs
+kubelet
+to use the controller manager’s certificate authority to request server certificates.
+The
+apiVersion
+and
+kind
+fields will appear in every Kubernetes YAML file. The
+apiVersion
+field defines a group of related Kubernetes resources, including a version number. The
+kind
+field then selects the specific resource type within that group. This not only allows the Kubernetes project and other vendors to add new groups of resources over time, but it also allows updates to existing resource specifications while maintaining backward compatibility.
+HIGHLY AVAILABLE CLUSTERS
+The
+controlPlaneEndpoint
+field is used to configure the most important requirement for a highly available cluster: an IP address that reaches all of the API servers. We need to establish this IP address immediately when we initialize the cluster because it is used to generate certificates with which clients will verify the API server’s identity. The best way to provide a cluster-wide IP address depends on where the cluster is running; for example, in a cloud environment, using the provider’s built-in capability, such as an Elastic Load Balancer (ELB) in Amazon Web Services or an Azure Load Balancer, is best.
+Because of the nature of the two different environments, the examples for this book use
+kube-vip
+when running with Vagrant, and ELB when running in Amazon Web Services. The top-level
+README.md
+file in the example documentation has more details. The installation and configuration is done automatically so there’s nothing more to configure. We can just use
+192.168.61.10:6443
+and expect traffic to get to any of the API server instances running on
+host01
+through
+host03
+.
+Because we have the cluster configuration ready to go in a YAML file, the
+kubeadm init
+command to initialize the cluster is simple. We run this command solely on
+host01
+:
+root@host01:~#
+/usr/bin/kubeadm init \
+--config /etc/kubernetes/kubeadm-init.yaml --upload-certs
+The
+--config
+option points to the YAML configuration file (
+kubeadm-init.yaml
+) that we looked at earlier, and the
+--upload-certs
+option tells
+kubeadm
+that it should upload the API server’s certificates to the cluster’s distributed storage. The other control plane nodes then can download those certificates when they join the cluster, allowing all API server instances to use the same certificates so that clients will trust them. The certificates are encrypted using the
+certificateKey
+we provided, which means that the other nodes will need this key to decrypt them.
+The
+kubeadm init
+command initializes the control plane’s components on
+host01
+. These components are run in containers and managed by the
+kubelet
+service, which makes them easy to upgrade. Several container images will be downloaded, so the command might take a while, depending on the speed of your virtual machines and your internet connection.
+Joining Nodes to the Cluster
+The
+kubeadm init
+command prints out a
+kubeadm join
+command that we can use to join other nodes to the cluster. However, the automation scripts have already prestaged a configuration file to each of the other nodes to ensure that they join as the correct type of node. The servers
+host02
+and
+host03
+will join as additional control plane nodes, whereas
+host04
+will join solely as a worker node.
+Here’s the YAML configuration file for
+host02
+with its specific settings:
+kubeadm-join.yaml (host02)
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    apiServerEndpoint: 192.168.61.10:6443
+    token: 1d8fb1.2875d52d62a3282d
+    unsafeSkipCAVerification: true
+  timeout: 5m0s
+nodeRegistration:
+  kubeletExtraArgs:
+    cgroup-driver: containerd
+    node-ip: 192.168.61.12
+  taints: []
+  ignorePreflightErrors:
+    - DirAvailable--etc-kubernetes-manifests
+controlPlane:
+  localAPIEndpoint:
+    advertiseAddress: 192.168.61.12
+  certificateKey: "5a7e07816958efb97635e9a66256adb1"
+This resource has a type of
+JoinConfiguration
+, but most of the fields are the same as the
+InitConfiguration
+in the
+kubeadm-init.yaml
+file. Most important, the
+token
+and
+certificateKey
+match the secret we set up earlier, so this node will be able to validate itself with the cluster and decrypt the API server certificates.
+One difference is the addition of
+ignorePreflightErrors
+. This section appears only when we are installing
+kube-vip
+, as in that case we need to prestage the configuration file for
+kube-vip
+to the
+/etc/kubernetes/manifests
+directory, and we need to tell
+kubeadm
+that it is okay for that directory to already exist.
+Because we have this YAML configuration file, the
+kubeadm join
+command is simple. Run it on
+host02
+:
+root@host02:~#
+/usr/bin/kubeadm join --config /etc/kubernetes/kubeadm-join.yaml
+As before, this command runs the control plane components as containers using the
+kubelet
+service on this node, so it will take some time to download the container images and start the containers.
+When it finishes, run the exact same command on
+host03
+:
+root@host03:~#
+/usr/bin/kubeadm join --config /etc/kubernetes/kubeadm-join.yaml
+The automation script set up the YAML file with the correct IP address for each host, so the differences in configuration between each of the hosts is already accounted for.
+When this command completes, we’ll have created a highly available Kubernetes cluster, with the control plane components running on three separate hosts. However, we do not yet have any regular worker nodes. Let’s fix that issue.
+We’ll begin by joining
+host04
+as a regular worker node and running exactly the same
+kubeadm join
+command on
+host04
+, but the YAML configuration file will be a little different. Here’s that file:
+kubeadm-join.yaml (host04)
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: JoinConfiguration
+discovery:
+  bootstrapToken:
+    apiServerEndpoint: 192.168.61.10:6443
+    token: 1d8fb1.2875d52d62a3282d
+    unsafeSkipCAVerification: true
+  timeout: 5m0s
+nodeRegistration:
+  kubeletExtraArgs:
+    cgroup-driver: containerd
+    node-ip: 192.168.61.14
+  taints: []
+This YAML file is missing the
+controlPlane
+field, so
+kubeadm
+configures it as a regular worker node rather than a control plane node.
+Now let’s join
+host04
+to the cluster:
+root@host04:~#
+/usr/bin/kubeadm join --config /etc/kubernetes/kubeadm-join.yaml
+This command completes a little faster because it doesn’t need to download the control plane container images and run them. We now have four nodes in the cluster, which we can verify by running
+kubectl
+back on
+host01
+:
+root@host01:~#
+export KUBECONFIG=/etc/kubernetes/admin.conf
+root@host01:~#
+kubectl get nodes
+NAME     STATUS     ROLES        ...
+host01   NotReady   control-plane...
+host02   NotReady   control-plane...
+host03   NotReady   control-plane...
+host04   NotReady   <none>       ...
+The first command sets an environment variable to tell
+kubectl
+what configuration file to use. The
+/etc/kubernetes/admin.conf
+file was created automatically by
+kubeadm
+when it initialized
+host01
+as a control plane node. That file tells
+kubectl
+what address to use for the API server, what certificate to use to verify the secure connection, and how to authenticate.
+The four nodes currently should be reporting a status of
+NotReady
+. Let’s run the
+kubectl describe
+command to get the node details:
+root@host01:~#
+kubectl describe node host04
+Name:               host04
+...
+Conditions:
+  Type   Status ... Message
+  ----   ------ ... -------
+  Ready  False  ... container runtime network not ready...
+...
+We haven’t yet installed a network driver for our Kubernetes cluster, and as a result, all of the nodes are reporting a status of
+NotReady
+, which means that they won’t accept regular application workloads. Kubernetes communicates this by placing a
+taint
+in the node’s configuration. A taint restricts what can be scheduled on a node. We can list the taints on the nodes using
+kubectl
+:
+root@host01:~#
+kubectl get node -o json | \
+jq '.items[]|.metadata.name,.spec.taints[]'
+"host01"
+{
+  "effect": "NoSchedule",
+  "key": "node.kubernetes.io/not-ready"
+}
+"host02"
+{
+  "effect": "NoSchedule",
+  "key": "node.kubernetes.io/not-ready"
+}
+"host03"
+{
+  "effect": "NoSchedule",
+  "key": "node.kubernetes.io/not-ready"
+}
+"host04"
+{
+  "effect": "NoSchedule",
+  "key": "node.kubernetes.io/not-ready"
+}
+We select an output format of
+json
+so that we can use
+jq
+to print just the information we need. Because all the nodes have a status of
+NotReady
+, they have a
+not-ready
+taint set to
+NoSchedule
+, which prevents the Kubernetes scheduler from scheduling containers onto them.
+By specifying
+taints
+as an empty array in the
+kubeadm
+configuration, we prevented the three control plane nodes from having an additional control plane taint. In a production cluster, this taint keeps application containers separate from the control plane containers for security reasons, so we would leave it in place. For our example cluster, though, it would mean that we need multiple extra virtual machines to act as worker nodes, which we don’t want.
+The command
+kubectl taint
+would allow us to remove the
+not-ready
+taint manually, but the correct approach is to install a network driver as a cluster add-on so that the nodes will properly report
+Ready
+, enabling us to run containers on them.
+Installing Cluster Add-ons
+We’ve installed
+kubelet
+on four separate nodes and installed the control plane on three of those nodes and joined them to our cluster. For the rest, we’ll use the control plane to install cluster add-ons. These add-ons are similar to regular applications that we would deploy. They consist of Kubernetes resources and run in containers, but they provide essential services to the cluster that our applications will use.
+To get a basic cluster up and running, we need to install three types of add-ons: a
+network driver
+, a
+storage driver
+, and an
+ingress controller
+. We will also install a fourth optional add-on, a
+metrics server
+.
+Network Driver
+Kubernetes networking is based on the Container Network Interface (CNI) standard. Anyone can build a new network driver for Kubernetes by implementing this standard, and as a result, several choices are available for Kubernetes network drivers. We’ll demonstrate different network plug-ins in
+Chapter 8
+, but most of the clusters in this book use the Calico network driver because it is the default choice for many Kubernetes platforms.
+First, download the primary YAML configuration file for Calico:
+root@host01:~#
+cd /etc/kubernetes/components
+root@host01:/etc/kubernetes/components#
+curl -L -O $calico_url
+...
+The
+-L
+option tells
+curl
+to follow any HTTP redirects, whereas the
+-O
+option tells
+curl
+to save the content in a file using the same filename as in the URL. The value of the
+calico_url
+environment variable is set in the
+k8s-ver
+script that also specified the Kubernetes version. This is essential, as Calico is sensitive to the specific version of Kubernetes we’re running, so it’s important to choose values that are compatible.
+The primary YAML configuration is written to the local file
+tigera-operator.yaml
+. This refers to the fact that the initial installation is a Kubernetes Operator, which then creates all of the other cluster resources to install Calico. We’ll explore operators in
+Chapter 17
+.
+In addition to this primary YAML configuration, the automated scripts for this chapter have added a file called
+custom-resources.yaml
+that provides necessary configuration for our example cluster. We now can tell the Kubernetes API server to apply all the resources in these files to the cluster:
+root@host01:/etc/kubernetes/components#
+kubectl apply -f tigera-operator.yaml
+...
+root@host01:/etc/kubernetes/components#
+kubectl apply -f custom-resources.yaml
+Kubernetes takes a few minutes to download container images and start containers, and then Calico will be running in our cluster and our nodes should report a status of
+Ready
+:
+root@host01:/etc/kubernetes/components#
+kubectl get nodes
+NAME     STATUS   ROLES                ...
+host01   Ready    control-plane,master ...
+host02   Ready    control-plane,master ...
+host03   Ready    control-plane,master ...
+host04   Ready    <none>               ...
+Calico works by installing a
+DaemonSet
+, a Kubernetes resource that tells the cluster to run a specific container or set of containers on every node. The Calico containers then provide network services for any containers running on that node. However, that raises an important question. When we installed Calico in our cluster, all of our nodes had a taint that told Kubernetes not to schedule containers on them. How was Calico able to run its containers on all the nodes? The answer is
+tolerations
+.
+A toleration is a configuration setting applied to a resource that instructs Kubernetes it can be scheduled on a node despite a taint possibly being present. Calico specifies a toleration when it adds its DaemonSet to the cluster, as we can see with
+kubectl
+:
+root@host01:/etc/kubernetes/components#
+kubectl -n calico-system \
+get daemonsets -o json | \
+jq '.items[].spec.template.spec.tolerations[]'
+{
+  "key": "CriticalAddonsOnly",
+  "operator": "Exists"
+}
+{
+  "effect": "NoSchedule",
+  "operator": "Exists"
+}
+{
+  "effect": "NoExecute",
+  "operator": "Exists"
+}
+The
+-n
+option selects the
+calico-system
+Namespace
+. Namespaces are a way to keep Kubernetes resources separate from one another on a cluster, for security reasons as well as to avoid naming collisions. Also, as before, we request JSON output and use
+jq
+to select only the field we’re interested in. If you want to see the entire configuration for the resource, use
+-o=json
+without
+jq
+or use
+-o=yaml
+.
+This DaemonSet has three tolerations, and the second one provides the behavior we need. It tells the Kubernetes scheduler to go ahead and schedule it even on nodes that have a
+NoSchedule
+taint. Calico then can get itself started before the node is ready, and once it’s running, the node changes its status to
+Ready
+so that normal application containers can be scheduled. The control plane components needed a similar toleration in order to run on nodes before they show
+Ready
+.
+Installing Storage
+The cluster nodes are ready, so if we deployed a regular application, its containers would run. However, applications that require persistent storage would fail to start because the cluster doesn’t yet have a storage driver. Like network drivers, several storage drivers are available for Kubernetes. The Container Storage Interface (CSI) provides the standard that storage drivers need to meet to work with Kubernetes. We’ll use Longhorn, a storage driver from Rancher; it’s easy to install and doesn’t require any underlying hardware like extra block devices or access to cloud-based storage.
+Longhorn makes use of the iSCSI and NFS software we installed earlier. It expects all of our nodes to have the
+iscsid
+service enabled and running, so let’s make sure that’s true on all our nodes:
+root@host01:/etc/kubernetes/components#
+k8s-all systemctl enable --now iscsid
+We now can install Longhorn on the cluster. The process for installing Longhorn looks a lot like Calico. Start by downloading the Longhorn YAML configuration:
+root@host01:/etc/kubernetes/components#
+curl -LO $longhorn_url
+The
+longhorn_url
+environment variable is also set by the
+k8s-ver
+script, which allows us to ensure compatibility.
+Install Longhorn using
+kubectl
+:
+root@host01:/etc/kubernetes/components#
+kubectl apply -f longhorn.yaml
+As before,
+kubectl apply
+ensures that the resources in the YAML file are applied to the cluster, creating or updating them as necessary. The
+kubectl apply
+command supports URLs as the source of the resource it applies to the cluster, but for these three installs, we run a separate
+curl
+command because it’s convenient to have a local copy of what was applied to the cluster.
+Longhorn is now installed on the cluster, which we’ll verify as we explore the cluster in the rest of this chapter.
+Ingress Controller
+We now have networking and storage, but the networking allows access to containers only from within our cluster. We need another service that exposes our containerized applications outside the cluster. The easiest way to do that is to use an ingress controller. As we’ll describe in
+Chapter 9
+, an ingress controller watches the Kubernetes cluster for
+Ingress
+resources and routes network traffic.
+We begin by downloading the ingress controller YAML configuration:
+root@host01:/etc/kubernetes/components#
+curl -Lo ingress-controller.yaml
+$ingress_url
+As in our earlier example, the
+ingress_url
+environment variable is set by the
+k8s-ver
+script so that we can ensure compatibility. In this case, the URL ends in the generic path of
+deploy.yaml
+, so we use
+-o
+to provide a filename to
+curl
+to make clear the purpose of the downloaded YAML file.
+Install the ingress controller using
+kubectl
+:
+root@host01:/etc/kubernetes/components#
+kubectl apply -f ingress-controller.yaml
+This creates a lot of resources, but there are two main parts: an NGINX web server that actually performs routing of HTTP traffic, and a component that watches for changes in Ingress resources in the cluster and configures NGINX accordingly.
+There’s one more step we need. As installed, the ingress controller tries to request an external IP address to allow traffic to reach it from outside the cluster. Because we’re running a sample cluster with no access to external IP addresses, this won’t work. Instead, we’ll be accessing our ingress controller using port forwarding from our cluster hosts. At the moment, our ingress controller is set up for this port forwarding, but it’s using a random port. We would like to select the port to be sure that we know where to find the ingress controller. At the same time, we’ll also add an annotation so that this ingress controller will be the default for this cluster.
+To apply the port changes, we’re going to provide our Kubernetes cluster an with extra YAML configuration with just the changes we need. Here’s that YAML:
+ingress-patch.yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-nginx-controller
+  namespace: ingress-nginx
+spec:
+  ports:
+    - port: 80
+      nodePort: 80
+    - port: 443
+      nodePort: 443
+This file specifies the name and Namespace of the Service to ensure that Kubernetes knows where to apply these changes. It also specifies the
+port
+configuration we’re updating, along with the
+nodePort
+, which is the port on our cluster nodes that will be used for port forwarding. We’ll look at NodePort service types and port forwarding in more detail in
+Chapter 9
+.
+To patch the service, we use the
+kubectl patch
+command:
+root@host01:/etc/kubernetes/components#
+kubectl patch -n ingress-nginx \
+service/ingress-nginx-controller --patch-file ingress-patch.yaml
+service/ingress-nginx-controller patched
+To apply the annotation, use the
+kubectl annotate
+command:
+root@host01:/etc/kubernetes/components#
+kubectl annotate -n ingress-nginx \
+ingressclass/nginx ingressclass.kubernetes.io/is-default-class="true"
+ingressclass.networking.k8s.io/nginx annotated
+Kubernetes reports the change to each resource as we make it, so we know that our changes have been applied.
+Metrics Server
+Our final add-on is a
+metrics server
+that collects utilization metrics from our nodes, enabling the use of autoscaling. To do this, it needs to connect to the
+kubelet
+instances in our cluster. For security, it needs to verify the HTTP/S certificate when it connects to a
+kubelet
+. This is why we configured
+kubelet
+to request a certificate signed by the controller manager rather than allowing the
+kubelet
+to generate self-signed certificates.
+During setup,
+kubelet
+created a certificate request on each node, but the requests were not automatically approved. Let’s find these requests:
+root@host01:/etc/kubernetes/components#
+kubectl get csr
+NAME      ... SIGNERNAME                                  ... CONDITION
+csr-sgrwz ... kubernetes.io/kubelet-serving               ... Pending
+csr-agwb6 ... kubernetes.io/kube-apiserver-client-kubelet ... Approved,Issued
+csr-2kwwk ... kubernetes.io/kubelet-serving               ... Pending
+csr-5496d ... kubernetes.io/kube-apiserver-client-kubelet ... Approved,Issued
+csr-hm6lj ... kubernetes.io/kube-apiserver-client-kubelet ... Approved,Issued
+csr-jbfmx ... kubernetes.io/kubelet-serving               ... Pending
+csr-njjr7 ... kubernetes.io/kube-apiserver-client-kubelet ... Approved,Issued
+csr-v7tcs ... kubernetes.io/kubelet-serving               ... Pending
+csr-vr27n ... kubernetes.io/kubelet-serving               ... Pending
+Each
+kubelet
+has a client certificate that it uses to authenticate to the API server; these were automatically approved during bootstrap. The requests we need to approve are for
+kubelet-serving
+certificates, which are used when clients such as our metrics server connect to
+kubelet
+. As soon as the request is approved, the controller manager signs the certificate. The
+kubelet
+then collects the certificate and starts using it.
+We can approve all of these requests at once by querying for the name of all of the
+kubelet-serving
+requests and then passing those names to
+kubectl certificate approve
+:
+root@host01:/etc/kubernetes/components#
+kubectl certificate approve \$(kubectl
+get csr --field-selector spec.signerName=kubernetes.io/kubelet-serving -o name)
+certificatesigningrequest.certificates.k8s.io/csr-sgrwz approved
+...
+We now can install our metrics server by downloading and applying its YAML configuration:
+root@host01:/etc/kubernetes/components#
+curl -Lo metrics-server.yaml \$metrics_url
+root@host01:/etc/kubernetes/components#
+kubectl apply -f metrics-server.yaml
+...
+root@host01:/etc/kubernetes/components#
+cd
+root@host01:~#
+This component is the last one we need to install, so we can leave this directory. With these cluster add-ons, we now have a complete, highly available Kubernetes cluster.
+Exploring a Cluster
+Before deploying our first application onto this brand-new Kubernetes cluster, let’s explore what’s running on it. The commands we use here will come in handy later as we debug our own applications and a cluster that isn’t working correctly.
+We’ll use
+crictl
+, the same command we used to explore running containers in
+Part I
+, to see what containers are running on
+host01
+:
+root@host01:~#
+crictl ps
+CONTAINER       ... STATE    NAME                       ...
+25c63f29c1442   ... Running  longhorn-csi-plugin        ...
+2ffdd044a81d8   ... Running  node-driver-registrar      ...
+94468050de89c   ... Running  csi-provisioner            ...
+119fbf417f1db   ... Running  csi-attacher               ...
+e74c1a2a0c422   ... Running  kube-scheduler             ...
+d1ad93cdbc686   ... Running  kube-controller-manager    ...
+76266a522cc3d   ... Running  engine-image-ei-611d1496   ...
+fc3cd1679e33e   ... Running  replica-manager            ...
+48e792a973105   ... Running  engine-manager             ...
+e658baebbc295   ... Running  longhorn-manager           ...
+eb51d9ec0f2fc   ... Running  calico-kube-controllers    ...
+53e7e3e4a3148   ... Running  calico-node                ...
+772ac45ceb94e   ... Running  calico-typha               ...
+4005370021f5f   ... Running  kube-proxy                 ...
+26929cde3a264   ... Running  kube-apiserver             ...
+9ea4c2f5af794   ... Running  etcd                       ...
+The control plane node is very busy, as this list includes Kubernetes control plane components, Calico components, and Longhorn components. Running this command on all the nodes and sorting out what containers are running where and for what purpose would be confusing. Fortunately,
+kubectl
+provides a clearer picture, although knowing that we can get down to these lower-level details and see exactly what containers are running on a given node is nice.
+To explore the cluster with
+kubectl
+, we need to know how the cluster resources are organized into Namespaces. As mentioned previously, Kubernetes Namespaces provide security and avoid name collisions. To ensure idempotence, Kubernetes needs each resource to have a unique name. By dividing resources into Namespaces, we allow multiple resources to have the same name while still enabling the API server to know exactly which resource we mean, which also supports multitenancy, one of our cross-cutting concerns.
+Even though we just set up the cluster, it’s already populated with several Namespaces:
+root@host01:~#
+kubectl get namespaces
+NAME              STATUS   AGE
+calico-system     Active   50m
+default           Active   150m
+kube-node-lease   Active   150m
+kube-public       Active   150m
+kube-system       Active   150m
+longhorn-system   Active   16m
+tigera-operator   Active   50m
+As we run
+kubectl
+commands, they will apply to the
+default
+Namespace unless we use the
+-n
+option to specify a different Namespace.
+To see what containers are running, we ask
+kubectl
+to get the list of Pods. We look at Kubernetes Pods in much more detail in
+Chapter 7
+. For now, just know that a Pod is a group of one or more containers, much like the Pods that we created with
+crictl
+in
+Part I
+.
+If we try to list Pods in the
+default
+Namespace, we can see that there aren’t any yet:
+root@host01:~#
+kubectl get pods
+No resources found in default namespace.
+So far, as we installed cluster infrastructure components, they’ve been created in other Namespaces. That way, when we configure normal user accounts, we can prevent those users from viewing or editing the cluster infrastructure. The Kubernetes infrastructure components were all installed into the
+kube-system
+Namespace:
+root@host01:~#
+kubectl -n kube-system get pods
+NAME                             READY   STATUS    ...
+coredns-558bd4d5db-7krwr         1/1     Running   ...
+...
+kube-apiserver-host01            1/1     Running   ...
+...
+We cover the control plane components in
+Chapter 11
+. For now, let’s explore just one of the control plane Pods, the API server running on
+host01
+. We can get all of the details for this Pod using
+kubectl describe
+:
+root@host01:~#
+kubectl -n kube-system describe pod kube-apiserver-host01
+Name:                 kube-apiserver-host01
+Namespace:            kube-system
+...
+Node:                 host01/192.168.61.11
+...
+Status:               Running
+Containers:
+  kube-apiserver:
+    Container ID:  containerd://26929cde3a264e...
+...
+The Namespace and name together uniquely identify this Pod. We also see the node on which the Pod is scheduled, its status, and details about the actual containers, including a container ID that we can use with
+crictl
+to find the container in the underlying
+containerd
+runtime.
+Let’s also verify that Calico deployed into our cluster as expected:
+root@host01:~#
+kubectl -n calico-system get pods
+NAME                                       READY   STATUS    ...
+calico-kube-controllers-7f58dbcbbd-ch7zt   1/1     Running   ...
+calico-node-cp88k                          1/1     Running   ...
+calico-node-dn4rj                          1/1     Running   ...
+calico-node-xnkmg                          1/1     Running   ...
+calico-node-zfscp                          1/1     Running   ...
+calico-typha-68b99cd4bf-7lwss              1/1     Running   ...
+calico-typha-68b99cd4bf-jjdts              1/1     Running   ...
+calico-typha-68b99cd4bf-pjr6q              1/1     Running   ...
+Earlier we saw that Calico installed a DaemonSet resource. Kubernetes has used the configuration in this DaemonSet to automatically create a
+calico-node
+Pod for each node. Like Kubernetes itself, Calico also uses a separate control plane to handle overall configuration of the network, and the other Pods provide that control plane.
+Finally, we’ll see the containers that are running for Longhorn:
+root@host01:~#
+kubectl -n longhorn-system get pods
+NAME                                       READY   STATUS    RESTARTS   AGE
+engine-image-ei-611d1496-8q58f             1/1     Running   0          31m
+...
+longhorn-csi-plugin-8vkr6                  2/2     Running   0          31m
+...
+longhorn-manager-dl9sb                     1/1     Running   1          32m
+...
+Like Calico, Longhorn uses DaemonSets so that it can run containers on every node. These containers provide storage services to the other containers on the node. Longhorn also includes a number of other containers that serve as a control plane, including providing the CSI implementation that Kubernetes uses to tell Longhorn to create storage when needed.
+We put a lot of effort into setting up this cluster, so it would be a shame to end this chapter without running at least one application on it. In the next chapter, we will look at many different ways to run containers, but let’s quickly run a simple NGINX web server in our Kubernetes cluster:
+root@host01:~#
+kubectl run nginx --image=nginx
+pod/nginx created
+That may look like an imperative command, but under the hood,
+kubectl
+is creating a Pod resource using the name and container image we specified, and then it’s applying that resource on the cluster. Let’s inspect the default Namespace again:
+root@host01:~#
+kubectl get pods -o wide
+NAME    READY   STATUS    ... IP               NODE  ...
+nginx   1/1     Running   ... 172.31.89.203   host02 ...
+We used
+-o wide
+to see extra information about the Pod, including its IP address and where it was scheduled, which can be different each time the Pod is created. In this case, the Pod was scheduled to
+host02
+, showing that we were successful in allowing regular application containers to be deployed to our control plane nodes. The IP address comes from the Pod CIDR we configured, and Calico automatically assigns it.
+Calico also handles routing traffic so that we can reach the Pod from any container in the cluster as well as from the host network. Let’s verify that, starting with a regular
+ping
+:
+root@host01:~#
+ping -c 1
+172.31.89.203
+PING 172.31.89.203 (172.31.89.203) 56(84) bytes of data.
+64 bytes from 172.31.89.203: icmp_seq=1 ttl=63 time=0.848 ms
+
+--- 172.31.89.203 ping statistics ---
+1 packets transmitted, 1 received, 0% packet loss, time 0ms
+rtt min/avg/max/mdev = 0.848/0.848/0.848/0.000 ms
+Use your Pod’s IP address in the place of the one shown here.
+We can also use
+curl
+to verify that the NGINX web server is working:
+root@host01:~#
+curl http://
+172.31.89.203
+...
+<title>Welcome to nginx!</title>
+...
+The Kubernetes cluster is working and ready for us to deploy applications. Kubernetes will take advantage of all of the nodes in the cluster to load balance our applications and provide resiliency in the event of any failures.
+Final Thoughts
+In this chapter, we’ve explored how Kubernetes is architected with the flexibility to allow cluster components to come and go at any time. This applies not only to containerized applications but also to the cluster components, including control plane microservices and the underlying servers and networks the cluster uses. We were able to bootstrap a cluster and then dynamically add nodes to it, configure those nodes to accept certain types of containers, and then dynamically add networking and storage drivers using the Kubernetes cluster itself to run and monitor them. Finally, we deployed our first container to a Kubernetes cluster, allowing it to automatically schedule the container onto an available node, using our network driver to access the container from the host network.
+Now that we have a highly available cluster, we can look at how to deploy an application to Kubernetes. We’ll explore some key Kubernetes resources that we need to create a scalable, reliable application. This process will provide a foundation for exploring Kubernetes in detail, including understanding what happens when our applications don’t run as expected and how to debug issues with our application or the Kubernetes cluster.
+
+7
+DEPLOYING CONTAINERS TO KUBERNETES
+We’re now ready to begin running containers on our working Kubernetes cluster. Because Kubernetes has a declarative API, we’ll create various kinds of resources to run them, and we’ll monitor the cluster to see what Kubernetes does for each type of resource.
+Different containers have different use cases. Some might require multiple identical instances with autoscaling to perform well under load. Other containers might exist solely to run a one-time command. Still others may require a fixed ordering to enable selecting a single primary instance and providing controlled failover to a secondary instance. Kubernetes provides different
+controller
+resource types for each of those use cases. We’ll look at each in turn, but we’ll begin with the most fundamental of them, the
+Pod
+, which is utilized by all of those use cases.
+Pods
+A Pod is the most basic resource in Kubernetes and is how we run containers. Each Pod can have one or more containers within it. The Pod is used to
+provide the process isolation we saw in
+Chapter 2
+. Linux kernel namespaces are used at the Pod and the container level:
+mnt
+Mount points: each container has its own root filesystem; other mounts are available to all containers in the Pod.
+uts
+Unix time sharing: isolated at the Pod level.
+ipc
+Interprocess communication: isolated at the Pod level.
+pid
+Process identifiers: isolated at the container level.
+net
+Network: isolated at the Pod level.
+The biggest advantage of this approach is that multiple containers can act like processes on the same virtual host, using the
+localhost
+address to communicate, while still being based on separate container images.
+Deploying a Pod
+To get started, let’s create a Pod directly. Unlike the previous chapter, in which we used
+kubectl run
+to have the Pod specification created for us, we’ll specify it directly using YAML so that we have complete control over the Pod and to prepare us for using controllers to create Pods, providing scalability and failover.
+NOTE
+The example repository for this book is at
+https://github.com/book-of-kubernetes/examples
+.
+See “Running Examples” on
+page xx
+for details on getting set up.
+The automation script for this chapter does a full cluster install with three nodes that run the control plane and regular applications, providing the smallest possible highly available cluster for testing. The automation also creates some YAML files for Kubernetes resources. Here’s a basic YAML resource to create a Pod running NGINX:
+nginx-pod.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+Pods are part of the
+core
+Kubernetes API, so we just specify a version number of
+v1
+for the
+apiVersion
+. Specifying
+Pod
+as the
+kind
+tells Kubernetes exactly what resource we’re creating in the API group. We will see these fields in all of our Kubernetes resources.
+The
+metadata
+field has many uses. For the Pod, we just need to provide the one required field of
+name
+. We don’t specify the
+namespace
+in the metadata, so by default this Pod will end up in the
+default
+Namespace.
+The remaining field,
+spec
+, tells Kubernetes everything it needs to know to run this Pod. For now we are providing the minimal information, which is a list of containers to run, but many other options are available. In this case, we have only one container, so we provide just the name and container image Kubernetes should use.
+Let’s add this Pod to the cluster. The automation added files to
+/opt
+, so we can do it from
+host01
+as follows:
+root@host01:~#
+kubectl apply -f /opt/nginx-pod.yaml
+pod/nginx created
+In
+Listing 7-1
+, we can check the Pod’s status.
+root@host01:~#
+kubectl get pods -o wide
+NAME    READY   STATUS    RESTARTS   AGE     IP               NODE   ...
+nginx   1/1     Running   0          2m26s   172.31.25.202   host03 ...
+Listing 7-1: Status of NGINX
+It can take some time before the Pod shows
+Running
+, especially if you just set up your Kubernetes cluster and it’s still busy deploying core components. Keep trying this
+kubectl
+command to check the status.
+Instead of typing the
+kubectl
+command multiple times, you can also use
+watch
+. The
+watch
+command is a great way to observe changes in your cluster over time. Just add
+watch
+in front of your command, and it will be run for you every two seconds.
+We added
+-o wide
+to the command to see the IP address and node assignment for this Pod. Kubernetes manages that for us. In this case, the Pod was scheduled on
+host03
+, so we need to go there to see the running container:
+root@host03:~#
+crictl pods --name nginx
+POD ID         CREATED         STATE  NAME   NAMESPACE  ...
+9f1d6e0207d7e  19 minutes ago  Ready  nginx  default    ...
+Run this command on whatever host your NGINX Pod is on.
+If we collect the Pod ID, we can see the container as well:
+root@host03:~#
+POD_ID=$(crictl pods -q --name nginx)
+root@host03:~#
+crictl ps --pod $POD_ID
+CONTAINER      IMAGE          CREATED         STATE    NAME   ...
+9da09b3671418  4cdc5dd7eaadf  20 minutes ago  Running  nginx  ...
+This output looks very similar to the output from
+kubectl get
+in
+Listing 7-1
+, which is not surprising given that our cluster gets that information from the
+kubelet
+service running on this node, which in turn uses the same Container Runtime Interface (CRI) API that
+crictl
+is also using to talk to the container engine.
+Pod Details and Logging
+The ability to use
+crictl
+with the underlying container engine to explore a container running in the cluster is valuable, but it does require us to connect to the specific host running the container. Much of the time, we can avoid that by using
+kubectl
+commands to inspect Pods from anywhere by connecting to our cluster’s API server. Let’s move back to
+host01
+and explore the NGINX Pod further.
+In
+Chapter 6
+, we saw how we could use
+kubectl describe
+to see the status and event log for a cluster node. We can use the same command to see the status and configuration details of other Kubernetes resources. Here’s the event log for our NGINX Pod:
+root@host01:~#
+kubectl describe pod nginx
+Name:         nginx
+ Namespace:
+➊
+default 
+ ...
+ Containers:
+   nginx:
+     Container ID:   containerd://9da09b3671418...
+ ...
+➋
+Type    Reason     Age   From               Message
+   ----    ------     ----  ----               -------
+   Normal  Scheduled  22m   default-scheduler  Successfully assigned ...
+   Normal  Pulling    22m   kubelet            Pulling image "nginx"
+   Normal  Pulled     21m   kubelet            Successfully pulled image ...
+   Normal  Created    21m   kubelet            Created container nginx
+   Normal  Started    21m   kubelet            Started container nginx
+We can use
+kubectl describe
+with many different Kubernetes resources, so we first tell
+kubectl
+that we are interested in a Pod and provide the name. Because we didn’t specify a Namespace, Kubernetes will look for this Pod in the
+default
+Namespace
+➊
+.
+NOTE
+We use the
+default
+Namespace for most of the examples in this book to save typing, but it’s a good practice to use multiple Namespaces to keep applications separate, both to avoid naming conflicts and to manage access control. We look at Namespaces in more detail in
+Chapter 11
+.
+The
+kubectl describe
+command output provides an event log
+➋
+, which is the first place to look for issues when we have problems starting a container.
+Kubernetes takes a few steps when deploying a container. First, it needs to schedule it onto a node, which requires that node to be available with sufficient resources. Then, control passes to
+kubelet
+on that node, which has to interact with the container engine to pull the image, create a container, and start it.
+After the container is started,
+kubelet
+collects the standard out and standard error. We can view this output by using the
+kubectl logs
+command:
+root@host01:~#
+kubectl logs nginx
+...
+2021/07/13 22:37:03 [notice] 1#1: start worker processes
+2021/07/13 22:37:03 [notice] 1#1: start worker process 33
+2021/07/13 22:37:03 [notice] 1#1: start worker process 34
+The
+kubectl logs
+command always refers to a Pod because Pods are the basic resource used to run containers, and our Pod has only one container, so we can just specify the name of the Pod as a single parameter to
+kubectl logs
+. As before, Kubernetes will look in the
+default
+Namespace because we didn’t specify the Namespace.
+The container output is available even if the container has exited, so the
+kubectl logs
+command is the place to look if a container is pulled and started successfully but then crashes. Of course, we have to hope that the container printed a log message explaining why it crashed. In
+Chapter 10
+, we look at what to do if we can’t get a container going and don’t have any log messages.
+We’re done with the NGINX Pod, so let’s clean it up:
+root@host01:~#
+kubectl delete -f /opt/nginx-pod.yaml
+pod "nginx" deleted
+We can use the same YAML configuration file to delete the Pod, which is convenient when we have multiple Kubernetes resources defined in a single file, as a single command will delete all of them. The
+kubectl
+command uses the name of each resource defined in the file to perform the delete.
+Deployments
+To run a container, we need a Pod, but that doesn’t mean we generally want to create the Pod directly. When we create a Pod directly, we don’t get all of the scalability and failover that Kubernetes offers, because Kubernetes will run only one instance of the Pod. This Pod will be allocated to a node only on creation, with no re-allocation even if the node fails.
+To get scalability and failover, we instead need to create a controller to manage the Pod for us. We’ll look at multiple controllers that can run Pods, but let’s start with the most common: the
+Deployment
+.
+Creating a Deployment
+A Deployment manages one or more
+identical
+Kubernetes Pods. When we create a Deployment, we provide a Pod template. The Deployment then creates Pods matching that template with the help of a
+ReplicaSet
+.
+DEPLOYMENTS AND REPLICASETS
+Kubernetes has evolved its controller resources over time. The first type of controller, the
+ReplicationController
+, provided only basic functionality. It was replaced by the ReplicaSet, which has improvements in how it identifies which Pods to manage.
+Part of the reason to replace ReplicationControllers with ReplicaSets is that ReplicationControllers were becoming more and more complicated, making the code difficult to maintain. The new approach splits up controller responsibility between ReplicaSets and Deployments. ReplicaSets are responsible for basic Pod management, including monitoring Pod status and performing failover. Deployments are responsible for tracking changes to the Pod template caused by configuration changes or container image updates. Deployments and ReplicaSets work together, but the Deployment creates its own ReplicaSet, so we usually need to interact only with Deployments. For this reason, I use the term
+Deployment
+generically to refer to features provided by the ReplicaSet, such as monitoring Pods to provide the requested number of replicas.
+Here’s the YAML file we’ll use to create an NGINX Deployment:
+nginx-deploy.yaml
+---
+ kind: Deployment
+ apiVersion: apps/v1 
+ metadata:
+➊
+name: nginx 
+ spec:
+   replicas: 3 
+   selector: 
+     matchLabels:
+       app: nginx
+   template:
+     metadata:
+➋
+labels:
+         app: nginx
+➌
+spec:   
+       containers:
+       - name: nginx
+         image: nginx
+➍
+resources:
+           requests:
+             cpu: "100m"
+Deployments are in the
+apps
+API group, so we specify
+apps/v1
+for
+apiVersion
+. Like every Kubernetes resource, we need to provide a unique name
+➊
+to keep this Deployment separate from any others we might create.
+The Deployment specification has a few important fields, so let’s look at them in detail. The
+replicas
+field tells Kubernetes how many identical instances of the Pod we want. Kubernetes will work to keep this many Pods
+running. The next field,
+selector
+, is used to enable the Deployment to find its Pods. The content of
+matchLabels
+must exactly match the content in the
+template.metadata.labels
+field
+➋
+, or Kubernetes will reject the Deployment.
+Finally, the content of
+template.spec
+➌
+will be used as the
+spec
+for any Pods created by this Deployment. The fields here can include any configuration we can provide for a Pod. This configuration matches
+nginx-pod.yaml
+that we looked at earlier except that we add a CPU resource request
+➍
+so that we can configure autoscaling later on.
+Let’s create our Deployment from this YAML resource file:
+root@host01:~#
+kubectl apply -f /opt/nginx-deploy.yaml
+deployment.apps/nginx created
+We can track the status of the Deployment with
+kubectl get
+:
+root@host01:~#
+kubectl get deployment nginx
+NAME    READY   UP-TO-DATE   AVAILABLE   AGE
+nginx   3/3     3            3           4s
+When the Deployment is fully up, it will report that it has three replicas ready and available, which means that we now have three separate NGINX Pods managed by this Deployment:
+root@host01:~#
+kubectl get pods
+NAME                     READY   STATUS    RESTARTS   AGE
+nginx-6799fc88d8-6vn44   1/1     Running   0          18s
+nginx-6799fc88d8-dcwx5   1/1     Running   0          18s
+nginx-6799fc88d8-sh8qs   1/1     Running   0          18s
+The name of each Pod begins with the name of the Deployment. Kubernetes adds some random characters to build the name of the ReplicaSet, followed by more random characters so that each Pod has a unique name. We don’t need to create or manage the ReplicaSet directly, but we can use
+kubectl get
+to see it:
+root@host01:~#
+kubectl get replicasets
+NAME               DESIRED   CURRENT   READY   AGE
+nginx-6799fc88d8   3         3         3       30s
+Although we generally interact only with Deployments, it is important to know about the ReplicaSet, as some specific errors encountered when creating Pods are only reported in the ReplicaSet event log.
+The
+nginx
+prefix on the ReplicaSet and Pod names are purely for convenience. The Deployment does not use names to match itself to Pods. Instead, it uses its selector to match the labels on the Pod. We can see these labels if we run
+kubectl describe
+on one of the three Pods:
+root@host01:~#
+kubectl describe pod
+nginx-6799fc88d8-6vn44
+Name:         nginx-6799fc88d8-6vn44
+Namespace:    default
+...
+Labels:       app=nginx
+...
+This matches the Deployment’s selector:
+root@host01:~#
+kubectl describe deployment nginx
+Name:                   nginx
+Namespace:              default
+...
+Selector:               app=nginx
+...
+The Deployment queries the API server to identify Pods matching its selector. Whereas the Deployment uses the programmatic API, the
+kubectl get
+command in the following example generates a similar API server query, giving us an opportunity to see how that works:
+root@host01:~#
+kubectl get all -l app=nginx
+NAME                     READY   STATUS    RESTARTS   AGE
+nginx-6799fc88d8-6vn44   1/1     Running   0          69s
+nginx-6799fc88d8-dcwx5   1/1     Running   0          69s
+nginx-6799fc88d8-sh8qs   1/1     Running   0          69s
+
+NAME                               DESIRED   CURRENT   READY   AGE
+replicaset.apps/nginx-6799fc88d8   3         3         3       69s
+Using
+kubectl get all
+in this case allows us to list multiple different kinds of resources as long as they match the selector. As a result, we see not only the three Pods but also the ReplicaSet that was created by the Deployment to manage those Pods.
+It may seem strange that the Deployment uses a selector rather than just tracking the Pods it created. However, this design makes it easier for Kubernetes to be self-healing. At any time, a Kubernetes node might go offline, or we might have a network split, during which some control nodes lose their connection to the cluster. If a node comes back online, or the cluster needs to recombine after a network split, Kubernetes must be able to look at the current state of all of the running Pods and figure out what changes are required to achieve the desired state. This might mean that a Deployment that started an additional Pod as the result of a node disconnection would need to shut down a Pod when that node reconnects so that the cluster can maintain the appropriate number of replicas. Using a selector avoids the need for the Deployment to remember all the Pods it has ever created, even Pods on failed nodes.
+Monitoring and Scaling
+Because the Deployment is monitoring its Pods to make sure we have the correct number of replicas, we can delete a Pod, and it will be automatically re-created:
+root@host01:~#
+kubectl delete pod
+nginx-6799fc88d8-6vn44
+pod "nginx-6799fc88d8-6vn44" deleted
+root@host01:~#
+kubectl get pods
+NAME                     READY   STATUS    RESTARTS   AGE
+nginx-6799fc88d8-dcwx5   1/1     Running   0          3m52s
+nginx-6799fc88d8-dtddk   1/1     Running   0
+➊
+14s
+nginx-6799fc88d8-sh8qs   1/1     Running   0          3m52s
+As soon as the old Pod is deleted, the Deployment created a new Pod
+➊
+. Similarly, if we change the number of replicas for the Deployment, Pods are automatically updated. Let’s add another replica:
+root@host01:~#
+kubectl scale --replicas=4 deployment nginx
+deployment.apps/nginx scaled
+root@host01:~#
+kubectl get pods
+NAME                     READY   STATUS    RESTARTS   AGE
+nginx-6799fc88d8-dcwx5   1/1     Running   0          8m22s
+nginx-6799fc88d8-dtddk   1/1     Running   0          4m44s
+nginx-6799fc88d8-kk7r6   1/1     Running   0
+➊
+5s 
+nginx-6799fc88d8-sh8qs   1/1     Running   0          8m22s
+The first command sets the number of replicas to four. As a result, Kubernetes needs to start a new identical Pod to meet the number we requested
+➊
+. We can scale the Deployment by updating the YAML file and re-running
+kubectl apply
+, or we can use the
+kubectl scale
+command to edit the Deployment directly. Either way, this is a declarative approach; we are updating the Deployment’s resource declaration; Kubernetes then updates the actual state of the cluster to match.
+Similarly, scaling the Deployment down causes Pods to be automatically deleted:
+root@host01:~#
+kubectl scale --replicas=2 deployment nginx
+deployment.apps/nginx scaled
+root@host01:~#
+kubectl get pods
+NAME                     READY   STATUS    RESTARTS   AGE
+nginx-6799fc88d8-dcwx5   1/1     Running   0          10m
+nginx-6799fc88d8-sh8qs   1/1     Running   0          10m
+When we scale down, Kubernetes selects two Pods to terminate. These Pods take a moment to finish shutting down, at which point we have only two NGINX Pods running.
+Autoscaling
+For an application that is receiving real requests from users, we would choose the number of replicas necessary to provide a quality application, while scaling down when possible to reduce the amount of resources used by our application. Of course, the load on our application is constantly changing, and it would be tedious to monitor each component of our application continually to scale it independently. Instead, we can have the cluster perform the monitoring and scaling for us using a
+HorizontalPodAutoscaler
+. The term
+horizontal
+in this case just refers to the fact that the autoscaler can update the number of replicas of the same Pod managed by a controller.
+To configure autoscaling, we create a new resource with a reference to our Deployment. The cluster then monitors resources used by the Pods and reconfigures the Deployment as needed. We could add a HorizontalPodAutoscaler to our Deployment using the
+kubectl autoscale
+command, but using a YAML resource file so that we can keep the autoscale configuration under version control is better. Here’s the YAML file:
+nginx-scaler.yaml
+---
+➊
+apiVersion: autoscaling/v2
+   kind: HorizontalPodAutoscaler
+   metadata:
+     name: nginx
+     labels:
+       app: nginx
+   spec:
+➋
+scaleTargetRef:
+       apiVersion: apps/v1
+       kind: Deployment
+       name: nginx
+➌
+minReplicas: 1
+     maxReplicas: 10
+     metrics:
+       - type: Resource
+         resource:
+           name: cpu
+           target:
+             type: Utilization
+             averageUtilization:
+➍
+50
+In the
+metadata
+field, we add the label
+app: nginx
+. This does not change the behavior of the resource; its only purpose is to ensure that this resource shows up if we use an
+app=nginx
+label selector in a
+kubectl get
+command. This style of tagging the components of an application with consistent metadata is a good practice to help others understand what resources go together and to make debugging easier.
+This YAML configuration uses version 2 of the autoscaler configuration
+➊
+. Providing new versions of API resource groups is how Kubernetes accommodates future capability without losing any of its backward compatibility. Generally, alpha and beta versions are released for new resource groups before the final configuration is released, and there is at least one version of overlap between the beta version and the final release to enable seamless upgrades.
+Version 2 of the autoscaler supports multiple resources. Each resource is used to calculate a vote on the desired number of Pods, and the largest number wins. Adding support for multiple resources requires a change in the YAML layout, which is a common reason for the Kubernetes maintainers to create a new resource version.
+We specify our NGINX Deployment
+➋
+as the target for the autoscaler using its API resource group, kind, and name, which is enough to uniquely identify any resource in a Kubernetes cluster. We then tell the autoscaler to monitor the CPU utilization of the Pods that belong to the Deployment
+➍
+. The autoscaler will work to keep average CPU utilization by the Pods close to 50 percent over the long run, scaling up or down as necessary. However, the number of replicas will never go beyond the range we specify
+➌
+.
+Let’s create our autoscaler using this configuration:
+root@host01:~#
+kubectl apply -f /opt/nginx-scaler.yaml
+horizontalpodautoscaler.autoscaling/nginx created
+We can query the cluster to see that it was created:
+root@host01:~#
+kubectl get hpa
+NAME    REFERENCE          TARGETS   MINPODS   MAXPODS   REPLICAS   AGE
+nginx   Deployment/nginx   0%/50%    1         10        3          96s
+The output shows the autoscaler’s target reference, the current and desired resource utilization, and the maximum, minimum, and current number of replicas.
+We use
+hpa
+as an abbreviation for
+horizontalpodautoscaler
+. Kubernetes allows us to use either singular or plural names and provides abbreviations for most of its resources to save typing. For example, we can type
+deploy
+for
+deployment
+and even
+po
+for
+pods
+. Every extra keystroke counts!
+The autoscaler uses CPU utilization data that the
+kubelet
+is already collecting from the container engine. This data is centralized by the metrics server we installed as a cluster add-on. Without that cluster add-on, there would be no utilization data, and the autoscaler would not make any changes to the Deployment. In this case, because we’re not really using our NGINX server instances, they aren’t consuming any CPU, and the Deployment is scaled down to a single Pod, the minimum we specified:
+root@host01:~#
+kubectl get pods
+NAME                     READY   STATUS    RESTARTS   AGE
+nginx-6799fc88d8-dcwx5   1/1     Running   0          15m
+The autoscaler has calculated that only one Pod is needed and has scaled the Deployment to match. The Deployment then selected a Pod to terminate to reach the desired scale.
+For accuracy, the autoscaler will not use CPU data from the Pod if it recently started running, and it has logic to prevent it from scaling up or down too often, so if you ran through these examples very quickly you might need to wait a few minutes before you see it scale.
+We explore Kubernetes resource utilization metrics in more detail when we look at limiting resource usage in
+Chapter 14
+.
+Other Controllers
+Deployments are the most generic and commonly used controller, but Kubernetes has some other useful options. In this section, we explore
+Job
+s and
+CronJob
+s,
+StatefulSets
+, and
+DaemonSets
+.
+Jobs and CronJobs
+Deployments are great for application components because we usually want one or more instances to stay running indefinitely. However, for cases for which we need to run a command, either once or on a schedule, we can use a Job. The primary difference is a Deployment ensures that any container that stops running is restarted, whereas a Job can check the exit code of the main process and restart only if the exit code is non-zero, indicating failure.
+A Job definition looks very similar to a Deployment:
+sleep-job.yaml
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sleep
+spec:
+  template:
+    spec:
+      containers:
+      - name: sleep
+        image: busybox
+        command: 
+          - "/bin/sleep"
+          - "30"
+      restartPolicy: OnFailure
+The
+restartPolicy
+can be set to
+OnFailure
+, in which case the container will be restarted for a non-zero exit code, or to
+Never
+, in which case the Job will be completed when the container exits regardless of the exit code.
+We can create and view the Job and the Pod it has created:
+root@host01:~#
+kubectl apply -f /opt/sleep-job.yaml
+job.batch/sleep created
+root@host01:~#
+kubectl get job
+NAME    COMPLETIONS   DURATION   AGE
+sleep   0/1           3s         3s
+root@host01:~#
+kubectl get pods
+NAME                     READY   STATUS    RESTARTS   AGE
+...
+sleep-fgcnz              1/1     Running   0          10s
+The Job has created a Pod per the specification provided in the YAML file. The Job reflects
+0/1
+completions because it is waiting for its Pod to exit successfully.
+When the Pod has been running for 30 seconds, it exits with a code of zero, indicating success, and the Job and Pod status are updated accordingly:
+root@host01:~#
+kubectl get jobs
+NAME    COMPLETIONS   DURATION   AGE
+sleep   1/1           31s        40s
+root@host01:~#
+kubectl get pods
+NAME                     READY   STATUS      RESTARTS   AGE
+nginx-65db7cf9c9-2wcng   1/1     Running     0          31m
+sleep-fgcnz              0/1     Completed   0          43s
+The Pod is still available, which means that we could review its logs if desired, but it shows a status of
+Completed
+, so Kubernetes will not try to restart the exited container.
+A CronJob is a controller that creates Jobs on a schedule. For example, we could set up our sleep Job to run once per day:
+sleep-cronjob.yaml
+---
+ apiVersion: batch/v1
+ kind: CronJob
+ metadata:
+   name: sleep
+ spec:
+➊
+schedule: "0 3 * * *"
+➋
+jobTemplate: 
+   spec:
+     template:
+       spec:
+         containers:
+           - name: sleep
+             image: busybox
+             command: 
+               - "/bin/sleep"
+               - "30"
+         restartPolicy: OnFailure
+The entire contents of the Job specification are embedded inside the
+jobTemplate
+field
+➋
+. To this, we add a
+schedule
+➊
+that follows the standard format for the Unix
+cron
+command. In this case,
+0 3 * * *
+indicates that a Job should be created at 3:00 AM every day.
+One of Kubernetes’ design principles is that anything could go down at any time. For a CronJob, if the cluster has an issue during the time the Job would be scheduled, the Job might not be scheduled, or it might be scheduled twice, this means that you should take care to write Jobs in an idempotent way so that they can handle missing or duplicated scheduling.
+If we create this CronJob
+root@host01:~#
+kubectl apply -f /opt/sleep-cronjob.yaml
+cronjob.batch/sleep created
+it now exists in the cluster, but it does not immediately create a Job or a Pod:
+root@host01:~#
+kubectl get jobs
+NAME    COMPLETIONS   DURATION   AGE
+sleep   1/1           31s        2m32s
+root@host01:~#
+kubectl get pods
+NAME                     READY   STATUS      RESTARTS   AGE
+nginx-65db7cf9c9-2wcng   1/1     Running     0          33m
+sleep-fgcnz              0/1     Completed   0          2m23s
+Instead, the CronJob will create a new Job each time its schedule is triggered.
+StatefulSets
+So far, we’ve been looking at controllers that create identical Pods. With both Deployments and Jobs, we don’t really care which Pod is which, or where it is deployed, as long as we run enough instances at the right time. However, that doesn’t always match the behavior we want. For example, even though a Deployment can create Pods with persistent storage, the storage must either be brand new for each new Pod, or the same storage must be shared across all Pods. That doesn’t align well with a “primary and secondary” architecture such as a database. For those cases, we want specific storage to be attached to specific Pods.
+At the same time, because Pods can come and go due to hardware failures or upgrades, we need a way to manage the replacement of a Pod so that each Pod is attached to the right storage. This is the purpose of a
+StatefulSet
+. A StatefulSet identifies each Pod with a number, starting at zero, and each Pod receives matching persistent storage. When a Pod must be replaced, the new Pod is assigned the same numeric identifier and is attached to the same storage. Pods can look at their hostname to determine their identifier, so a StatefulSet is useful both for cases with a fixed primary instance as well as cases for which a primary instance is dynamically chosen.
+We’ll explore a lot more details related to Kubernetes StatefulSets in the next several chapters, including persistent storage and Services. For this
+chapter, we’ll look at a basic example of a StatefulSet and then build on it as we introduce other important concepts.
+For this simple example, let’s create two Pods and show how they each get unique storage that stays in place even if the Pod is replaced. We’ll use this YAML resource:
+sleep-set.yaml
+---
+ apiVersion: apps/v1
+ kind: StatefulSet
+ metadata:
+    name: sleep
+ spec:
+➊
+serviceName: sleep 
+   replicas: 2
+   selector:
+     matchLabels:
+       app: sleep
+   template:
+     metadata:
+       labels:
+         app: sleep
+     spec:
+       containers:
+         - name: sleep
+           image: busybox
+           command: 
+             - "/bin/sleep"
+             - "3600"
+➋
+volumeMounts: 
+             - name: sleep-volume
+               mountPath: /storagedir
+➌
+volumeClaimTemplates: 
+     - metadata:
+         name: sleep-volume
+       spec:
+         storageClassName: longhorn
+         accessModes:
+           - ReadWriteOnce
+         resources:
+           requests:
+             storage: 10Mi
+There are a few important differences here compared to a Deployment or a Job. First, we must declare a
+serviceName
+to tie this StatefulSet to a Kubernetes Service
+➊
+. This connection is used to create a Domain Name Service (DNS) entry for each Pod. We must also provide a template for the StatefulSet to use to request persistent storage
+➌
+and then tell Kubernetes where to mount that storage in our container
+➋
+.
+The actual
+sleep-set.yaml
+file that the automation scripts install includes the
+sleep
+Service definition. We cover Services in detail in
+Chapter 9
+.
+Let’s create the
+sleep
+StatefulSet:
+root@host01:~#
+kubectl apply -f /opt/sleep-set.yaml
+The StatefulSet creates two Pods:
+root@host01:~#
+kubectl get statefulsets
+NAME    READY   AGE
+sleep   2/2     1m14s
+root@host01:~#
+kubectl get pods
+NAME      READY   STATUS    RESTARTS   AGE
+...
+sleep-0   1/1     Running   0          57s
+sleep-1   1/1     Running   0          32s
+The persistent storage for each Pod is brand new, so it starts empty. Let’s create some content. The easiest way to do that is from within the container itself, using
+kubectl exec
+, which allows us to run commands inside a container, similar to
+crictl
+. The
+kubectl exec
+command works no matter what host the container is on, even if we’re connecting to our Kubernetes API server from outside the cluster.
+Let’s write each container’s hostname to a file and print it out so that we can verify it worked:
+root@host01:~#
+kubectl exec sleep-0 -- /bin/sh -c \
+'hostname > /storagedir/myhost'
+root@host01:~#
+kubectl exec sleep-0 -- /bin/cat /storagedir/myhost
+sleep-0
+root@host01:~#
+kubectl exec sleep-1 -- /bin/sh -c \
+'hostname > /storagedir/myhost'
+root@host01:~#
+kubectl exec sleep-1 -- /bin/cat /storagedir/myhost
+sleep-1
+Each of our Pods now has unique content in its persistent storage. Let’s delete one of the Pods and verify that its replacement inherits its predecessor’s storage:
+root@host01:~#
+kubectl delete pod sleep-0
+pod "sleep-0" deleted
+root@host01:~#
+kubectl get pods
+NAME      READY   STATUS    RESTARTS   AGE
+...
+sleep-0   1/1     Running   0          28s
+sleep-1   1/1     Running   0          8m18s
+root@host01:~#
+kubectl exec sleep-0 -- /bin/cat /storagedir/myhost
+sleep-0
+After deleting
+sleep-0
+, we see a new Pod created with the same name, which is different from the Deployment for which a random name was generated for every new Pod. Additionally, for this new Pod, the file we created previously is still present because the StatefulSet attached the same persistent storage to the new Pod it created when the old one was deleted.
+Daemon Sets
+The
+DaemonSet
+controller is like a StatefulSet in that the DaemonSet also runs a specific number of Pods, each with a unique identity. However, the DaemonSet runs exactly one Pod per node, which is useful primarily for control plane and add-on components for a cluster, such as a network or storage plug-in.
+Our cluster already has multiple DaemonSets installed, so let’s look at the
+calico-node
+DaemonSet that’s already running, which runs on each node to provide network configuration for all containers on that node.
+The
+calico-node
+DaemonSet is in the
+calico-system
+Namespace, so we’ll specify that Namespace to request information about the DaemonSet:
+root@host01:~#
+kubectl -n calico-system get daemonsets
+NAME          DESIRED   CURRENT   READY   UP-TO-DATE   AVAILABLE   ...
+calico-node   3         3         3       3            3           ...
+Our cluster has three nodes, so the
+calico-node
+DaemonSet has created three instances. Here’s the configuration of this DaemonSet in YAML format:
+root@host01:~#
+kubectl -n calico-system get daemonset calico-node -o yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+...
+  name: calico-node
+  namespace: calico-system
+...
+spec:
+...
+  selector:
+    matchLabels:
+      k8s-app: calico-node
+...
+The
+-o yaml
+parameter to
+kubectl get
+prints out the configuration and status of one or more resources in YAML format, allowing us to inspect Kubernetes resources in detail.
+The selector for this DaemonSet expects a label called
+k8s-app
+to be set to
+calico-node
+. We can use this to show just the Pods that this DaemonSet creates:
+root@host01:~#
+kubectl -n calico-system get pods \
+-l k8s-app=calico-node -o wide
+NAME                READY   STATUS   ... NODE   ...
+calico-node-h9kjh   1/1     Running  ... host01 ...
+calico-node-rcfk7   1/1     Running  ... host03 ...
+calico-node-wj876   1/1     Running  ... host02 ...
+The DaemonSet has created three Pods, each of which is assigned to one of the nodes in our cluster. If we add additional nodes to our cluster, the DaemonSet will schedule a Pod on the new nodes as well.
+Final Thoughts
+This chapter explored Kubernetes from the perspective of a regular cluster user, creating controllers that in turn create Pods with containers. Having this core knowledge of controller resource types is essential for building our applications. At the same time, it’s important to remember that Kubernetes is using the container technology we explored in
+Part I
+.
+One key aspect of container technology is the ability to isolate containers in separate network namespaces. Running containers in a Kubernetes cluster adds additional requirements for networking because we now need to connect containers running on different cluster nodes. In the next chapter, we consider multiple approaches to make this work as we look at overlay networks.
+
+8
+OVERLAY NETWORKS
+Container networking is complex enough when all of the containers are on a single host, as we saw in
+Chapter 4
+. When we scale up to a cluster of nodes, all of which run containers, the complexity increases substantially. Not only must we provide each container with its own virtual network devices and manage IP addresses, dynamically creating new network namespaces and devices when containers are created, but we also need to ensure that containers on one node can communicate with containers on all the other nodes.
+In this chapter, we’ll describe how
+overlay networks
+are used to provide the appearance of a single container network across all nodes in a Kubernetes cluster. We’ll consider two different approaches for routing container traffic across a host network, examining the network configuration and traffic flows for each. Finally, we’ll explore how Kubernetes uses the Container Network Interface (CNI) standard to configure networking as a separate plug-in, making it easy to shift to new technology as it becomes available and allowing for custom solutions where needed.
+Cluster Networking
+The fundamental goal of a Kubernetes cluster is to treat a set of hosts (physical or virtual machines) as a single computing resource that can be allocated as needed to run containers. From a networking standpoint, this means Kubernetes should be able to schedule a Pod onto any node without worrying about connectivity to Pods on other nodes. It also means that Kubernetes should have a way to dynamically allocate IP addresses to Pods in a way that supports that cluster-wide network connectivity.
+As we’ll see in this chapter, Kubernetes uses a plug-in design to allow any compatible network software to allocate IP addresses and provide cross-node network connectivity. All plug-ins must follow a couple of important rules. First, Pod IP addresses should come from a single pool of IP addresses, although this pool can be subdivided by node. This means that we can treat all Pods as part of a single flat network, no matter where the Pods run. Second, traffic should be routable such that all Pods can see all other Pods and the control plane.
+CNI Plug-ins
+Plug-ins communicate with the Kubernetes cluster, specifically with
+kubelet
+, using the CNI standard. CNI specifies how
+kubelet
+finds and invokes CNI plug-ins. When a new Pod is created,
+kubelet
+first allocates the network namespace. It then invokes the CNI plug-in, providing it a reference to the network namespace. The CNI plug-in adds network devices to the namespace, assigns an IP address, and passes that IP address back to
+kubelet
+.
+Let’s see that process in action. To do so, our examples for this chapter include two different environments with two different CNI plug-ins: Calico and WeaveNet. Both of these plug-ins provide networking for Pods but with different cross-node networking. We’ll begin with the Calico environment.
+NOTE
+The example repository for this book is at
+https://github.com/book-of-kubernetes/examples
+.
+See “Running Examples” on
+page xx
+for details on getting set up.
+By default, CNI plug-in information is kept in
+/etc/cni/net.d
+. We can see the Calico configuration in that directory:
+root@host01:~#
+ls /etc/cni/net.d
+10-calico.conflist  calico-kubeconfig
+The file
+10-calico.conflist
+contains the actual Calico configuration. The file
+calico-kubeconfig
+is used by Calico components to authenticate with the control plane; it was created based on a service account created during Calico installation. The configuration filename has the
+10-
+prefix because
+kubelet
+sorts any configuration files it finds and uses the first one.
+Listing 8-1
+shows the configuration file, which is in JSON format and identifies the network plug-ins to use.
+root@host01:~#
+cat /etc/cni/net.d/10-calico.conflist
+{
+  "name": "k8s-pod-network",
+  "cniVersion": "0.3.1",
+  "plugins": [
+    {
+      "type": "calico",
+...
+    },
+    {
+      "type": "bandwidth",
+      "capabilities": {"bandwidth": true}
+    },
+    {"type": "portmap", "snat": true, "capabilities": {"portMappings": true}}
+  ]
+}
+Listing 8-1: Calico configuration
+The most important field is
+type
+; it specifies which plug-in to run. In this case, we’re running three plug-ins:
+calico
+, which handles Pod networking;
+bandwidth
+, which we can use to configure network limits; and
+portmap
+, which is used to expose container ports to the host network. These two plug-ins inform
+kubelet
+of their purposes using the
+capabilities
+field; as a result, when
+kubelet
+invokes them, it passes in the relevant bandwidth and port mapping configuration so that the plug-in can make the necessary network configuration changes.
+To run these plug-ins,
+kubelet
+needs to know where they are located. The default location for the actual plug-in executables is
+/opt/cni/bin
+, and the name of the plug-in matches the
+type
+field:
+root@host01:~#
+ls /opt/cni/bin
+bandwidth  calico-ipam  flannel      install   macvlan  sbr     vlan
+bridge     dhcp         host-device  ipvlan    portmap  static
+calico     firewall     host-local   loopback  ptp      tuning
+Here, we see a common set of network plug-ins that were installed by
+kubeadm
+along with our Kubernetes cluster. We also see
+calico
+, which was added to this directory by the Calico DaemonSet we installed after cluster initialization.
+Pod Networking
+Let’s look at an example Pod to get a glimpse of how the CNI plug-ins configure the Pod’s network namespace. The behavior is very similar to the work we did in
+Chapter 4
+, adding virtual network devices into network namespaces to enable communication between containers and with the host network.
+Let’s create a basic Pod:
+pod.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod
+spec:
+  containers:
+  - name: pod
+    image: busybox
+    command: 
+      - "sleep"
+      - "infinity"
+  nodeName: host01
+We’ve added the extra field
+nodeName
+to force this Pod to run on
+host01
+, which will make it easier to find and examine how its networking is configured.
+We start the Pod via the usual command:
+root@host01:~#
+kubectl apply -f /opt/pod.yaml
+pod/pod created
+Next, check to see that it’s running:
+root@host01:~#
+kubectl get pods
+NAME   READY   STATUS    RESTARTS   AGE
+pod    1/1     Running   0          2m32s
+After it’s running, we can use
+crictl
+to capture its unique ID:
+root@host01:~#
+POD_ID=$(crictl pods --name pod -q)
+root@host01:~#
+echo $POD_ID
+b7d2391320e07f97add7ccad2ad1a664393348f1dcb6f803f701318999ed0295
+At this point, using the Pod ID, we can find its network namespace. In
+Listing 8-2
+, we use
+jq
+to extract only the data we want, just as we did in
+Chapter 4
+. We’ll then assign it to a variable.
+root@host01:~#
+NETNS_PATH=$(crictl inspectp $POD_ID |
+jq -r '.info.runtimeSpec.linux.namespaces[]|select(.type=="network").path')
+root@host01:~#
+echo $NETNS_PATH
+/var/run/netns/cni-7cffed61-fb56-9be1-0548-4813d4a8f996
+root@host01:~#
+NETNS=$(basename $NETNS_PATH)
+root@host01:~#
+echo $NETNS
+cni-7cffed61-fb56-9be1-0548-4813d4a8f996
+Listing 8-2: Network namespace
+We now can explore the network namespace to see how Calico set up the IP address and network routing for this Pod. First, as expected, this network namespace is being used for our Pod:
+root@host01:~#
+ps $(ip netns pids $NETNS)
+PID TTY      STAT   TIME COMMAND
+  35574 ?        Ss     0:00 /pause
+  35638 ?        Ss     0:00 sleep infinity
+We see the two processes that we should expect. The first is a pause container that is always created whenever we create a Pod. This is a permanent container to hold the network namespace. The second is our BusyBox container running
+sleep
+, as we configured in the Pod YAML file.
+Now, let’s see the configured network interfaces:
+root@host03:~#
+ip netns exec $NETNS ip addr
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN ...
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+3:
+➊
+eth0@if16: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1450 ... state UP ...
+    link/ether 7a:9e:6c:e2:30:47 brd ff:ff:ff:ff:ff:ff link-netnsid 0
+    inet
+➋
+172.31.239.205/32 brd 172.31.25.202 scope global eth0
+       valid_lft forever preferred_lft forever
+    inet6 fe80::789e:6cff:fee2:3047/64 scope link 
+       valid_lft forever preferred_lft forever
+Calico has created the network device
+eth0@if16
+in the network namespace
+➊
+and given it an IP address of
+172.31.239.205
+➋
+. Note that the network length for that IP address is
+/32
+, which indicates that any traffic must go through a configured router. This is different from how our bridged container networking worked in
+Chapter 4
+. It is necessary so that Calico can provide firewall capabilities via network policies.
+The choice of IP address for this Pod was ultimately up to Calico. Calico is configured with
+172.31.0.0/16
+for use as the IP address space for Pods. Calico decides how to divide this address space up between nodes and then allocates IP addresses to each Pod from the range allocated to the node. Calico then passes this IP address back to
+kubelet
+so that it can update the Pod’s status:
+root@host01:~#
+kubectl get pods -o wide
+NAME   READY   STATUS    RESTARTS   AGE   IP                NODE    ...
+pod    1/1     Running   0          16m   172.31.239.205   host01   ...
+When Calico created the network interface in the Pod, it created it as part of a virtual Ethernet (veth) pair. The veth pair acts as a virtual network wire that creates a connection to a network interface in the root namespace,
+allowing connections outside the Pod.
+Listing 8-3
+lets us have a look at both halves of the veth pair.
+root@host01:~#
+ip netns exec $NETNS ip link
+...
+3: eth0@if13: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1450 qdisc noqueue ... 
+    link/ether 6e:4c:3a:41:d0:54 brd ff:ff:ff:ff:ff:ff link-netnsid 0
+root@host01:~#
+ip link | grep -B 1 $NETNS
+13: cali9381c30abed@if3: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1450 ... 
+    link/ether ee:ee:ee:ee:ee:ee ... link-netns cni-7cffed61-fb56-9be1-0548-4813d4a8f996
+Listing 8-3: Calico veth pair
+The first command prints the network interfaces inside the namespace, whereas the second prints the interfaces on the host. Each contains the field
+link-netns
+pointing to the corresponding network namespace of the other interface, showing that these two interfaces create a link between our Pod’s namespace and the root namespace.
+Cross-Node Networking
+So far, the configuration of the virtual network devices in the container looks very similar to the container networking in
+Chapter 4
+, where there was no Kubernetes cluster installed. The difference in this case is that the network plug-in is configured not just to connect containers on a single node, but to connect containers running anywhere in the cluster.
+WHY NOT NAT?
+Regular container networking does, of course, provide connectivity to the host network. However, as we’ve discussed, it accomplishes this using Network Address Translation (NAT). This is fine for containers running individual client applications, as connection tracking enables Linux to route server responses all the way into the originating container. It does not work for containers that need to act as servers, which is a key use case for a Kubernetes cluster.
+For most private networks that use NAT to connect to a broader network, port forwarding is used to expose specific services from within the private network. That isn’t a good solution for every container in every Pod, as we would quickly run out of ports to allocate. The network plug-ins do end up using NAT, but only to connect containers acting as clients to make connections to networks outside the cluster. In addition, we will see port forwarding behavior in
+Chapter 9
+, where it will be one possible way to expose Services outside the cluster.
+The challenge in cross-node networking is that the Pod network has a different range of IP addresses from the host network, so the host network does not know how to route this traffic. There are a couple of different ways that network plug-ins work around this. We’ll begin by continuing with our cluster running Calico. Then, we’ll show a different cross-node networking technology using WeaveNet.
+Calico Networking
+Calico performs cross-node networking using Layer 3 routing. This means that it routes based on IP addresses, configuring IP routing tables on each host and in the Pod to ensure that traffic is sent to the correct host and then to the correct Pod. Thus, at the host level, we see the Pod IP addresses as the source and destination. Because Calico relies on the built-in routing capabilities of Linux, we don’t need to configure our host network switch to route the traffic, but we do need to configure any security controls on the host network switch to allow Pod IP addresses to travel across the network.
+To explore Calico cross-node networking, it helps to have two Pods: one on
+host01
+and the other on
+host02
+. We’ll use this resource file:
+two-pods.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod1
+spec:
+  containers:
+  - name: pod1
+    image: busybox
+    command: 
+      - "sleep"
+      - "infinity"
+  nodeName: host01
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod2
+spec:
+  containers:
+  - name: pod2
+    image: busybox
+    command: 
+      - "sleep"
+      - "infinity"
+  nodeName: host02
+As always, these files have been loaded into the
+/opt
+directory by the automated scripts for this chapter.
+The
+---
+separator allows us to put two different Kubernetes resources in the same file so that we can manage them together. The only difference in configuration with these two Pods is that they each have a
+nodeName
+field to ensure that they are assigned to the correct node.
+Let’s delete our existing Pod and replace it with the two that we need:
+root@host01:~#
+kubectl delete -f /opt/pod.yaml
+pod "pod" deleted
+root@host01:~#
+kubectl apply -f /opt/two-pods.yaml
+pod/pod1 created
+pod/pod2 created
+After these Pods are running, we’ll need to collect their IP addresses:
+root@host01:~#
+IP1=$(kubectl get po pod1 -o json | jq -r '.status.podIP')
+root@host01:~#
+IP2=$(kubectl get po pod2 -o json | jq -r '.status.podIP')
+root@host01:~#
+echo $IP1
+172.31.239.216
+root@host01:~#
+echo $IP2
+172.31.89.197
+We’re able to extract the Pod IP using a simple
+jq
+filter because our
+kubectl get
+command is guaranteed to return only one item. If we were running
+kubectl get
+without a filter, or with a filter that might match multiple Pods, the JSON output would be a list and we would need to change the
+jq
+filter accordingly.
+Let’s quickly verify that we have connectivity between these two Pods:
+root@host01:~#
+kubectl exec -ti pod1 -- ping -c 3 $IP2
+PING 172.31.89.197 (172.31.89.197): 56 data bytes
+64 bytes from 172.31.89.197: seq=0 ttl=62 time=2.867 ms
+64 bytes from 172.31.89.197: seq=1 ttl=62 time=0.916 ms
+64 bytes from 172.31.89.197: seq=2 ttl=62 time=1.463 ms
+
+--- 172.31.89.197 ping statistics ---
+3 packets transmitted, 3 packets received, 0% packet loss
+round-trip min/avg/max = 0.916/1.748/2.867 ms
+The
+ping
+command shows that all three packets arrived successfully, so we know the Pods can communicate across nodes.
+As in our earlier example, each of these Pods has a network interface with a network length of
+/32
+, meaning that all traffic must go through a router. For example, here is the IP configuration and route table for
+pod1
+:
+root@host01:~#
+kubectl exec -ti pod1 -- ip addr
+...
+3: eth0@if17: <BROADCAST,MULTICAST,UP,LOWER_UP,M-DOWN> mtu 1450 qdisc noqueue 
+    link/ether f2:ed:e8:04:00:cc brd ff:ff:ff:ff:ff:ff
+    inet 172.31.239.216/32 brd 172.31.239.216 scope global eth0
+...
+root@host01:~#
+kubectl exec -ti pod1 -- ip route
+default via 169.254.1.1 dev eth0 
+169.254.1.1 dev eth0 scope link
+Based on this configuration, when we run our
+ping
+command, the networking stack recognizes that the destination IP is not local to any interface. It therefore looks up
+169.254.1.1
+in its Address Resolution Protocol (ARP) table to determine where to send the “next hop.” If we try to find an interface either in the container or on the host that has the address
+169.254.1.1
+, we won’t be successful. Rather than actually assign that address to an interface, Calico just configures “proxy ARP” so that the packet will be sent through the
+eth0
+end of the veth pair. As a result, there is an entry for
+169.254.1.1
+in the ARP table inside the container:
+root@host01:~#
+kubectl exec -ti pod1 -- arp -n
+? (169.254.1.1) at ee:ee:ee:ee:ee:ee [ether]  on eth0
+...
+As shown in
+Listing 8-3
+, the hardware address
+ee:ee:ee:ee:ee:ee
+belongs to the host side of the veth pair, so this is sufficient to get the packet out of the container and into the root network namespace. From there, IP routing takes over.
+Calico has already configured the routing table to send packets to other cluster nodes based on the destination IP address range for that node and to send packets to local containers based on their individual IP addresses. We can see the result of this in the IP routing table on the host:
+root@host01:~#
+ip route
+...
+172.31.25.192/26 via 192.168.61.13 dev enp0s8 proto 80 onlink 
+172.31.89.192/26 via 192.168.61.12 dev enp0s8 proto 80 onlink 
+172.31.239.216 dev calice0906292e2 scope link 
+...
+Because the destination address for the ping is within the
+172.31.89.192/26
+network, the packet now is routed to
+192.168.61.12
+, which is
+host02
+.
+Let’s look at the routing table on
+host02
+so that we can follow along with the next step:
+root@host02:~#
+ip route
+...
+172.31.239.192/26 via 192.168.61.11 dev enp0s8 proto 80 onlink 
+172.31.25.192/26 via 192.168.61.13 dev enp0s8 proto 80 onlink 
+172.31.89.197 dev calibd2348b4f67 scope link 
+...
+If you want to run this command for yourself, make sure you run it from
+host02
+. When our packet arrives at
+host02
+, it has a route for the specific IP address that is the destination of the
+ping
+. This route sends the packet into the veth pair that is attached to the
+pod2
+network namespace.
+Now that the ping has arrived, the network stack inside
+pod2
+sends back a reply. The reply goes through the same process to reach the root network namespace of
+host02
+. Based on the
+host02
+routing table, it is sent to
+host01
+,
+where a routing table entry for
+172.31.239.216
+is used to send it to the appropriate container.
+Because Calico is using Layer 3 routing, the host network sees the actual container IP addresses. We can confirm that using
+tcpdump
+. We’ll switch back to
+host01
+for this.
+First, let’s kick off
+tcpdump
+in the background:
+root@host01:~#
+tcpdump -n -w pings.pcap -i any icmp &
+[1] 70949
+tcpdump: listening on any ...
+The
+-n
+flag tells
+tcpdump
+to avoid trying to lookup hostnames in DNS for any IP addresses; this saves time. The
+-w pings.pcap
+flag tells
+tcpdump
+to write its data to the file
+pings.pcap
+; the
+-i any
+flag tells it to listen on all network interfaces; the
+icmp
+filter tells it to listen only to ICMP traffic; and finally,
+&
+at the end puts it in the background.
+The
+pcap
+filename extension is important because our Ubuntu host system will only allow
+tcpdump
+to read files with that extension.
+Now, let’s run
+ping
+again:
+root@host01:~#
+kubectl exec -ti pod1 -- ping -c 3 $IP2
+...
+3 packets transmitted, 3 packets received, 0% packet loss
+round-trip min/avg/max = 0.928/0.991/1.115 ms
+The ICMP requests and replies have been collected, but they are being buffered in memory.
+To get them dumped to the file, we’ll shut down
+tcpdump
+:
+root@host01:~#
+killall tcpdump
+12 packets captured
+12 packets received by filter
+0 packets dropped by kernel
+There were three pings, and each ping consists of a request and a reply. Thus, we might have expected six packets, but in fact we captured 12. To see why, let’s print the details of the packets that
+tcpdump
+collected:
+root@host01:~#
+tcpdump -enr pings.pcap
+reading from file pings.pcap, link-type LINUX_SLL (Linux cooked v1)
+00:16:23...  In f2:ed:e8:04:00:cc
+➊
+... 172.31.239.216 > 172.31.89.197: ICMP echo request ...
+00:16:23... Out 08:00:27:b7:ef:ef
+➋
+... 172.31.239.216 > 172.31.89.197: ICMP echo request ...
+00:16:23...  In 08:00:27:fc:d2:36
+➌
+... 172.31.89.197 > 172.31.239.216: ICMP echo reply ...
+00:16:23... Out ee:ee:ee:ee:ee:ee
+➍
+... 172.31.89.197 > 172.31.239.216: ICMP echo reply ...
+...
+The
+-e
+flag to
+tcpdump
+prints the hardware addresses; otherwise, we wouldn’t be able to tell some of the packets apart. The first hardware address
+➊
+is the hardware address of
+eth0
+inside the Pod. Next is the same packet again, but this time the hardware address is the host interface
+➋
+. We
+then see the reply, first arriving at the host interface and labeled with the hardware address for
+host02
+➌
+. Finally, the packet is routed into the Calico network interface corresponding to our Pod
+➍
+, and our
+ping
+has made its round trip.
+We’re now done with these two Pods, so let’s delete them:
+root@host01:~#
+kubectl delete -f /opt/two-pods.yaml
+pod "pod1" deleted
+pod "pod2" deleted
+Using Layer 3 routing is an elegant solution to cross-node networking for a Kubernetes cluster, as it takes advantage of the routing and traffic forwarding capabilities that are native to Linux. However, it does mean that the host network sees the Pods’ IP addresses, which may require security rule changes. For example, the automated scripts that set up virtual machines in Amazon Web Services (AWS) for use with this book not only configure a security group to allow all traffic in the Pod IP address space, but they also turn off the “source/destination check” for the virtual machine instances. Otherwise, the underlying AWS network infrastructure would refuse to pass traffic with unexpected IP addresses to our cluster’s nodes.
+WeaveNet
+Layer 3 routing is not the only solution for cross-node networking. Another option is to “encapsulate” the container packets into a packet that is sent explicitly host to host. This is the approach taken by popular network plug-ins such as Flannel and WeaveNet. We’ll look at a WeaveNet example, but the traffic using Flannel looks very similar.
+NOTE
+Larger clusters based on Calico also use encapsulation for some traffic between networks. For example, a cluster that spans multiple regions, or Availability Zones, in AWS would likely need to configure Calico to use encapsulation, given that it may not be possible or practical to configure all of the routers between the regions or Availability Zones with the necessary Pod IP routes for the cluster.
+Because everything you might want to do in networking has some defined standard, it’s not surprising that there is a standard for encapsulation: Virtual Extensible LAN (VXLAN). In VXLAN, each packet is wrapped in a UDP datagram and sent to the destination.
+We’ll use the same
+two-pods.yaml
+configuration file to create two Pods in our Kubernetes cluster, this time using a cluster built from the
+weavenet
+directory from this chapter’s examples. As before, we end up with one Pod on
+host01
+and the other on
+host02
+:
+root@host01:~#
+kubectl apply -f /opt/two-pods.yaml
+pod/pod1 created
+pod/pod2 created
+Let’s check that these Pods are running and allocated correctly to their different hosts:
+root@host01:~#
+kubectl get po -o wide
+NAME   READY   STATUS    ... IP           NODE     ...
+pod1   1/1     Running   ... 10.46.0.8    host01   ...
+pod2   1/1     Running   ... 10.40.0.21   host02   ...
+After these Pods are running, we can collect their IP addresses using the same commands shown earlier:
+root@host01:~#
+IP1=$(kubectl get po pod1 -o json | jq -r '.status.podIP')
+root@host01:~#
+IP2=$(kubectl get po pod2 -o json | jq -r '.status.podIP')
+root@host01:~#
+echo $IP1
+10.46.0.8
+root@host01:~#
+echo $IP2
+10.40.0.21
+Note that the IP addresses assigned look nothing like the Calico example. Further exploration shows that the address and routing configuration is also different, as demonstrated in
+Listing 8-4
+.
+root@host01:~#
+kubectl exec -ti pod1 -- ip addr
+...
+25: eth0@if26: <BROADCAST,MULTICAST,UP,LOWER_UP,M-DOWN> mtu 1376 qdisc noqueue 
+    link/ether e6:78:69:44:3d:a4 brd ff:ff:ff:ff:ff:ff
+    inet 10.46.0.8/12 brd 10.47.255.255 scope global eth0
+       valid_lft forever preferred_lft forever
+...
+root@host01:~#
+kubectl exec -ti pod1 -- ip route
+default via 10.46.0.0 dev eth0 
+10.32.0.0/12 dev eth0 scope link  src 10.46.0.8
+Listing 8-4: WeaveNet networking
+This time, our Pods are getting IP addresses in a massive
+/12
+network, corresponding to more than one million possible addresses on a single network. In this case, our Pod’s networking stack is going to expect to be able to use ARP to directly identify the hardware address of any other Pod on the network rather than routing traffic to a gateway as we saw with Calico.
+As before, we do have connectivity between these two Pods:
+root@host01:~#
+kubectl exec -ti pod1 -- ping -c 3 $IP2
+PING 10.40.0.21 (10.40.0.21): 56 data bytes
+64 bytes from 10.40.0.21: seq=0 ttl=64 time=0.981 ms
+64 bytes from 10.40.0.21: seq=1 ttl=64 time=0.963 ms
+64 bytes from 10.40.0.21: seq=2 ttl=64 time=0.871 ms
+--- 10.40.0.21 ping statistics ---
+3 packets transmitted, 3 packets received, 0% packet loss
+round-trip min/avg/max = 0.871/0.938/0.981 ms
+And now that we’ve run this
+ping
+command, we should expect that the ARP table in the
+pod1
+networking stack is populated with the hardware address of the
+pod2
+network interface:
+root@host01:~#
+kubectl exec -ti pod1 -- arp -n
+? (10.40.0.21) at ba:75:e6:db:7c:c6 [ether]  on eth0
+? (10.46.0.0) at 1a:72:78:64:36:c6 [ether]  on eth0
+As expected,
+pod1
+has an ARP table entry for
+pod2
+’s IP address, corresponding to the virtual network interface inside
+pod2
+:
+root@host01:~#
+kubectl exec -ti pod2 -- ip addr
+...
+53: eth0@if54: <BROADCAST,MULTICAST,UP,LOWER_UP,M-DOWN> mtu 1376 qdisc noqueue 
+    link/ether
+➊
+ba:75:e6:db:7c:c6 brd ff:ff:ff:ff:ff:ff
+    inet 10.40.0.21/12 brd 10.47.255.255 scope global eth0
+       valid_lft forever preferred_lft forever
+...
+The hardware address in the
+pod1
+ARP table matches the hardware address of the virtual network device in
+pod2
+➊
+. To make this happen, WeaveNet is routing the ARP request over the network so that the network stack in
+pod2
+can respond.
+Let’s look at how the cross-node routing of ARP and ICMP traffic is happening. First, although the IP address management may be different, one important similarity between Calico and WeaveNet is that both are using veth pairs to connect containers to the host. If you want to explore that, use the commands shown in
+Listing 8-2
+and
+Listing 8-3
+to determine the network namespace for
+pod1
+, and then use
+ip addr
+on
+host01
+to verify that there is a
+veth
+device with a
+link-netns
+field that corresponds to that network namespace.
+For our purposes, because we’ve seen that before, we’ll take it as a given that the traffic goes through the virtual network wire created by the veth pair and gets to the host. Let’s start there and trace the ICMP traffic between the two Pods.
+If we use the same
+tcpdump
+capture as we did with Calico, we’ll be able to capture the ICMP traffic, but that will get us only so far. Let’s go ahead and look at that:
+root@host01:~#
+tcpdump -w pings.pcap -i any icmp &
+[1] 55999
+tcpdump: listening on any, link-type LINUX_SLL (Linux cooked v1) ...
+root@host01:~#
+kubectl exec -ti pod1 -- ping -c 3 $IP2
+...
+3 packets transmitted, 3 packets received, 0% packet loss
+round-trip min/avg/max = 0.824/1.691/3.053 ms
+root@host01:~#
+killall tcpdump
+24 packets captured
+24 packets received by filter
+0 packets dropped by kernel
+As before, we ran
+tcpdump
+in the background to capture ICMP on all network interfaces, ran our
+ping
+, and then stopped
+tcpdump
+so that it would write out the packets it captured. This time we have 24 packets to look at, but they still don’t tell the whole story:
+root@host01:~#
+tcpdump -enr pings.pcap
+reading from file pings.pcap, link-type LINUX_SLL (Linux cooked v1)
+16:22:08.211499   P e6:78:69:44:3d:a4 ... 10.46.0.8 > 10.40.0.21: ICMP echo request ...
+16:22:08.211551 Out e6:78:69:44:3d:a4 ... 10.46.0.8 > 10.40.0.21: ICMP echo request ...
+16:22:08.211553   P e6:78:69:44:3d:a4 ... 10.46.0.8 > 10.40.0.21: ICMP echo request ...
+16:22:08.211745 Out e6:78:69:44:3d:a4 ... 10.46.0.8 > 10.40.0.21: ICMP echo request ...
+16:22:08.212917   P ba:75:e6:db:7c:c6 ... 10.40.0.21 > 10.46.0.8: ICMP echo reply ...
+16:22:08.213704 Out ba:75:e6:db:7c:c6 ... 10.40.0.21 > 10.46.0.8: ICMP echo reply ...
+16:22:08.213708   P ba:75:e6:db:7c:c6 ... 10.40.0.21 > 10.46.0.8: ICMP echo reply ...
+16:22:08.213724 Out ba:75:e6:db:7c:c6 ... 10.40.0.21 > 10.46.0.8: ICMP echo reply ...
+...
+These lines show four packets for a single
+ping
+request and reply, but the hardware addresses aren’t changing. What’s happening is that these ICMP packets are being handed between network interfaces unmodified. However, we’re still not seeing the actual traffic that’s going between
+host01
+and
+host02
+, because we never see any hardware addresses that correspond to host interfaces.
+To see the host-level traffic, we need to tell
+tcpdump
+to capture UDP and then treat it as VXLAN, which enables
+tcpdump
+to identify the fact that an ICMP packet is inside.
+Let’s start the capture again, this time looking for UDP traffic:
+root@host01:~#
+tcpdump -w vxlan.pcap -i any udp &
+...
+root@host01:~#
+kubectl exec -ti pod1 -- ping -c 3 $IP2
+...
+3 packets transmitted, 3 packets received, 0% packet loss
+round-trip min/avg/max = 1.139/1.364/1.545 ms
+root@host01:~#
+killall tcpdump
+22 packets captured
+24 packets received by filter
+0 packets dropped by kernel
+This time we saved the packet data in
+vxlan.pcap
+. In this example,
+tcpdump
+captured 22 packets. Because there is lots of cross-Pod traffic in our cluster, not just ICMP traffic, you might see a different number.
+The packets we captured cover all of the UDP traffic on
+host01
+, not just our ICMP, so in printing out the packets shown in
+Listing 8-5
+, we’ll need to be selective.
+root@host01:~#
+tcpdump -enr vxlan.pcap -T vxlan | grep -B 1 ICMP
+reading from file vxlan.pcap, link-type LINUX_SLL (Linux cooked v1)
+16:45:47.307949 Out 08:00:27:32:a0:28 ... 
+  length 150: 192.168.61.11.50200 > 192.168.61.12.6784: VXLAN ...
+e6:78:69:44:3d:a4 > ba:75:e6:db:7c:c6 ... 
+  length 98: 10.46.0.8 > 10.40.0.21: ICMP echo request ...
+16:45:47.308699  In 08:00:27:67:b9:da ... 
+  length 150: 192.168.61.12.43489 > 192.168.61.11.6784: VXLAN ... 
+ba:75:e6:db:7c:c6 > e6:78:69:44:3d:a4 ... 
+  length 98: 10.40.0.21 > 10.46.0.8: ICMP echo reply ...
+16:45:48.308240 Out 08:00:27:32:a0:28 ... 
+  length 150: 192.168.61.11.50200 > 192.168.61.12.6784: VXLAN ... 
+...
+Listing 8-5: VXLAN capture
+The
+-T vxlan
+flag tells
+tcpdump
+to treat the packet data it sees as VXLAN data. This causes
+tcpdump
+to look inside and pull out data from the encapsulated packets, enabling it to identify ICMP packets when those are hidden inside. We then use
+grep
+with a
+-B 1
+flag to find those ICMP packets and also print the line immediately previous so that we can see the VXLAN wrapper.
+This capture shows the host’s hardware address, which informs us that we’ve managed to capture the traffic moving between hosts. Each ICMP packet is wrapped in a UDP datagram and sent across the host network. The IP source and destination for these datagrams are the host network IP addresses
+192.168.61.11
+and
+192.168.61.12
+, so the host network never sees the Pod IP addresses. However, that information is still there, in the encapsulated ICMP packet, thus when the datagram arrives at its destination, WeaveNet can send the ICMP packet to the correct destination.
+The advantage of encapsulation is that all of our cross-node traffic looks like ordinary UDP datagrams between hosts. Typically, we don’t need to do any additional network configuration to allow this traffic. However, we do pay a price. As you can see in
+Listing 8-5
+, each ICMP packet is 98 bytes, but the encapsulated packet is 150 bytes. The wrapper needed for encapsulation creates network overhead that we have to pay with each packet we send.
+Look back at
+Listing 8-4
+for another consequence. The virtual network interface inside the Pod has a maximum transmission unit (MTU) of 1,376. This represents the largest packet that can be sent; anything bigger must to be fragmented into multiple packets and reassembled at the destination. This MTU of 1,376 is considerably smaller than the standard MTU of 1,500 on our host network. The smaller MTU on the Pod interface ensures that the Pod’s network stack will do any required fragmenting. This way, we can guarantee that we don’t exceed 1,500 at the host layer, even after the wrapper is added. For this reason, if you are using a network plug-in that uses
+encapsulation, it might be worth exploring how to configure jumbo frames to enable an MTU larger than 1,500 on the host network.
+Choosing a Network Plug-in
+Network plug-ins can use different approaches to cross-node networking. As is universal in engineering, though, there are trade-offs with each approach. Layer 3 routing uses native capabilities of Linux and is efficient in its use of the network bandwidth, but it may require customization of the underlying host network. Encapsulation with VXLAN works in any network where we can send UDP datagrams between hosts, but it adds overhead with each packet.
+Either way, however, our Pods are getting what they need, which is the ability to communicate with other Pods, wherever in the cluster they may be. And in practice, the configuration effort and performance difference tends to be small. For this reason, the best way to choose a network plug-in is to start with the plug-in that is recommended for or installed by default with your particular Kubernetes distribution. If you find specific use cases for which the performance doesn’t meet your requirements, you’ll then be able to test an alternative plug-in based on real network traffic rather than guesswork.
+Network Customization
+Some scenarios may require cluster networking that is more complex than a single Pod network connected across all cluster nodes. For example, some regulated industries require certain data, such as security audit logs, to travel across a separated network. Other systems may have specialized hardware so that application components that interface with that hardware must be placed on a specific network or virtual LAN (VLAN).
+One of the advantages of a plug-in architecture for networking is that a Kubernetes cluster can accommodate these specialized networking scenarios. As long as Pods have an interface that can reach (and is reachable from) the rest of the cluster, Pods can have additional network interfaces that provide specialized connectivity.
+Let’s look at an example. We’ll configure two Pods on the same node so they have a local host-only network they can use for intercommunication. Being a host-only network, it doesn’t provide connectivity to the rest of the cluster, so we’ll also use Calico to provide cluster networking for Pods.
+Because of the need to configure both Calico and our host-only network, we’ll be invoking two separate CNI plug-ins that will create virtual network interfaces in our Pods’ network namespaces. As we saw in
+Listing 8-1
+, it’s possible to configure multiple CNI plug-ins in a single configuration file. However,
+kubelet
+expects only one of these CNI plug-ins to actually assign a network interface and IP address. To work around this, we’ll use Multus, a CNI plug-in that is designed to invoke multiple plug-ins but will treat one as primary for purposes of reporting IP address information back to
+kubelet
+.
+Multus also allows us to be selective as to what CNI plug-ins are applied to each Pod.
+We’ll begin by installing Multus into the
+calico
+example cluster for this chapter:
+root@host01:~#
+kubectl apply -f /opt/multus-daemonset.yaml
+customresourcedefinition.../network-attachment-definitions... created
+clusterrole.rbac.authorization.k8s.io/multus created
+clusterrolebinding.rbac.authorization.k8s.io/multus created
+serviceaccount/multus created
+configmap/multus-cni-config created
+daemonset.apps/kube-multus-ds created
+As the filename implies, the primary resource in this YAML file is a DaemonSet that runs a Multus container on every host. However, this file installs several other resources, including a
+CustomResourceDefinition
+. This CustomResourceDefinition will allow us to configure network attachment resources to tell Multus what CNI plug-ins to use for a given Pod.
+We’ll look at CustomResourceDefinitions in detail in
+Chapter 17
+. For now, in
+Listing 8-6
+we’ll just see the NetworkAttachmentDefinition that we’ll use to configure Multus.
+netattach.yaml
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: macvlan-conf
+spec:
+  config: '{
+      "cniVersion": "0.3.0",
+      "type": "macvlan",
+      "mode": "bridge",
+      "ipam": {
+        "type": "host-local",
+        "subnet": "10.244.0.0/24",
+        "rangeStart": "10.244.0.1",
+        "rangeEnd": "10.244.0.254"
+      }
+    }'
+Listing 8-6: Network attachment
+The
+config
+field in the
+spec
+looks a lot like a CNI configuration file, which isn’t surprising, as Multus needs to use this information to invoke the
+macvlan
+CNI plug-in when we ask for it to be added to a Pod.
+We need to add this NetworkAttachmentDefinition to the cluster:
+root@host01:~#
+kubectl apply -f /opt/netattach.yaml
+networkattachmentdefinition.k8s.cni.cncf.io/macvlan-conf created
+This definition doesn’t immediately affect any of our Pods; it just provides a Multus configuration for future use.
+Of course, to use this configuration, Multus must be invoked. How does that happen when we’ve already installed Calico into this cluster? The answer is in the
+/etc/cni/net.d
+directory, which the Multus DaemonSet modified on all of our cluster nodes as part of its initialization:
+root@host01:~#
+ls /etc/cni/net.d
+00-multus.conf  10-calico.conflist  calico-kubeconfig  multus.d
+Multus left the existing Calico configuration files in place, but added its own
+00-multus.conf
+configuration file and a
+multus.d
+directory. Because the
+00-multus.conf
+file is ahead of
+10-calico.conflist
+in an alphabetic sort,
+kubelet
+will start to use it the next time it creates a new Pod.
+Here’s
+00-multus.conf
+:
+00-multus.conf
+{
+  "cniVersion": "0.3.1",
+  "name": "multus-cni-network",
+  "type": "multus",
+  "capabilities": {
+    "portMappings": true,
+    "bandwidth": true
+  },
+  "kubeconfig": "/etc/cni/net.d/multus.d/multus.kubeconfig",
+  "delegates": [
+    {
+      "name": "k8s-pod-network",
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "calico",
+...
+          }
+        },
+        {
+          "type": "bandwidth",
+...
+        },
+        {
+          "type": "portmap",
+...
+        }
+      ]
+    }
+  ]
+}
+The
+delegates
+field is pulled from the Calico configuration that Multus found. This field is used to determine the default CNI plug-ins that Multus always uses when it is invoked. The top-level
+capabilities
+field is needed to ensure that Multus will get all the correct configuration data from
+kubelet
+to be able to invoke the
+portmap
+and
+bandwidth
+plug-ins.
+Now that Multus is fully set up, let’s use it to add a host-only network to two Pods. The Pods are defined as follows:
+local-pods.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod1
+  annotations:
+    k8s.v1.cni.cncf.io/networks: macvlan-conf
+spec:
+  containers:
+  - name: pod1
+    image: busybox
+    command: 
+      - "sleep"
+      - "infinity"
+  nodeName: host01
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod2
+  annotations:
+    k8s.v1.cni.cncf.io/networks: macvlan-conf
+spec:
+  containers:
+  - name: pod2
+    image: busybox
+    command: 
+      - "sleep"
+      - "infinity"
+  nodeName: host01
+This time we need both Pods to wind up on
+host01
+so that the host-only networking functions. In addition, we add the
+k8s.v1.cni.cncf.io/networks
+annotation to each Pod. Multus uses this annotation to identify what additional CNI plug-ins it should run. The name
+macvlan-conf
+matches the name we provided in the NetworkAttachmentDefinition in
+Listing 8-6
+.
+Let’s create these two Pods:
+root@host01:~#
+kubectl apply -f /opt/local-pods.yaml
+pod/pod1 created
+pod/pod2 created
+After these Pods are running, we can check that they each have an extra network interface:
+root@host01:~#
+kubectl exec -ti pod1 -- ip addr
+...
+3: eth0@if12: <BROADCAST,MULTICAST,UP,LOWER_UP,M-DOWN> mtu 1450 qdisc noqueue 
+    link/ether 9a:a1:db:ec:c7:91 brd ff:ff:ff:ff:ff:ff
+    inet 172.31.239.198/32 brd 172.31.239.198 scope global eth0
+       valid_lft forever preferred_lft forever
+...
+4: net1@if2: <BROADCAST,MULTICAST,UP,LOWER_UP,M-DOWN> mtu 1500 qdisc noqueue 
+    link/ether 9e:4f:c4:47:40:07 brd ff:ff:ff:ff:ff:ff
+    inet 10.244.0.2/24 brd 10.244.0.255 scope global net1
+       valid_lft forever preferred_lft forever
+...
+root@host01:~#
+kubectl exec -ti pod2 -- ip addr
+...
+3: eth0@if13: <BROADCAST,MULTICAST,UP,LOWER_UP,M-DOWN> mtu 1450 qdisc noqueue 
+    link/ether 52:08:99:a7:d2:bc brd ff:ff:ff:ff:ff:ff
+    inet 172.31.239.199/32 brd 172.31.239.199 scope global eth0
+       valid_lft forever preferred_lft forever
+...
+4: net1@if2: <BROADCAST,MULTICAST,UP,LOWER_UP,M-DOWN> mtu 1500 qdisc noqueue 
+    link/ether a6:e5:01:82:81:82 brd ff:ff:ff:ff:ff:ff
+    inet 10.244.0.3/24 brd 10.244.0.255 scope global net1
+       valid_lft forever preferred_lft forever
+...
+The
+macvlan
+CNI plug-in has added the additional
+net1
+network interface, using the IP address management configuration we provided in the NetworkAttachmentDefinition.
+These two Pods are now able to communicate with each other using these interfaces:
+root@host01:~#
+kubectl exec -ti pod1 -- ping -c 3 10.244.0.3
+PING 10.244.0.3 (10.244.0.3): 56 data bytes
+64 bytes from 10.244.0.3: seq=0 ttl=64 time=3.125 ms
+64 bytes from 10.244.0.3: seq=1 ttl=64 time=0.192 ms
+64 bytes from 10.244.0.3: seq=2 ttl=64 time=0.085 ms
+
+--- 10.244.0.3 ping statistics ---
+3 packets transmitted, 3 packets received, 0% packet loss
+round-trip min/avg/max = 0.085/1.134/3.125 ms
+This communication goes over the bridge created by the
+macvlan
+CNI plug-in, as opposed to travelling via Calico.
+Keep in mind that our purpose here is solely to demonstrate custom networking without requiring any particular VLAN or complex setup outside our cluster hosts. For a real cluster, this kind of host-only network is of limited value because it constrains where Pods can be deployed. In this kind of situation, it might be preferable to place the two containers into the same Pod so that they will always be scheduled together and can use
+localhost
+to communicate.
+Final Thoughts
+We’ve looked at a lot of network interfaces and traffic flows in this chapter. Most of the time, it’s enough to know that every Pod in the cluster is allocated an IP address from a Pod network, and also that any Pod in the cluster can reach and is reachable from any other Pod. Any of the Kubernetes network plug-ins provide this capability, whether they use Layer 3 routing or VXLAN encapsulation, or possibly both.
+At the same time, networking issues do occur in a cluster, and it’s essential for cluster administrators and cluster users to understand how the traffic is flowing between hosts and what that traffic looks like to the host network in order to debug issues with switch and host configuration, or simply to build applications that make best use of the cluster.
+We’re not yet done with the networking layers that are needed to have a fully functioning Kubernetes cluster. In the next chapter, we’ll look at how Kubernetes provides a Service layer on top of Pod networking to provide load balancing and automated failover, and then uses the Service networking layer together with Ingress networking to make container services accessible outside the cluster.
+
+9
+SERVICE AND INGRESS NETWORKS
+A decent amount of complexity was involved in creating a cluster-wide network so that all of our Pods could communicate with one another. At the same time, we still don’t have all of the networking functionality we need to build scalable, resilient applications. We need networking that supports load balancing our application components across multiple instances and provides the ability to send traffic to new Pod instances as existing instances fail or need to be upgraded. Additionally, the Pod network is designed to be private, meaning that it is directly reachable only from within the cluster. We need additional traffic routing so that external users can reach our application components running in containers.
+In this chapter, we’ll look at Service and Ingress networking. Kubernetes Service networking provides an entire additional networking layer on top
+of Pod networking, including dynamic discovery and load balancing. We’ll see how this networking layer works and how we can use it to expose our application components to the rest of the cluster as scalable, resilient services. We’ll then look at how Ingress configuration provides traffic routing for these Services to expose them to external users.
+Services
+Putting together Deployments and overlay networking, we have the ability to create multiple identical container instances with a unique IP address for each. Let’s create an NGINX Deployment to illustrate:
+nginx-deploy.yaml
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: nginx
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx
+This is similar to Deployments we’ve seen previously. In this case we’re asking Kubernetes to maintain five Pods for us, each running an NGINX web server.
+NOTE
+The example repository for this book is at
+https://github.com/book-of-kubernetes/examples
+.
+See “Running Examples” on
+page xx
+for details on getting set up.
+The automated scripts have already placed this file in
+/opt
+, so we can apply it to the cluster:
+root@host01:~#
+kubectl apply -f /opt/nginx-deploy.yaml
+deployment.apps/nginx created
+After these Pods are running, we can check that they’ve been distributed across the cluster and each one has an IP address:
+root@host01:~#
+kubectl get pods -o wide
+NAME                     READY   STATUS    ... IP                NODE    ...
+nginx-6799fc88d8-2wqc7   1/1     Running   ... 172.31.239.231   host01   ...
+nginx-6799fc88d8-78bwx   1/1     Running   ... 172.31.239.229   host01   ...
+nginx-6799fc88d8-dtx7s   1/1     Running   ... 172.31.89.240    host02   ...
+nginx-6799fc88d8-wh479   1/1     Running   ... 172.31.239.230   host01   ...
+nginx-6799fc88d8-zwx27   1/1     Running   ... 172.31.239.228   host01   ...
+If these containers were merely clients of some server, that might be all we need to do. For example, if our application architecture was driven by sending and receiving messages, as long as these containers could connect to the messaging server, they’d be able to function as required. However, because these containers act as servers, clients need to be able to find them and connect.
+As it is, our separate NGINX instances aren’t very practical for clients to use. Sure, it’s possible to connect to any one of these NGINX server Pods directly. For example, we can communicate with the first one in the list using its IP address:
+root@host01:~#
+curl -v http://
+172.31.239.231
+*   Trying 172.31.239.231:80...
+* Connected to 172.31.239.231 (172.31.239.231) port 80 (#0)
+> GET / HTTP/1.1
+...
+< HTTP/1.1 200 OK
+< Server: nginx/1.21.3
+...
+Unfortunately, just choosing one instance is not going to provide load balancing or failover. Additionally, we don’t have any way of knowing ahead of time what the Pod IP address is going to be, and every time we make any changes to the Deployment, the Pods will be re-created and get new IP addresses.
+The solution to this situation needs to have two main features. First, we need to have a well-known name that clients can use to find a server. Second, we need a consistent IP address so that when a client has identified a server, it can continue to use the same address for connections even as Pod instances come and go. This is exactly what Kubernetes provides with a
+Service
+.
+Creating a Service
+Let’s create a Service for our NGINX Deployment and see what that gets us.
+Listing 9-1
+presents the resource YAML file.
+nginx-service.yaml
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: nginx
+spec:
+  selector:
+    app: nginx
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 80
+Listing 9-1: NGINX Service
+First, a Service has a
+selector
+much like a Deployment. This selector is used in the same way: to identify the Pods that will be associated with the Service. However, unlike a Deployment, a Service does not manage its Pods in any way; it simply routes traffic to them.
+The traffic routing is based on the ports we identify in the
+ports
+field. Because the NGINX server is listening on port 80, we need to specify that as the
+targetPort
+. We can use any
+port
+we want, but it’s simplest to keep it the same, especially as 80 is the default port for HTTP.
+Let’s apply this Service to the cluster:
+root@host01:~#
+kubectl apply -f /opt/nginx-service.yaml
+service/nginx created
+We can now see that the Service was created:
+root@host01:~#
+kubectl get services
+NAME         TYPE        CLUSTER-IP       EXTERNAL-IP   PORT(S)   AGE
+kubernetes   ClusterIP   10.96.0.1        <none>        443/TCP   14d
+nginx        ClusterIP   10.100.221.220   <none>        80/TCP    25s
+This
+nginx
+Service has the default type of
+ClusterIP
+. Kubernetes has automatically assigned a cluster IP address for this Service. The IP address is in an entirely different address space from that of our Pods.
+Using the selector, this Service will identify our NGINX server Pods and automatically start load balancing traffic to them. As Pods matching the selector come and go, the Service will automatically update its load balancing accordingly. As long as the Service exists, it will keep the same IP address, so clients have a consistent way of finding our NGINX server instances.
+Let’s verify that we can reach an NGINX server through the Service:
+root@host01:~#
+curl -v http://
+10.100.221.220
+*   Trying 10.100.221.220:80...
+* Connected to 10.100.221.220 (10.100.221.220) port 80 (#0)
+> GET / HTTP/1.1
+...
+< HTTP/1.1 200 OK
+< Server: nginx/1.21.3
+...
+We can see that the Service has correctly identified all five NGINX Pods:
+root@host01:~#
+kubectl describe service nginx
+Name:              nginx
+Namespace:         default
+...
+Selector:          app=nginx
+...
+Endpoints:         172.31.239.228:80,172.31.239.229:80,172.31.239.230:80 
++ 2 more...
+...
+The
+Endpoints
+field shows that the Service is currently routing traffic to all five NGINX Pods. As a client, we don’t need to know which Pod was used to handle our request. We interact solely with the Service IP address and allow the Service to choose an instance for us.
+Of course, for this example, we had to look up the IP address of the Service. To make it easier on clients, we still should provide a well-known name.
+Service DNS
+Kubernetes provides a well-known name for each Service through a DNS (Domain Name System) server that is dynamically updated with the name and IP address of every Service in the cluster. Each Pod is configured with this DNS server such that a Pod can use the name of the Service to connect to an instance.
+Let’s create a Pod that we can use to try this out:
+pod.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod
+spec:
+  containers:
+  - name: pod
+    image: alpine
+    command: 
+      - "sleep"
+      - "infinity"
+We’re using
+alpine
+rather than
+busybox
+as the image for this Pod because we’ll want to use some DNS commands that require us to install a more full-featured DNS client.
+NOTE
+BusyBox makes a great debug image for Kubernetes clusters because it’s tiny and has many useful commands. However, in the interest of keeping BusyBox tiny, it’s typical for the commands to include only the most popular options. Alpine makes a great alternative for debugging. The default Alpine image uses BusyBox to provide many of its initial commands, but it’s possible to replace them with a full-featured alternative by just installing the appropriate package.
+Next, create the Pod:
+root@host01:~#
+kubectl apply -f /opt/pod.yaml
+pod/pod created
+After it’s running, let’s use it to connect to our NGINX Service, as demonstrated in
+Listing 9-2
+.
+root@host01:~#
+kubectl exec -ti pod -- wget -O - http://nginx
+Connecting to nginx (10.100.221.220:80)
+...
+<title>Welcome to nginx!</title>
+...
+Listing 9-2: Connect to NGINX Service
+We were able to use the name of the Service,
+nginx
+, and that name resolved to the Service IP address. This worked because our Pod is configured to talk to the DNS server that’s built in to the cluster:
+root@host01:~#
+kubectl exec -ti pod -- cat /etc/resolv.conf
+search default.svc.cluster.local svc.cluster.local cluster.local 
+nameserver 10.96.0.10
+options ndots:5
+We print out the file
+/etc/resolv.conf
+inside the container because this is the file that is used to configure DNS.
+The name server
+10.96.0.10
+referenced is itself a Kubernetes Service, but it’s in the
+kube-system
+Namespace, so we need to look there for it:
+root@host01:~#
+kubectl -n kube-system get services
+NAME            TYPE       CLUSTER-IP      ... PORT(S)                  AGE
+kube-dns        ClusterIP  10.96.0.10      ... 53/UDP,53/TCP,9153/TCP   14d
+metrics-server  ClusterIP  10.105.140.176  ... 443/TCP                  14d
+The
+kube-dns
+Service connects to a DNS server Deployment called CoreDNS that listens for changes to Services in the Kubernetes cluster. CoreDNS updates the DNS server configuration as required to stay up to date with the current cluster configuration.
+Name Resolution and Namespaces
+DNS names in a Kubernetes cluster are based on the Namespace as well as the cluster domain. Because our Pod is in the
+default
+Namespace, it has
+been configured with a search path of
+default.svc.cluster.local
+as the first entry in the list, so it will search the
+default
+Namespace first when looking for Services. This is why we were able to use the bare Service name
+nginx
+to find the
+nginx
+Service—that Service is also in the
+default
+Namespace.
+We could have also found the same Service using the fully qualified name:
+root@host01:~#
+kubectl exec -ti pod -- wget -O - http://nginx.default.svc
+Connecting to nginx.default.svc (10.100.221.220:80)
+...
+<title>Welcome to nginx!</title>
+...
+Understanding this interaction between Namespaces and Service lookup is important. One common deployment pattern for a Kubernetes cluster is to deploy the same application multiple times to different Namespaces and use simple hostnames for application components to communicate with one another. This pattern is often used to deploy a “development” and “production” version of an application to the same cluster. If we’re planning to use this pattern, we need to be sure that we stick to bare hostnames when our application components try to find one another; otherwise, we could end up communicating with the wrong version of our application.
+Another important configuration item in
+/etc/resolv.conf
+is the
+ndots
+entry. The
+ndots
+entry tells the hostname resolver that when it sees a hostname with four or fewer dots, it should try appending the various search domains
+prior
+to performing an absolute search without any domain appended. This is critical to make sure that we try to find services inside the cluster before reaching outside the cluster.
+As a result, when we used the name
+nginx
+in
+Listing 9-2
+, the DNS resolver within our container immediately tried
+nginx.default.svc.cluster.local
+and found the correct Service.
+To make sure this is clear, let’s try one more example: looking up a Service in another Namespace. The
+kube-system
+Namespace has a
+metrics-server
+Service. To find it, let’s use the standard host lookup
+dig
+command in our Pod.
+Our Pod is using Alpine Linux, so we need to install the
+bind-tools
+package to get access to
+dig
+:
+root@host01:~#
+kubectl exec -ti pod -- apk add bind-tools
+...
+OK: 13 MiB in 27 packages
+Now, let’s try looking up
+metrics-server
+using the bare name first:
+root@host01:~#
+kubectl exec -ti pod -- dig +search metrics-server
+...
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: SERVFAIL, id: 38423
+...
+We add the
++search
+flag onto the command to tell
+dig
+to use the search path information from
+/etc/resolv.conf
+. However, even with that flag, we don’t find the Service, because our Pod is in the
+default
+Namespace, so the search path doesn’t lead
+dig
+to look in the
+kube-system
+Namespace.
+Let’s try again, this time specifying the correct Namespace:
+root@host01:~#
+kubectl exec -ti pod -- dig +search metrics-server.kube-system
+...
+;; ANSWER SECTION:
+metrics-server.kube-system.svc.cluster.local. 30 IN A 10.105.140.176
+...
+This lookup works, and we are able to get the IP address for the
+metrics-server
+Service. It works because the search path includes
+svc.cluster.local
+as its second entry. After initially trying
+metrics-server.kube-system.default.svc.cluster.local
+, which doesn’t work,
+dig
+then tries
+metrics-server.kube-system.svc.cluster.local
+, which does.
+Traffic Routing
+We’ve seen how to create and use Services, but we haven’t yet looked at how the actual traffic routing works. It turns out that Service network traffic works in a way that’s completely different from the overlay networks we saw in
+Chapter 8
+, which can lead to some confusion.
+For example, because we can use
+wget
+to reach an NGINX server instance using the
+nginx
+Service name, we might expect to be able to use
+ping
+, as well, but that doesn’t work:
+root@host01:~#
+kubectl exec -ti pod -- ping -c 3 nginx
+PING nginx (10.100.221.220): 56 data bytes
+
+--- nginx ping statistics ---
+3 packets transmitted, 0 packets received, 100% packet loss
+command terminated with exit code 1
+Name resolution worked as expected, so
+ping
+knew what destination IP address to use for its ICMP packets. But there was no reply from that IP address. We could look at every host and container network interface in our cluster and never find an interface that carries the Service IP address of
+10.100.221.220
+. So how is our HTTP traffic getting through to an NGINX Service instance?
+On every node in our cluster, there is a component called
+kube-proxy
+that configures traffic routing for Services.
+kube-proxy
+is run as a DaemonSet in the
+kube-system
+Namespace. Each
+kube-proxy
+instance watches for changes to Services in the cluster and configures the Linux firewall to route traffic.
+We can use
+iptables
+commands to look at the firewall configuration to see how
+kube-proxy
+has configured traffic routing for our
+nginx
+Service:
+root@host01:~#
+iptables-save | grep 'default/nginx cluster IP'
+➊
+-A KUBE-SERVICES ! -s 172.31.0.0/16 -d 10.100.221.220/32 -p tcp -m comment 
+    --comment "default/nginx cluster IP" -m tcp --dport 80 -j KUBE-MARK-MASQ
+➋
+-A KUBE-SERVICES -d 10.100.221.220/32 -p tcp -m comment --comment 
+   "default/nginx cluster IP" -m tcp --dport 80 -j KUBE-SVC-2CMXP7HKUVJN7L6M
+The
+iptables-save
+command backs up all of the current Linux firewall rules, so it’s useful for printing out all rules. The
+grep
+command searches for the comment string that
+kube-proxy
+applies to the Service rules it creates. In this example,
+kube-proxy
+has created two rules for the Service as a whole. The first rule
+➊
+looks for traffic destined for our Service that is
+not
+coming from the Pod network. This traffic must be marked for Network Address Translation (NAT) masquerade so that the source of any reply traffic will be rewritten to be the Service IP address rather than the actual Pod that handles the request. The second rule
+➋
+sends all traffic destined for the Service to a separate rule chain that will send it to a Pod instance. Note that in both cases, the rules only match for TCP traffic that is destined for port 80.
+We can examine this separate rule chain to see how the actual routing to individual Pods works. Be sure to replace the name of the rule chain in this command with the one shown in the previous output:
+root@host01:~#
+iptables-save | grep
+KUBE-SVC-2CMXP7HKUVJN7L6M
+...
+-A KUBE-SVC-2CMXP7HKUVJN7L6M ... -m statistic --mode random 
+  --probability 0.20000000019 -j KUBE-SEP-PIVU7ZHMCSOWIZ2Z
+-A KUBE-SVC-2CMXP7HKUVJN7L6M ... -m statistic --mode random 
+  --probability 0.25000000000 -j KUBE-SEP-CFQXKE74QEHFB7VJ
+-A KUBE-SVC-2CMXP7HKUVJN7L6M ... -m statistic --mode random 
+  --probability 0.33333333349 -j KUBE-SEP-DHDWEJZ7MGGIR5XF
+-A KUBE-SVC-2CMXP7HKUVJN7L6M ... -m statistic --mode random 
+  --probability 0.50000000000 -j KUBE-SEP-3S3S2VJCXSAISE2Z
+-A KUBE-SVC-2CMXP7HKUVJN7L6M ... -j KUBE-SEP-AQWD2Y25T24EHSNI
+The output shows five rules, corresponding to each of the five NGINX Pod instances the Service’s selector matched. The five rules together provide random load balancing across all the instances so that each one has an equal chance of being selected for new connections.
+It may seem strange that the
+probability
+figure increases for each rule. This is necessary because the rules are evaluated sequentially. For the first rule, we want a 20 percent chance of choosing the first instance. However, if we don’t select the first instance, only four instances are left, so we want a 25 percent chance of choosing the second one. The same logic applies until we get to the last instance, which we always want to choose if we’ve skipped all the others.
+Let’s quickly verify that these rules go to the expected destination (again, be sure to replace the name of the rule chain in this command):
+root@host01:~#
+iptables-save | grep
+KUBE-SEP-PIVU7ZHMCSOWIZ2Z
+...
+-A KUBE-SEP-PIVU7ZHMC ... -s 172.31.239.235/32 ... --comment "default/nginx" -j KUBE-MARK-MASQ
+-A KUBE-SEP-PIVU7ZHMCSOWIZ2Z -p tcp ... -m tcp -j DNAT --to-destination 172.31.239.235:80
+This output shows two rules. The first is the other half of the NAT masquerade configuration, as we mark all packets that leave our Pod instance so that they can have their source address rewritten to appear to come from the Service. The second rule is the one that actually routes Service traffic to a specific Pod as it performs a rewrite of the destination address so that a packet originally destined for the Service IP is now destined for a Pod. From there, the overlay networking takes over to actually send the packet to the correct container.
+With this understanding of how Service traffic is actually routed, it makes sense that our ICMP packets didn’t make it through. The firewall rule that
+kube-proxy
+created applies only to TCP traffic destined for port 80. As a result, there was no firewall rule to rewrite our ICMP packets and therefore no way for them to make it to a networking stack that could reply to them. Similarly, if we have a container that’s listening on multiple ports, we will be able to connect to any of those ports by directly using the Pod IP address, but the Service IP address will route traffic only if we explicitly declare that port in the Service specification. It can be a significant source of confusion when deploying an application where the Pod starts up as expected and listens for traffic, but a misconfiguration of the Service means that the traffic is not being routed to all of the correct destination ports.
+External Networking
+We now have enough layers of networking to meet all of our internal cluster communication needs. Each Pod has its own IP address and has connectivity to other Pods as well as the control plane, and with Service networking we have automatic load balancing and failover based on running multiple Pod instances with a Service. However, we’re still missing the ability for external users to access services running in our cluster.
+To provide access for external users, we can no longer rely solely on the cluster-specific IP address ranges that we use for Pods and Services, given that external networks don’t recognize those address ranges. Instead, we’ll need a way to allocate externally routable IP addresses to our Services, either by explicitly associating an IP address with a Service or by using an
+ingress controller
+that listens to external traffic and routes it to Services.
+External Services
+The
+nginx
+Service we created earlier was a
+ClusterIP
+Service, the default Service type. Kubernetes supports multiple Service types, including Service types that are made for Services that need to be exposed externally:
+None
+Also known as a
+headless
+Service, it’s used to enable tracking of selected Pods but without an IP address or any network routing behavior.
+ClusterIP
+The default Service type that provides tracking of selected Pods, a cluster IP address that is routed internally, and a well-known name in the cluster DNS.
+NodePort
+Extends
+ClusterIP
+and also provides a port on all nodes in the cluster that is routed to the Service.
+LoadBalancer
+Extends
+NodePort
+and also uses an underlying cloud provider to obtain an IP address that is externally reachable.
+ExternalName
+Aliases a well-known Service name in the cluster DNS to some external DNS name. Used to make external resources appear to be in-cluster Services.
+Of these Service types, the
+NodePort
+and
+LoadBalancer
+types are most useful for exposing Services outside the cluster. The
+LoadBalancer
+type seems the most straightforward, as it simply adds an external IP to the Service. However, it requires integration with an underlying cloud environment to create the external IP address when the Service is created, to route traffic from that IP address to the cluster’s nodes, and to create a DNS entry outside the cluster that enables external users to find the Service as a host on some pre-registered domain that we already own, rather than a
+cluster.local
+domain that works only within the cluster.
+For this reason, a
+LoadBalancer
+Service is most useful for cases in which we know what cloud environment we’re using and we’re creating Services that will live for a long time. For HTTP traffic, we can get most of the benefit of a
+LoadBalancer
+Service by using a
+NodePort
+Service together with an ingress controller, with the added feature of better support for dynamically deploying new applications with new Services.
+Before moving on to an ingress controller, let’s turn our existing
+nginx
+Service into a
+NodePort
+Service so that we can look at the effect. We can do this using a patch file:
+nginx-nodeport.yaml
+---
+spec:
+  type: NodePort
+A patch file allows us to update only the specific fields we care about. In this case, we are updating only the type of the Service. For this to work, we just need to specify that one changed field in its correct position in the hierarchy, which allows Kubernetes to know what field to modify. We don’t
+need to change the selector or ports for our Service, only the type, so the patch is very simple.
+Let’s use the patch:
+root@host01:~#
+kubectl patch svc nginx --patch-file /opt/nginx-nodeport.yaml
+service/nginx patched
+For this command, we must specify the resource to be patched and a patch file to be used. The result is identical to if we had edited the YAML resource file for the Service and then used
+kubectl apply
+again.
+The Service now looks a little different:
+root@host01:~#
+kubectl get service nginx
+NAME    TYPE       CLUSTER-IP       EXTERNAL-IP   PORT(S)        AGE
+nginx   NodePort   10.100.221.220   <none>        80:31326/TCP   2h
+A
+NodePort
+Service provides all the behavior of a
+ClusterIP
+Service, so we still have a cluster IP associated with our
+nginx
+Service. The Service even kept the same cluster IP. The only change is the
+PORT
+field now shows that the Service port 80 is attached to node port 31326.
+The
+kube-proxy
+Service on every cluster node is listening on this port (be sure to use the correct node port for your Service):
+root@host01:~#
+ss -nlp | grep
+31326
+tcp   LISTEN 0  4096  .0.0.0:31326 ... users:(("kube-proxy",pid=3339,fd=15))
+As a result, we can still use the
+nginx
+Service name inside our Pod, but we can also use the NodePort from the host:
+root@host01:~#
+kubectl exec -ti pod -- wget -O - http://nginx
+Connecting to nginx (10.100.221.220:80)
+...
+<title>Welcome to nginx!</title>
+...
+root@host01:~#
+wget -O - http://host01:
+31326
+...
+Connecting to host01 (host01)|127.0.2.1|:31326... connected.
+...
+<h1>Welcome to nginx!</h1>
+...
+Because
+kube-proxy
+is listening on all network interfaces, we’ve successfully exposed this Service to external users.
+Ingress Services
+Although we’ve successfully exposed our NGINX Service outside the cluster, we still don’t provide a great user experience for external users. To use the
+NodePort
+Service, external users will need to know the IP address of at least one of our cluster nodes, and they’ll need to know the exact port on which
+each Service is listening. That port could change if the Service is deleted and re-created. We could partially address this by telling Kubernetes which port to use for the
+NodePort
+, but we don’t want to do this with any arbitrary Service because multiple Services may choose the same port.
+What we really need is a single external entry point to our cluster that keeps track of multiple services that are available and uses rules to route traffic to them. This way, we can do all of our routing configuration inside the cluster so that Services can come and go dynamically. At the same time, we can have a single well-known entry point for our cluster that all external users can use.
+For HTTP traffic, Kubernetes provides exactly this capability, calling it an
+Ingress
+. To configure our cluster to route external HTTP traffic to Services, we need to define the set of Ingress resources that specify the routing and to deploy the ingress controller that receives and routes the traffic. We already installed our ingress controller when we set up our cluster:
+root@host01:~#
+kubectl -n ingress-nginx get deploy
+NAME                       READY   UP-TO-DATE   AVAILABLE   AGE
+ingress-nginx-controller   1/1     1            1           15d
+root@host01:~#
+kubectl -n ingress-nginx get svc
+NAME                      TYPE        ... PORT(S)               ...
+ingress-nginx-controller  NodePort    ... 80:80/TCP,443:443/TCP ...
+...
+Our ingress controller includes a Deployment and a Service. As the Service is of type
+NodePort
+, we know that
+kube-proxy
+is listening to ports 80 and 443 on all of our cluster’s nodes, ready to route traffic to the associated Pod.
+As the name implies, our ingress controller is actually an instance of an NGINX web server; however, in this case NGINX is solely acting as an HTTP reverse proxy rather than serving any web content of its own. The ingress controller listens for changes to Ingress resources in the cluster and reconfigures NGINX to connect to backend servers based on the rules that are defined. These rules use host or path information from the HTTP request to select a Service for the request.
+Let’s create an Ingress resource to route traffic to the
+nginx
+Service we defined in
+Listing 9-1
+. Here’s the resource we’ll create:
+nginx-ingress.yaml
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web01
+spec:
+  rules:
+    - host: web01
+      http:
+        paths:
+          - path: /
+pathType: Prefix
+            backend:
+              service:
+                name: nginx
+                port:
+                  number: 80
+This resource instructs the ingress controller to look at the HTTP
+Host
+header. If it sees
+web01
+as the
+Host
+header, it then tries to match against a path in the
+paths
+we specified. In this case, all paths will match the path
+/
+prefix, so all traffic will be routed to the
+nginx
+Service.
+Before we apply this to the cluster, let’s confirm what happens if we try to use a hostname that the ingress controller doesn’t recognize. We’ll use the high-availability IP address that’s associated with our cluster, as the cluster’s load balancer will forward that to one of the instances:
+root@host01:~#
+curl -vH "Host:web01" http://192.168.61.10
+...
+> Host:web01
+...
+<head><title>404 Not Found</title></head>
+...
+The
+-H "Host:web01"
+flag in the
+curl
+command tells
+curl
+to use the value
+host01
+as the
+Host
+header in the HTTP request. This is necessary given that we don’t have a DNS server in our example cluster that can turn
+web01
+into our cluster’s IP address.
+As we can see, the NGINX server that’s acting as the ingress controller is configured to reply with a
+404 Not Found
+error message whenever it gets a request that doesn’t match any configured Ingress resource. In this case, because we haven’t created any Ingress resources yet, any request will get this response.
+Let’s apply the
+web01
+Ingress resource to the cluster:
+root@host01:~#
+kubectl apply -f /opt/nginx-ingress.yaml
+ingress.networking.k8s.io/web01 created
+Now that the Ingress resource exists, as
+Listing 9-3
+illustrates, HTTP port 80 requests on both the cluster high-availability IP and individual hosts are routed to the
+nginx
+Service:
+root@host01:~#
+curl -vH "Host:web01" http://host01
+...
+> Host:web01
+...
+<title>Welcome to nginx!</title>
+...
+root@host01:~#
+curl -vH "Host:web01" http://192.168.61.10
+...
+> Host:web01
+...
+<title>Welcome to nginx!</title>
+...
+Listing 9-3: NGINX via Ingress
+The output in both cases is the same, showing that traffic is being routed to the
+nginx
+Service.
+In the
+web01-ingress
+resource, we were able to use the bare name of the
+nginx
+Service. The Service name lookup is based on where the Ingress resource is located. Because we created the Ingress resource in the default Namespace, that is where it looks first for Services.
+Putting this all together, we now have a high-availability solution to route traffic from external users to HTTP servers in our cluster. This combines our cluster’s high-availability IP address
+192.168.61.10
+with an ingress controller exposed as a
+NodePort
+Service on port 80 of all our cluster’s nodes. The ingress controller can be dynamically configured to expose additional Services by creating new Ingress resources.
+Ingress in Production
+The
+curl
+command in
+Listing 9-3
+still looks a little strange, as we’re required to override the HTTP
+Host
+header manually. We need to perform a few additional steps to use Ingress resources to expose services in a production cluster.
+First, we need our cluster to have an externally routable IP address together with a well-known name that is registered in DNS. The best way to do that is with a wildcard DNS scheme so that all hosts in a given domain are all routed to the cluster’s external IP. For example, if we own the domain
+cluster.example.com
+, we could create a DNS entry so that
+*.cluster.example.com
+routes to the cluster’s external IP address.
+This approach still works with larger clusters that span multiple networks. We just need to have multiple IP addresses associated with the DNS entry, possibly using location-aware DNS servers that route clients to the closest service.
+Next, we need to create an SSL certificate for our ingress controller that includes our wildcard DNS as a Subject Alternative Name (SAN). This will allow our ingress controller to provide a secure HTTP connection for external users no matter what specific service hostname they are using.
+Finally, when we define our Services, we need to specify the fully qualified domain name for the
+host
+field. For the preceding example, we would specify
+web01.cluster.example.com
+rather than just
+web01
+.
+After we’ve performed these additional steps, any external user would be able to connect via HTTPS to the fully qualified hostname of our Service, such as
+https://web01.cluster.example.com
+. This hostname would resolve to our cluster’s external IP address, and the load balancer would route it to one of the cluster’s nodes. At that point, our ingress controller, listening on the standard port of 443, would offer its wildcard certificate, which would match
+what the client expects. As soon as the secure connection is established, the ingress controller would inspect the HTTP
+Host
+header and proxy a connection to the correct Service, sending back the HTTP response to the client.
+The advantage of this approach is that after we have it set up, we can deploy a new Ingress resource at any time to expose a Service externally, and as long as we choose a unique hostname, it won’t collide with any other exposed Service. After the initial setup, all of the configuration is maintained within the cluster itself, and we still have a highly available configuration for all of our Services.
+Final Thoughts
+Routing network traffic in a Kubernetes cluster might involve a great deal of complexity, but the end result is straightforward: we can deploy our application components to a cluster, with automatic scaling and failover, and external users can access our application using a well-known name without having to know how the application is deployed or how many container instances we’re using to meet demand. If we build our application to be resilient, our application containers can upgrade to new versions or restart in response to failure without users even being aware of the change.
+Of course, if we’re going to build application components that are resilient, it’s important to know what can go wrong in deploying containers. In the next chapter, we’ll look at some common issues with deploying containers to a Kubernetes cluster and how to debug them.
+
+10
+WHEN THINGS GO WRONG
+So far our installation and configuration of Kubernetes has gone as planned, and our controllers have had no problem creating Pods and starting containers. Of course, in the real world, it’s rarely that easy. Although showing everything that might go wrong with a complex application deployment isn’t possible, we can look at some of the most common problems. Most important, we can explore debugging tools that will help us diagnose any issue.
+In this chapter, we’ll look at how to diagnose problems with application containers that we deploy on top of Kubernetes. We’ll work our way through the life cycle for scheduling and running containers, examining potential problems at each step as well as how to diagnose and fix them.
+Scheduling
+Scheduling is the first activity Kubernetes performs on a Pod and its containers. When a Pod is first created, the Kubernetes scheduler assigns it to a
+node. Normally, this happens quickly and automatically, but some issues can prevent scheduling from happening successfully.
+No Available Nodes
+One possibility is that the scheduler simply doesn’t have any nodes available. This situation might occur because our cluster doesn’t have any nodes configured for regular application containers or because all nodes have failed.
+To illustrate the case in which no nodes are available for assignment, let’s create a Pod with a
+node selector
+. A node selector specifies one or more node labels that are required for a Pod to be scheduled on that node. Node selectors are useful when some nodes in our cluster are different from others (for example, when some nodes have newer CPUs with support for more advanced instruction sets needed by some of our containers).
+NOTE
+The example repository for this book is at
+https://github.com/book-of-kubernetes/examples
+.
+See “Running Examples” on
+page xx
+for details on getting set up.
+We’ll begin with a Pod definition that has a node selector that doesn’t match any of our nodes:
+nginx-selector.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+  nodeSelector:
+➊
+purpose: special
+The node selector
+➊
+tells Kubernetes to assign this Pod only to a node with a label called
+purpose
+whose value is equal to
+special
+. Even though none of our nodes currently match, we can still create this Pod:
+root@host01:~#
+kubectl apply -f /opt/nginx-selector.yaml
+pod/nginx created
+However, Kubernetes is stuck trying to schedule the Pod, because it can’t find a matching node:
+root@host01:~#
+kubectl get pods -o wide
+NAME    READY   STATUS    RESTARTS   AGE    IP       NODE     ...
+nginx   0/1     Pending   0          113s   <none>   <none>   ...
+We see a status of
+Pending
+and a node assignment of
+<none>
+. This is because Kubernetes has not yet scheduled this Pod onto a node.
+The
+kubectl get
+command is typically the first command we should run to see whether there are issues with a resource we’ve deployed to our cluster. If we have an issue, as we do in this case, the next step is to view the detailed status and event log using
+kubectl describe
+:
+root@host01:~#
+kubectl describe pod nginx
+Name:         nginx
+Namespace:    default
+...
+Status:       Pending
+...
+Node-Selectors:              purpose=special
+
+Events:
+  Type     Reason            Age    From               Message
+  ----     ------            ----   ----               -------
+  Warning  FailedScheduling  4m36s  default-scheduler  0/3 nodes are 
+    available: 3 node(s) didn't match Pod's node affinity/selector.
+  Warning  FailedScheduling  3m16s  default-scheduler  0/3 nodes are 
+    available: 3 node(s) didn't match Pod's node affinity/selector.
+The event log informs us as to exactly what the issue is: the Pod can’t be scheduled because none of the nodes matched the selector.
+Let’s add the necessary label to one of our nodes:
+root@host01:~#
+kubectl get nodes
+NAME     STATUS   ROLES        ...
+host01   Ready    control-plane...
+host02   Ready    control-plane...
+host03   Ready    control-plane...
+root@host01:~#
+kubectl label nodes host02 purpose=special
+node/host02 labeled
+We first list the three nodes we have available and then apply the necessary label to one of them. As soon as we apply this label, Kubernetes can now schedule the Pod:
+root@host01:~#
+kubectl get pods -o wide
+NAME    READY   STATUS    RESTARTS   AGE   IP               NODE     ...
+nginx   1/1     Running   0          10m   172.31.89.196   host02   ...
+root@host01:~#
+kubectl describe pod nginx
+Name:         nginx
+Namespace:    default
+...
+Events:
+  Type     Reason            Age    From               Message
+  ----     ------            ----   ----               -------
+  Warning  FailedScheduling  10m    default-scheduler  0/3 nodes are 
+    available: 3 node(s) didn't match Pod's node affinity/selector.
+Warning  FailedScheduling  9m17s  default-scheduler  0/3 nodes are 
+    available: 3 node(s) didn't match Pod's node affinity/selector.
+  Normal   Scheduled         2m22s  default-scheduler  Successfully assigned 
+    default/nginx to host02
+...
+As expected, the Pod was scheduled onto the node where we applied the label.
+This example, like the others we’ll see in this chapter, illustrates debugging in Kubernetes. After we’ve created the resources that we need, we query the cluster state to make sure the actual deployment of those resources was successful. When we find issues, we can correct those issues and our resources will be started as desired without having to reinstall our application components.
+Let’s clean up this NGINX Pod:
+root@host01:~#
+kubectl delete -f /opt/nginx-selector.yaml
+pod "nginx" deleted
+Let’s also remove the label from the node. We remove the label by appending a minus sign to it to identify it:
+root@host01:~#
+kubectl label nodes host02 purpose-
+node/host02 unlabeled
+We’ve covered one issue with the scheduler, but there’s still another we need to look at.
+Insufficient Resources
+When choosing a node to host a Pod, the scheduler also considers the resources that are available on each node and the resources the Pod requires. We explore resource limits in detail in
+Chapter 14
+; for now it’s enough to know that each container in a Pod can request the resources it needs, and the scheduler will ensure that it is scheduled onto a node that has those resources available. Of course, if there aren’t any nodes with enough room, the scheduler won’t be able to schedule the Pod. Instead the Pod will wait in a
+Pending
+state.
+Let’s look at an example Pod definition to illustrate this:
+sleep-multiple.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sleep
+spec:
+  containers:
+  - name: sleep
+    image: busybox
+command: 
+      - "/bin/sleep"
+      - "3600"
+    resources:
+      requests:
+        cpu: "2"
+  - name: sleep2
+    image: busybox
+    command: 
+      - "/bin/sleep"
+      - "3600"
+    resources:
+      requests:
+        cpu: "2"
+In this YAML definition, we create two containers in the same Pod. Each container requests two CPUs. Because all of the containers in a Pod must be on the same host in order to share some Linux namespace types (especially the network namespace so that they can use
+localhost
+for communication), the scheduler needs to find a single node with four CPUs available. In our small cluster, that can’t happen, as we can see if we try to deploy the Pod:
+root@host01:~#
+kubectl apply -f /opt/sleep-multiple.yaml
+pod/sleep created
+root@host01:~#
+kubectl get pods -o wide
+NAME    READY   STATUS    RESTARTS   AGE   IP       NODE   ...
+sleep   0/2     Pending   0          7s    <none>   <none> ...
+As before,
+kubectl describe
+gives us the event log that reveals the issue:
+root@host01:~#
+kubectl describe pod sleep
+Name:         sleep
+Namespace:    default
+...
+Events:
+  Type     Reason            Age   From               Message
+  ----     ------            ----  ----               -------
+  Warning  FailedScheduling  71s   default-scheduler  0/3 nodes are 
+    available: 3 Insufficient cpu.
+Notice that it doesn’t matter how heavily loaded our nodes actually are:
+root@host01:~#
+kubectl top node
+NAME     CPU(cores)   CPU%   MEMORY(bytes)   MEMORY%   
+host01   429m         21%    1307Mi          69%
+host02   396m         19%    1252Mi          66%
+host03   458m         22%    1277Mi          67%
+Nor does it matter how much CPU our containers will actually use. The scheduler allocates Pods purely based on what it requested; this way, we don’t suddenly overwhelm a CPU when load increases.
+We can’t magically provide our nodes with more CPUs, so to get this Pod scheduled, we’re going to need to specify a lower CPU usage for our two containers. Let’s use a more sensible figure of 0.1 CPU:
+sleep-sensible.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sleep
+spec:
+  containers:
+  - name: sleep
+    image: busybox
+    command: 
+      - "/bin/sleep"
+      - "3600"
+    resources:
+      requests:
+➊
+cpu: "100m"
+  - name: sleep2
+    image: busybox
+    command: 
+      - "/bin/sleep"
+      - "3600"
+    resources:
+      requests:
+        cpu: "100m"
+The value
+100m
+➊
+equates to “one hundred millicpu” or one-tenth (0.1) of a CPU.
+Even though this is a separate file, it declares the same resource, so Kubernetes will treat it as an update. However, if we try to apply this as a change to the existing Pod, it will fail:
+root@host01:~#
+kubectl apply -f /opt/sleep-sensible.yaml
+The Pod "sleep" is invalid: spec: Forbidden: pod updates may not change 
+  fields other than ...
+We are not allowed to change the resource request of an existing Pod, which makes sense given that a Pod is allocated to a node only once on creation, and a resource usage change might cause the node to be overly full.
+If we were using a controller such as a Deployment, the controller could handle replacing the Pods for us. Because we created a Pod directly, we need to manually delete and then re-create it:
+root@host01:~#
+kubectl delete pod sleep
+pod "sleep" deleted
+root@host01:~#
+kubectl apply -f /opt/sleep-sensible.yaml
+pod/sleep created
+Our new Pod has no trouble with node allocation:
+root@host01:~#
+kubectl get pods -o wide
+NAME    READY   STATUS    RESTARTS   AGE   IP               NODE  ...
+sleep   2/2     Running   0          51s   172.31.89.199   host02 ...
+And if we run
+kubectl describe
+on the node, we can see how our new Pod has been allocated some of the node’s CPU:
+root@host01:~#
+kubectl describe node
+host02
+Name:               host02
+...
+Capacity:
+  cpu:                2
+...
+Non-terminated Pods:          (10 in total)
+  Namespace  Name     CPU Requests  CPU Limits  ...
+  ---------  ----     ------------  ----------  ...
+...
+  default    sleep
+➊
+200m (10%)    0 (0%)      ... 
+...
+Be sure to use the correct node name for the node where your Pod was deployed. Because our Pod has two containers, each requesting
+100m
+, its total request is
+200m
+➊
+.
+Let’s finish by cleaning up this Pod:
+root@host01:~#
+kubectl delete pod sleep
+pod "sleep" deleted
+Other errors can prevent a Pod from being scheduled, but these are the most common. Most important, the commands we used here apply in all cases. First, use
+kubectl get
+to determine the Pod’s current status, followed by
+kubectl describe
+to view the event log. These two commands are always a good first step when something doesn’t seem to be working properly.
+Pulling Images
+After a Pod is scheduled onto a node, the local
+kubelet
+service interacts with the underlying container runtime to create an isolated environment and start containers. However, there’s still one application misconfiguration that can cause our Pod to become stuck in the
+Pending
+phase: inability to pull the container image.
+Three main issues can prevent the container runtime from pulling an image:
+Failure to connect to the container image registry
+Authorization issue with the requested image
+Image is missing from the registry
+As we described in
+Chapter 5
+, an image registry is a web server. Often, the image registry is outside the cluster, and the nodes need to be able to connect to an external network or the internet to reach the registry. Additionally, most registries support publishing private images that require authentication and authorization to access. And, of course, if there is no image published under the name we specify, the container runtime is not going to be able to pull it from the registry.
+All of these errors behave the same way in our Kubernetes cluster, with differences only in the message in the event log, so we’ll need to explore only one of them. We’ll look at what is probably the most common issue: a missing image caused by a typo in the image name.
+Let’s try to create a Pod using this YAML file:
+nginx-typo.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginz
+Because there is no image in Docker Hub called
+nginz
+, it won’t be possible to pull this image. Let’s explore what happens when we add this resource to the cluster:
+root@host01:~#
+kubectl apply -f /opt/nginx-typo.yaml
+pod/nginx created
+root@host01:~#
+kubectl get pods
+NAME    READY   STATUS             RESTARTS   AGE
+nginx   0/1     ImagePullBackOff   0          20s
+Our Pod has status
+ImagePullBackOff
+, which immediately signals two things. First, this Pod is not yet getting to the point at which the containers are running, because it has not yet pulled the container images. Second, as with all errors, Kubernetes will continue attempting the action, but it will use a
+back-off
+algorithm to avoid overwhelming our cluster’s resources.
+Pulling an image involves reaching out over the network to communicate with the image registry, and it would be rude and a waste of network bandwidth to flood the registry with many requests in a short amount of time. Moreover, the cause of the failure may be transient, so the cluster will keep trying in hopes that the problem will be resolved.
+The fact that Kubernetes uses a back-off algorithm for retrying errors is important for debugging. In this case, we obviously are not going to publish an
+nginz
+image to Docker Hub to fix the problem. But for cases in which we do fix the issue by publishing an image, or by changing the permissions for the image, it’s important to know that Kubernetes will not pick up that change immediately, because the amount of delay between tries increases with each failure.
+Let’s explore the event log so that we can see this back-off in action:
+root@host01:~#
+kubectl describe pod nginx
+Name:         nginx
+Namespace:    default
+...
+Status:
+➊
+Pending 
+...
+Events:
+  Type     Reason     Age                 From               Message
+  ----     ------     ----                ----               -------
+  Normal   Scheduled  114s                default-scheduler  Successfully 
+    assigned default/nginx to host03
+...
+  Warning  Failed     25s (x4 over 112s)  kubelet            Failed to pull 
+    image "nginz": ...
+➋
+pull access denied, repository does not exist or may 
+    require authorization  ...
+...
+  Normal   BackOff    1s
+➌
+(x7 over 111s)   kubelet            ...
+As before, our Pod is stuck in a
+Pending
+status
+➊
+. In this case, however, the Pod has gotten past the scheduling activity and has moved on to pulling the image. For security reasons, the registry does not distinguish between a private image for which we don’t have permission to access and a missing image, so Kubernetes can tell us only that the issue is one or the other
+➋
+. Finally, we can see that Kubernetes has tried to pull the image seven times during the two minutes since we created this Pod
+➌
+, and it last tried to pull the image one second ago.
+If we wait a few minutes and then run the same
+kubectl describe
+command again, focusing on the back-off behavior, we can see that a long amount of time elapses between tries:
+root@host01:~#
+kubectl describe pod nginx
+Name:         nginx
+Namespace:    default
+...
+Events:
+  Type     Reason     Age                   From               Message
+  ----     ------     ----                  ----               -------
+...
+  Normal   BackOff    4m38s (x65 over 19m)  kubelet            ...
+Kubernetes has now tried to pull the image 65 times over the course of 19 minutes. However, the amount of delay has grown over time and has reached the maximum of five minutes between each attempt. This means that as we debug this issue, we will need to wait up to five minutes each time to see whether the problem has been resolved.
+Let’s go ahead and fix the issue so that we can see this in action. We could fix the YAML file and run
+kubectl apply
+again, but we can also fix it using
+kubectl set
+:
+root@host01:~#
+kubectl set image pod nginx nginx=nginx
+pod/nginx image updated
+root@host01:~#
+kubectl get pods
+NAME    READY   STATUS             RESTARTS   AGE
+nginx   0/1     ImagePullBackOff   0          28m
+The
+kubectl set
+command requires us to specify the resource type and name; in this case
+pod nginx
+. We then specify
+nginx=nginx
+to provide the name of the container to modify (because a Pod can have multiple containers) along with the new image.
+We fixed the image name, but the Pod is still showing
+ImagePullBackOff
+because we must wait for the five-minute timer to elapse before Kubernetes tries again. Upon the next try, the pull is successful and the Pod starts running:
+root@host01:~#
+kubectl get pods
+NAME    READY   STATUS    RESTARTS   AGE
+nginx   1/1     Running   0          32m
+Let’s clean up the Pod before moving on:
+root@host01:~#
+kubectl delete pod nginx
+pod "nginx" deleted
+Again, we were able to solve this using
+kubectl get
+and
+kubectl describe
+. However, when we get to the point that the container is running, that won’t be sufficient.
+Running Containers
+After instructing the container runtime to pull any images needed,
+kubelet
+then tells the runtime to start the containers. For the rest of the examples in this chapter, we’ll assume that the container runtime is working as expected. At this point, then, the main problem we’ll run into is the case in which the
+container does not start as expected. Let’s begin with a simpler example of debugging a container that fails to run, and then we’ll look at a more complex example.
+Debugging Using Logs
+For our simple example, we first need a Pod definition with a container that fails on startup. Here’s a Pod definition for PostgreSQL that will do what we want:
+postgres-misconfig.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: postgres
+spec:
+  containers:
+  - name: postgres
+    image: postgres
+It might not seem like there are any issues with this definition, but PostgreSQL has some required configuration when running in a container.
+We can create the Pod using
+kubectl apply
+:
+root@host01:~#
+kubectl apply -f /opt/postgres-misconfig.yaml
+pod/postgres created
+After a minute or so to allow time to pull the image, we can check the status with
+kubectl get
+, and we’ll notice a status we haven’t seen before:
+root@host01:~#
+kubectl get pods
+NAME       READY   STATUS             RESTARTS     AGE
+postgres   0/1     CrashLoopBackOff   1 (8s ago)   25s
+The
+CrashLoopBackOff
+status indicates that a container in the Pod has exited. As this is not a Kubernetes Job, it doesn’t expect the container to exit, so it’s considered a crash.
+If you catch the Pod at the right time, you might see an
+Error
+status rather than
+CrashLoopBackOff
+. This is temporary: the Pod transitions through that status immediately after crashing.
+Like the
+ImagePullBackOff
+status, a
+CrashLoopBackOff
+uses an algorithm to retry the failure, increasing the time between retries with every failure, to avoid overwhelming the cluster. We can see this back-off if we wait a few minutes and then print the status again:
+root@host01:~#
+kubectl get pods
+NAME       READY   STATUS             RESTARTS       AGE
+postgres   0/1     CrashLoopBackOff   5 (117s ago)   5m3s
+After five restarts, we’re already up to more than a minute of wait time between retries. The wait time will continue to increase until we reach five minutes, and then Kubernetes will continue to retry every five minutes thereafter indefinitely.
+Let’s use
+kubectl describe
+, as usual, to try to get more information about this failure:
+root@host01:~#
+kubectl describe pod postgres
+Name:         postgres
+Namespace:    default
+...
+Containers:
+  postgres:
+...
+    State:          Waiting
+      Reason:       CrashLoopBackOff
+    Last State:     Terminated
+      Reason:       Error
+      Exit Code:    1
+...
+Events:
+  Type     Reason     Age                    From               Message
+  ----     ------     ----                   ----               -------
+...
+  Warning  BackOff    3m13s (x24 over 8m1s)  kubelet            Back-off 
+    restarting failed container
+The
+kubectl describe
+command does give us one piece of useful information: the exit code for the container. However, that really just tells us there was an error of some kind; it isn’t enough to fully debug the failure. To establish why the container is failing, we’ll look at the container logs using the
+kubectl logs
+command:
+root@host01:~#
+kubectl logs postgres
+Error: Database is uninitialized and superuser password is not specified.
+  You must specify POSTGRES_PASSWORD to a non-empty value for the
+  superuser. For example, "-e POSTGRES_PASSWORD=password" on "docker run".
+...
+We can see the logs even though the container has already stopped, because the container runtime has captured them.
+This message comes directly from PostgreSQL itself. Fortunately, it tells us exactly what the issue is: we are missing a required environment variable. We can quickly fix this with an update to the YAML resource file:
+postgres-fixed.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+name: postgres
+spec:
+  containers:
+  - name: postgres
+    image: postgres
+➊
+env:
+    - name: POSTGRES_PASSWORD
+      value: "supersecret"
+The
+env
+field
+➊
+adds a configuration to pass in the required environment variable. Of course, in a real system we would not put this directly in a YAML file in plaintext. We look at how to secure this kind of information in
+Chapter 16
+.
+To apply this change, we first need to delete the Pod definition and then apply the new resource configuration to the cluster:
+root@host01:~#
+kubectl delete pod postgres
+pod "postgres" deleted
+root@host01:~#
+kubectl apply -f /opt/postgres-fixed.yaml
+pod/postgres created
+As before, if we were using a controller such as a Deployment, we could just update the Deployment, and it would handle deleting the old Pod and creating a new one for us.
+Now that we’ve fixed the configuration, our PostgreSQL container starts as expected:
+root@host01:~#
+kubectl get pods
+NAME       READY   STATUS    RESTARTS   AGE
+postgres   1/1     Running   0          77s
+Let’s clean up this Pod before we continue to our next example:
+root@host01:~#
+kubectl delete pod postgres
+pod "postgres" deleted
+Most well-written applications will print log messages before terminating, but we need to be prepared for more difficult cases. Let’s look at one more example that includes two new debugging approaches.
+Debugging Using Exec
+For this example, we’ll need an application that behaves badly. We’ll use a C program that does some very naughty memory access. This program is packaged into an Alpine Linux container so that we can run it as a container in Kubernetes. Here’s the C source code:
+crasher.c
+int main() {
+  char *s = "12";
+  s[2] = '3';
+return 0;
+}
+The first line of code creates a pointer to a string that is two characters long; the second line then tries to write to the non-existent third character, causing the program to terminate immediately.
+This C program can be compiled on any system by using
+gcc
+to create a
+crasher
+executable. If you build it on a host Linux system, use this
+gcc
+command:
+$
+gcc -g -static -o crasher crasher.c
+The
+-g
+argument ensures that debugging symbols are available. We’ll use those in a moment. The
+-static
+argument is the most important; we want to package this as a standalone application inside an Alpine container image. If we are building on a different Linux distribution, such as Ubuntu, the standard libraries are based on a different toolchain, and dynamic linking will fail. For this reason, we want our executable to have all of its dependencies statically linked. Finally, we use
+-o
+to specify the output executable name and then provide the name of our C source file.
+Alternatively, you can just use the container image that’s already been built and published to Docker Hub under the name
+bookofkubernetes/crasher: stable
+. This image is built and published automatically using GitHub Actions based on the code in the repository
+https://github.com/book-of-kubernetes/crasher
+. Here’s the
+Dockerfile
+from that repository:
+Dockerfile
+FROM alpine AS builder
+COPY ./crasher.c /
+RUN apk --update add gcc musl-dev && \
+    gcc -g -o crasher crasher.c

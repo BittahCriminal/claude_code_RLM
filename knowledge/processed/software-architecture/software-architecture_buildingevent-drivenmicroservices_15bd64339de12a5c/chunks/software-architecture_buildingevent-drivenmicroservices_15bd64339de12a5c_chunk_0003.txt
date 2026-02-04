@@ -1,0 +1,4065 @@
+organization will undoubtedly benefit from a common testing platform, so you should consider investing in tooling to streamline your testing processes. Programmatic bringup of environments, including the population of event streams, can significantly reduce the overhead of setting up environments for each microservice under test.
+A single shared testing environment is a common strategy to employ when investment in tooling is low. The tradeoff is the increased difficulty in managing the event data, ensuring validity, and clarifying ownership. Disposable environments are a preferable alternative, as they provide isolation for services under test and reduce the risks and shortcomings caused by multiple tenancy issues. These options tend to require more investment in common supportive tooling, but save significant time and effort in the long run. As an added benefit, using programmatic environment bringup and event copying tooling can better prepare your organization for disaster recovery.
+
+Chapter 16.
+Deploying Event-Driven Microservices
+Deploying event-driven microservices can be challenging. As the number of microservices within an organization increases, so does the importance of having standardized deployment processes in place. An organization managing only a few dozen services can get away with a few custom deployment processes, but any organization seriously invested in microservices, event-driven or otherwise, must invest in standardization and streamlining its deployment processes.
+Principles of Microservice Deployment
+There are a number of principles that drive deployment processes:
+Give teams deployment autonomy
+Teams should control their own testing and deployment process and have the autonomy to deploy their microservices at their discretion.
+Implement a standardized deployment process
+The deployment process should be consistent between services. A new microservice should be created with a deployment process already available to it. This is commonly accomplished with a
+continuous integration
+framework, as is discussed shortly.
+Provide necessary supportive tooling
+Deployments may require teams to reset consumer group offsets, purge state stores, check and update schema evolution, and delete internal event streams. Supportive tooling provides these functions to enable further automation of deployment and support team autonomy.
+Consider event stream reprocessing impacts
+Reconsuming input event streams can be time-consuming, leading to stale results for downstream consumers. Additionally, this microservice may subsequently generate a large volume of output events, causing another high load for downstream consumers. Very large event streams and those with large amounts of consumers may see nontrivial surges in processing power requirements. You must also consider side effects, particularly those that can be disruptive to customers (e.g., resending multiple years’ worth of promotional emails).
+Adhere to service-level agreements (SLAs)
+Deployments may be disruptive to other services. For instance, rebuilding state stores can result in a significant amount of downtime, while reprocessing input event streams may generate a significant number of events. Ensure that all SLAs are honored during the deployment process.
+Minimize dependent service changes
+Deployments may require that other services change their APIs or data models, such as when interacting with a REST API or introducing a domain schema change. These changes should be minimized whenever possible, as they violate the other team’s autonomy for deploying their services only when required by shifting business requirements.
+Negotiate breaking changes with downstream consumers
+Breaking schema changes may be inevitable in some circumstances, requiring the creation of new event streams and a renegotiation of the data contract with downstream consumers. Ensure that these discussions happen before any deployment and that a migration plan for consumers is in place.
+Warning
+Microservices should be independently deployable, and it is an anti-pattern if they are not. If a particular microservice deployment regularly requires other microservices to synchronize their deployments, it is an indicator that their bounded contexts are ill-defined and should be reviewed.
+Architectural Components of Microservice Deployment
+There are several major components of the microservice deployment architecture, each of which plays a pivotal role. This architecture can be roughly broken down into two main components: the system used to build and deploy the code, and the compute resources used by the microservices.
+Continuous Integration, Delivery, and Deployment Systems
+Continuous integration, delivery, and deployment systems allow for microservices to be built, tested, and deployed as code changes are committed to the repository.
+This is part of the microservice tax that you must pay to successfully manage and deploy microservices at scale. These systems allow microservice owners to decide when to deploy their microservices, which is essential for scaling up the number of microservices used in an organization.
+Continuous integration
+(CI) is the practice of automating the integration of code changes from multiple contributors into a single software project. Changes from code are integrated at the discretion of the team managing the microservice, with the intent of reducing the amount of time between when code changes are made to when they are deployed in production. CI frameworks allow for processes to be executed automatically when code is merged into the main branch, including build operations, unit testing, and integration testing operations. Other CI processes may include validating code style and performing schema evolution validation. A ready-to-deploy container or virtual machine is the final output of the CI pipeline.
+Continuous delivery
+is the practice of keeping your codebase deployable. Microservices that adhere to continuous delivery principles use a CI pipeline to validate that the build is ready for deployment. The deployment itself is
+not
+automated, however, and requires some manual intervention on the service owner’s part.
+Continuous deployment
+is the automated deployment of the build. In an end-to-end continuous deployment, a committed code change propagates through the CI pipeline, reaches a deliverable state, and is automatically deployed to production according to the deployment configuration. This contributes to a tight development loop with a short turnaround time, as committed changes quickly enter production.
+Figure 16-1.
+A CI pipeline showcasing the difference between continuous delivery and continuous deployment
+Warning
+Continuous deployment is difficult to do in practice. Stateful services are particularly challenging, as deployments may require rebuilding state stores and reprocessing event streams, which are especially disruptive to dependent services.
+Container Management Systems and Commodity Hardware
+The container management system (CMS) provides the means of managing, deploying, and controlling the resource use of containerized applications (see
+“Managing Containers and Virtual Machines”
+). The container built during the CI process is deposited into a repository, where it awaits deployment instructions from the CMS. Integration between your CI pipeline and the CMS is essential to a streamlined deployment process and is usually provided by all of the leading CMS providers, as discussed in
+Chapter 2
+.
+Commodity hardware is typically used for the deployment of event-driven microservices, as it is inexpensive, performs reliably, and enables horizontal scaling of services. You can add and remove hardware to and from the resource pools as required, while recovery from failed instances requires only that you redeploy the failed microservice instances to the new hardware. Though your microservice implementations may vary, many event-driven microservices do not require any specialized hardware to operate. For those that do, you can allocate specialized resources into their own independent pools, such that the associated microservices can be deployed accordingly. Examples might include memory-intensive computing instances for caching purporses, or processor-intensive computing instances for applications demanding significant processing power.
+The Basic Full-Stop Deployment Pattern
+The basic full-stop deployment pattern is the basis of all other patterns, and this section outlines the steps involved (illustrated in
+Figure 16-1
+). You may have additional steps in your pipeline depending on the specific requirements of your domain, but I am keeping these steps lean for space purposes. Use your own judgment and domain knowledge to insert any steps specific to your use cases.
+Commit code.
+Merge the latest code into the master branch, kicking off the CI pipeline. The specifics depend upon your repository and CI pipeline, but you typically do this using commit hooks that can execute arbitrary logic when code is committed to the repository.
+Execute automated unit and integration tests.
+This step is part of the CI pipeline to validate that the committed code passes all the unit and integration tests necessary for merging. Integration tests may require that you spin up transient environments and populate them with data to perform more complex tests. This requires integration of the CI pipeline with the tooling described in
+“Local Integration Testing”
+so that each service can bring up its own integration testing environment.
+Tip
+It’s best to have independent integration testing environments for any sort of automated integration, as it allows you to run tests for a given service in isolation from other services. This significantly reduces multitenancy issues that arise from having a long-running and shared integration test environment.
+Run predeployment validation tests.
+This step ensures that your microservice will deploy properly by validating common issues before release. Validations may include:
+Event stream validation
+Validate that input event streams exist, output streams exist (or can be created, if automatic creation is enabled), and your microservice has the proper read/write permissions to access them.
+Schema validation
+Validate that both the input and output schemas follow schema evolution rules. A simple way to do this is by convention, with your input and output schemas contained within a specific directory structure, along with a map of schemas to event streams. This step of the pipeline can simply ingest the schemas and run the comparisons for you, detecting any incompatibilities.
+Deployment.
+The currently deployed microservice needs to be halted before the new one can be deployed. This process consists of two major steps:
+Stop instances and perform any clean-up before deploying.
+Stop the microservice instances. Perform any necessary state store resets and/or consumer group resets, and delete any internal streams. If rebuilding state in the case deployment failure is expensive, you may instead want to leave your state, consumer group, and internal topics alone, and instead deploy as a new service. This will enable you to roll back quickly in the case of a failure.
+Deploy.
+Perform the actual deployment. Deploy the containerized code and start the required number of microservice instances. Wait for them to boot up and signal that they are ready before moving on to the next step. In the case of a failure, abandon this step and deploy the previous working version of the code.
+Run post-deployment validation tests.
+Validate that the microservice is operating normally, that consumer lag is returning to normal, that there are no logging errors, and that endpoints are working as expected.
+Warning
+Consider the impacts to all dependent services, including SLAs, downtime, stream processing catch-up time, output event load, new event streams, and breaking schema changes. Communicate with dependent service owners to ensure that the impacts are acceptable.
+The Rolling Update Pattern
+The rolling update pattern can be used to keep a service running while updating the individual microservice instances. Its prerequisites include the following:
+No breaking changes to any state stores
+No breaking changes to the internal microservice topology (particularly relevant for implementations using lightweight frameworks)
+No breaking changes to internal event schemas
+So long as the prerequisites are met, this deployment pattern works well for scenarios such as when:
+New fields have been added to the input events and need to be reflected in the business logic
+New input streams are to be consumed
+Bugs need to be fixed but don’t require reprocessing
+Warning
+Inadvertently altering the internal microservice topology is one of the most common mistakes people make when trying to use this deployment pattern. Doing so is a breaking change and will require a full application reset instead of a rolling update.
+During a rolling update, only step 4 of
+“The Basic Full-Stop Deployment Pattern”
+is changed. Instead of stopping each instance at the same time, only one instance at a time is stopped. The stopped instance is then updated and started back up, such that a mixture of new and old instances are running during the deployment process. This rolling update means that for a short period of time, both old and new logic will be operating simultaneously.
+Tip
+Smart implementations will run a test that checks compatibility of a release to notify you if the rolling update is valid. Doing this manually is quite error-prone and should be avoided.
+The main benefit of this pattern is that services can be updated while near-real-time processing continues uninterrupted, eliminating downtime. The main drawback of this pattern is its prerequisites, which limits its usage to specific scenarios.
+The Breaking Schema Change Pattern
+A breaking schema change is sometimes inevitable, as covered in
+“Breaking Schema Changes”
+. Deployments involving breaking schema changes must take into account a number of dependencies, including both consumer and producer responsibilities, coordination of migration efforts, and reprocessing downtime.
+Deploying a breaking schema change is a fairly straightforward technical process. The difficult part is renegotiating the schema definition, communicating that with stakeholders, and coordinating deployment and migration plans. Each of these steps requires clear communication between parties and well-defined timelines for action.
+The impacts of a breaking schema change vary depending on the type of event. Breaking
+entity
+schema changes are more complex than those of
+nonentity events
+, as entities require a consistent definition for consumer materialization. Entities are also, by definition,
+durable
+units of data that will be reconsumed whenever a consumer rematerializes the entity stream from its source. Entity streams must be re-created under the new schema, incorporating both the new business logic and schema
+definitions
+.
+Re-creating the entities for the new stream will require reprocessing the necessary source data for the producer, whether a batch source or its own input event streams. This logic can be built into the same producer, or a new producer can be built and deployed alongside it.
+The former option keeps all logic encapsulated within its own service, whereas the latter option allows the original producer to continue its operations uninterrupted, reducing impact to downstream consumers. These options are illustrated in
+Figure 16-2
+.
+Breaking schema changes often reflect a fundamental shift in the domain of an entity or event. These usually don’t happen too often, but when they do, the change is usually significant enough that consumers must be updated to reflect the shifted business meaning of the domain.
+Figure 16-2.
+Breaking schema change producer options for re-creating events with new schema
+Breaking changes for
+nonentity events
+, on the other hand, may not require reprocessing. This is predominantly because many event streaming applications don’t regularly reprocess event streams in the same way that a service may need to rematerialize its entity streams. Consumers can often simply add the new event definition as a new event stream and modify their business logic to handle both old and new events. Once the old events expire out of the event stream, the old event stream can simply be dropped from the business logic.
+There are two main options for migrating a breaking schema change:
+Eventual migration via two event streams, one with the old schema and one with the new schema
+Synchronized migration to a single new stream, with the old one removed
+Eventual Migration via Two Event Streams
+Eventual migration via two event streams requires that the producer write events with both the old and new format, each to its respective stream. The old stream is marked as deprecated, and the consumers of it will, in their own time, migrate to the new stream instead. Once all of the consumers have migrated, the old stream can be removed or offloaded into long-term data storage.
+This strategy makes a couple of assumptions:
+Events can be produced to both the old and new streams.
+The producer must have the necessary data available to create events of both the old and new format. The domain of the produced event will have changed significantly enough to require a breaking change, while remaining similar enough that a 1:1 mapping of old to new event format still makes sense. This may not be the case with all breaking schema changes.
+Eventual migration will not cause downstream inconsistencies.
+Downstream services will continue consuming two different definitions, but there will not be consequential effects, or those effects will be limited. Again, the breaking change in the schema suggests the domain has been altered enough that the redefinition was necessary to the organization. It is seldom the case that the breaking change is necessary for the business but largely inconsequential to the consumers that use the events.
+Caution
+One of the main risks of eventual migration is that the migration is never finished, and similar-yet-different data streams remain in use indefinitely. Additionally, new services created during the migration may inadvertently register themselves as consumers on the old stream instead of the new one. Use metadata tagging (see
+“Event Stream Metadata Tagging”
+) to mark streams as deprecated and keep migration windows small.
+Synchronized Migration to the New Event Stream
+Another option is to update the producer to create events strictly with the new format and to cease providing updates to the old stream. This is a simpler option—technologically speaking—than maintaining two event streams, but it requires more intensive communication between the producer and consumers of the data. Consumers must update their definitions to accommodate breaking changes introduced by the producer.
+This strategy also makes a few assumptions:
+The event definition change is significant enough that the old format is no longer usable.
+The domain of the entity or event has changed so much that the old and new format cannot be maintained concurrently.
+Migration must happen synchronously to eliminate downstream inconsistencies.
+The domain has changed so significantly that services need to update to ensure that business requirements can be met. Downstream services could have major inconsistencies otherwise. For example, consider an entity where the selection criteria for creation of the event has changed.
+The biggest risk of this deployment plan is that consumers may fail in their migration to the new event stream, but be unable to gracefully fall back to the old source of data as they would using the eventual migration strategy.
+Integration testing (preferably using programmatically generated environments and source data) can reduce this risk by providing an environment in which to completely exercise the migration process. You can create and register the producer and the consumers together in the test environment to validate the migration prior to performing it in production.
+Note
+Synchronized migrations tend to be rare in practice, as they require significant breaking changes or even the destruction of the event’s previous domain model. Core business entities usually have very stable domain models, but when major breaking changes occur, a synchronous migration may be unavoidable.
+The Blue-Green Deployment Pattern
+The main goal of blue-green deployment is to provide zero downtime while deploying new functionality. This pattern is predominantly used in synchronous request-response microservice deployments, as it allows for synchronous requests to continue while the service is updated. An example of this pattern is shown in
+Figure 16-3
+.
+Figure 16-3.
+Blue-green deployment pattern
+In this example, a full copy of the new microservice (blue) is brought up in parallel with the old microservice (green). The blue service has a fully isolated instance of its external data store, its own event stream consumer group, and its own IP addresses for remote access. It consumes input events until monitoring indicates that it is sufficiently caught up to the green service, at which point traffic from the green instances can begin to be rerouted.
+The switchover of traffic is performed by the router in front of the services. A small amount of traffic can be diverted to the new blue instance, such that the deployment can be validated in real time. If the deployment process detects no failures or abnormalities, more and more traffic can be diverted until the green side is no longer receiving any traffic.
+At this point, depending on the sensitivity of your application and the need to provide a quick fallback, the green instances can be turned off immediately or left to idle until sufficient time without incident has passed. In the case that an error occurs during this cooldown period, the router can quickly reroute the traffic back to the green instances.
+Note
+Monitoring and alerting—including resource usage metrics, consumer group lag, autoscaling triggers, and system alerts—need to be integrated as part of the color switching process.
+Blue-green deployments work well for microservices that consume from event streams. They can also work well when events are produced
+only
+due to request-response activity, such as when the request is converted directly into an event (see
+“Handling Requests Within an Event-Driven Workflow”
+).
+Warning
+Blue-green deployments
+do not work
+when the microservice produces events to an output stream in reaction to an input event stream. The two microservices will overwrite each other’s results in the case of entity streams or will create duplicated events in the case of event streams. Use either the
+rolling update pattern
+or the
+basic full-stop deployment pattern
+instead.
+Summary
+Streamlining the deployment of microservices requires your organization to pay the microservice tax and invest in the necessary deployment systems. Due to the large number of microservices that may need to be managed, it is best to delegate deployment responsibilities to the teams that own the microservices. These teams will need supportive tooling to control and manage their deployments.
+Continuous integration pipelines are an essential part of the deployment process. They provide the framework for setting up and executing tests, validating builds, and ensuring that the containerized services are ready to deploy to production. The container management system provides the means for managing the deployment of the containers into the compute clusters, allocating resources, and providing scalability.
+There are a number of ways to deploy services, with the simplest being to stop the microservice fully and redeploy the newest code. This can incur significant downtime, however, and may not be suitable depending on the SLAs. There are several other deployment patterns, each with its own benefits and drawbacks. The patterns discussed in this chapter are by no means a comprehensive list, but should give you a good starting point for determining the needs of your own services.
+
+Chapter 17.
+Conclusion
+Event-driven microservice architectures provide a powerful, flexible, and well-defined approach to solving business problems. Here is a quick recap of the things that have been covered in this book, as well as some final words.
+Communication Layers
+The data communication structure allows for universal access of important business events across the organization.
+Event brokers fulfill this need extremely well, as they permit the strict organization of data, can propagate updates in near–real time, and can operate at big-data scale. The communication of data remains strictly decoupled from the business logic that transforms and utilizes it, offloading these requirements into individual bounded contexts. This separation of concerns allows the event broker to remain largely agnostic of the business logic requirements (aside from supporting reads and writes), enabling it focus strictly on storing, preserving, and distributing the event data to consumers.
+A mature data communication layer decouples the ownership and production of data from the access and consumption of it. Applications no longer need to perform double duty by serving internal business logic while also providing synchronization mechanisms and outside direct access for other services.
+Any service can leverage the durability and resiliency of the event broker to makes its data highly available, including those that use the event broker to store changelogs of its internal state. A failed service instance no longer means that data is inaccessible, but simply that new data will be delayed until the producer is back online. Meanwhile, consumers are free to consume from the event broker during any producer outages, decoupling the failure modes between the services.
+Business Domains and Bounded Contexts
+Businesses operate in a specific domain, which can be broken down into subdomains. Solutions to business problems are informed by bounded contexts, which identify the boundaries—including the inputs, outputs, events, requirements, processes, and data models—relevant to the subdomain.
+Microservice implementations can be built to align with these bounded contexts. The resultant services and workflows thus align with the problems and business requirements. The universal data communication layer helps facilitate these alignments by ensuring that the microservice implementations are flexible enough to adapt to changes within the business domain and subsequent bounded contexts.
+Shareable Tools and Infrastructure
+Event-driven microservices require an investment in the systems and tools that permit its operation at scale, known as the microservice tax. The event broker is at the heart of the system, as it provides the fundamental communication between services and absolves each service from managing its own data communication solution.
+Microservice architectures amplify all of the issues surrounding creating, managing, and deploying applications, and benefit from a standardization and streamlining of these processes. This becomes more critical as the number of microservices grow, because while each new microservice incurs an overhead, the nonstandardized ones can incur significantly more than those following a protocol.
+The essential services that make up the microservice tax include:
+The event broker
+Schema registry and data exploration service
+Container management system
+Continuous integration, delivery, and deployment service
+Monitoring and logging service
+Paying the microservice tax is unlikely to be an all-or-nothing process. An organization will typically start with either an event broker service or a container management system, and work toward adding other pieces as needed. Fortunately, a number of computing service providers, such as Google, Microsoft, and Amazon, have created services that significantly reduce the overhead. You must weigh your options and choose between outsourcing these operations to a service provider or building your own systems in-house.
+Schematized Events
+Schemas play a pivotal role in communicating the meaning of events. Strongly typed events force both producers and consumers to contend with the realities of the data. Producers must ensure that they produce events according to the schema, while consumers must ensure that they handle the types, ranges, and definitions of the consumed events. Strongly defined schemas significantly reduce the chance of consumers misinterpreting events and provide a contract for future changes.
+Schema evolution provides a mechanism for events and entities to change in response to new business requirements. It enables the producer to generate data with new and altered fields, while also allowing consumers that don’t care about the change to continue using older schemas. This significantly reduces the frequency and risk of nonessential change. Meanwhile, the remaining consumers can independently upgrade their code to consume and process events using the latest schema format, enabling them to access the latest data fields.
+Finally, schemas also allow for useful features such as code generation and data discovery. Code generators can create classes/structures relevant to producing and consuming applications. These strongly defined classes/structures can help detect formatting errors in production and consumption either at compile time or during local testing, ensuring that events can be seamlessly produced and consumed. This allows developers to focus strictly on the business logic of handling and transforming these events, and far less on the plumbing. Meanwhile, a schema registry provides a searchable means of figuring out which data is attributed to which event stream, enabling easier discovery of the stream’s contents.
+Data Liberation and the Single Source of Truth
+Once the data communication layer is available, it’s time to get the business-critical data into it. Liberating data from the various services and data stores in your organization can be a lengthy process, and it will take some time to get all necessary data into the event broker. This is an essential step in decoupling systems from one another and for moving toward an event-driven architecture. Data liberation decouples the production and ownership of data from the accessing of it by downstream consumers.
+Start by liberating the data that is most commonly used and most critical to your organization’s next major goals. There are various ways to extract information from the various services and data stores, and each method has benefits and drawbacks. It’s important to weigh the impact on the existing service against the risks of stale data, lack of schemas, and exposure of internal data models in the liberated event streams.
+Tip
+Having readily available business data in the form of event streams allows for services to be built by
+composition
+. A new service needs only to subscribe to the event streams of interest via the event broker, rather than directly connecting to each service that would otherwise provide the data.
+Microservices
+As the implementation of the bounded context, microservices are focused on solving the
+business
+problems of the bounded context, and aligned accordingly. Business requirement changes are the primary driver of updates to a microservice, with all other unrelated microservices remaining unchanged.
+Avoid implementing microservices based on technical boundaries. These are generally created as a short-term optimization for serving multiple business workflows, but in doing so, they couple themselves to each workflow. The technical microservice becomes sensitive to business changes and couples otherwise unrelated workflows together. A failure or inadvertent change in the technical microservice can bring down multiple business workflows. Steer clear of technical alignment whenever possible, and focus instead on fulfilling the business’s bounded context.
+Lastly, not all microservices need be “micro.” It is reasonable for an organization to instead use several larger services, particularly if it has not paid the microservice tax, in part or in full. This is a normal evolution of an organization’s architecture. If your business is using numerous large services, following these principles will help enable the creation of new, fine-grained services decoupled from the existing large services:
+Put important business entities and events into the event broker.
+Use the event broker as the single source of truth.
+Avoid using direct calls between services.
+Microservice Implementation Options
+There’s a wide range of options available, all with pros and cons, for building event-driven microservices.
+Currently, lightweight frameworks tend to have the greatest out-of-the-box functionality. Streams can be materialized to tables and maintained indefinitely. Joins, including those on foreign keys, can be performed for numerous streams and tables. Hot replicas, durable storage, and changelogs provide resiliency and scalability.
+Heavyweight frameworks provide similar functionality to lightweight frameworks, but fall short in terms of processing independence because they require a separate dedicated cluster of resources. New cluster management options are becoming more popular, such as direct integration with Kubernetes, one of the leading container management systems. Heavyweight frameworks are often already in use in mid-sized and larger organizations, typically by the individuals performing big-data analysis.
+Basic producer/consumer (BPC) and Function-as-a-Service (FaaS) solutions provide flexible options for many languages and runtimes. Both options are limited to basic consumption and production patterns. Ensuring deterministic behavior is difficult, as neither option comes with built-in event scheduling, so complex operations require either a significant investment in your own custom libraries to provide that functionality, or limiting the usage to simple use-case patterns.
+Testing
+Event-driven microservices lend themselves very well to full integration and unit testing. As the predominant form of inputs to an event-driven microservice, events can be easily composed to cover whatever cases may arise. Event schemas constrain the range of values that need to be tested and provide the necessary structure for composing input test streams.
+Local testing can include both unit and integration testing, with the latter relying on the dynamic creation of an event broker, schema registry, and any other dependencies required by the service under test. For example, an event broker can be created to run within the same executable as the test, as is the case with numerous JVM-based solutions, or to run within its own container alongside the application under test. With full control of the event broker, you can simulate load, timing conditions, outages, failures, or any other broker-application interactions.
+You can conduct production integration testing by dynamically creating a temporary event broker cluster, populating it with copies of production event streams and events (barring information-security concerns) and executing the application against it. This can provide a smoke test prior to production deployment to ensure that nothing has been overlooked. You can also execute performance tests in this environment, testing both the performance of a single instance and the ability of the application to horizontally scale. The environment can simply be discarded once testing is complete.
+Deploying
+Deploying microservices at scale requires that microservice owners can quickly and easily deploy and roll back their services. This autonomy allows for teams to move and act independently and to eliminate bottlenecks that would otherwise exist in an infrastructural team responsible solely for deployments.
+Continuous integration, delivery, and deployment pipelines are essential in providing this functionality, as they allow a streamlined yet customizable deployment process that reduces manual steps and intervention, and can be scaled out to other microservices. Depending on your selection, the container management system may provide additional functionality to help with deployments and rollbacks, further simplifying the process.
+The deployment process must take into account service-level agreements (SLAs), rebuilding of state, and reconsumption of input event streams. SLAs are not simply matters of downtime, but also must take into account the impact of deployment on all downstream consumers, and the health of the event broker service.
+A microservice that must rebuild its entire state and propagate new output events may place a considerable load on the event broker, as well as cause downstream consumers to suddenly need to scale up to many more processing instances.
+It is not uncommon for a rebuilding service to process millions or billions of events in short order.
+Quotas can mitigate the impact, but depending on downstream service requirements, a rebuilding service may be in an  inconsistent state for an unacceptable period of time.
+There are always tradeoffs between SLAs, impact to downstream consumers, impact to the event broker, and impact to monitoring and alerting frameworks.
+For instance, a blue-green deployment requires two consumer groups, which must be considered for monitoring and alerting, including lag-based autoscaling. While you can certainly perform the work necessary to accommodate this deployment pattern, another option is to simply change the application’s design. An alternative to blue-green deployments is to use a thin, always-on serving layer to serve synchronous requests, while the backend event processor can be swapped out and reprocess in its own time. While your service layer may serve stale data for a period of time, it doesn’t require any augmentations to tooling or more complex swapping operations and can possibly still meet the SLAs of dependent services.
+Final Words
+Event-driven microservices require you to rethink what data really is and how services go about accessing and using it. The amount of data attributed to any specific domain grows in leaps and bounds every year and shows no signs of stopping. Data is becoming larger and more ubiquitous, and gone are the days when it could simply be shoved into one large data store and used for all purposes. A robust and well-defined data communication layer relieves services of performing double duty and allows them to focus instead on serving just their own business functionality, not the data and querying needs of other bounded contexts.
+Event-driven microservices are a natural evolution of computing to handle these large and diverse data sets. The compositional nature of event streams lends itself to unparalleled flexibility and allows individual business units to focus on using whatever data is necessary to accomplish their business goals. Organizations running a handful of services can benefit greatly from the data communications provided by the event broker, which paves the way for building new services, fully decoupled from old business requirements and implementations.
+Regardless of the future of event-driven microservices themselves, this much is clear: The data communication layer extends the power of an organization’s data to any service or team that requires it, eliminates access boundaries, and reduces unnecessary complexity related to the production and distribution of important business
+information
+.
+
+Index
+A
+ACLs (access control lists) for event streams
+,
+Permissions and Access Control Lists for Event Streams
+,
+Dependency Tracking and Topology Visualization
+AFTER trigger
+,
+Capturing Change-Data Using Triggers
+aggregation layer, challenges of
+,
+Micro-Frontends in Request-Response Applications
+,
+Example: Experience Search and Review Application
+Akidau, Tyler
+Streaming Systems
+,
+Watermarks
+Amazon Web Services
+(
+see
+AWS)
+analytical events
+,
+Autonomously Generated Events
+-
+Handling Autonomously Generated Analytical Events
+Apache Avro
+,
+Selecting an Event Format
+Apache Beam
+,
+Heavyweight Framework Microservices
+,
+A Brief History of Heavyweight Frameworks
+,
+Choosing a Framework
+,
+Testing the Topology
+Apache Flink
+,
+Heavyweight Framework Microservices
+,
+A Brief History of Heavyweight Frameworks
+,
+Specifying resources for a single job using the CMS
+,
+Scaling an Application by Restarting It
+,
+Testing the Topology
+Apache Gobblin
+,
+Data Liberation Frameworks
+Apache Hadoop
+,
+A Brief History of Heavyweight Frameworks
+Apache Heron
+,
+Heavyweight Framework Microservices
+,
+A Brief History of Heavyweight Frameworks
+,
+Scaling an Application While It Is Running
+Apache Kafka
+,
+Community support
+,
+Consuming as a queue
+,
+Selecting an Event Format
+,
+Data Liberation Frameworks
+,
+Liberating Data Using Change-Data Capture Logs
+,
+Assigning Partitions to a Consumer Instance
+,
+Transactions and Effectively Once Processing
+,
+Choosing a FaaS Provider
+,
+Schema Registry
+Apache NiFi
+,
+Data Liberation Frameworks
+Apache Pulsar
+,
+Consuming as a queue
+,
+Selecting an Event Format
+,
+Assigning Partitions to a Consumer Instance
+,
+Transactions and Effectively Once Processing
+,
+Choosing a FaaS Provider
+Apache Samza
+,
+Custom Event Schedulers
+,
+Stream Time in Parallel Processing
+,
+Apache Samza: Embedded Mode
+Apache Spark
+,
+Heavyweight Framework Microservices
+,
+A Brief History of Heavyweight Frameworks
+,
+Specifying resources for a single job using the CMS
+,
+Scaling an Application While It Is Running
+,
+Choosing a Framework
+,
+Testing the Topology
+Apache Storm
+,
+Heavyweight Framework Microservices
+,
+A Brief History of Heavyweight Frameworks
+,
+Scaling an Application by Restarting It
+Apache Zookeeper
+,
+Heavyweight Framework Microservices
+,
+The Inner Workings of Heavyweight Frameworks
+,
+Recovering from Failures
+API versioning and dependency management
+,
+API versioning and dependency management
+application layer, testing
+,
+Local Integration Testing
+asynchronous direct-function calling
+,
+Choreography and asychronous function calling
+-
+Choreography and asychronous function calling
+asynchronous microservices
+,
+Asynchronous Event-Driven Microservices
+-
+Example Team Using Event-Driven Microservices
+,
+Processing Events for User Interfaces
+asynchronous triggers, FaaS
+,
+Triggering Based on New Events: The Event-Stream Listener
+asynchronous UI
+,
+Processing Events for User Interfaces
+autoincrementing ID
+,
+Autoincrementing ID Loading
+,
+Liberating Data Using Outbox Tables
+autonomously generated events
+,
+Autonomously Generated Events
+-
+Handling Autonomously Generated Analytical Events
+autonomy, microservices’ role in providing design
+,
+Aligning Bounded Contexts with Business Requirements
+autoscaling applications
+,
+Autoscaling Applications
+AWS (Amazon Web Services) ECS
+,
+Managing Containers and Virtual Machines
+AWS (Amazon Web Services) Firecracker
+,
+Managing Containers and Virtual Machines
+AWS (Amazon Web Services) Kinesis
+,
+Integrate Hosted Services Using Mocking and Simulator Options
+AWS (Amazon Web Services) Lambda
+,
+Integrate Hosted Services Using Mocking and Simulator Options
+B
+backend and frontend services, coordination of
+,
+Micro-Frontends in Request-Response Applications
+-
+Example: Experience Search and Review Application
+backward compatibility, schema evolution rules
+,
+Full-Featured Schema Evolution
+basic full-stop deployment pattern
+,
+The Basic Full-Stop Deployment Pattern
+-
+The Basic Full-Stop Deployment Pattern
+basic producer and consumer (BPC) microservices
+(
+see
+BPC)
+batch event-processing parameters, tuning your functions
+,
+Batch Event-Processing Parameters
+batch size and batch window in event-stream listener triggers
+,
+Triggering Based on New Events: The Event-Stream Listener
+big data
+,
+A Brief History of Heavyweight Frameworks
+binary logs
+,
+Liberating Data Using Change-Data Capture Logs
+,
+Benefits of Using Data Store Logs
+blue-green deployment pattern
+,
+The Blue-Green Deployment Pattern
+-
+The Blue-Green Deployment Pattern
+,
+Deploying
+bootstrapping
+,
+Liberating Data Using Change-Data Capture Logs
+bounded contexts
+,
+Introduction to Domain-Driven Design and Bounded Contexts
+ACLs as enforcers of
+,
+Permissions and Access Control Lists for Event Streams
+aligning microservice implementation to
+,
+Aligning Bounded Contexts with Business Requirements
+,
+Ensure Strict Membership to a Bounded Context
+,
+Business Domains and Bounded Contexts
+,
+Microservices
+business domains
+,
+Introduction to Domain-Driven Design and Bounded Contexts
+-
+Aligning Bounded Contexts with Business Requirements
+,
+Business Domains and Bounded Contexts
+consumer responsibilities in communication structure
+,
+Consumers Perform Their Own Modeling and Querying
+FaaS and designing solutions as microservices
+,
+Ensure Strict Membership to a Bounded Context
+function access permissions
+,
+Maintaining State
+introduction
+,
+Introduction to Domain-Driven Design and Bounded Contexts
+leveraging domain models
+,
+Leveraging Domain Models and Bounded Contexts
+loose coupling of
+,
+Aligning Bounded Contexts with Business Requirements
+,
+Aligning Bounded Contexts with Business Requirements
+,
+Asynchronous Event-Driven Microservices
+bounded versus unbounded data sets, out-of-order event processing
+,
+Out-of-Order and Late-Arriving Events
+BPC (basic producer and consumer) microservices
+,
+Basic Producer and Consumer Microservices
+-
+Example: Using an External Stream-Processing Framework to Join Event Streams
+,
+Microservice Implementation Options
+branching of event streams
+,
+Branching and Merging Streams
+breaking schema change pattern
+,
+Breaking Schema Changes
+-
+Accommodating breaking schema changes for events
+,
+The Breaking Schema Change Pattern
+-
+Synchronized Migration to the New Event Stream
+broker ingestion time
+,
+Timestamps
+bulk loading of data by query
+,
+Bulk Loading
+business domains
+and bounded contexts
+,
+Introduction to Domain-Driven Design and Bounded Contexts
+-
+Aligning Bounded Contexts with Business Requirements
+,
+Business Domains and Bounded Contexts
+,
+Microservices
+centralized frameworks for CDC
+,
+The Impacts of Sinking and Sourcing on a Business
+-
+The Impacts of Sinking and Sourcing on a Business
+communication structures
+,
+Business Communication Structures
+-
+Accessible Data Supports Business Communication Changes
+,
+Using Explicit Schemas as Contracts
+,
+Communication Layers
+FaaS advantages for
+,
+Performing Business Work with Functions
+,
+Microservice Implementation Options
+topology of
+,
+Business Topology
+business logic
+in event processing
+,
+Event-Driven Processing Basics
+freeing UI element libraries from bounded-context-specific
+,
+Potentially Inconsistent UI Elements and Styling
+not reliant on event order
+,
+Stateful Business Logic That Isn’t Reliant Upon Event Order
+windowing
+,
+Time-Sensitive Functions and Windowing
+-
+Session windows
+business requirements
+aligning bounded contexts with
+,
+Aligning Bounded Contexts with Business Requirements
+-
+Aligning Bounded Contexts with Business Requirements
+BPC microservices’ capabilities
+,
+Stateful Business Logic That Isn’t Reliant Upon Event Order
+-
+Example: Perform aggregations on event data to build user engagement profiles
+data definitions and triggering logic
+,
+Event-Driven Data Contracts
+EDM’s flexibility and
+,
+Asynchronous Event-Driven Microservices
+mapping to microservices
+,
+Dependency Tracking and Topology Visualization
+out-of-order and late event handling
+,
+Handling Late Events
+rebuilding state stores
+,
+Rebuilding Versus Migrating State Stores
+request-response and EDM integration
+,
+Easy Alignment to Business Requirements
+schema evolution rules for
+,
+Full-Featured Schema Evolution
+temporal order
+,
+Example: Selecting order of events when processing multiple partitions
+C
+CDC (change data capture)
+,
+Liberating Data Using Change-Data Capture Logs
+-
+The Impacts of Sinking and Sourcing on a Business
+business considerations
+,
+The Impacts of Sinking and Sourcing on a Business
+-
+The Impacts of Sinking and Sourcing on a Business
+change-data capture logs
+,
+Liberating Data Using Change-Data Capture Logs
+-
+Drawbacks of Using Data Base Logs
+change-data tables
+,
+Handling Data Definition Changes for Change-Data Table Capture Patterns
+data definition changes
+,
+Making Data Definition Changes to Data Sets Under Capture
+-
+Handling Data Definition Changes for Change-Data Table Capture Patterns
+data liberation benefits and drawbacks
+,
+Benefits of Using Data Store Logs
+outbox tables
+,
+Liberating Data Using Outbox Tables
+-
+Drawbacks of using triggers
+strategy tradeoffs
+,
+The Impacts of Sinking and Sourcing on a Business
+changelogs
+,
+Recording State to a Changelog Event Stream
+lightweight framework
+,
+Handling State and Using Changelogs
+recording state to
+,
+Recording State to a Changelog Event Stream
+-
+Recording State to a Changelog Event Stream
+restoring and scaling internal state from
+,
+Restoring and scaling from changelogs
+scaling and recovery with external state stores
+,
+Using changelogs
+sourcing data for
+,
+Liberating Data Using Change-Data Capture Logs
+checkpoints
+changelog progress
+,
+Liberating Data Using Change-Data Capture Logs
+in heavyweight framework
+,
+Handling State and Using Checkpoints
+Chernyak, Slava
+Streaming Systems
+,
+Watermarks
+choreography design pattern
+,
+The Choreography Pattern
+-
+Monitoring a Choreographed Workflow
+asynchronous function calling
+,
+Choreography and asychronous function calling
+-
+Choreography and asychronous function calling
+distributed systems
+,
+Creating and Modifying a Choreographed Workflow
+,
+Choreographed Transactions: The Saga Pattern
+-
+Choreography Example
+multifunction solutions
+,
+Event-Driven Communication Pattern
+transactions
+,
+Choreographed Transactions: The Saga Pattern
+-
+Choreography Example
+CI (continuous integration)
+,
+Continuous Integration, Delivery, and Deployment Systems
+,
+Deploying
+cluster mode, for heavyweight cluster
+,
+Cluster Mode
+clusters
+application submission modes
+,
+Application Submission Modes
+in heavyweight framework
+,
+Heavyweight Framework Microservices
+-
+Recovering from Failures
+multicluster management
+,
+Cluster Creation and Management
+replication with cross-cluster event data
+,
+Cross-Cluster Event Data Replication
+,
+Populating with events from production
+setup options and execution modes
+,
+Cluster Setup Options and Execution Modes
+-
+Specifying resources for a single job using the CMS
+supportive tooling
+,
+Cluster Creation and Management
+-
+Programmatic Bringup of Tooling
+CMSes (container management systems)
+,
+Managing Containers and Virtual Machines
+deployment role of
+,
+Container Management Systems and Commodity Hardware
+in heavyweight framework
+,
+Cluster Setup Options and Execution Modes
+-
+Specifying resources for a single job using the CMS
+in lightweight framework
+,
+Heavyweight Framework Microservices
+,
+Lightweight Framework Microservices
+as supportive tool
+,
+Container Management Controls
+code generator support for event schema
+,
+Code Generator Support
+cold start and warm start, FaaS
+,
+Cold Start and Warm Starts
+comments, in schema definition
+,
+Schema Definition Comments
+committing code, deployment
+,
+The Basic Full-Stop Deployment Pattern
+commodity hardware in deployment
+,
+Container Management Systems and Commodity Hardware
+communication structures
+,
+Communication Structures
+-
+Accessible Data Supports Business Communication Changes
+,
+Using Explicit Schemas as Contracts
+,
+Communication Layers
+community support, function of
+,
+Community support
+compaction of changelogs
+,
+Recording State to a Changelog Event Stream
+compatibility types, schema evolution rules
+,
+Full-Featured Schema Evolution
+compensation workflows
+,
+Compensation Workflows
+composite service, multiple microservices as
+,
+Serving requests via a separate microservice
+composition-based microservices
+,
+Composition-Based Microservices
+,
+Data Liberation and the Single Source of Truth
+compute resources, programmatic bringup of
+,
+Programmatic Bringup of Compute Resources
+Confluent KSQL
+,
+Example: Using an External Stream-Processing Framework to Join Event Streams
+,
+Languages and Syntax
+consumer group
+,
+Consuming as an event stream
+consumer group lag
+,
+Triggering Based on Consumer Group Lag
+consumer ingestion time
+,
+Timestamps
+consumer offset lag monitoring
+,
+Consumer Offset Lag Monitoring
+consumers
+,
+Event-Driven Microservice Fundamentals
+access data limitations in data model
+,
+Isolating Internal Data Models
+assigning partitions to consumer instance
+,
+Assigning Partitions to a Consumer Instance
+-
+Recovering from Stateless Processing Instance Failures
+in BPC microservices
+,
+Basic Producer and Consumer Microservices
+-
+Example: Using an External Stream-Processing Framework to Join Event Streams
+breaking schema changes
+,
+Accommodating breaking schema changes for entities
+and communication layers
+,
+Communication Layers
+data access and modeling requirements based on
+,
+Consumers Perform Their Own Modeling and Querying
+decoupling of services
+,
+The Choreography Pattern
+in EDM process
+,
+Event-Driven Processing Basics
+implicit versus explicit data contracts
+,
+Using Explicit Schemas as Contracts
+involvement in designing events
+,
+Involve Prospective Consumers in the Event Design
+negotiating breaking changes with
+,
+Principles of Microservice Deployment
+notifications of schema creation and modification
+,
+Schema Creation and Modification Notifications
+in queue-based consumption
+,
+Event Brokers Versus Message Brokers
+,
+Consuming as a queue
+,
+Integrating with Third-Party Request-Response APIs
+responsibilities for using event stream
+,
+Consuming as an event stream
+timestamp extraction by
+,
+Timestamp Extraction by the Consumer
+container management systems
+(
+see
+CMSes)
+continuous delivery
+,
+Continuous Integration, Delivery, and Deployment Systems
+,
+Deploying
+continuous deployment
+,
+Continuous Integration, Delivery, and Deployment Systems
+,
+Deploying
+continuous integration
+(
+see
+CI)
+Conway’s Law
+,
+Conway’s Law and Communication Structures
+copartitioning event streams
+,
+Copartitioning Event Streams
+,
+Assigning Copartitioned Partitions
+Couchbase
+,
+Liberating Data Using Change-Data Capture Logs
+created-at timestamp
+,
+Liberating Data Using Outbox Tables
+cross-cluster event data replication
+,
+Cross-Cluster Event Data Replication
+,
+Populating with events from production
+cross-cutting versus sole ownership of application
+,
+Aligning Bounded Contexts with Business Requirements
+curated testing source
+,
+Populating with events from a curated testing source
+custom event schedulers
+,
+Custom Event Schedulers
+custom partition assignment strategy
+,
+Custom assignment
+custom querying of data
+,
+Custom Querying
+custom tags, metadata tag
+,
+Event Stream Metadata Tagging
+Custom transforms
+,
+Transformations
+D
+data access, EDM versus request-response microservices
+,
+Data access tied to the implementation
+data communication structure
+,
+Communication Structures
+-
+Accessible Data Supports Business Communication Changes
+,
+Using Explicit Schemas as Contracts
+,
+Communication Layers
+data contracts
+,
+Event-Driven Data Contracts
+-
+Accommodating breaking schema changes for events
+data definition language
+(
+see
+DDL)
+data definitions
+,
+Event-Driven Data Contracts
+,
+Making Data Definition Changes to Data Sets Under Capture
+changing
+,
+Event-Driven Data Contracts
+,
+Using Explicit Schemas as Contracts
+,
+Converting Liberated Data to Events
+,
+Making Data Definition Changes to Data Sets Under Capture
+-
+Handling Data Definition Changes for Change-Data Table Capture Patterns
+events
+,
+Event Data Definitions and Schemas
+in schema
+,
+Using Explicit Schemas as Contracts
+,
+Accommodating breaking schema changes for entities
+updating
+,
+Full-Featured Schema Evolution
+data dependency
+,
+API versioning and dependency management
+,
+Drawbacks of Query-Based Updating
+,
+Drawbacks of Using Data Base Logs
+,
+Dependency Tracking and Topology Visualization
+-
+Topology Example
+data layer performing business logic, using BPC
+,
+When the Data Layer Does Much of the Work
+data liberation
+,
+What Is Data Liberation?
+-
+Drawbacks of using triggers
+change-data capture logs
+,
+Liberating Data Using Change-Data Capture Logs
+-
+Drawbacks of Using Data Base Logs
+converting to events
+,
+Converting Liberated Data to Events
+data definition changes
+,
+Making Data Definition Changes to Data Sets Under Capture
+-
+Handling Data Definition Changes for Change-Data Table Capture Patterns
+frameworks
+,
+Data Liberation Frameworks
+outbox tables
+,
+Liberating Data Using Outbox Tables
+-
+Drawbacks of using triggers
+patterns of
+,
+Data Liberation Patterns
+query-based
+,
+Liberating Data by Query
+-
+Drawbacks of Query-Based Updating
+and single source of truth
+,
+Benefits of Query-Based Updating
+,
+Data Liberation and the Single Source of Truth
+sinking event data to data stores
+,
+The Impacts of Sinking and Sourcing on a Business
+-
+The Impacts of Sinking and Sourcing on a Business
+data lineage, determining
+,
+Dependency Tracking and Topology Visualization
+data models
+benefit of event-production with outbox tables
+,
+Benefits of event-production with outbox tables
+exposure from change-data log data liberation pattern
+,
+Data Liberation Frameworks
+,
+Drawbacks of Using Data Base Logs
+graph
+,
+What Are Event-Driven Microservices?
+isolating with outbox tables
+,
+Isolating Internal Data Models
+data source discovery, determining
+,
+Dependency Tracking and Topology Visualization
+data stores
+change-data capture logs for data liberation
+,
+Liberating Data Using Change-Data Capture Logs
+in EDM topology
+,
+Microservice Topology
+mocked external data store, for testing
+,
+Stateful Functions
+sinking event data to
+,
+The Impacts of Sinking and Sourcing on a Business
+-
+The Impacts of Sinking and Sourcing on a Business
+testing
+,
+Local Integration Testing
+data types
+keeping single purpose
+,
+Use the Narrowest Data Types
+-
+Example: Overloading event definitions
+maintaining respect for
+,
+Code Generator Support
+database logs
+(
+see
+CDC)
+DDL (data definition language)
+,
+Making Data Definition Changes to Data Sets Under Capture
+Debezium
+,
+Liberating Data Using Change-Data Capture Logs
+,
+Handling After-the-Fact Data Definition Changes for the Query and CDC Log Patterns
+decoupling of producer and consumer services
+,
+The Choreography Pattern
+dedicated versus shared databases
+,
+Conway’s Law and Communication Structures
+dedup ID (deduplication ID)
+,
+Identifying duplicate events
+deduplication of events
+,
+Identifying duplicate events
+-
+Guarding against duplicates
+deletions
+database log updating pattern
+,
+Benefits of Using Data Store Logs
+tracking with query-based updating
+,
+Drawbacks of Query-Based Updating
+denormalization
+,
+Drawbacks of Using Data Base Logs
+,
+Isolating Internal Data Models
+,
+Benefits of event-production with outbox tables
+dependency, data
+,
+API versioning and dependency management
+,
+Drawbacks of Query-Based Updating
+,
+Drawbacks of Using Data Base Logs
+,
+Dependency Tracking and Topology Visualization
+-
+Topology Example
+dependent scaling, request-response microservices
+,
+Dependent scaling
+dependent service changes
+deployment considerations
+,
+The Basic Full-Stop Deployment Pattern
+minimizing
+,
+Principles of Microservice Deployment
+deployment considerations
+,
+Deploying Event-Driven Microservices
+-
+The Blue-Green Deployment Pattern
+architectural components
+,
+Architectural Components of Microservice Deployment
+-
+Container Management Systems and Commodity Hardware
+basic full-stop deployment pattern
+,
+The Basic Full-Stop Deployment Pattern
+-
+The Basic Full-Stop Deployment Pattern
+blue-green deployment pattern
+,
+The Blue-Green Deployment Pattern
+-
+The Blue-Green Deployment Pattern
+breaking schema change pattern
+,
+The Breaking Schema Change Pattern
+-
+Synchronized Migration to the New Event Stream
+heavyweight framework cluster
+,
+Benefits and Limitations
+,
+Deploying and running the cluster using the CMS
+principles
+,
+Principles of Microservice Deployment
+-
+Principles of Microservice Deployment
+rolling update pattern
+,
+The Rolling Update Pattern
+summary
+,
+Deploying
+deprecation, metadata tag
+,
+Event Stream Metadata Tagging
+designing events
+,
+Designing Events
+-
+Avoid Events as Semaphores or Signals
+deterministic processing
+,
+Deterministic Stream Processing
+-
+Producer/Event Broker Connectivity Issues
+connectivity issues
+,
+Producer/Event Broker Connectivity Issues
+-
+Producer/Event Broker Connectivity Issues
+event scheduling and
+,
+Event Scheduling and Deterministic Processing
+-
+Request-Response Calls to External Systems
+FaaS caution
+,
+Performing Business Work with Functions
+late-arriving events
+,
+Out-of-Order and Late-Arriving Events
+,
+Handling Late Events
+out-of-order events
+,
+Out-of-Order and Late-Arriving Events
+-
+Out-of-Order and Late-Arriving Events
+,
+Causes and Impacts of Out-of-Order Events
+-
+Multiple producers to multiple partitions
+reprocessing historical data
+,
+Reprocessing Versus Processing in Near-Real Time
+-
+Reprocessing Versus Processing in Near-Real Time
+stream time
+,
+Stream Time
+-
+Stream Time in Parallel Processing
+timestamps
+,
+Timestamps
+-
+Example: Selecting order of events when processing multiple partitions
+watermarks
+,
+Watermarks
+-
+Watermarks in Parallel Processing
+DevOps capabilities
+,
+Supportive Tooling
+direct coupling, avoiding
+,
+What Is Data Liberation?
+,
+Materializing State to an External State Store
+,
+Serving Real-Time Requests with External State Stores
+direct-call communication pattern
+functions calling other functions
+,
+Direct-Call Pattern
+-
+Queue-triggered event processing
+microservice architectures
+,
+The Choreography Pattern
+orchestration workflow
+,
+A Simple Direct-Call Orchestration Example
+-
+Comparing Direct-Call and Event-Driven Orchestration
+distributed systems
+choreographed workflows
+,
+Creating and Modifying a Choreographed Workflow
+,
+Choreographed Transactions: The Saga Pattern
+-
+Choreography Example
+heavyweight framework
+,
+The Inner Workings of Heavyweight Frameworks
+lightweight framework
+,
+Lightweight Framework Microservices
+monoliths, request-response microservices
+,
+Distributed monoliths
+orchestrated workflows
+,
+Orchestrated Transactions
+-
+Orchestrated Transactions
+timestamps
+,
+Timestamps
+,
+Synchronizing Distributed Timestamps
+,
+Processing with Timestamped Events
+transactions
+,
+Building Workflows with Microservices
+,
+Distributed Transactions
+-
+Compensation Workflows
+Docker
+,
+Putting Microservices into Containers
+Docker Engine
+,
+Managing Containers and Virtual Machines
+domain
+,
+Introduction to Domain-Driven Design and Bounded Contexts
+domain models
+,
+Introduction to Domain-Driven Design and Bounded Contexts
+,
+Leveraging Domain Models and Bounded Contexts
+domain-driven design
+,
+Introduction to Domain-Driven Design and Bounded Contexts
+,
+Accessible Data Supports Business Communication Changes
+Domain-Driven Design (Evans)
+,
+Introduction to Domain-Driven Design and Bounded Contexts
+driver mode, heavyweight cluster
+,
+Driver Mode
+duplicate events, processing
+,
+Effectively Once Processing Without Client-Broker Transactions
+-
+Guarding against duplicates
+,
+Processing Events for User Interfaces
+durable and immutable log, consuming from
+,
+Consuming from the Immutable Log
+-
+Consuming as a queue
+,
+Event Scheduling and Deterministic Processing
+durable stateful function support
+,
+Maintaining State
+E
+EDM (event-driven microservice) architecture
+,
+What Are Event-Driven Microservices?
+-
+What Are Event-Driven Microservices?
+advantages of
+,
+Asynchronous Event-Driven Microservices
+asynchronous
+,
+Asynchronous Event-Driven Microservices
+-
+Example Team Using Event-Driven Microservices
+,
+Processing Events for User Interfaces
+BPC microservices
+,
+Basic Producer and Consumer Microservices
+-
+Example: Using an External Stream-Processing Framework to Join Event Streams
+communication structures
+,
+Communication Structures
+-
+Accessible Data Supports Business Communication Changes
+,
+Using Explicit Schemas as Contracts
+,
+Communication Layers
+costs of
+,
+Paying the Microservice Tax
+data contracts
+,
+Event-Driven Data Contracts
+-
+Accommodating breaking schema changes for events
+deployment
+,
+Deploying Event-Driven Microservices
+-
+The Blue-Green Deployment Pattern
+designing events
+,
+Designing Events
+-
+Avoid Events as Semaphores or Signals
+deterministic stream processing
+,
+Deterministic Stream Processing
+-
+Producer/Event Broker Connectivity Issues
+versus direct-call
+,
+Comparing Direct-Call and Event-Driven Orchestration
+-
+Monitoring the Orchestration Workflow
+event format
+,
+Selecting an Event Format
+existing systems, integrating with
+,
+Integrating Event-Driven Architectures with Existing Systems
+-
+The Impacts of Sinking and Sourcing on a Business
+FaaS
+,
+Microservices Using Function-as-a-Service
+-
+Scaling Your FaaS Solutions
+fundamentals
+,
+Event-Driven Microservice Fundamentals
+-
+Paying the Microservice Tax
+heavyweight framework
+,
+Heavyweight Framework Microservices
+-
+Example: Session Windowing of Clicks and Views
+implementation options
+,
+Microservice Implementation Options
+lightweight framework
+,
+Lightweight Framework Microservices
+-
+Stream-Table-Table Join: Enrichment Pattern
+processing basics
+,
+Event-Driven Processing Basics
+-
+Recovering from Stateless Processing Instance Failures
+request-response, integrating with
+,
+Integrating Event-Driven and 
+Request-Response Microservices
+-
+Example: Experience Search and Review Application
+stateful streaming
+,
+Stateful Streaming
+-
+Maintaining consistent state
+supportive tooling
+,
+Supportive Tooling
+-
+Topology Example
+synchronous
+,
+Synchronous Microservices
+-
+Benefits of Synchronous Microservices
+,
+Benefits of Synchronous Microservices
+testing
+,
+Testing Event-Driven Microservices
+-
+Choosing Your Full-Remote Integration Testing Strategy
+workflows, building
+,
+Building Workflows with Microservices
+-
+Compensation Workflows
+effectively once processing
+,
+Transactions and Effectively Once Processing
+-
+Maintaining consistent state
+emergent behavior
+,
+The Choreography Pattern
+encapsulation
+,
+Consumers Perform Their Own Modeling and Querying
+,
+Example: Newspaper publishing workflow (approval pattern)
+,
+Potentially Inconsistent UI Elements and Styling
+,
+The Breaking Schema Change Pattern
+entities, accommodating breaking schema changes for
+,
+Accommodating breaking schema changes for entities
+,
+The Breaking Schema Change Pattern
+entity events
+,
+Entity Event
+,
+Materializing State from Entity Events
+-
+Materializing State from Entity Events
+ESS (external shuffle service)
+,
+Scaling an Application While It Is Running
+Evans, Eric
+,
+Introduction to Domain-Driven Design and Bounded Contexts
+event brokers
+,
+Event-Driven Microservice Fundamentals
+client libraries and processing frameworks
+,
+Client libraries and processing frameworks
+community support
+,
+Community support
+connectivity issues for
+,
+Producer/Event Broker Connectivity Issues
+-
+Producer/Event Broker Connectivity Issues
+deployment impacts
+,
+Deploying
+differences in queue support
+,
+Consuming as a queue
+features for running EDM ecosystem
+,
+Powering Microservices with the Event Broker
+-
+Event Storage and Serving
+heavyweight versus lightweight frameworks
+,
+Heavyweight Framework Microservices
+,
+Benefits and Limitations
+,
+Apache Samza: Embedded Mode
+hosted services
+,
+Hosted services
+ingestion time in deterministic processing
+,
+Processing Based on Event Time, Processing Time, and Ingestion Time
+long-term and tiered storage
+,
+Long-term and tiered storage
+versus message brokers
+,
+Event Brokers Versus Message Brokers
+-
+Providing a Single Source of Truth
+programmatic bringup of
+,
+Programmatic Bringup of Event Brokers
+and quotas
+,
+Quotas
+role of
+,
+Communication Layers
+as single sources of truth for all data
+,
+Providing a Single Source of Truth
+storage and serving of events
+,
+Event Storage and Serving
+support tooling
+,
+Support tooling
+testing
+,
+Local Integration Testing
+,
+Programmatically Create a Temporary Integration Testing Environment
+transactional support and effectively once processing
+,
+Transactions and Effectively Once Processing
+,
+Effectively Once Processing with Client-Broker Transactions
+-
+Effectively Once Processing with Client-Broker Transactions
+event keys
+in repartitioning
+,
+Repartitioning Event Streams
+selecting
+,
+Watermarks in Parallel Processing
+-
+Watermarks in Parallel Processing
+event streams
+ACLs and permissions for
+,
+Permissions and Access Control Lists for Event Streams
+,
+Dependency Tracking and Topology Visualization
+assigning partitions to a consumer instance
+,
+Assigning Partitions to a Consumer Instance
+-
+Recovering from Stateless Processing Instance Failures
+branching and merging stateless topologies
+,
+Branching and Merging Streams
+consumer role in using
+,
+Consuming as an event stream
+creating and modifying
+,
+Event Stream Creation and Modification
+data liberation
+,
+Compromises for Data Liberation
+deterministic processing
+,
+Deterministic Stream Processing
+-
+Producer/Event Broker Connectivity Issues
+joining with external stream processing
+,
+Hybrid BPC Applications with External Stream Processing
+-
+Example: Using an External Stream-Processing Framework to Join Event Streams
+materializing a state from
+,
+Materializing State from Entity Events
+-
+Materializing State from Entity Events
+,
+Compromises for Data Liberation
+,
+Materializing State to an Internal State Store
+-
+Using snapshots
+,
+Benefits and Limitations
+,
+Benefits and Limitations
+,
+Serving requests via the materializing event-driven microservice
+,
+Example: Experience Search and Review Application
+metadata tagging
+,
+Event Stream Metadata Tagging
+migration of
+,
+Eventual Migration via Two Event Streams
+,
+Synchronized Migration to the New Event Stream
+partitioning of
+,
+Event Storage and Serving
+,
+Repartitioning Event Streams
+-
+Recovering from Stateless Processing Instance Failures
+,
+Multiple producers to multiple partitions
+,
+Scaling Applications and Handling Event Stream Partitions
+-
+Autoscaling Applications
+processing basics
+,
+Event-Driven Processing Basics
+-
+Recovering from Stateless Processing Instance Failures
+repartitioning of
+,
+Repartitioning Event Streams
+-
+Example: Copartitioning an Event Stream
+,
+Watermarks in Parallel Processing
+,
+Stream Time
+,
+Multiple producers to multiple partitions
+-
+Multiple producers to multiple partitions
+reprocessing historical data from
+,
+Reprocessing Versus Processing in Near-Real Time
+-
+Reprocessing Versus Processing in Near-Real Time
+role in microservice processes
+,
+Event-Driven Microservice Fundamentals
+as single source of truth
+,
+Event Streams Provide the Single Source of Truth
+single writer principle
+,
+Microservice Single Writer Principle
+singular event definition per stream
+,
+Use a Singular Event Definition per Stream
+sinking event data to data stores
+,
+The Impacts of Sinking and Sourcing on a Business
+state stores from
+,
+State Stores and Materializing State from an Event Stream
+-
+Migrating
+validating
+,
+The Basic Full-Stop Deployment Pattern
+event time
+,
+Timestamps
+,
+Event Scheduling and Deterministic Processing
+,
+Processing Based on Event Time, Processing Time, and Ingestion Time
+,
+Watermarks in Parallel Processing
+event-driven communication pattern
+,
+Event-Driven Communication Pattern
+event-driven microservices
+(
+see
+EDM)
+event-stream listener
+,
+Triggering Based on New Events: The Event-Stream Listener
+-
+Triggering Based on New Events: The Event-Stream Listener
+eventification
+,
+Isolating Internal Data Models
+events
+accommodating breaking schema changes for
+,
+Accommodating breaking schema changes for events
+as basis of communication
+,
+Events Are the Basis of Communication
+,
+Communication and Data Contracts
+contents of
+,
+The Contents of an Event
+converting liberated data to
+,
+Converting Liberated Data to Events
+converting requests into
+,
+Handling Requests Within an Event-Driven Workflow
+,
+Processing Events for User Interfaces
+-
+Separating the editor and advertiser approval services
+data definitions
+,
+Event Data Definitions and Schemas
+,
+Designing Events
+-
+Avoid Events as Semaphores or Signals
+designing
+,
+Designing Events
+-
+Avoid Events as Semaphores or Signals
+formatting
+,
+Selecting an Event Format
+materializing state from entity events
+,
+Materializing State from Entity Events
+-
+Materializing State from Entity Events
+mock events using schemas
+,
+Creating mock events using schemas
+scheduling
+,
+Event Scheduling and Deterministic Processing
+-
+Request-Response Calls to External Systems
+,
+Reprocessing Versus Processing in Near-Real Time
+-
+Reprocessing Versus Processing in Near-Real Time
+shuffling
+,
+Watermarks in Parallel Processing
+,
+Stream Time in Parallel Processing
+,
+Multiple producers to multiple partitions
+,
+Lightweight Processing
+,
+Event Shuffling
+as single source of truth
+,
+Event Streams Provide the Single Source of Truth
+,
+The Contents of an Event
+,
+Providing a Single Source of Truth
+,
+Tell the Truth, the Whole Truth, and Nothing but the Truth
+,
+Data Liberation and the Single Source of Truth
+storage and serving of
+,
+Event Storage and Serving
+structure of
+,
+The Structure of an Event
+-
+Keyed Event
+types of
+,
+The Structure of an Event
+evolution rules, schema
+,
+Full-Featured Schema Evolution
+-
+Full-Featured Schema Evolution
+,
+Example: Overloading event definitions
+,
+Schematized Events
+exactly once processing
+(
+see
+effectively once processing)
+executor, heavyweight stream processing cluster
+,
+The Inner Workings of Heavyweight Frameworks
+existing systems, integration with
+,
+Integrating Event-Driven Architectures with Existing Systems
+-
+The Impacts of Sinking and Sourcing on a Business
+BPC microservices
+,
+Integration with Existing and Legacy Systems
+data liberation
+,
+What Is Data Liberation?
+-
+Drawbacks of using triggers
+sinking event data to data stores
+,
+The Impacts of Sinking and Sourcing on a Business
+-
+The Impacts of Sinking and Sourcing on a Business
+explicit versus implicit data contracts
+,
+Using Explicit Schemas as Contracts
+external events, handling with request-response
+,
+Handling External Events
+-
+Reactively Generated Events
+external services, nondeterministic
+,
+Determinism with Event-Driven Workflows
+external shuffle service
+(
+see
+ESS)
+external state store
+,
+State Stores and Materializing State from an Event Stream
+application reset
+,
+State Management and Application Reset
+BPC microservices
+,
+Where Do BPCs Work Well?
+lightweight framework
+,
+Handling State and Using Changelogs
+materializing state from an event stream
+,
+Materializing State to an External State Store
+-
+Using snapshots
+serving real-time requests
+,
+Serving Real-Time Requests with External State Stores
+-
+Serving requests via a separate microservice
+external systems, request-response calls to
+,
+Request-Response Calls to External Systems
+external to test code, temporary environment
+,
+Create a Temporary Environment External to Your Test Code
+F
+FaaS (Function-as-a-Service)
+,
+Microservices Using Function-as-a-Service
+-
+Scaling Your FaaS Solutions
+building microservices out of functions
+,
+Building Microservices Out of Functions
+-
+Building Microservices Out of Functions
+business solutions with
+,
+Performing Business Work with Functions
+,
+Microservice Implementation Options
+choosing a provider
+,
+Choosing a FaaS Provider
+cold start and warm start
+,
+Cold Start and Warm Starts
+designing solutions as microservices
+,
+Designing Function-Based Solutions as Microservices
+-
+Less Is More
+functions calling other functions
+,
+Functions Calling Other Functions
+-
+Queue-triggered event processing
+maintaining state
+,
+Maintaining State
+scaling your solutions
+,
+Scaling Your FaaS Solutions
+termination and shutdown
+,
+Termination and Shutdown
+testing libraries
+,
+Integrate Hosted Services Using Mocking and Simulator Options
+triggering logic, starting functions with
+,
+Starting Functions with Triggers
+-
+Triggering on Resource Events
+tuning your functions
+,
+Tuning Your Functions
+Filter transformations
+,
+Transformations
+financial cost of materializing state from external store
+,
+Financial cost of external state store services
+financial information, metadata tag
+,
+Event Stream Metadata Tagging
+formatting events
+,
+The Structure of an Event
+,
+Selecting an Event Format
+forward compatibility, schema evolution rules
+,
+Full-Featured Schema Evolution
+frontend and backend services, coordination of
+,
+Micro-Frontends in Request-Response Applications
+-
+Example: Experience Search and Review Application
+full compatibility, schema evolution rules
+,
+Full-Featured Schema Evolution
+full date locality in materializing state from external store
+,
+Full data locality
+,
+Full data locality
+full remote integration testing
+,
+Full Remote Integration Testing
+-
+Choosing Your Full-Remote Integration Testing Strategy
+function
+,
+Microservices Using Function-as-a-Service
+Function-as-a-Service
+(
+see
+FaaS)
+function-trigger map
+,
+Building Microservices Out of Functions
+functional testing
+,
+General Testing Principles
+,
+Integration Testing of Event-Driven Microservices
+-
+Full Remote Integration Testing
+G
+gating pattern
+,
+Stateful Business Logic That Isn’t Reliant Upon Event Order
+GCP (Google Cloud Platform)
+,
+Choosing a FaaS Provider
+,
+Integrate Hosted Services Using Mocking and Simulator Options
+global state store
+,
+Materializing Global State
+global window
+,
+Benefits and Limitations
+Google Cloud Platform
+(
+see
+GCP)
+Google Dataflow
+,
+The Inner Workings of Heavyweight Frameworks
+,
+Scaling an Application While It Is Running
+Google gVisor
+,
+Managing Containers and Virtual Machines
+Google PubSub
+,
+Integrate Hosted Services Using Mocking and Simulator Options
+GPS and NTP synchronization
+,
+Synchronizing Distributed Timestamps
+graph data models
+,
+What Are Event-Driven Microservices?
+groupByKey operation
+,
+Watermarks in Parallel Processing
+H
+HDFS (Hadoop Distributed File System)
+,
+Sinking Event Data to Data Stores
+heavyweight framework
+,
+Heavyweight Framework Microservices
+-
+Example: Session Windowing of Clicks and Views
+application submission modes
+,
+Application Submission Modes
+benefits and limitations
+,
+Benefits and Limitations
+-
+Benefits and Limitations
+,
+Microservice Implementation Options
+choosing a framework
+,
+Choosing a Framework
+clusters
+,
+Heavyweight Framework Microservices
+-
+Recovering from Failures
+history
+,
+A Brief History of Heavyweight Frameworks
+inner workings
+,
+The Inner Workings of Heavyweight Frameworks
+-
+The Inner Workings of Heavyweight Frameworks
+languages and syntax
+,
+Languages and Syntax
+multitenancy considerations
+,
+Multitenancy Considerations
+recovering from failures
+,
+Recovering from Failures
+scaling applications
+,
+Scaling Applications and Handling Event Stream Partitions
+-
+Autoscaling Applications
+session windowing example
+,
+Example: Session Windowing of Clicks and Views
+-
+Example: Session Windowing of Clicks and Views
+state and checkpoints
+,
+Handling State and Using Checkpoints
+-
+Handling State and Using Checkpoints
+testing
+,
+Testing the Topology
+testing applications
+,
+Integrate Hosted Services Using Mocking and Simulator Options
+high availability
+cluster task manager’s role in providing
+,
+The Inner Workings of Heavyweight Frameworks
+enforcing static master node assignment in cluster
+,
+Deploying and running the cluster using the CMS
+event broker’s role in providing
+,
+Powering Microservices with the Event Broker
+high performance
+in disk-based options
+,
+High-performance disk-based options
+event broker’s role in providing
+,
+Powering Microservices with the Event Broker
+historical event processing
+,
+Determinism with Event-Driven Workflows
+,
+Out-of-Order and Late-Arriving Events
+hosted services
+(
+see
+managed services)
+hot replicas
+,
+Using hot replicas
+-
+Using hot replicas
+,
+State Replication and Hot Replicas
+,
+Serving Real-Time Requests with Internal State Stores
+hybrid BPC applications with external stream processing
+,
+Hybrid BPC Applications with External Stream Processing
+-
+Example: Using an External Stream-Processing Framework to Join Event Streams
+hybrid integration testing
+,
+Integration Testing of Event-Driven Microservices
+hybrid microservice architectures
+,
+Benefits of Synchronous Microservices
+I
+idempotent writes
+,
+Transactions and Effectively Once Processing
+,
+Effectively Once Processing Without Client-Broker Transactions
+immutability of event data
+,
+Event Storage and Serving
+(
+see also
+durable and immutable log)
+implementation communication structures
+,
+Implementation Communication Structures
+-
+Conway’s Law and Communication Structures
+,
+The Team Scenario, Continued
+,
+Data Communication Is Improved Across the Organization
+implicit versus explicit data contracts
+,
+Using Explicit Schemas as Contracts
+incremental timestamp data loading by query
+,
+Incremental Timestamp Loading
+incremental updating of data sets
+,
+Incremental Updating
+indexing of events
+,
+Event Storage and Serving
+,
+Consuming as an event stream
+infinite retention of events
+,
+Event Storage and Serving
+ingestion time
+,
+Processing Based on Event Time, Processing Time, and Ingestion Time
+integrations
+capturing DDL changes
+,
+Making Data Definition Changes to Data Sets Under Capture
+CMS in heavyweight framework
+,
+Create Clusters with CMS Integration
+-
+Specifying resources for a single job using the CMS
+continuous
+,
+Continuous Integration, Delivery, and Deployment Systems
+,
+Deploying
+with existing systems
+,
+Integrating Event-Driven Architectures with Existing Systems
+-
+The Impacts of Sinking and Sourcing on a Business
+,
+Integration with Existing and Legacy Systems
+with request-response
+,
+Integrating Event-Driven and 
+Request-Response Microservices
+-
+Example: Experience Search and Review Application
+testing environment
+,
+Integration Testing of Event-Driven Microservices
+-
+Choosing Your Full-Remote Integration Testing Strategy
+,
+The Basic Full-Stop Deployment Pattern
+,
+Synchronized Migration to the New Event Stream
+,
+Testing
+interconnectedness and complexity measurement
+,
+Dependency Tracking and Topology Visualization
+intermittent capture, query-based updating
+,
+Drawbacks of Query-Based Updating
+intermittent failures and late events
+,
+Intermittent Failures and Late Events
+intermonolith communication
+,
+What Are Event-Driven Microservices?
+internal data model, isolating with outbox
+,
+Isolating Internal Data Models
+internal state store
+,
+State Stores and Materializing State from an Event Stream
+application reset
+,
+State Management and Application Reset
+lightweight framework
+,
+Handling State and Using Changelogs
+materializing state from an event stream
+,
+Materializing State to an Internal State Store
+-
+Restoring and scaling from input event streams
+serving real-time requests
+,
+Serving Real-Time Requests with Internal State Stores
+-
+Serving Real-Time Requests with Internal State Stores
+J
+Java (JVM) microservice
+,
+Benefits and Limitations
+,
+Languages and Syntax
+,
+Apache Kafka Streams
+,
+Languages and Syntax
+K
+Kafka Connect
+,
+Handling After-the-Fact Data Definition Changes for the Query and CDC Log Patterns
+,
+Sinking Event Data to Data Stores
+,
+Triggering Based on New Events: The Event-Stream Listener
+Kafka Streams
+,
+Stream Time in Parallel Processing
+,
+Using hot replicas
+,
+Apache Kafka Streams
+,
+Create a Temporary Environment Within the Runtime 
+of Your Test Code
+Kata Containers
+,
+Managing Containers and Virtual Machines
+key state, checkpointing mechanism
+,
+Handling State and Using Checkpoints
+key/value format for events
+,
+The Structure of an Event
+,
+Materializing State to an Internal State Store
+keyed event
+,
+Keyed Event
+Kubernetes
+,
+Managing Containers and Virtual Machines
+,
+Specifying resources for a single job using the CMS
+L
+lag monitoring/triggering
+,
+Triggering Based on Consumer Group Lag
+,
+Consumer Offset Lag Monitoring
+late-arriving events
+,
+Out-of-Order and Late-Arriving Events
+,
+Handling Late Events
+Lax, Reuven
+Streaming Systems
+,
+Watermarks
+legacy systems, integration with EDMs
+,
+Integrating Event-Driven Architectures with Existing Systems
+-
+The Impacts of Sinking and Sourcing on a Business
+,
+Integration with Existing and Legacy Systems
+lightweight framework
+,
+Lightweight Framework Microservices
+-
+Stream-Table-Table Join: Enrichment Pattern
+benefits and limitations
+,
+Benefits and Limitations
+,
+Microservice Implementation Options
+changelog usage
+,
+Handling State and Using Changelogs
+choosing a framework
+,
+Choosing a Lightweight Framework
+languages and syntax
+,
+Languages and Syntax
+processing
+,
+Lightweight Processing
+scaling applications
+,
+Scaling Applications and Recovering from Failures
+-
+State Replication and Hot Replicas
+state handling
+,
+Handling State and Using Changelogs
+stream-table-table join
+,
+Stream-Table-Table Join: Enrichment Pattern
+-
+Stream-Table-Table Join: Enrichment Pattern
+testing
+,
+Testing the Topology
+,
+Create a Temporary Environment Within the Runtime 
+of Your Test Code
+load balancers
+,
+Serving Real-Time Requests with Internal State Stores
+local integration testing
+,
+Integration Testing of Event-Driven Microservices
+,
+Testing
+LocalStack
+,
+Integrate Hosted Services Using Mocking and Simulator Options
+log-based data liberation
+,
+Data Liberation Patterns
+long-term tiered storage, function of
+,
+Long-term and tiered storage
+loose coupling of bounded contexts
+,
+Aligning Bounded Contexts with Business Requirements
+,
+Aligning Bounded Contexts with Business Requirements
+,
+Asynchronous Event-Driven Microservices
+M
+managed services (hosted services)
+cloud computing
+,
+Programmatic Bringup of Compute Resources
+function of
+,
+Hosted services
+heavyweight framework cluster setup
+,
+Use a Hosted Service
+mocking and simulator options
+,
+Integrate Hosted Services Using Mocking and Simulator Options
+Map transformations
+,
+Transformations
+mapping of business requirements to microservices
+,
+Dependency Tracking and Topology Visualization
+MapReduce
+,
+A Brief History of Heavyweight Frameworks
+,
+Languages and Syntax
+MapValue transformations
+,
+Transformations
+master node, heavyweight stream processing cluster
+,
+The Inner Workings of Heavyweight Frameworks
+,
+Deploying and running the cluster using the CMS
+,
+Recovering from Failures
+materialized state
+,
+State Stores and Materializing State from an Event Stream
+materializing state from an event stream
+data liberation compromise
+,
+Compromises for Data Liberation
+external state store
+,
+Materializing State to an External State Store
+-
+Using snapshots
+from entity events
+,
+Materializing State from Entity Events
+-
+Materializing State from Entity Events
+frontend/backend coordination
+,
+Example: Experience Search and Review Application
+heavyweight framework
+,
+Benefits and Limitations
+internal state store
+,
+Materializing State to an Internal State Store
+-
+Restoring and scaling from input event streams
+lightweight framework
+,
+Benefits and Limitations
+serving requests via
+,
+Serving requests via the materializing event-driven microservice
+Maxwell
+,
+Liberating Data Using Change-Data Capture Logs
+MemoryStream class
+,
+Testing the Topology
+merging of event streams
+,
+Branching and Merging Streams
+Mesos Marathon
+,
+Managing Containers and Virtual Machines
+message brokers versus event brokers
+,
+Event Brokers Versus Message Brokers
+-
+Providing a Single Source of Truth
+message-passing architectures
+,
+What Are Event-Driven Microservices?
+MessageChooser class
+,
+Custom Event Schedulers
+metadata tagging of event streams
+,
+Event Stream Metadata Tagging
+metadata, in schema definition
+,
+Schema Definition Comments
+micro-frontends in request-response applications
+,
+Micro-Frontends in Request-Response Applications
+-
+Example: Experience Search and Review Application
+microservice tax
+,
+Paying the Microservice Tax
+,
+Continuous Integration, Delivery, and Deployment Systems
+,
+Shareable Tools and Infrastructure
+microservice-to-team assignment system
+,
+Microservice-to-Team Assignment System
+microservices
+(
+see
+EDM)
+Microsoft Azure
+,
+Choosing a FaaS Provider
+,
+Maintaining State
+,
+Integrate Hosted Services Using Mocking and Simulator Options
+Microsoft Azure Event Hub
+,
+Integrate Hosted Services Using Mocking and Simulator Options
+,
+Integrate Remote Services That Have No Local Options
+migration
+,
+Data Liberation and the Single Source of Truth
+(
+see also
+data liberation)
+data definition changes to data sets
+,
+Making Data Definition Changes to Data Sets Under Capture
+eventual migration via two event streams
+,
+Eventual Migration via Two Event Streams
+versus rebuilding state stores
+,
+Rebuilding Versus Migrating State Stores
+-
+Migrating
+synchronized migration to new event stream
+,
+Synchronized Migration to the New Event Stream
+Mills, David
+,
+Synchronizing Distributed Timestamps
+mock events using schemas
+,
+Creating mock events using schemas
+mocked external data store
+,
+Stateful Functions
+mocking and simulator options for hosted services
+,
+Integrate Hosted Services Using Mocking and Simulator Options
+MongoDB
+,
+Liberating Data Using Change-Data Capture Logs
+monolith communication
+,
+What Are Event-Driven Microservices?
+,
+Option 2: Add It to the Existing Service
+,
+Example: Newspaper publishing workflow (approval pattern)
+,
+Micro-Frontends in Request-Response Applications
+multicluster management
+,
+Cluster Creation and Management
+multilanguage support, outbox tables
+,
+Benefits of event-production with outbox tables
+multitenancy considerations
+,
+Synchronizing Distributed Timestamps
+,
+Multitenancy Considerations
+MySQL
+,
+Liberating Data Using Change-Data Capture Logs
+,
+Handling After-the-Fact Data Definition Changes for the Query and CDC Log Patterns
+N
+namespace, metadata tag
+,
+Event Stream Metadata Tagging
+namespacing, heavyweight framework clusters
+,
+Multitenancy Considerations
+near-real-time event processing
+,
+Determinism with Event-Driven Workflows
+network latency, performance loss due to
+,
+Performance loss due to network latency
+Network Time Protocol
+(
+see
+NTP)
+network-attached disk, materializing state to internal state store
+,
+Flexibility to use network-attached disk
+Nomad
+,
+Managing Containers and Virtual Machines
+nondeterministic workflows
+,
+Determinism with Event-Driven Workflows
+nonentity events, accommodating breaking schema changes for
+,
+The Breaking Schema Change Pattern
+nonfunctional testing
+,
+General Testing Principles
+notifications of schema creation and modification
+,
+Schema Creation and Modification Notifications
+NTP (Network Time Protocol) synchronization
+,
+Synchronizing Distributed Timestamps
+O
+offsets
+,
+Consuming as an event stream
+batch event-processing with FaaS
+,
+Batch Event-Processing Parameters
+choreographed asynchronous function calls
+,
+Choreography and asychronous function calling
+committing offsets, timing of
+,
+Commit Offsets Only After Processing Has Completed
+deterministic processing
+,
+Timestamps
+,
+Event Scheduling and Deterministic Processing
+manual adjustment of
+,
+Offset Management
+offset lag monitoring
+,
+Consumer Offset Lag Monitoring
+reprocessing event streams
+,
+Reprocessing Versus Processing in Near-Real Time
+operator state, checkpointing mechanism
+,
+Handling State and Using Checkpoints
+orchestration design pattern
+,
+The Orchestration Pattern
+-
+Monitoring the Orchestration Workflow
+direct-call workflow in request-response
+,
+Comparing Direct-Call and Event-Driven Orchestration
+-
+Monitoring the Orchestration Workflow
+multifunction solutions
+,
+Event-Driven Communication Pattern
+synchronous function calling
+,
+Orchestration and synchronous function calling
+transactions
+,
+Orchestrated Transactions
+-
+Orchestrated Transactions
+orphaned streams and microservices
+,
+Permissions and Access Control Lists for Event Streams
+out-of-order events
+,
+Consuming as a queue
+,
+Out-of-Order and Late-Arriving Events
+-
+Out-of-Order and Late-Arriving Events
+,
+Causes and Impacts of Out-of-Order Events
+-
+Multiple producers to multiple partitions
+,
+Choreography and asychronous function calling
+overlay team boundaries, determining
+,
+Dependency Tracking and Topology Visualization
+P
+partition assignment
+to consumer instance
+,
+Assigning Partitions to a Consumer Instance
+-
+Recovering from Stateless Processing Instance Failures
+deterministic processing
+,
+Event Scheduling and Deterministic Processing
+,
+Watermarks in Parallel Processing
+,
+Stream Time
+lightweight framework
+,
+State Assignment
+request-response microservices integration
+,
+Serving Real-Time Requests with Internal State Stores
+,
+Serving Real-Time Requests with Internal State Stores
+scaling of FaaS solutions
+,
+Scaling Your FaaS Solutions
+partition assignor
+,
+Assigning Partitions with the Partition Assignor
+partition count
+,
+Repartitioning Event Streams
+partitioning of event streams
+,
+Repartitioning Event Streams
+-
+Recovering from Stateless Processing Instance Failures
+copartitioning
+,
+Copartitioning Event Streams
+,
+Assigning Copartitioned Partitions
+out-of-order events and multiple partitions
+,
+Multiple producers to multiple partitions
+repartitioning
+,
+Repartitioning Event Streams
+-
+Example: Copartitioning an Event Stream
+,
+Watermarks in Parallel Processing
+,
+Stream Time
+,
+Multiple producers to multiple partitions
+-
+Multiple producers to multiple partitions
+scaling in heavyweight framework
+,
+Scaling Applications and Handling Event Stream Partitions
+-
+Autoscaling Applications
+strict ordering of partitions
+,
+Event Storage and Serving
+permissions for event streams
+,
+Permissions and Access Control Lists for Event Streams
+,
+Dependency Tracking and Topology Visualization
+PII (personally identifiable information), metadata tag
+,
+Event Stream Metadata Tagging
+point-to-point couplings, request-response microservices
+,
+Point-to-point couplings
+post-deployment validation tests
+,
+The Basic Full-Stop Deployment Pattern
+PostgreSQL
+,
+Liberating Data Using Change-Data Capture Logs
+,
+Capturing Change-Data Using Triggers
+predeployment validation tests
+,
+The Basic Full-Stop Deployment Pattern
+processing logic
+(
+see
+topologies)
+processing of events
+,
+Event-Driven Microservice Fundamentals
+(
+see also
+event streams)
+deterministic
+,
+Deterministic Stream Processing
+-
+Producer/Event Broker Connectivity Issues
+duplicate events
+,
+Effectively Once Processing Without Client-Broker Transactions
+-
+Guarding against duplicates
+,
+Processing Events for User Interfaces
+effectively once processing
+,
+Transactions and Effectively Once Processing
+-
+Maintaining consistent state
+overview
+,
+Event-Driven Processing Basics
+-
+Recovering from Stateless Processing Instance Failures
+versus reprocessing
+,
+Reprocessing Versus Processing in Near-Real Time
+-
+Reprocessing Versus Processing in Near-Real Time
+,
+Integrating with Third-Party Request-Response APIs
+,
+Principles of Microservice Deployment
+testing framework
+,
+Local Integration Testing
+for user interface
+,
+Processing Events for User Interfaces
+-
+Separating the editor and advertiser approval services
+processing time
+,
+Timestamps
+producers
+,
+Event-Driven Microservice Fundamentals
+BPC microservices
+,
+Basic Producer and Consumer Microservices
+-
+Example: Using an External Stream-Processing Framework to Join Event Streams
+breaking schema changes
+,
+Accommodating breaking schema changes for entities
+,
+The Breaking Schema Change Pattern
+connectivity issues for
+,
+Producer/Event Broker Connectivity Issues
+-
+Producer/Event Broker Connectivity Issues
+decoupling of services
+,
+The Choreography Pattern
+duplicate event generation
+,
+Generating duplicate events
+event-driven role of
+,
+Event-Driven Communication Structures
+,
+Event-Driven Processing Basics
+implicit versus explicit data contracts
+,
+Using Explicit Schemas as Contracts
+out-of-order event impact for multiple
+,
+Multiple producers to multiple partitions
+product-focused microservices
+,
+Micro-Frontends in Request-Response Applications
+production environment, for testing
+,
+Populating with events from production
+,
+Testing Using the Production Environment
+,
+Testing
+Protobuf
+,
+Selecting an Event Format
+Python
+,
+Languages and Syntax
+Q
+query-based data liberation
+,
+Data Liberation Patterns
+,
+Liberating Data by Query
+-
+Drawbacks of Query-Based Updating
+after-the-fact data definition changes in
+,
+Handling After-the-Fact Data Definition Changes for the Query and CDC Log Patterns
+autoincrementing ID
+,
+Autoincrementing ID Loading
+benefits of
+,
+Benefits of Query-Based Updating
+bulk loading of data by query
+,
+Bulk Loading
+custom querying of data
+,
+Custom Querying
+drawbacks of
+,
+Drawbacks of Query-Based Updating
+timestamp data loading by query
+,
+Incremental Timestamp Loading
+updating of data sets
+,
+Incremental Updating
+queue-based event consumption
+,
+Event Brokers Versus Message Brokers
+,
+Consuming as a queue
+,
+Integrating with Third-Party Request-Response APIs
+queue-triggered event processing
+,
+Queue-triggered event processing
+quotas
+,
+Integrating with Third-Party Request-Response APIs
+,
+Quotas
+,
+Deploying
+R
+reactive architectures
+(
+see
+choreography design pattern)
+reactively generated events
+,
+Reactively Generated Events
+rebuilding versus migrating state stores
+,
+Rebuilding Versus Migrating State Stores
+-
+Migrating
+,
+Deploying
+recovery
+(
+see
+scaling and scalability)
+refactoring of legacy systems, challenges of
+,
+Compromises for Data Liberation
+relational databases
+events in
+,
+Materializing State from Entity Events
+sourcing of data options for
+,
+Liberating Data Using Change-Data Capture Logs
+remote integration testing
+,
+Integration Testing of Event-Driven Microservices
+,
+Integrate Remote Services That Have No Local Options
+-
+Choosing Your Full-Remote Integration Testing Strategy
+repartitioning event streams
+,
+Repartitioning Event Streams
+-
+Example: Copartitioning an Event Stream
+,
+Watermarks in Parallel Processing
+,
+Stream Time
+,
+Multiple producers to multiple partitions
+-
+Multiple producers to multiple partitions
+replayability of events
+,
+Event Storage and Serving
+replication
+cross-cluster event data
+,
+Cross-Cluster Event Data Replication
+,
+Populating with events from production
+event broker’s role in
+,
+Powering Microservices with the Event Broker
+hot replicas
+,
+Using hot replicas
+-
+Using hot replicas
+,
+State Replication and Hot Replicas
+,
+Serving Real-Time Requests with Internal State Stores
+reprocessing
+,
+Reprocessing Versus Processing in Near-Real Time
+-
+Reprocessing Versus Processing in Near-Real Time
+,
+Integrating with Third-Party Request-Response APIs
+,
+Principles of Microservice Deployment
+request-response microservices
+,
+Integrating Event-Driven and 
+Request-Response Microservices
+-
+Example: Experience Search and Review Application
+autonomously generated events
+,
+Autonomously Generated Events
+-
+Handling Autonomously Generated Analytical Events
+calls to external systems in event scheduling
+,
+Request-Response Calls to External Systems
+direct-call orchestration workflow
+,
+Comparing Direct-Call and Event-Driven Orchestration
+-
+Monitoring the Orchestration Workflow
+versus event-driven structures
+,
+Event-Driven Communication Structures
+,
+Synchronous Microservices
+,
+Benefits of Synchronous Microservices
+event-driven workflow to handle requests
+,
+Handling Requests Within an Event-Driven Workflow
+-
+Separating the editor and advertiser approval services
+external event handling
+,
+Handling External Events
+-
+Reactively Generated Events
+integrations with
+,
+Integrating with Third-Party Request-Response APIs
+-
+Integrating with Third-Party Request-Response APIs
+local testing of logic
+,
+Local Integration Testing
+microfrontends
+,
+Micro-Frontends in Request-Response Applications
+-
+Example: Experience Search and Review Application
+stateful data processing and serving
+,
+Processing and Serving Stateful Data
+-
+Serving requests via a separate microservice
+testing
+,
+Testing
+resources
+allocating function
+,
+Allocating Sufficient Resources
+production challenges in query-based updating
+,
+Drawbacks of Query-Based Updating
+programmatic bringup of
+,
+Programmatic Bringup of Compute Resources
+specifying for CMS heavyweight framework job
+,
+Specifying resources for a single job using the CMS
+triggering logic, starting functions with
+,
+Triggering on Resource Events
+restarting applications for scaling
+,
+Scaling an Application by Restarting It
+reusable event streams
+,
+The Choreography Pattern
+rollback command, orchestrated transactions
+,
+Orchestrated Transactions
+rolling update pattern
+,
+The Rolling Update Pattern
+round-robin partition assignment strategy
+,
+Round-robin assignment
+runtime of test code, temporary environment within
+,
+Create a Temporary Environment Within the Runtime 
+of Your Test Code
+S
+sagas (distributed transactions)
+,
+Building Workflows with Microservices
+,
+Distributed Transactions
+-
+Orchestrated Transactions
+Scala
+,
+Languages and Syntax
+scaling and scalability
+dependent scaling
+,
+Dependent scaling
+event broker’s role in
+,
+Powering Microservices with the Event Broker
+FaaS
+,
+Scaling Your FaaS Solutions
+heavyweight framework cluster
+,
+Build Your Own Full Cluster
+,
+Scaling Applications and Handling Event Stream Partitions
+-
+Autoscaling Applications
+independent scaling of processing and data layer
+,
+Independent Scaling of the Processing and Data Layer
+with internal state stores
+,
+Scalability requirements are offloaded from the developer
+,
+Scaling and Recovery of Internal State
+-
+Restoring and scaling from input event streams
+lightweight framework
+,
+Scaling Applications and Recovering from Failures
+-
+State Replication and Hot Replicas
+managing microservices at scale
+,
+Asynchronous Event-Driven Microservices
+,
+Managing Microservices at Scale
+-
+Managing Containers and Virtual Machines
+materializing state to internal state store
+,
+Scalability requirements are offloaded from the developer
+offset lag monitoring
+,
+Consumer Offset Lag Monitoring
+recovery with external state stores
+,
+Scaling and Recovery with External State Stores
+-
+Using snapshots
+request-response API and EDM
+,
+API versioning and dependency management
+,
+Serving requests via the materializing event-driven microservice
+as trigger disadvantage
+,
+Drawbacks of using triggers
+scheduling
+events
+,
+Event Scheduling and Deterministic Processing
+-
+Request-Response Calls to External Systems
+,
+Reprocessing Versus Processing in Near-Real Time
+-
+Reprocessing Versus Processing in Near-Real Time
+functions for triggering logic
+,
+Triggering on a Schedule
+schema registry
+,
+Data Liberation Frameworks
+,
+Schema Registry
+-
+Schema Registry
+,
+Testing Schema Evolution and Compatibility
+,
+Local Integration Testing
+schemas
+breaking schema change pattern
+,
+Breaking Schema Changes
+-
+Accommodating breaking schema changes for events
+,
+The Breaking Schema Change Pattern
+-
+Synchronized Migration to the New Event Stream
+brittle dependency consideration
+,
+Drawbacks of Query-Based Updating
+,
+Drawbacks of Using Data Base Logs
+code generator support for
+,
+Code Generator Support
+,
+Schematized Events
+creating mock events using
+,
+Creating mock events using schemas
+creation and modification notifications
+,
+Schema Creation and Modification Notifications
+data definitions and
+,
+Event Data Definitions and Schemas
+,
+Schematized Events
+defining for data contracts
+,
+Using Explicit Schemas as Contracts
+-
+Accommodating breaking schema changes for events
+for event encoding in generating events
+,
+Handling Autonomously Generated Analytical Events
+evolution rules
+,
+Full-Featured Schema Evolution
+-
+Full-Featured Schema Evolution
+,
+Example: Overloading event definitions
+,
+Schematized Events
+merged event streams
+,
+Branching and Merging Streams
+outbox table compatibility
+,
+Ensuring Schema Compatibility
+-
+Drawbacks of event production with outbox tables
+serializing
+,
+Ensuring Schema Compatibility
+-
+Ensuring Schema Compatibility
+summary
+,
+Schematized Events
+testing
+,
+Capturing Change-Data Using Triggers
+,
+Testing Schema Evolution and Compatibility
+validating
+,
+Ensuring Schema Compatibility
+-
+Ensuring Schema Compatibility
+,
+The Basic Full-Stop Deployment Pattern
+semaphores or signals, avoiding events as
+,
+Avoid Events as Semaphores or Signals
+separate microservices and request-response API
+,
+Serving requests via a separate microservice
+serialization options for events
+,
+Selecting an Event Format
+serializing schemas
+,
+Ensuring Schema Compatibility
+-
+Ensuring Schema Compatibility
+service failure handling, request-response microservices
+,
+Service failure handling
+service-level agreements
+(
+see
+SLAs)
+service-oriented architectures
+(
+see
+SOAs)
+session windows
+,
+Session windows
+,
+Example: Session Windowing of Clicks and Views
+-
+Example: Session Windowing of Clicks and Views
+Shannon, Claude
+,
+Communication and Data Contracts
+shared environment for testing
+,
+Testing Using a Shared Environment
+,
+Choosing Your Full-Remote Integration Testing Strategy
+shared versus dedicated databases
+,
+Conway’s Law and Communication Structures
+shuffling, event
+,
+Watermarks in Parallel Processing
+,
+Stream Time in Parallel Processing
+,
+Multiple producers to multiple partitions
+,
+Lightweight Processing
+,
+Event Shuffling
+sidecar pattern
+,
+Integration with Existing and Legacy Systems
+single source of truth
+contents of event
+,
+The Contents of an Event
+,
+Tell the Truth, the Whole Truth, and Nothing but the Truth
+designing events
+,
+Tell the Truth, the Whole Truth, and Nothing but the Truth
+event broker as
+,
+Providing a Single Source of Truth
+legacy database challenge for
+,
+Converting Liberated Data to Events
+liberated data as
+,
+Benefits of Query-Based Updating
+,
+Data Liberation and the Single Source of Truth
+single writer principle
+,
+Microservice Single Writer Principle
+,
+Microservice-to-Team Assignment System
+singular event definition per stream
+,
+Use a Singular Event Definition per Stream
+sinking event data to data stores
+,
+The Impacts of Sinking and Sourcing on a Business
+-
+The Impacts of Sinking and Sourcing on a Business
+SLAs (service-level agreements)
+,
+Principles of Microservice Deployment
+,
+Deploying
+sliding windows
+,
+Sliding windows
+smart load balancer
+,
+Serving Real-Time Requests with Internal State Stores
+snapshots, in scaling and recovery with external state stores
+,
+Using snapshots
+SOAs (service-oriented architectures)
+,
+What Are Event-Driven Microservices?
+,
+Synchronous Microservices
+sole versus cross-cutting ownership of application
+,
+Aligning Bounded Contexts with Business Requirements
+source streams, in scaling and recovery with external state stores
+,
+Using the source streams
+spark-fast-tests
+,
+Testing the Topology
+SQL and related languages
+,
+Liberating Data Using Change-Data Capture Logs
+,
+Capturing Change-Data Using Triggers
+,
+Handling After-the-Fact Data Definition Changes for the Query and CDC Log Patterns
+,
+Example: Using an External Stream-Processing Framework to Join Event Streams
+,
+Languages and Syntax
+,
+Languages and Syntax
+SQL Server
+,
+Liberating Data Using Outbox Tables
+state
+changelogs
+,
+Recording State to a Changelog Event Stream
+-
+Recording State to a Changelog Event Stream
+,
+Restoring and scaling from changelogs
+,
+Using changelogs
+,
+Handling State and Using Changelogs
+consistency of
+,
+Maintaining consistent state
+-
+Maintaining consistent state
+handling in heavyweight framework
+,
+Handling State and Using Checkpoints
+-
+Handling State and Using Checkpoints
+maintaining
+,
+Materializing State from Entity Events
+,
+Compromises for Data Liberation
+,
+Maintaining State
+management and application reset
+,
+State Management and Application Reset
+replication
+,
+State Replication and Hot Replicas
+scaling applications and recovering from failures
+,
+State Assignment
+state stores
+,
+State Stores and Materializing State from an Event Stream
+effectively once processing to maintain state
+,
+Maintaining consistent state
+external
+,
+State Stores and Materializing State from an Event Stream
+,
+Materializing State to an External State Store
+-
+Using snapshots
+,
+Where Do BPCs Work Well?
+,
+Handling State and Using Changelogs
+,
+Serving Real-Time Requests with External State Stores
+-
+Serving requests via a separate microservice
+,
+State Management and Application Reset
+global
+,
+Materializing Global State
+internal
+,
+State Stores and Materializing State from an Event Stream
+,
+Materializing State to an Internal State Store
+-
+Restoring and scaling from input event streams
+,
+Handling State and Using Changelogs
+,
+Serving Real-Time Requests with Internal State Stores
+-
+Serving Real-Time Requests with Internal State Stores
+,
+State Management and Application Reset
+rebuilding versus migrating
+,
+Rebuilding Versus Migrating State Stores
+-
+Migrating
+stateful streaming
+,
+Stateful Streaming
+-
+Maintaining consistent state
+business logic not reliant on event order, use of BPC for
+,
+Stateful Business Logic That Isn’t Reliant Upon Event Order
+effectively once processing of transactions
+,
+Transactions and Effectively Once Processing
+-
+Maintaining consistent state
+FaaS
+,
+Maintaining State
+heavyweight framework
+,
+Handling State and Using Checkpoints
+-
+Autoscaling Applications
+lightweight framework
+,
+State Assignment
+materializing from event stream
+,
+Materializing State from Entity Events
+-
+Materializing State from Entity Events
+,
+Compromises for Data Liberation
+,
+Materializing State to an Internal State Store
+-
+Using snapshots
+,
+Benefits and Limitations
+,
+Benefits and Limitations
+,
+Serving requests via the materializing event-driven microservice
+,
+Example: Experience Search and Review Application
+request-response microservices
+,
+Processing and Serving Stateful Data
+-
+Serving requests via a separate microservice
+state stores from an event stream
+,
+State Stores and Materializing State from an Event Stream
+-
+Migrating
+testing
+,
+Stateful Functions
+stateless streaming
+composing topologies
+,
+Composing Stateless Topologies
+-
+Example: Repartitioning an Event Stream
+limitations of
+,
+Materializing State from Entity Events
+recovering from processing instance failures
+,
+Recovering from Stateless Processing Instance Failures
+scaling of
+,
+Scaling Applications and Handling Event Stream Partitions
+testing functions
+,
+Stateless Functions
+transformations
+,
+Transformations
+static partition assignment strategy
+,
+Static assignment
+stream owner (service), metadata tag
+,
+Event Stream Metadata Tagging
+stream time
+,
+Stream Time
+-
+Stream Time in Parallel Processing
+,
+Late Events with Watermarks and Stream Time
+,
+Full data locality
+stream-table-table join
+,
+Stream-Table-Table Join: Enrichment Pattern
+-
+Stream-Table-Table Join: Enrichment Pattern
+streaming frameworks
+,
+Heavyweight Framework Microservices
+-
+Example: Session Windowing of Clicks and Views
+,
+Lightweight Framework Microservices
+-
+Stream-Table-Table Join: Enrichment Pattern
+Streaming Systems (O’Reilly)
+,
+Watermarks
+StreamingSuiteBase
+,
+Testing the Topology
+streamlined microservice creation process
+,
+Streamlined Microservice Creation Process
+strict ordering of partitions
+,
+Event Storage and Serving
+subdomain
+,
+Introduction to Domain-Driven Design and Bounded Contexts
+,
+Leveraging Domain Models and Bounded Contexts
+supportive tooling
+,
+Supportive Tooling
+-
+Topology Example
+cluster creation and management
+,
+Cluster Creation and Management
+-
+Programmatic Bringup of Tooling
+consumer offset lag monitoring
+,
+Consumer Offset Lag Monitoring
+container management controls
+,
+Container Management Controls
+dependency tracking and topology visualization
+,
+Dependency Tracking and Topology Visualization
+-
+Topology Example
+event streams, creating and modifying
+,
+Event Stream Creation and Modification
+function of
+,
+Support tooling
+metadata tagging event streams
+,
+Event Stream Metadata Tagging
+and microservice deployment
+,
+Principles of Microservice Deployment
+microservice-to-team assignment system
+,
+Microservice-to-Team Assignment System
+offset management
+,
+Offset Management
+permissions and ACLs for event streams
+,
+Permissions and Access Control Lists for Event Streams
+quotas
+,
+Quotas
+schema creation and modification notifications
+,
+Schema Creation and Modification Notifications
+schema registry
+,
+Schema Registry
+-
+Schema Registry
+state management and application reset
+,
+State Management and Application Reset
+streamlined microservice creation process
+,
+Streamlined Microservice Creation Process
+synchronized migration to new event stream
+,
+Synchronized Migration to the New Event Stream
+synchronizing distributed timestamps
+,
+Synchronizing Distributed Timestamps
+synchronous function calling
+,
+Orchestration and synchronous function calling
+synchronous microservices
+,
+Synchronous Microservices
+-
+Benefits of Synchronous Microservices
+,
+Benefits of Synchronous Microservices
+synchronous triggers, FaaS
+,
+Triggering Based on New Events: The Event-Stream Listener
+T
+table-based data liberation
+,
+Data Liberation Patterns
+table-stream duality
+,
+Materializing State from Entity Events
+-
+Materializing State from Entity Events
+task manager, heavyweight stream processing cluster
+,
+The Inner Workings of Heavyweight Frameworks
+tax, microservice
+,
+Paying the Microservice Tax
+,
+Continuous Integration, Delivery, and Deployment Systems
+,
+Shareable Tools and Infrastructure
+technological versus business requirements
+,
+Aligning Bounded Contexts with Business Requirements
+temporary integration testing environment
+,
+Create a Temporary Environment Within the Runtime 
+of Your Test Code
+-
+Create a Temporary Environment External to Your Test Code
+,
+Programmatically Create a Temporary Integration Testing Environment
+-
+Creating mock events using schemas
+termination and shutdown of functions
+,
+Termination and Shutdown
+testing
+,
+Testing Event-Driven Microservices
+-
+Choosing Your Full-Remote Integration Testing Strategy
+deployment pattern
+,
+The Basic Full-Stop Deployment Pattern
+,
+Synchronized Migration to the New Event Stream
+high testability characteristic of EDM
+,
+Asynchronous Event-Driven Microservices
+local integration
+,
+Local Integration Testing
+-
+Integrate Hosted Services Using Mocking and Simulator Options
+remote integration
+,
+Integration Testing of Event-Driven Microservices
+,
+Full Remote Integration Testing
+-
+Choosing Your Full-Remote Integration Testing Strategy
+schemas
+,
+Capturing Change-Data Using Triggers
+,
+Testing Schema Evolution and Compatibility
+summary
+,
+Testing
+topology (as a whole)
+,
+Testing the Topology
+unit-testing of topology functions
+,
+Unit-Testing Topology Functions
+-
+Stateful Functions
+third-party request-response APIs, integrating with
+,
+Integrating with Third-Party Request-Response APIs
+-
+Integrating with Third-Party Request-Response APIs
+tight coupling, avoiding
+,
+Aligning Bounded Contexts with Business Requirements
+,
+Option 2: Add It to the Existing Service
+,
+Materializing State to an External State Store
+,
+Creating and Modifying an Orchestration Workflow
+,
+Serving Real-Time Requests with External State Stores
+time-based aggregations, heavyweight framework
+,
+Benefits and Limitations
+time-sensitive functions and windowing, late-arriving events
+,
+Time-Sensitive Functions and Windowing
+-
+Session windows
+timestamp extractor
+,
+Timestamp Extraction by the Consumer
+timestamps
+deterministic stream processing
+,
+Timestamps
+-
+Example: Selecting order of events when processing multiple partitions
+in distributed systems
+,
+Timestamps
+,
+Synchronizing Distributed Timestamps
+,
+Processing with Timestamped Events
+incremental data loading by query
+,
+Incremental Timestamp Loading
+outbox pattern
+,
+Liberating Data Using Outbox Tables
+topologies
+,
+Building Topologies
+business
+,
+Business Topology
+composing stateless
+,
+Composing Stateless Topologies
+-
+Example: Repartitioning an Event Stream
+microservice
+,
+Microservice Topology
+processing topology
+,
+Composing Stateless Topologies
+recovering from instance failures
+,
+Recovering from Stateless Processing Instance Failures
+testing of
+,
+Unit-Testing Topology Functions
+-
+Testing the Topology
+visualization tool
+,
+Dependency Tracking and Topology Visualization
+-
+Topology Example
+transactional support for event processing
+distributed systems
+,
+Building Workflows with Microservices
+,
+Distributed Transactions
+-
+Compensation Workflows
+effectively once processing
+,
+Transactions and Effectively Once Processing
+,
+Effectively Once Processing with Client-Broker Transactions
+-
+Effectively Once Processing with Client-Broker Transactions
+,
+Maintaining consistent state
+transformations, stateless topologies
+,
+Transformations
+triggering logic
+,
+Event-Driven Data Contracts
+capturing change-data using triggers
+,
+Capturing Change-Data Using Triggers
+-
+Drawbacks of using triggers
+comments in
+,
+Schema Definition Comments
+consumer group lag
+,
+Triggering Based on Consumer Group Lag
+event-stream listener pattern
+,
+Triggering Based on New Events: The Event-Stream Listener
+-
+Triggering Based on New Events: The Event-Stream Listener
+orchestration function calling
+,
+Queue-triggered event processing
+on resource events
+,
+Triggering on Resource Events
+on schedule
+,
+Triggering on a Schedule
+with webhooks
+,
+Triggering Using Webhooks
+tumbling windows
+,
+Tumbling windows
+U
+UI (user interface)
+inconsistent elements or styling in microfrontend
+,
+Potentially Inconsistent UI Elements and Styling
+processing events for
+,
+Processing Events for User Interfaces
+-
+Separating the editor and advertiser approval services
+unit-testing of topology functions
+,
+Unit-Testing Topology Functions
+-
+Stateful Functions
+,
+The Basic Full-Stop Deployment Pattern
+unkeyed event
+,
+Unkeyed Event
+updated-at timestamp
+,
+Incremental Updating
+,
+Drawbacks of Query-Based Updating
+upserting
+,
+Materializing State from Entity Events
+V
+validation of data
+outbox tables
+,
+Ensuring Schema Compatibility
+-
+Ensuring Schema Compatibility
+testing
+,
+The Basic Full-Stop Deployment Pattern
+trigger execution challenge to
+,
+Capturing Change-Data Using Triggers
+,
+Drawbacks of using triggers
+version accommodation, analytical events
+,
+Handling Autonomously Generated Analytical Events
+visibility system, workflow
+,
+Monitoring a Choreographed Workflow
+,
+Monitoring the Orchestration Workflow
+,
+Orchestrated Transactions
+VMs (virtual machines)
+,
+Putting Microservices into Virtual Machines
+-
+Managing Containers and Virtual Machines
+W
+warm start and cold start, FaaS
+,
+Cold Start and Warm Starts
+wasted disk space, materializing state to internal state store
+,
+Wasted disk space
+watermarks
+,
+Watermarks
+-
+Watermarks in Parallel Processing
+,
+Late Events with Watermarks and Stream Time
+webhooks
+,
+Triggering Using Webhooks
+worker nodes, heavyweight stream processing cluster
+,
+The Inner Workings of Heavyweight Frameworks
+-
+The Inner Workings of Heavyweight Frameworks
+,
+Recovering from Failures
+workflows
+,
+Building Workflows with Microservices
+-
+Compensation Workflows
+choreography pattern
+,
+The Choreography Pattern
+-
+Monitoring a Choreographed Workflow
+,
+Choreographed Transactions: The Saga Pattern
+-
+Choreography Example
+compensation
+,
+Compensation Workflows
+distributed transactions
+,
+Distributed Transactions
+-
+Compensation Workflows
+orchestration pattern
+,
+The Orchestration Pattern
+-
+Monitoring the Orchestration Workflow
+,
+Orchestrated Transactions
+-
+Orchestrated Transactions
+,
+Event stream—triggered processing
+request-response
+,
+Comparing Direct-Call and Event-Driven Orchestration
+-
+Monitoring the Orchestration Workflow
+,
+Handling Requests Within an Event-Driven Workflow
+-
+Separating the editor and advertiser approval services
+write-ahead logs
+,
+Liberating Data Using Change-Data Capture Logs
+
+About the Author
+Adam Bellemare
+is a staff engineer for the data platform at Shopify. He’s held this position since 2020. Previously, he worked at Flipp from 2014 to 2020 as a staff engineer. Prior to that, he held a software developer position at BlackBerry, where he first got started in event-driven systems.
+His expertise includes DevOps (Kafka, Spark, Mesos, Kubernetes, Solr, Elasticsearch, HBase, and Zookeeper clusters, programmatic building, scaling, monitoring); technical leadership (helping businesses organize their data communication layer, integrate existing systems, develop new systems, and focus on delivering products); software development (building event-driven microservices in Java and Scala using Beam, Flink, Spark, and Kafka Streams libraries); and data engineering (reshaping the
+way that
+behavioral data is collected from user devices and shared within the
+organization
+).
+
+Colophon
+The animal on the cover of
+Building Event-Driven Microservices
+is a yellow-cheeked tit (
+Machlolophus spilonotus
+). This bird can be found in the broadleaf and mixed-hill forests, as well as in the human-made parks and gardens, of southeast Asia.
+The striking bright yellow face and nape of the yellow-cheeked tit in contrast with its black crest, throat, and breast make it easily identifiable. The male, depicted on the cover, has a gray body and black wings peppered with white spots and bars; the female has an olive-colored body and pale yellow wing-bars.
+Yellow-cheeked tits dine on small invertebrates, spiders, and some fruits and berries, foraging in the low- and mid-levels of the forest. Like other birds in the chickadee, tit, and titmice family, the yellow-cheeked tit travels via short, undulating flights with rapidy fluttering wings.
+While the yellow-cheeked tit’s conversation status is listed as of Least Concern, many of the animals on O’Reilly covers are endangered; all of them are important to the world.
+The cover illustration is by Karen Montgomery, based on a black and white engraving from
+Pictorial Museum of Animated Nature
+. The cover fonts are Gilroy Semibold and Guardian Sans. The text font is Adobe Minion Pro; the heading font is Adobe Myriad Condensed; and the code font is Dalton Maag’s Ubuntu Mono.

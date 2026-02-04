@@ -1,0 +1,2831 @@
+our service for hosting data. It also marks the beginning of the next part of the book, which is titled
+Storage, Messaging,
+and Monitoring
+.
+
+Part 4:Storage, Messaging, and Monitoring
+In this part, you will explore essential Azure services for storing data, managing messaging between components, and monitoring application health. You’ll learn how to work with both structured and unstructured data using Azure Storage and relational databases. The part also covers implementing message queues to enable reliable communication between services and adding observability using Azure
+Application Insights.
+By the end of this part, you will be equipped to build applications that are not only data-driven but also maintainable, scalable,
+and performance-aware.
+This part contains the
+following chapters:
+Chapter 13
+,
+Storing Data with Azure Storage
+Chapter 14
+,
+Using Queues in Microsoft Azure
+Chapter 15
+,
+Using Relational Databases in Microsoft Azure
+Chapter 16
+,
+Adding Monitoring to Your Application
+
+13
+Storing Data with Azure Storage
+Almost every application built requires some kind of storage solution. In many cases, it can be a relational database or a file share mounted to the filesystem exposed to your application. The nature of data handled by an application dictates what kind of database or storage will be used; so, it’s important to understand and know the available options when designing
+an application.
+Until now, we’ve been mostly focused on Azure services, which allow you to host and run your application. This time, we’re going to talk more about one of the most popular storage solutions available for Azure, which is Azure Storage. It’s one of the oldest services implemented for that cloud platform – it’s the backbone of many business applications and
+Azure itself.
+In this chapter, we’re going to cover the following main topics:
+Using Table Storage as a database for
+an application
+Using Blob Storage as a generic
+storage solution
+Understanding design patterns when using
+Azure Storage
+Learning about
+use cases
+Technical requirements
+To perform the exercises from this chapter, you will need
+the following:
+Azure CLI
+Azurite (
+https://learn.microsoft.com/en-us/azure/storage/common/storage-use-azurite
+)
+Azure Storage
+Explorer (
+https://azure.microsoft.com/en-us/products/storage/storage-explorer
+)
+Using Table Storage as a database for an application
+Azure Storage
+is a
+storage
+service in Azure, which consists of the
+following subservices:
+Table Storage
+Blob Storage
+File
+Service (Storage)
+Queue Storage
+Data
+Lake Storage
+They are all part of the same service (Azure Storage) and can be deployed as a single unit. Historically, there was a possibility to deploy Azure Storage without some of those. Today, it’s rather a matter of choosing which of the sub-services you will focus on the most. The choice won’t affect the capabilities of Azure Storage but will rather give you some suggestions and insights on how to use the service in the most
+efficient way.
+Our journey with Azure Storage will begin with using Table Storage. Table Storage is a simple
+non-relational database
+, which
+allows you to store and access your data quickly and efficiently. The most important features of Table Storage are
+as follows:
+Indexing based on two columns (which are named
+Partition Key
+and
+Row Key
+– we’ll talk about them later in
+the chapter)
+Lack of fixed schema (you can store records with various schema using the
+same table)
+In-built concurrency
+handling (
+optimistic concurrency
+)
+Scales well even with millions of records assuming proper structure of data
+is implemented
+Doesn’t support advanced filtering
+and queries
+Note
+It’s worth mentioning that Table Storage does support the filtering and querying of data to some extent. Due to the nature of the indexing mechanism for that service, I tend to describe it as limited to Primary and Row Keys. We’ll describe that in detail later in
+the chapter.
+Table Storage can be easily used to handle data in scenarios where you don’t need relations between records, the schema is not known or can be dynamic, and you can easily predict partitioning for data. While there are techniques that would allow you to create relations between records in Table Storage, they aren’t implemented on the service level. This
+means you need to implement and manage them on your own.
+Let’s see how one can use Table Storage as the storage solution for
+an application.
+Using Table Storage in an application
+In this
+section, we
+will discuss
+two topics:
+How to find a use case for
+Table Storage
+How to implement a connection with Table Storage and how to query
+the service
+Let’s start with the former, as it will allow us to understand some additional concepts needed to be able to properly use
+the service.
+Designing an application to use Table Storage
+As mentioned
+before, Table Storage is a non-relational
+database, which automatically indexes your data based on two columns (
+Primary Key
+and
+Row Key
+). That information is very important from the design point of view – if you happen to start querying your data stored in Table Storage using any other column, it will heavily impact the performance of both your application and the service. Let’s take a look at
+Figure 13
+.1
+to see the three in-built columns that are available in
+every table:
+Figure 13.1 – The three columns in every Table Storage table
+Every table in Table Storage will have at least three columns:
+Primary Key
+is (as the name implies) the primary column used for indexing. You can consider it a way to group your records.
+Row Key
+allows you to identify records within a group indicated by
+Primary Key
+.
+Timestamp
+is an automatically managed column, which tells the service when a record was created and
+then updated.
+Note
+Row Key
+values must be unique within a partition (
+Partition Key
+). You can have records with the same
+Row Key
+value, but they must belong to
+different partitions.
+Each table in Table
+Storage can have a number of
+custom columns. See
+Figure 13
+.2
+for visualization.
+Figure 13.2 – Table Storage with three separate tables with different schema
+It’s important to remember that various tables can share the same column. You can even have tables with exactly the same schema – this approach is used in some designs to simplify the management of data. One of those designs targets data deletion – as deleting records from tables in Table Storage sometimes requires thousands of operations to be performed (which can be both slow and expensive); it’s easier to just remove a table. Removing a table is a single operation, which is both cost-efficient and quick. We will discuss those designs and tricks later in
+the book.
+The next important thing to discuss is how Table Storage handles data within the same table. Let’s take a look at
+Figure 13
+.3
+and
+Figure 13
+.4
+to see
+the concept.
+Figure 13.3 – Three different records kept in the same table
+Figure 13
+.4
+presents
+a slightly different
+scenario when compared to
+Figure 13
+.3
+:
+Figure 13.4 – Records with different schema kept in the same table
+If you take a closer look at the data presented in
+Figure 13
+.3
+and
+Figure 13
+.4
+, you will see that Table Storage supports both nullable columns and records with a completely different schema. Theoretically, every record could have a completely different schema. Practically, it’s not achievable as Table Storage doesn’t support more than 255 columns for each table. Still, you could have records that used only one additional column and records that used all 255 columns – all in the same table. This allows you to very easily introduce versioning of data to your application and simplify the management as no migrations are needed to handle schema changes.
+Tip
+If you want to keep data with changing schema in the same table, a good idea is to introduce a column that holds the information about the schema version. It then can be easily integrated with
+your application.
+When a new column is introduced to a table in Table Storage, it gets automatically created, and all the records that don’t have the value for that column will have a
+NULL
+value assigned instead. At any moment, you can update those records to use the new column with any custom value supported by it. The opposite happens when the last records using a custom column are removed – the column is no longer available in the table and needs to be re-inserted by using a record, which defines it
+once again.
+As Table Storage may seem limited in some cases (as rows are indexed using only two columns –
+Partition Key
+and
+Row Key
+), it’s worth understanding how to overcome those
+limitations by using well-defined
+patterns. Let’s discuss them now to see how to implement certain scenarios for
+business applications.
+Implementing design patterns for Table Storage
+Table Storage
+offers extensive documentation explaining various design patterns for different scenarios. As that documentation is available publicly (at the following link:
+https://learn.microsoft.com/en-us/azure/storage/tables/table-storage-design-patterns
+), we’re not going to explain them once again in this chapter. Instead, we will focus on understanding how to choose the ones that will suit your application and how to properly incorporate them into
+your code.
+We already discussed that indexing in Table Storage happens only for two columns –
+Partition Key
+and
+Row Key
+. This forces you to plan the design of the database upfront as making changes in the future will be challenging. This is one of the major drawbacks when working with this service – while typical relational databases such as Microsoft SQL Server or PostgreSQL offer robust solutions for maintaining a database schema and automated migrations, Table Storage may look underdeveloped in that area. In fact, the difficulty of maintaining a dynamic schema for database tables is more or less the same for most NoSQL databases. This comes from a certain trade-off – you gain a much more flexible schema, which can be altered without hardcoded migrations, but also need to be much more careful when maintaining code, which interacts with such a schema. Let’s consider the following scenario: you implemented a
+database access layer
+(
+DAL
+) in your
+application that adds a new row. This could be explained using the
+following pseudo-code:
+var dal = new SomeTableDal();
+var newRecord = new SomeRecord
+{
+    Id = 1,
+    Name = “John”,
+    Surname = “Doe”
+}
+dal.Insert(newRecord);
+The aforementioned example does the
+following things:
+Creates a
+dal
+object to interact with a
+specific table
+Defines a new record to be added with
+certain values
+Adds the record using the
+Insert
+method
+Now, let’s imagine
+you want to add an additional field to the
+SomeRecord
+table. If you interact with a relational database, you will need to write a migration code (or use some kind of ORM, which will do that for you) and then implement a change in your code. If the new field is required, you will need to make sure that all instances of your application have a new code version deployed before you make new interactions with the database. Missing that step will result in errors returned from your application as it won’t be able to add a new record due to a schema mismatch between a table and your code. For databases such as Table Storage, the only thing needed will be adding a field to the type in
+your code:
+var newRecord = new SomeRecord
+{
+    Id = 1,
+    Name = “John”,
+    Surname = “Doe”,
+    Phone = 100200300
+}
+The only thing to remember will be the fact that if there are any existing records in the table, they will have the
+Phone
+field set to a
+NULL
+value. This means that we’d need to consider what to
+do now:
+We can treat the new field as required, meaning we need to update the existing records to have the value provided or set to a
+default one.
+We can treat the new field as optional for old records and required for the new ones. This will make the implementation quite complex as we will need to understand which records are the old ones and which are the new ones (most likely, an additional field with a version number would
+be required).
+We can treat the new field as optional, which is the
+simplest scenario.
+The final decision depends on the business requirements. Here, what we can see is that even though adding
+a record with altered fields may be quite easy when using Table Storage, maintaining such a code base with dynamic schema will become more and more challenging as time goes by. It’s also worth mentioning that Table Storage offers three different methods to choose from when interacting with an entity stored in
+a table:
+Insert
+Merge
+Replace
+They have completely different semantics so it’s important to understand the difference between them, as
+described here:
+Insert
+adds a new entity to a table based on the
+Partition Key
+and
+Row Key
+values. If the combination of those columns would result in a duplicated record, an error will
+be thrown.
+Merge
+allows you to limit the amount of data sent to Table Storage by sending only the fields that you’d like to update. Those fields (or rather their values) will replace (or add new ones) the ones existing in an entity saved in
+the database.
+Replace
+allows you to replace an entity stored in Table Storage with the fields provided in a request. Note that fields that are not part of the request will be removed, so it’s important to use that method
+with caution.
+Note
+Neither
+Replace
+nor
+Merge
+methods will work if an entity doesn’t exist. The only method working with non-existing entities
+is
+Insert
+.
+As you can see, even though Table Storage offers quite an easy interface for interacting with its data plane, there are lots of additional features available. This is why a proper upfront design will be important when using that service as your database.
+Another example of using a proper design for an application is querying data. We discussed in this chapter the limitation of Table Storage, which is that it is unable to index data if it’s
+not stored in the
+Primary Key
+or
+Row Key
+column. More traditional databases (especially relational ones) allow you to build a custom index using any column available for a table. Let’s use the same example of a table as we did when discussing changes to the table schema. We will assume that our table looks like the one presented in
+Figure 13
+.5
+:
+Figure 13.5 – A visualized structure of a table
+In a relational database (such as Microsoft SQL), all those columns will be equal in the beginning. You can decide whether they have additional semantics by setting one of them as a primary key (most of the time, it would be the
+ID
+column), configure them with a unique index (so you’ll get an error when adding a duplicate), or select one or several columns to create an index. Indexes allow you to optimize querying for data in a table by allowing a database engine to structure it in an optimal way. Let’s assume you’d like to query data using both the
+Name
+and
+Surname
+columns. In a relational database, you’d build an index and save it to the database. Then, to utilize it, you’d just need to remember to use those columns in
+your queries:
+SELECT 
+ID, 
+Name, 
+Surname, 
+Phone 
+FROM 
+[SomeRecord] 
+WHERE 
+Name = @Name 
+AND Surname = @Surname
+The aforementioned example uses SQL syntax to build a query and expects two parameters:
+@Name
+and
+@Surname
+. You could provide any value for them if needed – what’s important is that they are part of the
+WHERE
+clause and, based on our assumption of
+building an index containing those two fields, they would help us in getting a better performance from
+the query.
+In Table Storage, things aren’t that simple. If you’re unable to make those columns part of the index (
+Primary Key
+and
+Row Key
+columns), then we’d need to find a better way to structure a table. Let’s review
+our options:
+Name
+(
+Primary Key
+),
+Surname
+(
+Row Key
+): This won’t work as people may have the same name
+and surname.
+Surname
+(
+Primary Key
+),
+Name
+(
+Row Key
+): This has the same issue as the
+previous option.
+ID
+(
+Primary Key
+),
+Name_Surname
+(
+Row Key
+): This will work just fine as long as we can always obtain a value for
+ID
+when querying for
+a record.
+ID_Name
+(
+Primary Key
+),
+Surname
+(
+Row Key
+): This is another working example that doesn’t provide much of an improvement unless we need to reuse
+ID
+between the
+same names.
+ID_Surname
+(
+Primary Key
+),
+Name
+(
+Row Key
+): This is similar to the
+previous example.
+Name_Surname
+(
+Primary Key
+),
+ID
+(
+Row Key
+): This will work just fine but may result in imbalanced partitions due to various numbers of duplicated
+Primary
+Key
+values.
+Based on the preceding examples, you can see that we may easily structure any table in various ways depending on our use case. Those patterns of providing different values for
+Partition Key
+and
+Row Key
+and merging some of the values are called
+intra/inter-partition secondary index patterns
+. Use them when you need to query your data using
+one of the value columns (columns that aren’t either
+Primary Key
+or
+Row Key
+). One of the advised approaches for working with such designs is data duplication. If you need more than one secondary index, you may find it useful to create more than one
+record (one per index) in the table. This complicates the implementation and makes it prone to data drift. However, it allows you to keep the performance target and is a common practice when Table Storage is your
+actual storage.
+Note
+Designs and patterns used with Table Storage may look strange if you haven’t got much experience working with NoSQL solutions. They are perfectly fine to be used in production scenarios and are well-tested even in heavily distributed and
+scaled-out services.
+Using Table Storage will require some skill to be able to utilize its full potential so don’t be discouraged by the
+number of different patterns and designs available for that service. For now, let’s see how we can start using Table Storage in our application by leveraging
+its SDK.
+Connecting with Table Storage from an application
+When it comes to
+connecting to a Table Storage instance, you can use either its REST API directly or integrate with one of the available SDKs. Under the hood, the SDK will connect with the REST API as well, but the benefit of using it comes not from the connectivity point of view but, rather, from encapsulating all the implementation details such as authorization, concurrency, and reliability. In the following list, you can find all the available SDKs for different
+programming languages:
+.
+NET
+:
+https://learn.microsoft.com/en-us/dotnet/api/overview/azure/data.tables-readme?view=azure-dotnet
+Java
+:
+https://mvnrepository.com/artifact/com.azure/azure-data-tables
+JavaScript
+:
+https://www.npmjs.com/package/@azure/data-tables
+Python
+:
+https://pypi.org/project/azure-data-tables/
+Go
+:
+https://pkg.go.dev/github.com/Azure/azure-sdk-for-go/sdk/data/aztables
+There are also additional SDKs available for PHP and Ruby, but as they offer only community support and aren’t official SDKs, we’re going to skip them in this chapter. The installation instructions for those packages can be found in the corresponding links. Once you have them installed, we can discuss how they’re connected with the Table
+Storage instance.
+The connection method will be the same for each SDK and those methods will be similar to the ones used to connect with other services such as Azure Container Registry, Azure Key Vault, or Azure App Configuration. When interacting with Table Storage, to authorize a connection, you can use
+the following:
+Access key
+Shared Access Signature
+(
+SAS
+) token
+Managed identity
+The first two methods are native to Table Storage, meaning you can use them even if the entity connecting with your instance doesn’t have an Azure account. The use of a managed identity will be preferred in most of the scenarios but will require providing Azure credentials (whether it’s a service principal or a user). The use of an access key is very often discouraged as it doesn’t allow you to control who accesses and how they access Table Storage. Let’s discuss the possible use cases for different kinds of credentials
+mentioned before:
+Use an access key for admin-only access or quick prototypes that are created in sandbox environments and don’t store
+real data.
+Use SAS tokens if you’re unable to generate credentials for a customer connecting with your instance of Table Storage. Make sure they’re short-lived and provide only the necessary permissions instead of
+all available.
+Consider a managed identity as the preferred way of connecting with Table Storage. Remember that you should follow the least privilege principle and avoid granting principals too broad roles (Azure Storage offers dedicated roles limited to either control or data plane only – you can check the documentation for a detailed
+overview:
+https://learn.microsoft.com/en-us/azure/storage/tables/authorize-access-azure-active-directory
+).
+Depending on the selected authorization method, the implementation of connection in your application will
+be slightly different. Let’s compare making the connection using a managed identity in three different programming languages, starting
+with C#:
+var credential = new(); 
+var client = new( 
+    endpoint: new Uri(“<table-storage-endpoint>”), 
+    credential 
+);
+The same can be done in Java with a
+similar syntax:
+DefaultAzureCredential azureTokenCredential = 
+    new DefaultAzureCredentialBuilder()
+        .build();
+TableServiceAsyncClient client = 
+    new TableServiceClientBuilder()
+        .endpoint(“<table-storage-endpoint>”)
+        .credential(credential)
+        .buildAsyncClient();
+Let’s also check the syntax
+for Python:
+credential = DefaultAzureCredential()
+client = TableServiceClient(
+    endpoint=”<table-storage-endpoint>”, 
+    credential=credential
+)
+As you can see, the connection method using different SDKs will look the same no matter which programming language you’re using. You can find more code examples in the repository for the chapter for a better overview of possible configuration values and syntax differences
+between various connection methods. Before we continue with code examples for interacting with Table Storage, let’s briefly discuss SAS tokens, as they offer a slightly different experience when connecting to
+your data.
+Using SAS tokens for connection
+SAS tokens in Azure Storage
+are used
+to grant limited access to your data without using a managed identity. As mentioned previously, access keys are currently a deprecated way of connecting to Table Storage and similar services as you can’t control who uses them and how they use them. SAS tokens, however, can be delegated to a particular service or a user and revoked when needed, so you have much better control over scope
+and security.
+There are three different types of
+SAS tokens:
+Account SAS
+can give access to the whole storage account and
+multiple services
+Service SAS
+is dedicated to a single service (for instance,
+Table Storage)
+User delegation SAS
+is supported only for Blob and Data
+Lake Storage
+The difference between user delegation SAS and the other SAS token types is the security method used to secure them – while account and service SAS tokens use a storage account key, user delegation SAS uses Microsoft Entra ID credentials. From the development point of view, you shouldn’t see much of a difference when using those tokens. However, it’s worth remembering that tokens secured by an account access key will be revoked each time the key is generated. This means that when you use them, you need to have a way to update them in a coordinated way, so users and services using them won’t lose access to
+your data.
+Generally speaking, an SAS token is a string containing a set of information, which can be used by Azure Storage to determine access. An example token may look
+like this:
+“se=2025-01-30T20%3A00%3A00Z&sp=dac&sv=2022-11-02&ss=tb&srt=s&sig=oqYCIs2Y%2Bwgd31hy6KVeTf0qLd4dFnP7aCs2AHOxFno%3D”
+To get a similar token, you’d need to use the following Azure
+CLI command:
+az storage account generate-sas --account-name afd13 --services tb --resource-types s --permissions acd --expiry 2025-01-30’T’20:00:00Z
+It’s also possible to generate such a token using the SDK or REST API – the examples can be found in
+the repository.
+As you can
+see, a token looks like a
+query string, which you could attach to an HTTP request when interacting with the data plane of Azure Storage. It consists of a few parameters that provide information such as expiry date (
+se
+), permissions (
+sp
+), allowed services (
+ss
+), and signature (
+sig
+). To learn more about the structure of the token, take a look at the following
+page:
+https://learn.microsoft.com/en-us/azure/storage/common/storage-sas-overview
+.
+Let’s now discuss how SAS tokens can help you in properly designing an application. For the first example, let’s consider providing an access key to multiple services. The concept is presented in
+Figure 13
+.6
+.
+Figure 13.6 – Accessing a storage account using an access key
+Figure 13
+.6
+presents a simple scenario where we have three different services connecting to Azure Storage using the same access key. While such a configuration can be set up very quickly and with minimal operational overhead, let’s see what happens if the access key is revoked (
+Figure 13
+.7
+).
+Figure 13.7 – Refused connection to Azure Storage for two services with an old access key
+Figure 13
+.7
+presents
+a scenario
+where one service was updated with a new access key while two others are still working with the old one. As you can see, they won’t be able to communicate with Azure Storage unless they obtain the new access key. Another major thing visualized by those diagrams is the fact that you cannot differentiate the services based on the access key.
+They all share the same access level, and as the access key isn’t personalized, the only way to tell the difference when services are connecting would be by introducing a proxy between them and Azure Storage (see
+Figure 13
+.8
+for reference).
+Figure 13.8 – A reverse proxy placed between services and Azure Storage to intercept requests
+You may wonder
+why we’d place
+a reverse proxy in front of Azure Storage when an access key is used. This is actually one of the easiest methods to be able to detect what clients are connecting with your data (by investigating the source IP, hostname, or any of the request’s headers). This method could be also used to centralize the use of the access key (see
+Figure 13
+.9
+).
+Figure 13.9 – Access key moved to the reverse proxy for easier management
+Figure 13
+.9
+presents you with a setup where an access key is used by a reverse proxy to authorize forwarded requests. While such a setup may not increase the security (as it means that every
+client connecting
+with the proxy will be able to communicate with Azure Storage), it definitely simplifies the management and revokes an
+access key.
+Note
+There are ways to have the access key moved to the proxy while still maintaining a certain level of security. You could have custom authentication implemented, so only a subset of clients could connect to the proxy. The services connecting with the proxy could also be considered safe by default thanks to network isolation. There are multiple possibilities and, as always, you need to consider all of them when designing
+your application.
+Now, as we have discussed how a connection is authorized when an access key is used and what kind of problems and challenges it may generate, let’s discuss how SAS tokens are helpful. We’ll consider a similar scenario with three separate clients connecting to the same instance of Azure Storage (
+Figure 13
+.10
+).
+Figure 13.10 – Different services connecting to Azure Storage using different SAS tokens
+In
+Figure 13
+.10
+, you can see how each service uses a different SAS token. Each token may provide a different set of permissions and have a different expiry date. A token could be also revoked individually (by using the stored access policy – you can read more about it here:
+https://learn.microsoft.com/en-gb/rest/api/storageservices/define-stored-access-policy
+), so you gain flexibility when compared with the approach using an access key. As SAS tokens are generated and granted for individual entities, you also don’t need to introduce additional infrastructure components as a workaround for an access
+key limitation.
+Note
+While you could provide the same SAS token for different services, such a practice is considered a bad practice. You’d lose the flexibility of SAS tokens and gain nothing
+in return.
+We can now
+discuss how to
+implement a proper access layer to a Table Storage instance in our application using the aforementioned SDKs and best practices for working with
+that service.
+Interacting with Table Storage in an application
+When integrating
+an application with Table Storage, you will most likely need an abstraction, which will help you with unit testing your code. An example setup is presented in
+Figure 13
+.11
+as a reference for
+further discussion.
+Figure 13.11 – Simple visualization of the different layers in an application
+Let’s consider that the main code of our application resides within a business layer. If we want to connect with Table Storage, obviously, we could have direct references to the SDK within that layer. It will work in simpler scenarios and during initial iterations of development, but ultimately, we would rather seek more flexible and
+clean
+solutions. There are two
+possible paths:
+Add a single layer (such as a repository), which will encapsulate all the SDK-related code there and inject it into our
+business layer.
+If needed, add an intermediary layer (such as a storage provider), which can take care of choosing the storage our application needs to connect to. This setup works in scenarios where we may have multiple storage accounts available (or even multiple databases to
+choose from).
+The next important thing is understanding the difference between a
+Table service client
+and a
+Table client
+. Those
+two separate concepts provided by the SDK
+allow you to either interact with
+the service itself (its control plane) to work with the tables or to interact with the data plane, so you can add, remove, and update data stored there. Take a look at the following example in .NET, which shows the difference between those
+two clients:
+// Table service client
+var serviceClient = new TableServiceClient(
+    new Uri(storageUri), 
+    new TableSharedKeyCredential(
+        accountName, 
+        storageAccountKey
+    )
+);
+// Table client
+var tableClient = new TableClient(
+    new Uri(storageUri), 
+    “mytablename”, 
+    new TableSharedKeyCredential(
+        accountName, 
+        storageAccountKey
+    )
+);
+You can find detailed examples with descriptions in
+the repository.
+When working on your application with Table Storage, you will need to decide what kind of operations you need to perform against the tables. One of the crucial concepts is deciding who or what is responsible for creating the tables. You can have them created externally (manually or via some kind of automated script) or let your application do the work. If you decide
+that it’s your application’s responsibility, you need to consider when the tables will be created – most of the time, the best place to have that kind of code implemented is the initialization part of the application, which is executed only when an application starts. See
+Figure 13
+.12
+to see the
+visualized concept.
+Figure 13.12 – Placing the code initializing the Table Storage tables in the application’s bootstrap
+The benefit of such an approach is a much lower impact on the application’s performance when compared with creating a table as part of your data layer. For comparison, take a look at
+Figure 13
+.13
+, which explains a
+different concept:
+Figure 13.13 – Creating a table as part of a data layer
+When you place the code responsible for creating a table as part of your data layer, you will need to make
+sure that a table doesn’t exist already. Fortunately, the SDK already has those methods implemented so you don’t need to do that on your own. The downside of that approach is that your application will always need to make another call to the Table service to ensure the request sent to the service doesn’t conflict with the service’s state. For individual calls, it won’t be a problem; however, if you multiply those requests by thousands of calls, you may find it impacting
+the performance.
+When interacting with Table Storage, it’s also important to remember that the data is indexed only with two columns:
+PartitionKey
+and
+RowKey
+. When you want to query your data, you should only use those columns as part of your
+WHERE
+clause (SDKs allow you to provide a filter where you can place parameters). The clause (filter) may look
+like this:
+PartitionKey eq ‘cars’ and RowKey eq ‘8556783’
+In the aforementioned example, we created a filter that will look for a specific record in our table. As Table Storage doesn’t provide an API for querying a single record only, even though the filter limits the returned data to a single entity, the result will still be a collection of entities (but obviously containing only a single entry). In fact, we could summarize the possible queries
+as follows:
+Use both
+PartitionKey
+and
+RowKey
+to query a single record. This is the most
+performant query.
+Use
+PartitionKey
+only
+to fetch data from a particular partition (such as displaying a list of stored records). Such a query won’t be as performant as leveraging both
+PartitionKey
+and
+RowKey
+but still should provide
+decent performance.
+Use
+RowKey
+without
+PartitionKey
+if you want to look for records that share the same identifier, or you don’t know the value of
+PartitionKey
+. This query will scan all the partitions, but as we’re
+RowKey
+, it will be able to utilize some of the indexing capabilities of
+Table Storage.
+The summary is also presented as a decision tree in
+Figure 13
+.14
+.
+Figure 13.14 – A decision tree for selecting a proper identifier for a query
+Not using either
+PartitionKey
+or
+RowKey
+generates a query that will cause all the records to be
+scanned. Avoid running such a query as they are not only very slow but can also be costly, especially if there’s lots of data
+to scan.
+Note
+Table Storage is priced on the basis of two factors – data volume stored and data operations. Proper use of
+PartitionKey
+and
+RowKey
+limits the number of read operations performed when loading data. Hence, it allows you to keep the cost up to
+the minimum.
+An interesting fact about Table Storage is that its API is fully compatible with the Table API offered by Azure Cosmos DB. This means you could start working on an application using a simpler and much cheaper service (Table Storage) and then switch to Azure Cosmos DB once your scalability demands and reliability expectations become stricter.
+It’s also worth mentioning here that switching to Azure Cosmos DB provides additional features that aren’t available in
+Table Storage:
+You can create indexes using all the columns in a table – this simplifies database design and makes it much
+more flexible.
+You can create additional replicas of your database, so you can co-locate read/write locations with the locations of
+your customers.
+You can leverage the change feed offered by Azure Cosmos DB to distribute your data as
+a stream.
+You can use the backup and restore capabilities of Azure Cosmos DB to increase the reliability of your database and make it much more resistant
+to errors.
+The downside of using the Table API instead of Table Storage is the huge pricing difference – Azure Cosmos DB is a much more expensive solution, which makes sense in bigger applications (spanned across multiple locations, with strict performance targets and low-latency requirements). If you don’t need the advanced features offered by Azure Cosmos DB, I highly recommend giving Table Storage a try. It’s a great service that is easy to learn, can
+be quickly implemented as the data layer of your applications, and is really cheap in the majority of business scenarios.
+Let’s discuss now another service offered by Azure Storage, which is Blob Storage – a generic solution for storing files
+and data.
+Using Blob Storage as a generic storage solution
+In the first part of this
+chapter, we talked about
+Table Storage, which could be used as a database for our application. While Table Storage is perfect for storing data in semi-structured format (rows inside a table but without struct schema), it can’t help you in storing unstructured data or files. For those cases, we have Blob Storage – another service offered by Azure Storage, which you can use as a generic storage. However, what does
+generic storage
+mean? Let’s try to explain the
+term here.
+Most applications require some kind of storage. The nature of storage depends on the business requirements for those applications – those requirements shape the domain implemented by an application and tell architects and developers what technology will be suited the most to help with the implementation. If the data stored by an application has relations, a relational database will definitely be a good match. If data is semi-structured or loosely coupled, a non-relational database could work as well. Sometimes applications need to store unstructured data, though – those could be text or binary files or serialized data, which you don’t want to store inside a database. For those cases, Blob Storage
+seems
+like a perfect fit. Let’s quickly discuss the most important features of
+that service:
+It supports any
+file format.
+It allows you to organize files using a tree-like structure using containers (though it’s important to remember that the structure is virtual – it doesn’t work like a
+typical filesystem).
+It provides a way to tell which files should be available publicly and which ones
+are private.
+It supports authorization using access keys, SAS tokens, and Microsoft Entra ID (
+via RBAC).
+It supports various access tiers, so you can decide what the most important parameters are for you when integrating Blob Storage with your application (performance
+or price).
+Note
+Blob Storage offers a feature
+called
+hierarchical namespaces
+, which transforms the service from Blob Storage to Data Lake Storage. Data Lake Storage works in a similar way to Blob Storage but gives you more control over the structure of your files (it supports POSIX-like access control lists in addition to Azure RBAC) and targets working with high volumes of data (hundreds of gigabytes
+or more).
+As the first topic
+in
+this section, let’s discuss how access tiers affect
+your application.
+Using the correct access tier for an application
+As of now, Blob
+Storage offers four
+different
+access tiers:
+Hot
+Cool
+Cold
+Archive
+Access tiers allow you to select the best approach for storing and accessing your data from an application. For instance, the
+Hot
+tier has the best cost ratio for frequently accessed data. On the other hand, if you access data less than once a week, you may find the
+Cool
+or
+Cold
+tiers much better suited for your needs. The last tier,
+Archive
+, is designed for storing data that is accessed only as the last resort (for instance, old backups or historical data stored out of compliance reasons).
+The important feature of the Archive tier is the need to rehydrate (or resurface) data. It means that once a file is moved to that tier, you can’t read it or write to it. See
+Figure 13
+.15
+for
+the explanation.
+Figure 13.15 – Blob Storage with three archived files, which are moved to the archive storage and are locked. They exist only virtually within the standard structure of Blob Storage
+The fact that data needs to be rehydrated before accessing it (and that process may take 15 hours) is why you need to carefully select which files are supposed to be archived. I’d also like to emphasize that, very often, spending too much time deciding which access tier is the best for your application isn’t worth the money saved. It’s difficult to tell the numbers (you need to make your own calculations), but most of the time, you need to store huge data volumes (hundreds of gigabytes) to see the difference between Hot and Cool/Cold tiers.
+Note
+You can find more information about access tiers
+here:
+https://learn.microsoft.com/en-us/azure/storage/blobs/access-tiers-overview
+.
+From the
+system’s point of view, it makes more
+sense to divide it into domains/modules, which are responsible for pushing and retrieving data and then finding a proper structure for the access layer. Take a look at
+Figure 13
+.16
+for a reference architecture, which we will discuss in
+a moment.
+Figure 13.16 – A reference architecture with two services publishing data to various topics. There are specific subscribers for those topics, which take care of saving data to a Blob Storage with a proper access tier
+Let’s discuss how the architecture presented in
+Figure 13
+.16
+could help in the proper use of access tiers in Blob Storage. The fact that we’re supposed to use a specific tier will often be linked with a set of non-functional requirements for all applications within our domain. For instance, you may need to log and save all the operations performed by a user when using your application. While those operations may not be presented to a user, you may still be obligated to store them because of compliance or regulations (even though they’re not directly connected with the application itself). In such a scenario, it may be easier to delegate the responsibility of storing that data to an external service. As
+one of the possible
+solutions, you could use
+multiple topics:
+Hot
+: Topics used to transfer data directly connected to the functional requirements of
+your application.
+Cold
+: Logs, audit data, and
+regulatory data.
+Note
+If you’re unfamiliar with the concept of a topic, take a look at the following
+documentation:
+https://learn.microsoft.com/en-us/azure/service-bus-messaging/service-bus-queues-topics-subscriptions#topics-and-subscriptions
+.
+The use of topics allows you to implement a pub/sub pattern with multiple publishers and subscribers, who can select on their own what data to read. From the architecture point of view, the pattern presented in
+Figure 13
+.16
+decouples the business layer (applications publishing data to the topics) from the data access layer (the services that connect directly with Blob Storage). It also helps you in keeping user-facing applications decoupled from the underlying infrastructure. Most of the time, you don’t want to wonder where data
+published by your
+application is supposed to be stored. All you need to know is the data that belongs to the Hot or Cold data
+processing path.
+Let’s talk now about the proper structure for folders and files when using
+Blob Storage.
+Implementing data structure
+We already
+mentioned that, by default, Blob Storage
+offers a rather flat structure for the data stored inside the service. When it comes to a high-level hierarchy of major objects, we can introduce the
+following concepts:
+Account (Azure
+Storage instance)
+Service (
+Blob Storage)
+Container
+Blob
+When looking at the service itself, we can see that there are two major concepts we need to understand: a
+container
+and a
+blob
+. In Blob Storage, blobs cannot exist outside of containers; you
+always
+need to have at least one container to store data. Containers allow you to set basic access levels, which will impact how data will be accessed. You can have containers that allow for anonymous access [Container] (anybody with access to the internet can read them and list all the files they store), public [Blob] (available to anyone with a link but allowed to access only a specific blob only), and private (require proper authorization before you can access any of the files). A good practice is to have all the containers private by default – public ones only make sense as public repositories, for example, for new packages of
+your application.
+Note
+Access methods available for Blob Storage are the same as for Table Storage. You still can use an access key, SAS tokens, or Microsoft Entra ID tokens with Azure RBAC. The only difference is the access level for a container, which needs to work in tandem with the selected
+authorization method.
+When designing a data structure for Blob Storage, you need to consider how you’re planning to use the service. Depending on the purpose of the files stored, you may need a
+different approach:
+It’s generally a good idea to separate Azure storage accounts storing your data if they require different
+access tiers.
+You may use a single account to store data coming from multiple applications, but as you don’t pay for the service itself but rather for the data stored (and operations performed against the data), it’s just easier to use
+multiple accounts.
+You shouldn’t overcomplicate the data structure itself. For a hierarchical directory with several levels of nested folders, Data Lake Storage will be a much
+better fit.
+There are no performance benefits of having hierarchical storage over a flat structure of files. Creating multiple directories allows you to set different access levels for files and organize the structure, but Blob Storage isn’t optimized for either of the
+possible designs.
+A much more
+important topic when it comes to the data
+stored using Blob Storage is the type of blob itself. We’ll describe that in the
+next section.
+Using the correct blob type
+In Blob Storage, you
+can use the following blob types when
+storing
+your files:
+Block
+Append
+Page
+Each of the available types serves a different purpose and directly impacts how the files can be used, modified, and stored. For the majority of scenarios involving Blob Storage, you’ll be interested in block blobs. Such blobs aren’t optimized for any specific scenario. They allow you to store any file and modify it anytime. By default, there are no benefits of specific read patterns applied for those blobs, which makes them really easy to use, read,
+and update.
+On the other hand, append blobs are specifically designed to be optimized for updates, which append data
+at the end
+of a file. By definition, it means that they’re immutable unless you want to add something to a file. This makes them a great choice for scenarios such as storing logs or a history of conversation – in those cases, the data is often streamed as saved when it comes to the service storing it. Even if they’re transformed, the transformation happens either before storing them or just in the time they’re persisted in the underlying storage.
+The concept is visualized in
+Figure 13
+.17
+.
+Figure 13.17 – Appending data to an Append blob
+As append blobs are optimized for appending data, you shouldn’t consider them a viable option if you need to modify a file rather than add something to it. For any scenario that requires modifying
+a file, consider a block blob to be a better
+option rather than an
+append blob.
+Note
+Append blobs can still be modified if needed. The difference here is that append blobs don’t support modifying individual blocks, which are the base structure of all blobs in Blob Storage. This means that modifying an append blob requires rewriting the whole file. What’s more, append blobs don’t support tiering – you can change the access tier from Hot to Cold, Cool, or Archive when you decide to use that type
+of blob.
+The last type of blob, page blob, is a specialized type that is optimized for random reads and writes. While, initially, they look like block blobs, the way you create and interact with them is completely different. When a page blob is created, you need to specify its maximum size. What’s more, as page blobs are organized into pages of a specific size (512 bytes), all the write operations must align with a set of requirements. You can read more about those three types of blobs
+here:
+https://learn.microsoft.com/en-us/rest/api/storageservices/understanding-block-blobs--append-blobs--and-page-blobs
+.
+From the application’s perspective, selecting the incorrect blob type will have much more severe consequences than selecting the incorrect access tier. While an incorrect access tier will affect the pricing (which could be significant but requires reaching a certain scale), an incorrect blob type affects the implementation. Changing the implementation requires going through the whole release process for an application from the beginning, so focusing on choosing the right type from the beginning will save lots of effort later. The simple algorithm for choosing the correct blob type could look
+like this:
+Use a block blob as the default type unless you’re not planning on modifying the
+data stored.
+Does the application store the data by appending new content to the already existing files? If so, an append blob may be useful if you can accept the trade-off (lack of tiering
+and immutability).
+Are you planning to
+store
+virtual hard disks
+(
+VHDs
+) or data that requires random reads or writes? If so, consider using page blobs, which are specifically for
+those scenarios.
+Remember that once a blob is created, you can’t change its type. If you realize the selected blob type isn’t serving its purpose in your scenario, you will need to recreate a blob with a
+new
+blob type.
+As the next topic, let’s discuss the change feed in Blob Storage, which is one of the most useful features when building an application that integrates with that
+Azure service.
+Using the change feed in Blob Storage
+A change feed is a
+specific feature of a service that allows you
+to subscribe to a stream of events telling you what has changed within a specific time window. In other words, it’s a stream of events that provide information about changes happening to files or data in general. You can use such a stream to react to changes by listening to those events in your application and implementing logic that can handle them. A high-level concept is presented in
+Figure 13
+.18
+.
+Figure 13.18 – A high-level concept of a change feed integrated with an application via an event listener
+You may wonder what’s the benefit of using a change feed over fetching both the metadata and files
+via standard APIs for Blob Storage. To
+understand that better, let’s quickly discuss the possible options for interacting with
+external services:
+Standard API calls
+using the HTTP protocol without any
+specific pattern.
+Short pooling
+is an easy and quick-to-implement solution for simple APIs, which doesn’t handle extensive web traffic. The concept here relies on repetitive calls made against a service to see whether there’s
+data available.
+Long pooling
+allows you to keep the connection open until the data is available. This pattern introduces fewer calls to be made but, at the same time, tends to exhaust server resources quickly. It’s a good solution if establishing a connection with a web server is a
+costly operation.
+WebSockets
+are a different protocol when compared with HTTP and allow for bi-directional communication (and even broadcasting messages to connected clients). They are used in communication-heavy applications such as chats or services requiring
+near-real-time updates.
+Not all those patterns are available for Blob Storage (for instance, WebSockets aren’t supported), but in general, you could interact with this Azure service using either generic HTTP requests, short pooling, or long pooling. The issue here is that applications handling lots of traffic (thus frequently interacting with Blob Storage) may require heavy optimizations to be able to handle the load within acceptable response times. As HTTP itself is quite a heavy protocol without state management, finding an alternative solution will be beneficial to keep the
+expected performance.
+This is where a change feed comes in handy. While it’s not a bi-directional communication as with WebSockets, it limits the unnecessary calls to Blob Storage and allows your application to save its resources for more important tasks rather than asking Blob Storage whether there is new or updated data available. By looking at
+Figure 13
+.18
+, you can see that there’s a concept
+called an
+event listener
+. This part of your application (which could be an isolated service as well) acts as a bridge between the business logic implemented in your application and infrastructure (in our case, Blob Storage). Its responsibility is to listen to changes published by Blob Storage and process the incoming messages. You could think about change feed as a specific implementation of a publisher/subscriber pattern – Blob Storage is a publisher of changes happening within the data
+plane of the service and your application (which could
+consist of several different services) is the subscriber of
+the feed.
+What’s important is that change feed messages have a strict schema, meaning they are strongly typed and follow Apache Avro serialization specifications (see
+https://avro.apache.org/
+for more information). They are also saved as append blobs so, in fact, you have two possibilities to
+process them:
+Read them directly from the change feed in
+near-real time
+Load the serialized data from the append blobs
+While the first approach is better suited for building applications that need to react to blob changes as quickly as possible, the second one may be beneficial if you’re building data pipelines, which process data on their own and combine the results on their own. Both approaches are viable in business applications and it’s up to specific requirements to choose the correct one. See
+Figure 13
+.19
+for a visualization of the
+second approach.
+Figure 13.19 – Processing persisted change feed data
+For more information about change feed and code examples, look at the following documentation
+page:
+https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blob-change-feed
+.
+As the last
+subtopic in this section, let’s talk about the available
+emulators for Blob Storage, which are helpful in
+local development.
+Using emulators for local development
+Using cloud services is
+challenging
+when it comes to emulating the local environment on a daily basis. Most of the Azure services don’t come with a viable emulation capability, forcing developers to either implement mocks or work with dedicated cloud environments. While having an isolated environment isn’t bad (in fact, it’s a great way to develop an application), many companies don’t have the resources or money to implement and manage them. Fortunately, Azure Storage is one of the services that offer easy-to-install emulators, which are cross-platform and free
+to use.
+Some time ago, the available solution for emulation for Azure Storage was Azure Storage Emulator. Unfortunately, it worked only with Microsoft Windows, greatly limiting development platforms available for Azure developers. As this emulator is currently deprecated, we’re not going to discuss it further. However, if you’d like to learn about it (or you have a use case for it), feel free to read about it and install it with the help of the following
+documentation:
+https://learn.microsoft.com/en-us/azure/storage/common/storage-use-emulator
+.
+The currently recommended emulator is
+called
+Azurite
+. It’s an open source, free, and cross-platform service that you can install on the majority of machines. If you’re using Visual Studio 2022 or higher, Azurite is already available to you. You can check its version by running the
+following command:
+azurite -v
+However, if the command isn’t available, it may mean that Azurite is not yet installed. There are
+possibilities to install it
+with
+various tools:
+Using npm:
+npm install -g azurite
+Using Docker:
+docker pull mcr.microsoft.com/azure-storage/azurite
+You could also build the emulator directly from the source code available here:
+https://github.com/Azure/Azurite
+. It’s up to you to decide how you’d like to install and run it. While the emulator works out of the box after installation, you may find it useful to know how to change the ports it exposes for various services. The emulator emulates three
+separate services:
+Blob service
+Queue service
+Table service
+Each of those services runs behind an individual port –
+10000
+,
+10001
+, and
+10002
+. If for any reason one of those ports is blocked (for instance, you’re hosting an application locally), the service won’t be able to start. To change the port, use this
+simple command:
+azurite --blobPort / --queuePort / --tablePort 11111
+After running the command, Azurite will restart the service and put it under a newly
+selected port.
+Tip
+Remember to make sure your application runs with an updated connection string after changing
+the port.
+You can find more information about Azurite and connect to it in the Azure documentation:
+https://learn.microsoft.com/en-us/azure/storage/common/storage-use-azurite
+. I strongly recommend taking a look there to see what other options are available for Azurite and what’s the best way to integrate it with
+your application.
+Let’s now switch our focus to the last topic in this chapter, which is design patterns for Azure Storage. While
+we have already
+discussed some of them, we’ll summarize all the lessons and talk about the ones related to Blob Storage itself.
+Understanding design patterns when using Azure Storage
+As Azure Storage consists of multiple services (Table, Queue, Blob, and Files), design patterns applicable for one service may not be directly transferrable to another one. In this section, we’ll discuss how to properly place them within the architecture of your application to make sure they’re the best choice for it. To be even more specific, we’ll focus on both Table and Blob services as they are the ones we discussed in
+this chapter.
+Finding use cases for Table Storage
+As mentioned
+previously in this chapter, Table Storage is a simple key-value storage, which is a great choice if you’re challenged with storing semi-structured and structured data. It’s basically a non-relational database, which limits its indexing capabilities to two in-built columns. To select Table Storage as a viable solution, first, you need to answer the following question:
+Is your data relational or not?
+If the data isn’t relational, we could go to the next point directly. However, if data is relational, we may still discuss whether Table Storage should be discarded
+right away.
+Using Table Storage for relational data
+The fact that data
+processed by an application is relational may not be enough to discard Table Storage as your database. To find a proper solution here, we need to understand what advantages databases such as SQL Server or PostgreSQL have over Table Storage. The even more important thing here is understanding what advantages relational data possesses over non-relational data. The main advantage of having relations between records (or tables) in your database is the consistency of data. As relational databases allow you to create relations and enforce consistency by checking the defined constraints upon executing operations that mutate data, you can be sure that once the database schema is defined, no application or user will break the data contract. In non-relational databases, it’s much more difficult to ensure consistency (though it’s still possible
+to achieve).
+If you want to use Table Storage for relational data, you will need to implement relations on your own. You will also need to provide your own mechanism to ensure that all constraints are respected and checked. While this is achievable within the application, you won’t be able to ensure consistency on a database level. In other words, if you let somebody modify data outside of your application, you may find some records corrupted and no
+longer usable.
+The reason you’d like to use Table Storage in such a scenario could be performance – no native relations mean fewer checks and a simpler database engine. Of course, this still could be a trade-off (as those checks would need to be implemented by your application), but as you control the whole process, you may decide when you want operations to be strict and when you want to make them more flexible.
+Let’s discuss another use case for Table Storage, which is
+storing logs.
+Using Table Storage to store logs
+Table Storage looks
+like a great choice for storing logs and integrating with various dashboards. As you control the partitioning of data, you could create partitions representing the expected time windows and query them to visualize data. This is a perfect example of how a proper database design may improve the overall performance of an application. With proper partitioning, you can leverage the indexes provided by Table Storage and implement a storage solution, which is not only very performant but also cheap (cheaper than typical relational databases).
+Of course, you could store logs as append blobs and use Blob Storage for that. The downside of such an approach is forcing your application not only to download a file but also to parse and deserialize it. For integrations with visualization tools such as Grafana, I’d strongly
+recommend choosing Table Storage over
+Blob Storage.
+Let’s now talk about duplicating data in Table Storage the
+correct way.
+Storing duplicated data in Table Storage
+In relational
+databases, storing duplicated data is rarely a good idea (you have relations so most of the time you want to link records rather than duplicate them). In Table Storage, data duplication is actually one of the viable patterns for storing data and allowing your application to query it. Let’s consider the previous example with logs; you may want to introduce three separate time windows for
+an application:
+Each hour
+30 minutes
+5 minutes
+Now, to properly implement such a solution, there are
+two possibilities:
+Use a single partition for each hour and use it to query data. Then, if the client application wants to show only a subset of data, it will filter out some records on its own. The advantage of this solution is no data duplication. The downside is that you always return the full hour of data, even if the user wants to check for only
+5 minutes.
+Duplicate the data and store each record in each partition separately. The downside here is data duplication. The advantage is that you can select the data with the expected granularity, lowering the cost of the infrastructure and most likely
+increasing performance.
+The same reasoning can be applied to various other scenarios that require querying the same set of data using different parameters (consider revisiting inter and intra-partition design patterns for Table Storage for a detailed explanation of the concept). The important thing here is that you shouldn’t worry about duplicating data with Table Storage – it’s well suited for handling such an approach and it’s actually an advised solution to improve
+the performance of
+your queries.
+Let’s now discuss the additional use cases and ideas for Blob Storage, as an alternative to
+Table Storage.
+Finding use cases for Blob Storage
+Blob Storage, which is
+well suited for storing unstructured data, offers some interesting capabilities that can be used in various applications. Most use cases for Blob Storage gravitate toward using it as simple file storage (remember, though, that Blob Storage isn’t a file share; to implement file shares, you’d need to use File Service). As Blob Storage supports virtual directories, you can easily structure it in a way that limits access to various folders depending on the assigned role of a principal (user or application). As Blob Storage is simple to provision and set up, it’s often tempting to just allow access to it by anyone with a link to a file. Let’s see whether there’s an alternative to
+that approach.
+Generating URLs to files stored in Blob Storage
+Let’s consider the
+following scenario – you have an application that allows a user to upload a file. A user uploads it, and your backend service takes that file and places it in Blob Storage. Then, a user would like to share a file. The easiest option would be to get the download URL from the Blob service and just allow the user to use it. While such a solution may work in simple applications, in serious business applications, such an approach may cause some
+serious problems:
+You have no control over who accesses
+a file.
+You can’t implement rate limiting for people accessing
+the files.
+You have no way of revoking access to
+a file.
+You can gather statistics about people and services accessing
+the file.
+Note
+In theory, you could implement all the preceding points by forcing a user to send a request through some kind of gateway (proxy). While it may be achievable in corporate scenarios, for public applications used by external users, it will be very difficult
+to achieve.
+To overcome those challenges, a much better option would be to generate a URL to a file on your own
+and send it to a user. See
+Figure 13
+.20
+for
+an explanation.
+Figure 13.20 – Generating URL for a user to a file with an additional call to an API
+Of course, those download URLs generated by an API could be generated beforehand (e.g., when a file is saved to Blob Storage). It’s actually up to you to decide how you’d like to have it implemented. Once the URL is generated, a user will send a request that will go through
+your infrastructure (it could be routed through the API itself or an additional component if needed).
+Choosing between change feed and Azure Event Grid events
+When it comes
+to listening to changes happening in Blob Storage regarding stored data, there are two
+options available:
+Using the change feed described in
+this chapter
+Integrating with Azure Event
+Grid events
+Both solutions allow you to avoid unnecessary pooling of Blob Storage itself and can improve the performance of your application. There’s a slight difference though in the architecture they offer – while the change feed expects you to listen to it to get the changes, Azure Event Grid can be used to push events to the endpoints that are exposed by your application. While conceptually they may look alike, the implementation for those two solutions is
+quite different:
+Change feed doesn’t require an additional Azure service
+to work.
+With change feed, all the changes are stored inside append blobs, which can be used by other data
+processing pipelines.
+Change feed has a bigger delay in data delivery when compared with Azure Event Grid, hence if your application expects to process messages as quickly as possible, the latter is a
+better choice.
+Azure Event Grid offers a simpler implementation when compared with change feed as it can work with typical HTTP endpoints. Change feed requires a separate service to be hosted with a listener reacting to the
+incoming messages.
+Azure Event Grid doesn’t guarantee the order of the incoming events, meaning they may be out of order when they reach an endpoint. Change feed saves and delivers changes in order.
+Azure Event Grid incurs additional costs related to the service and event
+delivery process.
+If you’re
+interested in learning more, take a look at the following documentation explaining the topic in
+detail:
+https://learn.microsoft.com/en-us/azure/storage/blobs/storage-blob-event-overview
+.
+Let’s look at a few use
+cases now.
+Learning about use cases
+Azure Storage is a flexible service that is able to cover various use cases. Depending on the selected functionality, you could implement numerous different capabilities – all using a single Azure product. When deciding whether Azure Storage is the best match for your scenario, you will need to compare what this service offers with the available alternatives. Let’s see how you could learn more about individual products offered by Azure Storage and what the additional resources are for improving your understanding of
+that service.
+Using Table Storage as a database
+Table Storage, as
+a non-relational database, has limited usability when used to handle relational data. However, with a proper design, it’s possible to cover even such scenarios. The best place for learning more about th
+at approach is by checking the Azure Storage documentation for the Table Storage ser
+vice available here:
+https://learn.microsoft.com/en-us/azure/storage/tables/table-storage-design-modeling
+. That article explains in detail how one could model relationships and even implement inheritance. Also, make sure you understand how to properly query and
+modify data:
+https://learn.microsoft.com/en-us/azure/storage/tables/table-storage-design-for-query
+https://learn.microsoft.com/en-us/azure/storage/tables/table-storage-design-for-modification
+Those additional resources should help you become proficient with Table Storage and use it
+with confidence.
+Using Blob Storage as storage
+Blob Storage is
+useful if you work with unstructured data. You could use it as either the final storage for your application (for instance, to store files uploaded by your customers or reports generated by your application) or an intermediary (staging) storage for data processing pipelines. It’s a good idea to check the architecture best practices for that service, available here:
+https://learn.microsoft.com/en-us/azure/well-architected/service-guides/azure-blob-storage
+. Reading that article will improve your understanding of how various use cases apply when
+Blob Storage
+is used.
+Using Queue Storage as a simple queue
+Queue Storage offers
+quite a robust solution for implementing a queue for your service. Even though it has its limitations (as described in the chapter), it’s still a viable choice for less critical workloads or communication between services where ordering isn’t required. If in doubt, make sure you have gone through the following article:
+https://learn.microsoft.com/en-us/azure/service-bus-messaging/service-bus-azure-and-service-bus-queues-compared-contrasted
+. It will help you understand the differences between queues in Azure and make a better decision when choosing a queue solution for
+your application.
+Summary
+In this chapter, we discussed Azure Storage, which is a generic storage solution offered by Microsoft Azure. We focused on two components that are offered by this service: Table Storage and Blob Storage. They are very popular in application development and are widely used in many
+different scenarios.
+We discussed how Table Storage differs from typical relational databases and how important proper data design is to get the most from the service itself. You learned how data is automatically indexed with
+Primary Key
+and
+Row Key
+columns and what patterns are useful in keeping the performance as high
+as possible.
+When talking about Blob Storage, we considered its virtual directories as a logical way to separate and secure stored data. We mentioned various available blob types, which are selected depending on the use case. What’s more, we considered the change feed as a great addition to implementing logic, which needs to react to changes happening to
+a blob.
+In the next chapter, we will discuss queues available in Microsoft Azure, including Queue Storage, Azure Event Hub, and Azure
+Service Bus.
+
+14
+Using Queues in Microsoft Azure
+When designing a system, you often need to decouple one service from another. Such an approach is useful if you want to secure endpoints from extensive loads, make sure incoming requests are not lost in case of an error, or control how they are processed. To implement such an architecture, you may use queues, which are a popular and well-known solution for
+asynchronous communication.
+This chapter is dedicated to describing three separate Azure services that offer queue capabilities –
+Queue Storage
+,
+Azure Event Hubs
+, and
+Azure Service Bus
+. In this chapter, you will learn about various use cases, unique features, and limitations of each of those services. The knowledge provided will help you in implementing your own queue and processing messages in a reliable and
+performant way.
+In this chapter, we’re going to cover the following
+main topics:
+Using Queue Storage in
+Microsoft Azure
+Choosing Azure Event Hubs for queues with
+high load
+Implementing enterprise-grade queues with Azure
+Service Bus
+Learning about
+use cases
+Technical requirements
+To perform the exercises in this chapter, you will need
+the following:
+The
+Azure CLI
+An IDE (preferably Visual
+Studio Code)
+Using Queue Storage in Microsoft Azure
+In the previous chapter (
+Chapter 13
+), we started
+discussing
+Azure Storage and two of its services – Table Storage and Blob Storage. In this chapter, we will discuss the third service – Queue Storage. As mentioned in
+Chapter 13
+, if you want to use any of the available Azure Storage services, you just deploy a storage account (an instance of Azure Storage) and start integrating it from your application. With Queue Storage, nothing changes – you’d still need an instance of Azure Storage to start working with queues. For a reference on how to create your storage account, take a look at the
+information provided in
+Chapter 13
+.
+Before we start discussing
+the technicalities of Queue Storage, let’s describe its capabilities
+and limitations:
+It is part of
+Azure Storage.
+Its pricing is based on the amount of data sent and processed using Queue
+Storage queues.
+It supports the same authentication mechanism as the rest of Azure Storage services (access keys, SAS tokens, and
+managed identity).
+It supports messages with a size up to
+64 KiB.
+A single queue cannot exceed
+500 TiB.
+A single queue has a maximum throughput of 2,000 messages per second (assuming the size of a message does not exceed
+1 KiB).
+A single storage account performance cap is 20,000 messages
+per second.
+It doesn’t support more advanced messaging patterns, such as topics, various receive modes, transactions, or deduplication. If you’re not familiar with those patterns, you’ll find descriptions later in the book when we discuss Azure
+Service Bus.
+Replication of data stored inside queues follows the same patterns as the Azure Storage service itself, meaning messages could be replicated globally if such replication
+is selected.
+Messages can be configured so they never expire, though the default expiration time is
+seven days.
+It doesn’t have
+First-In, First-Out
+(
+FIFO
+) guarantees, though most of the time messages are processed
+in
+order.
+As you can see, Queue Storage follows the general concept of Azure Storage, being a rather simple but specialized
+service. It has its limitations, which may have quite an impact in some applications (for instance, the maximum size of a
+message), but often those limitations can be mitigated with a proper design. Let’s now discuss the structure of Queue Storage to learn about the most
+important concepts.
+Learning about the structure of Queue Storage
+The
+structure of
+Queue Storage consists of two
+major concepts:
+A
+queue
+A
+message
+, which is placed
+inside
+a queue
+The concepts are visualized in
+Figure 14
+.1
+for a
+better understanding.
+Figure 14.1 – General structure of Queue Storage
+When creating queues, the important thing to remember is naming limitations – each queue name must be in lowercase and can consist of alphanumerical characters only. A name must be between 3 and 63 characters long. A queue can be created using the Azure portal, the Azure CLI, Azure PowerShell, or management SDKs. You could also use an infrastructure-as-code approach
+using Terraform.
+Note
+As queues are part of the data plane of Azure Storage, you can’t use ARM templates or Azure Bicep to create them. Terraform, however (when using the AzureRM provider), uses a different API to interact with this service. Hence, it can create blobs and queues while interacting with the infrastructure of
+Azure Storage.
+Let’s now discuss what
+useful commands and packages are to work with Queue Storage using either the command line or the
+application’s code.
+Interacting with Queue Storage using the CLI and SDK
+While it’s possible to
+work with Queue Storage using the Azure portal, for automation and actual integration, you will need to use either a CLI or SDK. When it comes to an SDK, you will need to choose one that is
+supported by your
+programming
+language:
+.
+NET
+:
+https://learn.microsoft.com/en-us/dotnet/api/overview/azure/storage?view=azure-dotnet
+Java
+:
+https://learn.microsoft.com/en-us/java/api/overview/azure/storage?view=azure-java-stable
+Python
+:
+https://learn.microsoft.com/en-us/python/api/overview/azure/storage?view=azure-python
+JavaScript
+:
+https://learn.microsoft.com/en-us/javascript/api/overview/azure/storage?view=azure-node-latest
+The packages listed in the
+aforementioned list give you access to the data
+plane of Queue Storage. If you’d like to manage the service itself, there are separate libraries offered
+by Microsoft:
+.
+NET
+:
+https://learn.microsoft.com/en-us/dotnet/api/overview/azure/resourcemanager.storage-readme?view=azure-dotnet
+Java
+:
+https://learn.microsoft.com/en-us/java/api/overview/azure/storage/management?view=azure-java-archive
+Python
+:
+https://learn.microsoft.com/en-us/python/api/overview/azure/storage?view=azure-python#management
+JavaScript
+:
+https://learn.microsoft.com/en-us/javascript/api/overview/azure/storage?view=azure-node-latest#management
+If you want to use a different language to interact with Queue Storage, it will still be possible using the REST API
+offered by
+the
+service:
+Data
+plane
+:
+https://learn.microsoft.com/en-us/rest/api/storageservices/queue-service-rest-api
+Control
+plane
+:
+https://learn.microsoft.com/en-us/rest/api/storagerp/
+As you can see, there are
+multiple possibilities depending on your use case and technology stack. When using those libraries, remember that they will require different access levels depending on the operation you’re performing. If you authenticate using your Azure credentials (whether it’s your personal account or managed identity), you will need to configure a different set of permissions depending on the context of the operations (control versus data plane).
+You can read more about available in-built roles and assigning them in the documentation:
+https://learn.microsoft.com/en-us/azure/storage/queues/assign-azure-role-data-access
+. Examples that present interacting with Queue Storage are available in the repository, in the folder dedicated to
+Chapter 14
+.
+Let’s now talk about the messages themselves when transferring them over
+Queue Storage.
+Sending messages with Queue Storage
+As mentioned at the
+beginning of this chapter, each queue in Queue Storage supports messages up to 64 KiB in size. The question of whether it is enough depends on the business case you’d like to cover. For small payloads consisting of only a few fields, 64 KiB will be more than enough. For complex messages or binary formats, 64 KiB will definitely be too small. Another limitation is the content of the message itself. Queue Storage requires that all messages be included in XML requests with UTF-8 encoding. If that’s not possible, the encoding of a message must be set to Base64 to make it compliant with
+this requirement.
+Unfortunately, whether we use Base64 or not, it doesn’t solve the issue of the message size being limited to 64 KiB. If we don’t want to change Queue Storage to another service (which is a reasonable reason considering the simplicity and affordable pricing of Azure Storage), we need to find a way to make a message smaller in size. To do that, you could use one of the data compression algorithms (discussing them in more detail is, unfortunately, beyond the scope of this book). Some
+notable examples include
+the following:
+Run-Length
+Encoding
+(
+RLE
+)
+Burrows-Wheeler
+Transform
+(
+BWT
+)
+Combination of RLE
+and BWT
+Note
+Any text-to-text compression would work to overcome the limitation of Queue Storage. The algorithms listed here are not the only
+viable possibilities.
+Another idea to overcome the limitation is combining Queue Storage with another Azure Storage service, such as Table Storage or Blob Storage. See
+Figure 14
+.2
+for
+a visualization.
+Figure 14.2 – Overcoming the message size limitation in Queue Storage using Blob Storage
+The process presented in
+Figure 14
+.2
+could be explained
+as follows:
+A producer saves
+the actual data in Blob Storage and obtains a handle (identifier) for
+a file.
+Then, the producer sends a message with a file handle using
+Queue Storage.
+A consumer consumes the message and obtains the
+file handle.
+Using the file handle, the consumer can get the data, which would normally exceed
+64 KiB.
+While the explained approach may look complicated, it has its use cases in many scenarios, especially where an alternative solution requires implementing new architecture or deploying much more expensive queue services. It could be applied to both Blob Storage and Table Storage depending on your needs. It also allows for batching messages, as explained in the
+next section.
+Sending batches with Queue Storage
+By design, Queue Storage
+doesn’t support sending and receiving batches of messages. Sure, you can tell Queue Storage how many messages you’d like to receive at once, but this approach is limited to a maximum of 32 messages received within a single operation. If you aim at much higher throughput, you need to find a way to overcome
+another limitation.
+The idea presented in the previous section will come in handy when trying to send and receive more than 32 messages at once. If you save your data inside Table Storage or Blob Storage (or any other
+service that allows you to do so – it could even be a SQL database), you could send only handles/identifiers as a single message and then parse them on the consumer’s side.
+The concept is presented in
+Figure 14
+.3
+.
+Figure 14.3 – Processing a batch of messages with a single message
+The concept here is
+quite simple:
+A producer saves data first using the selected storage solution and collects handles/identifiers, which can be used by a consumer when a queue message
+is consumed.
+The handles/identifiers are placed inside a message – the number of those items depends on the requirements and the expected throughput for both the producer
+and consumer.
+The consumer consumes a message and parses it so it can get the actual data from the storage solution selected for
+the process.
+Using the approach described, you could start processing batches of hundreds of messages. While technically you’d process a single Queue Storage message at a time, in reality, the message would
+link to a huge volume of data to be processed further by
+a consumer.
+Let’s discuss now how to ensure that data is processed in the correct order when using
+Queue Storage.
+Ensuring the proper order of messages
+We mentioned at the beginning of this chapter that Queue Storage doesn’t have guarantees for the order of
+messages sent through the queue implemented with that service. While not all applications require ordering guarantees (if that is the case, you can just start using the service), some need to ensure that messages are processed in the order they were sent (FIFO). Under normal circumstances, messages delivered by Queue Storage should be delivered in the order they appeared in a queue. However, there are some rare cases (such as a consumer’s process crashing, which causes a message to reappear on a queue), where a message can be placed on a queue out of order. If you need to secure your application from such a situation, there are three ideas that may
+be helpful:
+Check the
+DequeueCount
+property of a message. If it’s greater than
+1
+, you may assume a message is out of order because previous
+processing failed.
+Store the state of consumed messages and compare it upon receiving a new message – this solution may be quite complex as it requires not only storing the state but also providing a performant way to query it. In-memory cache such as Redis may be helpful but it could also be quite expensive if the state needs to be persisted
+and replicated.
+Each message comes with a concept called a
+pop receipt
+. Pop receipts allow a consumer to delete a message once it is
+processed. If a pop receipt no longer works, it means the message was processed by another consumer. Note that this method only works if two consumers process the same message concurrently – it won’t work in a scenario where message
+processing fails.
+If none of the solutions satisfies you, you may need to consider using Azure Service Bus instead of
+Queue Storage.
+Understanding how messages are processed with Queue Storage
+Message processing with
+Queue Storage is quite easy when compared with other queue solutions, such as Azure Service Bus. In general, it looks
+like this:
+A producer sends
+a message.
+The message is placed on the queue and
+replicated locally/globally.
+A message is received by a consumer – it becomes hidden until a consumer confirms it was
+processed correctly.
+If the consumer fails to process a message, it’s enqueued once again and available
+for reprocessing.
+As Queue Storage is a typical queue, it doesn’t allow multiple consumers to read the same message at the same time. Different consumers could consume the same message only if they fail to process it once it’s consumed. It’s also worth mentioning that it’s up to the consumer to delete a message from a queue once it’s done processing it. This is done using a pop receipt, which is generated individually each time a message is dequeued. What’s interesting is that the pop receipt must be used within a timeframe called the
+visibility timeout
+, which can be
+individually set for each message. If a consumer fails to delete a message before it becomes visible again, it may not be able to delete it using the original pop receipt. This happens if the message processing takes too long, so it becomes visible and gets consumed by another consumer. In that case, another consumer may be able to delete it using its own
+pop receipt.
+As we have learned lots of concepts related to Queue Storage, let’s now switch our focus to another queue solution, which is Azure
+Event Hubs.
+Choosing Azure Event Hubs for queues with high load
+In the previous section, we
+discussed the usage of Queue Storage in various queue-based scenarios. We talked about the limitations of that service, especially when it comes to the architecture of the possible solutions and the size of a message. If you find Queue Storage too limited for your scenario, you may consider an Azure service named Azure Event Hubs. Conceptually, Azure Event Hubs is another queue that can be integrated with your application. It’s designed, however, to handle a much higher load, making it a great choice for applications that require
+streaming data rather than
+queueing it.
+To get started, let’s talk about the available features and limitations of Azure
+Event Hubs:
+It supports HTTP(S) and AMQP and is compatible with the
+Kafka protocol.
+It offers Schema Registry, which is useful for making sure messages sent through Azure Event Hubs queues are compatible with the schema used by
+your applications.
+It integrates with Azure Stream Analytics for real-time data processing
+and analytics.
+It has an in-built scaling
+mechanism (
+Auto inflate
+), which helps in properly scaling out the service when more messages come into
+the system.
+It offers a feature called
+Capture
+, which helps in
+data retention and further data processing (you can implement both hot and cold paths using only native features of
+the service).
+It allows you to host multiple consumers; hence, the same message can be processed
+in parallel.
+Azure Event Hubs comes with an emulator, which can be used in local development, so you don’t have to deploy an instance of the service
+in Azure.
+It can be deployed using different tiers offering different capabilities and quotas with a message size varying from 256 KB to 1 MB and data retention from 1 day to
+90 days.
+As you can see, Azure Event Hubs offers a much broader set of features and capabilities. The fact that there are multiple tiers available makes this service a little bit more complicated to properly implement when compared with Queue Storage. Let’s dive deeper into those tiers to
+understand when they should be selected and what the best use of
+them is.
+Understanding the tiers of Azure Event Hubs
+Azure Event Hubs can
+be deployed using one of the
+following tiers:
+Basic
+Standard
+Premium
+Dedicated
+The main differences between these tiers are
+as follows:
+For the Basic tier, the
+maximum size of a message is 256 KB. For the rest, you can send messages up to
+1 MB.
+The Basic tier allows for
+only a single consumer group. As consumer groups are used to process data in parallel, it means that by using
+that tier, you cannot implement multiple subscribers. We’ll talk more about consumer groups later in
+the chapter.
+Data retention for the Basic tier is set to 1 day, for the Standard tier it’s 7 days, and for the rest of the tiers, it’s
+90 days.
+Capture isn’t available when using the
+Basic tier.
+Throughput is calculated differently depending on the tier – for the Basic and Standard tiers, it’s
+provided via
+Throughput Units
+(
+TUs
+); for the Premium tier, Event
+Hubs will use
+Processing Units
+(
+PUs
+), while for the Dedicated tier, it uses
+Capacity
+Units
+(
+CUs
+).
+Some additional features, such
+as IP firewall, geo-disaster, and virtual network integration, are available only for tiers
+above Basic.
+When using Azure Event Hubs as a service to be integrated with your application, you will need to take into account all those differences. As the Basic tier is the most limited one, it’s rarely usable in real-world scenarios (mostly because you can’t make it secure enough). The most typical tier
+for production-ready applications is the Standard one. The more expensive tiers (Premium and Dedicated) are reserved for applications with higher
+performance demands.
+Note
+Higher tiers of Azure Event Hubs are also much more expensive. The Basic tier costs ~$11 per month, while the Premium one costs $912. The Dedicated tier is even more expensive – it costs $5,068 per month. All those prices were calculated for a single unit (TU/PU/CU) and for the Central US region. When working with Azure Event Hubs, choose the tier carefully to avoid spending too much on infrastructure capabilities you
+don’t need.
+Let’s now talk about the basic architecture of Azure Event Hubs to understand how it can be integrated with
+an application.
+Understanding the architecture of Azure Event Hubs
+When it comes to using Azure Event
+Hubs, the main components used by it are
+the following:
+Namespace
+Hub
+Partition
+Message
+Consumer group
+Those concepts are visualized in
+Figure 14
+.4
+.
+Figure 14.4 – High-level overview of the data processing process in Azure Event Hubs
+The process described in
+Figure 14
+.4
+can be
+described
+as follows:
+A consumer produces messages that are sent to a specific hub inside the Azure Event
+Hubs namespace.
+A hub consists of multiple partitions (the upper limit of partitions depends on the tier of the Azure Event Hubs instance), which allows for an even distribution
+of messages.
+A hub can have single or multiple consumers. Consumers may use the same or different consumer groups – the latter allows them to consume the same message
+multiple times.
+Let’s for a moment focus on the concept of
+partitions
+. As explained previously, each hub inside a namespace can have a specific
+number of partitions (32 for the Basic and Standard tiers, 100 for the Premium one, and 1,024 for the Dedicated one). Partitions are defined when a hub is created and cannot be changed later. The purpose of partitions is not only to have an even distribution of messages but also to enable connecting multiple consumers from the same consumer group. Let’s look at
+Figure 14
+.5
+to understand
+the concept.
+Figure 14.5 – Azure Event Hubs with four partitions and four consumers
+As presented in
+Figure 14
+.5
+, you can see that we have a single hub with four partitions. Each partition is consumed by a separate
+consumer. Now, let’s see what happens when a message is produced and placed in Azure
+Event Hubs:
+A producer creates a message and sends it to Azure
+Event Hubs.
+Azure Event Hubs decides on its own in which partition a message should
+be placed.
+The message is enqueued on a queue represented by
+a partition.
+A consumer connected to a partition consumes
+the message.
+You may wonder what would happen if we removed one of the consumers (for instance, it crashed and hasn’t reconnected again). The situation is visualized in
+Figure 14
+.6
+.
+Figure 14.6 – A single consumer processing more than a single partition in Azure Event Hubs
+If partitions don’t have a
+corresponding number of consumers, the consumers start to consume partitions that are not yet connected to a consumer. Here we need to describe one more
+concept, which is called
+partition leasing
+. When a consumer begins to start consuming messages from Azure Event Hubs, it tries to create a lease for one of the available partitions. Once a partition has a lease created, it won’t be assigned to another consumer unless a consumer crashes or you create new consumers, who attempt to take over
+the lease.
+Note
+You should avoid creating more consumers than partitions for a hub. While most of the time the SDK for Azure Event Hubs can handle those situations pretty well, many times, consumers start to compete with each other and your application will lose time on consumers switching
+between partitions.
+The number of consumers can be adjusted dynamically – you can start with a lower number and increase it when needed. Each consumer consumes resources; hence, in lower environments (such as development or testing), which are meant to validate a solution, you should keep a smaller number of consumers to preserve resources unless you can afford to keep as many consumers
+as partitions.
+Tip
+Remember that lower environments may be deployed with Azure Event Hubs having fewer partitions than your production environment. While partitions are free no matter which tier is used, you may find it easier to manage if the number of partitions is kept to
+a minimum.
+Note that from the producer’s side, you may place a message on a particular partition. This approach is rarely used as it
+may cause the partitions to be overloaded; hence it may affect the consumer as well. However, as the order of messages is guaranteed only if they’re placed on the same partition, you may find it useful to control the placement of
+the messages.
+As the next step to better understand Azure Event Hubs, let’s talk about
+consumer groups.
+Using consumer groups in Azure Event Hubs
+We mentioned at the beginning of the section
+describing Azure Event Hub that it’s possible to process the same message multiple times using that service. To do that, we need to leverage the feature called
+consumer groups
+. Consumer groups
+may be described as
+hubs inside hubs
+– they allow consumers to be separated from each other so they don’t affect the delivery of a message. See
+Figure 14
+.7
+for a graphical representation of
+the process.
+Figure 14.7 – Consumers using different consumer groups
+The process of message delivery when multiple consumer groups are used looks
+like this:
+A producer sends a message to Azure
+Event Hubs.
+The message is multiplicated internally by Azure Event Hubs and delivered to all the
+consumer groups.
+Consumers using different consumer groups get the same message delivered and can consume it without affecting
+other consumers.
+Note
+Using multiple consumer groups doesn’t affect the placement of messages in regard
+to partitions.
+The important drawback of
+using consumer groups is how they affect the throughput of your instance of Azure Event Hubs. Let’s say you’re using the Standard tier with 1 TU. It means that you can send up to 1,000 messages or 1 MB of data per second (whichever comes first). This calculation, however, is true only for a scenario with a single consumer group. If you’re using two consumer groups, each consumer group will get up to half of the available throughput. The more consumer groups you have, the worse the throughput will be per consumer group. To achieve the same performance, you need to get
+X
+more TUs where
+X
+is the number of consumer groups configured for Azure
+Event Hubs.
+Note
+The way TUs are affected by the number of consumer groups is true only for the Basic and Standard tiers. As the Premium and Dedicated tiers use different units (PUs and CUs), which have no throughput quota, you can work with consumer groups without worrying about the
+overall performance.
+A consumer group is selected by a consumer upon connecting to an instance of Azure Event Hubs. Look at the examples in the repository for
+Chapter 14
+to see the code
+in action.
+As the next topic, let’s talk
+about the feature called
+Event
+Hubs Capture
+.
+Using the Event Hubs Capture feature in an application
+If you want to persist messages sent through any queue, most of the time you need to consume it and save it using a storage
+solution of your choice. While this approach may look simple, it will affect the performance of your application (as you need to perform additional operations). Even if you find a way to delegate that additional operation to an additional process or service, you still need to make your solution more complex just to save the data. Fortunately, Azure Event Hubs comes with a specialized feature called Capture to do that work for you. Take a look at
+Figure 14
+.8
+for a visual explanation of
+the concept.
+Figure 14.8 – A message delivered to a consumer with Capture enabled
+What you can see in
+Figure 14
+.8
+is the
+following process:
+A producer sends a message to Azure
+Event Hubs.
+The message is delivered to
+a consumer.
+At the same moment, Azure Event Hubs saves the message to the
+integrated store.
+When it comes to the storage type used by Azure Event Hubs, there’s not much of a choice. Once Capture is enabled, the service will integrate with Azure Storage and save messages inside blobs. Depending on whether hierarchical namespaces are enabled or not, data will be saved to either Blob Storage or Data
+Lake Storage.
+Note
+The steps needed to use Event Hubs Capture are the same for both Blob Storage and Data
+Lake Storage.
+When data is captured, it’s saved with the
+following convention:
+{Namespace}/{EventHub}/{PartitionId}/{Year}/{Month}/{Day}/{Hour}/{Minute}/{Second}
+As you can see, the path where files are stored consists of lots of useful information – starting with the metadata of Azure Event Hubs itself. It also contains a time frame pointing to a specific point in time when a message was created. The path (or rather the format used to save data) can be adjusted depending on your needs. In the repository for this chapter, you’ll find a Bicep
+file presenting how the format could be modified upon the creation of
+the service.
+What’s even more important, captured data is saved using the Apache Avro format. This means it’s not only strongly typed but can be also integrated with lots of tools meant for big data processing without a need to implement your very own workarounds or interim services to translate it. The schema itself cannot be controlled by you, though – Event Hubs Capture comes with a predefined structure of data, so you will need to adjust to it. The schema and tools to decode it are described here:
+https://learn.microsoft.com/en-us/azure/event-hubs/explore-captured-avro-files
+. Look at the documentation to learn more about the feature itself and other cases
+for it.
+As the next step, let’s talk about sending batches using Azure Event Hubs, so you can increase the throughput of the data
+processing process.
+Sending batches with Azure Event Hubs
+Unlike Queue Storage, Azure Event Hubs comes
+with a native solution to send batches of messages. That operation is represented by a REST operation available on the
+service level:
+POST \
+    https://{eventBusNamespace}.servicebus.windows.net/\
+    {eventHubPath}/messages
+In fact, all data plane operations performed against Azure Event Hubs may be performed as typical HTTP requests (unless you opt
+in for the use of
+Advanced Message Queueing Protocol
+(
+AMQP
+)). A batch of messages may look
+like this:
+[{"Body":"Message1"},{"Body":"Message2"},{"Body":"Message3"}]
+For a better understanding, let’s compare it with an operation sending a
+single message:
+POST \
+    https://{eventBusNamespace}.servicebus.windows.net/\
+    {eventHubPath}/messages
+{
+    "Type": "Car",
+    "Color": "Red"
+}
+As you can see, both operations
+use the same endpoint – the difference is in the payload schema used (an array of objects versus an object). There will also be a difference in the
+Content-Type
+header value:
+For a single message:
+Content-Type: application/atom+xml;type=entry;charset=utf-8
+For a batch of messages:
+Content-Type: application/vnd.microsoft.servicebus.json
+Setting the correct
+Content-Type
+value will be important so Azure Event Hubs understands the data and
+acts accordingly.
+Note
+When using an SDK, you don’t need to worry about setting the correct headers, as it’s the responsibility of the SDK itself to configure them. The SDK will also select the protocol (HTTP/AMQP) depending on the connection string or endpoint you use when configuring the
+SDK client.
+When talking about sending batches, we may revisit the solution we discussed for Queue Storage to send multiple messages at once. When using Azure Event Hubs, you need to remember that depending on the tier and configured throughput, you may hit some quotas. For instance, if you configure your hub to have 1 TU, you won’t be able to send more than 1,000 messages at
+once. This applies also if you choose to use batches instead of individual messages. To overcome that limit, you need to choose an
+alternative approach:
+Compress all messages as a single message in a similar way as we did for
+Queue Storage.
+Use the
+SendMessage
+method instead
+of
+SendBatchEvents
+.
+Decompress the message once consumed by a consumer and process all the
+data accordingly.
+The advantage of Azure Event Hubs over Queue Storage is the size of a message – even when using the Basic tier of Azure Event Hubs, we can send four times more data when compared with Queue Storage. Text compression may still be beneficial, but we could select less strict or easier-to-implement algorithms. Note that even if you choose to send a batch of messages, it’s not guaranteed that those messages will be consumed at the same moment. It’s because Azure Event Hubs behaves differently for input and output (it looks more like a data sink for the input and a structured log for
+the output).
+Finding more information about Azure Event Hubs
+As Azure Event Hubs offers even more features, I strongly recommend you take a look at the official documentation, which
+explains them in detail and suggests additional resources to improve
+your skills:
+Using application groups to logically group applications and services connected to the same Azure Event Hubs instance for simplified management and access
+control:
+https://learn.microsoft.com/en-us/azure/event-hubs/resource-governance-overview
+Implementing Schema Registry for Azure Event
+Hubs:
+https://learn.microsoft.com/en-us/azure/event-hubs/schema-registry-concepts
+Multi-site and multi-region federations of data
+processing:
+https://learn.microsoft.com/en-us/azure/event-hubs/event-hubs-federation-overview
+Geo-replication:
+https://learn.microsoft.com/en-us/azure/event-hubs/geo-replication
+These links should help you understand the advanced features of Azure Event Hubs, which are useful in scenarios that require increased availability, durability of data, or simplified management. While
+you can use Azure Event Hubs without using any of those advanced capabilities, they will be helpful in enterprise-grade scenarios, where you work with much
+greater scale.
+Let’s now start learning about the next Azure service with queue capabilities, which is
+Azure
+Service Bus
+.
+Implementing enterprise-grade queues with Azure Service Bus
+Up to now, we have discussed two separate Azure services that are based on queues – Queue Storage and Azure Event Hubs. Both of these services can be used to implement messaging patterns that are
+useful in various applications, and while they offer various features and different limits, conceptually, they
+are pretty similar. The third service to be described in this chapter is Azure Service Bus. It’s a service that internally shares lots of infrastructure with Azure Event Hubs (if you look at the URL of the Azure Event Hubs endpoint, you will see it contains the
+.servicebus
+suffix). From a use case perspective and the features offered, however, Azure Service Bus is quite a different service when compared with Azure Event Hubs and
+Queue Storage:
+It can be used to implement both queues and topics, meaning you can explicitly configure it to allow a specific
+messaging pattern.
+It allows for transactions, which are atomic operations consisting of multiple actions performed
+by consumers.
+It implements a dead-letter queue to handle problematic messages that can’t be
+properly consumed.
+It supports scheduled delivery and message deferral to handle advanced scenarios where you want to wait until a specific point in time to deliver a message or set it aside because of
+existing circumstances.
+It provides a
+mechanism for the deduplication of messages, so identical messages are discarded. This saves processing time as consumers don’t need to worry about processing the same
+message twice.
+By default, a queue
+or topic has a maximum size of 5 GB. If partitioning is enabled, the maximum size is set to
+80 GB.
+Depending on the selected tier, the maximum size of a message is either 256 KB (Standard tier) or 1 MB (
+Premium tier).
+As you can see, the number of additional and useful features in Azure Service Bus is astounding. This service is designed to help you in implementing queues, which need to support advanced and complex scenarios. The native capabilities of Azure Service Bus simplify implementation as you don’t need to implement various features, such as scheduled delivery or transactions, on
+your own.
+Let’s now discuss queues
+and topics.
+Understanding the differences between queues and topics
+The easiest way to differentiate a queue and a topic is by checking whether multiple consumers can read the same
+message. If they do, then you’re working with a topic. Topics are used to implement a publisher/subscriber pattern where a producer publishes a message and multiple subscribers consume it. Note that consumers don’t always need to process the same message – in the case of Azure Service Bus, you may use
+filters
+, which allow
+you to define which messages are supposed to be delivered by which topic. We’ll talk more about filters later in
+this section.
+To understand topics better, take a look at
+Figure 14
+.9
+for
+a visualization.
+Figure 14.9 – Visualization of topics in Azure Service Bus
+As presented in
+Figure 14
+.9
+, you can see each consumer is connected to the same topic. While those consumers
+could be connected to a single queue as well, they wouldn’t be able to consume the same message at the
+same moment.
+Note
+You can think of topics as queues that multiply messages for
+connected consumers.
+Topics in Azure Service Bus work in a different way when compared with consumer groups used in Azure Event Hub. While consumer groups used TUs defined for a hub (so you needed to increase them to keep the performance on the same level), topics don’t affect the throughput of Azure Service Bus. What’s more, topics support filters, which you can use to limit messages coming to a consumer. There are three types of
+filters available:
+SQL filter
+Boolean filter
+Correlation filter
+SQL filters have their own syntax, which you can find here:
+https://learn.microsoft.com/en-us/azure/service-bus-messaging/service-bus-messaging-sql-filter
+. Whether you use a SQL filter, Boolean filter, or correlation filter, you need to remember
+two traits:
+To make filters work, you need to evaluate the message properties. Unfortunately, you can’t use them to select messages based on
+their body.
+The more complex a
+filter is, the more compute power it will use to work. In other words, advanced filters will lower the overall throughput of the Azure Service
+Bus service.
+The filters can be created using the management SDK directly from your application. Check the repository for this chapter for examples and a further explanation of
+the concept.
+Let’s talk now about the different receive modes available for Azure
+Service Bus.
+Choosing the correct receive mode
+Unlike Queue Storage and
+Azure Event Hub, Azure Service Bus allows you to select a receive mode to consume
+a message:
+Receive
+and delete
+Peek lock
+Being able to choose a receive mode gives you flexibility when it comes to implementing a process that consumes messages. The first mode (receive and delete) is the simpler mode, which works
+as follows:
+When a message is received by a consumer, it is marked
+as consumed.
+If the message processing fails, it won’t be
+consumed again.
+Receive and delete mode reflects the at-most-once processing approach. It’s suited for applications and services that can tolerate a message that is not fully consumed. Of course, you could reschedule a message on your own when using receive and delete mode. In that case, the processing approach would be at least once, but it’s not something natively supported by this receive mode. Some examples of applications suited for using this receive mode are logs processing or services that monitor by themselves whether a message has been processed (and if not, they will just enqueue it
+once again).
+The second receive mode, peek lock, is a little bit
+more complicated:
+Each message consumption process starts with locking it so other consumers are unable to
+receive it.
+Once the message is properly processed, an application notifies Azure Service Bus and asks to mark a message
+as consumed.
+If an application is unable to consume a message, it has
+two possibilities:
+Let Azure Service Bus know to abandon a message, which makes it available for further processing by
+other consumers.
+Do nothing and wait until the timeout associated with a lock expires, so the message is unlocked and available to be
+processed again.
+With peek lock mode, you
+can implement the at-least-once messaging pattern or, if you enable duplicate detection, you can achieve even the exactly once
+messaging pattern.
+Note
+Peek lock receive mode is like the way Queue Storage
+processes messages.
+Receive mode is configured upon creating a consumer for a message or topic in your application. You can find an example of how it’s done in the code examples presented in the repository for
+this chapter.
+Remember that you should select a receive mode suited to your application. While going for a default may be tempting, receive modes have quite a significant impact on the implementation of your service. The most important question when building a queue-based system is how many times a message can be delivered. If you answer
+exactly once
+, then you need to use peek lock mode with duplicate detection. If your system can handle duplicates, then both modes will work (but receive and delete will require additional code to implement that pattern). Applications that can handle duplicates often integrate with a database or some other kind of storage, which allows them to see whether a message is a duplicate or not. The process is
+described here:
+A consumer receives a message and
+decodes it.
+Based on the properties provided by a message, a consumer checks the database for a record that represents a message (the most common approach is using a
+unique identifier).
+If a record in the database is found, the message is a duplicate, hence it can
+be discarded.
+If a record isn’t found, a
+consumer creates it, starts processing a message, and notifies Azure Service Bus that processing
+is complete.
+The aforementioned process, however, explains only the optimistic path. Let’s see what happens if we add a new record but fail to process a message, hence it is processed once again. In that case, upon processing the message once again, the consumer would find the message ID in the database and discard it. The problem here is that the message was never processed correctly, and thus we may lose data because of that.
+To solve that issue, you would need to implement a transaction that covers the
+following operations:
+Adding a record to
+the database
+Processing
+a message
+Completing the message with Azure
+Service Bus
+While it looks easy on paper, it’s much more difficult to implement in a real-world scenario. Depending on the complexity of the message processing implemented in your application, reverting changes made during that process may be really difficult to do. Let’s consider the following scenario – your application got a message that a customer created a new order for some products. The application is supposed to integrate with various external systems, such as a CRM, ERP, or something similar, to put an order there. Now, if message processing fails between various integrations, you have
+two options:
+Catch each error individually and try to revert it when an
+error happens.
+Complete a message even if an error happens and place a new message on a queue with the
+reverted outcome.
+For instance, let’s say that a new order integrates with a CRM to create a new customer and then fails when interacting with the ERP system. Instead of trying to delete a customer directly in your application (because we were unable to place an order and we don’t want to have a
+customer in a CRM who has no orders), we could use another queue where we would place a message to delete a customer and mark our original message as completed from an Azure Service Bus perspective (so it doesn’t get delivered again) but incomplete from our process perspective (for instance, by updating the order in the database
+as failed).
+Messaging patterns and proper implementation of the business process with a queue get really complicated when you need to secure your application from various errors and inconsistencies. While the aforementioned example explains some of them, there’s still room
+for improvement.
+Let’s talk now about how you may ensure FIFO delivery using Azure
+Service Bus.
+Implementing FIFO with Azure Service Bus
+When we discussed Azure Event Hubs, we
+were wondering what the solution to implementing order guarantees using that service is. While in Azure Event Hubs, we needed to point messages to the same partition so FIFO is preserved, with Azure Service Bus, we
+will use a different approach. To implement FIFO in Azure Service Bus, we need to
+use a feature called a
+session
+. Sessions are built in a way that ensures that multiple receivers may be connected to the same queue but still get messages in order. The concept is visualized in
+Figure 14
+.10
+.
+Figure 14.10 – A producer sending a message using two separate sessions used by two separate receivers
+When receiving a message from a session, a receiver has
+two options:
+Use the session ID to point to a
+specific session.
+Do not use the explicit session ID so it gets assigned the first
+available session.
+Those two options have their
+use cases. While not specifying a session ID may not look like a good option, if you have only one session and one receiver, you
+can get a FIFO guarantee with no additional code. However, as it’s up to a sender to point a message to a session, you could implement separate receivers with different behavior – one consuming messages as they come and one connected to a specific session, so it consumes messages
+in order.
+Note
+To send a message using a session, a sender only needs to specify a session ID. There’s no dedicated method or endpoint used there. A receiver, however, needs to explicitly state its intentions. A code example of the concept is presented in the repository for
+this chapter.
+As sessions allow a producer and a consumer to communicate
+directly
+(by using the session ID), one more possibility opens up. In queue-based applications, you sometimes need to deliver the result of message processing to the sender. As queues decouple senders from receivers, implementing such a concept is quite cumbersome. There are various solutions to that problem (such as pooling a specific endpoint or registering webhooks).
+In Azure Service Bus, you
+can leverage sessions to implement a pattern called
+request-reply
+. The pattern is visualized in
+Figure 14
+.11
+.
+Figure 14.11 – A request-reply pattern visualized using an Azure Service Bus session
+In
+Figure 14
+.11
+, you can see how
+both a producer and receiver communicate over two separate channels included within a single session. With this pattern, you can allow a producer to obtain a response from a receiver without implementing additional mechanisms to let them
+communicate. Communication here is based on using a unique session ID, which is used to listen to responses (so, in fact, what you use here is a bi-directional communication mechanism). Take a look at the repository for a code example presenting how this communication can
+be implemented.
+In the next section, let’s discuss duplicate detection in Azure
+Service Bus.
+Implementing duplicate detection
+In queue-based systems, applications sometimes fail to process a message. Depending on the messaging pattern (at least once, at most once, or exactly once), you may be challenged with duplicates coming
+your way. While the at-most-once and exactly-once patterns aren’t bothered by duplicates, the most popular pattern, which is at-least-once, forces you to find a way to mitigate incoming duplicated
+messages. A
+duplicated message
+is a message that was placed in a queue and processed but not completed correctly. Depending on the place where processing was terminated, a duplicate may be more or
+less severe:
+If message processing is terminated before any action is taken, you can handle a duplicate without an additional mechanism as it can be
+safely retried.
+If message processing is terminated after it was partially processed, you need to take care of handling a duplicate, so the state
+isn’t corrupted.
+Note
+A pattern that is helpful in handling duplicates is sagas:
+https://learn.microsoft.com/en-us/azure/architecture/patterns/saga
+. Also, durable functions are the ideal solution for handling such a scenario as their activities are executed only once per orchestration, so you could process the same message multiple times without worrying that the state will
+be corrupted.
+Azure Service Bus comes with built-in duplicate detection, which you may find helpful if you don’t want to worry about duplicates or you don’t want to make your architecture more complex than necessary. It is
+based on checking the unique identifier of each message and is handled internally, which means that it’s Azure Service Bus’ responsibility to detect a duplicate. The most important thing here is managing the identifier of a message. When you publish a message, you can set its identifier to any value. While it can be any unique value, you may find it a much better fit to use something that is connected to the business process. Consider the
+following examples:
+ID: 1
+ID: 7as6d-sd8976f-asd867sah-3234-sad12
+ID: customer-123/order-5623
+The first identifier is just an integer, the second one is a UUID-like string, and the third one is an identifier that combines other identifiers and matches them with business objects. While the first two may be easier to generate, without context, they provide little to no value. For duplicate detection, it’s better to utilize the third identifier as it clearly states the intentions of a publisher. Semantically, it’s also easier to understand the duplicate if its identifier isn’t some
+random value.
+From a technical perspective, when duplicate detection is enabled, the process looks
+as follows:
+A producer sends a message with an identifier set
+to
+X
+.
+The message is accepted and processed by
+the queue.
+A consumer fetches the message and
+completes it.
+In the meantime, a producer sends another message with the same identifier set
+to
+X
+.
+Azure Service Bus accepts the message, but as the message was sent to the queue previously, it’s never
+delivered again.
+Duplicate detection works
+within a time window, which can be set from 20 seconds to a maximum of 7 days. Note that having a bigger window lowers the overall throughput of the queue as the more messages are stored internally for duplicate detection, the more time it takes to detect duplicates and update
+the state.
+The feature can be enabled only when a queue or a topic is created, so it’s important to validate how useful it is for you as soon
+as possible.
+Let’s talk now about the
+dead-letter queue
+, which is natively available for Azure
+Service Bus.
+Handling dead-letter queues
+A dead-letter queue is a subqueue
+that is used to store messages that the system couldn’t deliver or process. There are a few scenarios in which a
+message is put on a
+dead-letter queue:
+A message reached its
+Time to
+Live
+(
+TTL
+).
+A message
+exceeded the maximum
+delivery count.
+An exception during processing a filter for a topic or sending a message to a topic with
+no subscribers.
+An explicit operation made by
+an application.
+In Azure Service Bus, a dead-letter queue must be enabled (so it’s an opt-in feature). Unlike duplicate detection, it can be enabled even when a queue or a topic is already created. To explicitly put a message on a dead-letter queue, you need to use a dedicated method from the SDK (for instance,
+ServiceBusReceiver.DeadLetterMessageAsync()
+in .NET).
+One important thing about dead-letter queues is what to do with messages that end up there. Some companies integrate those queues with systems such as help desks, so people can be aware of issues and
+have an input already provided (so they can finish processing a message manually). It’s also a good idea to create a metric based on the size of the dead-letter queue. Such a metric can be presented to
+the IT operations teams – if it grows, it means something is going wrong in
+the system.
+Learning more about advanced features of Azure Service Bus
+As Azure Service Bus is quite an extensive
+topic itself, we won’t be able to cover all the features and capabilities. As the next step, I strongly recommend you take a look at the
+following links:
+SQL filter
+syntax:
+https://learn.microsoft.com/en-us/azure/service-bus-messaging/service-bus-messaging-sql-filter
+Message
+deferral:
+https://learn.microsoft.com/en-us/azure/service-bus-messaging/message-deferral
+Message
+prefetch:
+https://learn.microsoft.com/en-us/azure/service-bus-messaging/service-bus-prefetch
+Chaining and
+auto-forwarding:
+https://learn.microsoft.com/en-us/azure/service-bus-messaging/service-bus-auto-forwarding
+Transactions:
+https://learn.microsoft.com/en-us/azure/service-bus-messaging/service-bus-transactions
+How to optimize
+performance:
+https://learn.microsoft.com/en-us/azure/service-bus-messaging/service-bus-performance-improvements
+Those additional topics will help you in getting a full understanding of the capabilities of Azure Service Bus. As they are quite advanced, you may not always find a use case for them. However, general knowledge about this service is helpful when assessing which queue is the best in
+your case.
+To complete the description of Azure Service Bus, let’s discuss how you use Azure Service Bus Explorer to help
+you develop
+your application.
+Using Azure Service Bus Explorer to develop applications
+When building an application that
+uses a queue such as Azure Service Bus, you need a way to peek at what messages are in the queue. You will also need a way to test whether a receiver works without using the producer. To help you with those tasks, you can use Azure Service Bus Explorer. That’s a native feature of the Azure Service Bus instance, which is available
+in the Azure portal. To learn more about it, take a look at the follo
+wing documentation
+page:
+https://learn.microsoft.com/en-us/azure/service-bus-messaging/explorer
+.
+An alternative produ
+ct to Azure Service Bus Explorer is a project named
+Service Bus Explorer, available on GitHub:
+https://github.com/paolosalvatori/ServiceBusExplorer
+. The difference between those two solutions is significant: the former is a web-based management tool for a single instance of Azure Service Bus, while the latter is a desktop application that you can use to connect to multiple Azure Service Bus and Azure Event
+Hub namespaces.
+In the last section of this chapter, let’s talk about use cases for the queues
+we’ve discussed.
+Learning about use cases
+In this chapter, we talked about three
+separate services:
+Azure
+Queue Storage
+Azure
+Event Hubs
+Azure
+Service Bus
+Each service is a queue, which means it can be used to decouple multiple services and introduce asynchronous communication patterns. Upon closer look, however, you can see that they’re quite different from
+each other:
+Queue Storage doesn’t provide a way to have multiple subscribers for the
+same queue.
+Receive mode can be configured only for Azure
+Service Bus.
+Queue Storage offers the smallest message size out of the three described services (64 KB versus at least 256 KB for Azure Event Hubs and Azure
+Service Bus).
+Azure Event Hubs is designed more like a data sink with high throughput for both ingress
+and egress.
+Only Azure Service Bus natively supports advanced features such as sessions, transactions, and
+dead lettering.
+Only Azure Event Hubs and Azure Service Bus allow you to enable or implement features that
+guarantee FIFO.
+Because of those differences, use cases for the services mentioned will be different. When choosing the right service for your needs, you need to consider the
+following things:
+Is a message expected to be delivered at most once, at least once, or
+exactly once?
+Do you expect to send batches
+of messages?
+What’s the maximum size of a message you’d like
+to send?
+Do you need a
+dead-letter queue?
+Do you need a producer to interact with
+a consumer?
+Do you need to defer delivering
+a message?
+How would you like to
+handle duplicates?
+Do messages need to be delivered
+in order?
+These questions should be helpful in choosing the right solution for your needs. While batches are natively supported only by Azure Event Hubs, you may implement them with other services as well. Dead-letter queue is supported natively only for Azure Service Bus but can also be easily implemented for Queue Storage. If you require FIFO from your queue, the available options are Azure Event Hubs (when explicitly selecting a partition) or sessions in Azure Service Bus. Deferring message delivery is only available with Azure Service Bus. The same is true for producer-communication communication, which natively works only when you choose Azure
+Service Bus.
+Use cases for those queues are
+as follows:
+Queue Storage
+: Less critical workloads with no hard requirements on message order. It’s a cheap
+and simple service that can be used to quickly get started with your work. An example of such a service is
+log aggregation.
+Azure Event Hubs
+: Systems requiring high
+throughput and near-real-time processing. This service is often used in IoT or mobile scenarios where you have lots of clients connecting to a queue and producing
+semi-structured data.
+Azure Service Bus
+: Queues focused on durability and handling complex business cases. Azure Service Bus is
+useful in scenarios such as processing orders and documents or integrating
+external systems.
+The golden rule here is to always assess a service before selecting it. Bear in mind that in scenarios that require network isolation, the cost of a service will be much higher as those networking features are rarely available in the
+lower tiers.
+To help you better understand the use cases for these services, here are some architecture ideas you may fi
+nd useful for more information about messaging
+in Azure:
+Stream processing with Azure
+Databricks:
+https://learn.microsoft.com/en-us/azure/architecture/reference-architectures/data/stream-processing-databricks
+Transactional Outbox pattern with Azure Cosmos
+DB:
+https://learn.microsoft.com/en-us/azure/architecture/reference-architectures/data/stream-processing-databricks
+Pipes and filters
+pattern:
+https://learn.microsoft.com/en-us/azure/architecture/patterns/pipes-and-filters
+Now, let’s summarize what we have learned and see what’s going to be discussed in the
+next chapter.
+Summary
+In this chapter, we discussed three separate services – Queue Storage, Azure Event Hubs, and Azure Service Bus. We talked about the overall approach to implementing queue-based applications and the challenges they may pose. We compared these services to see what scenarios they’re
+applicable to.
+We saw how you can implement sending batches using Queue Storage and Azure Event Hubs. When discussing advanced scenarios, we used Azure Service Bus to provide a native way to ensure the ordering of messages, bi-directional communication, and duplicate detection. The knowledge from this chapter will be helpful in choosing the right queue for your application and asking the right questions during implementation. Remember that queue-based systems are much more demanding in terms of design while also less forgiving. Take your time when working with them to
+avoid mistakes.
+In the next chapter, we’re going to see what the options for relational databases in Azure are. We’ll focus on describing Azure SQL and managed PostgreSQL and see whether they change from the versions
+hosted on-premises.
+
+15
+Using Relational Databases in Microsoft Azure
+Almost every application requires storage to store its state. While, of course, there are applications that can work without a database, for the majority of business-oriented services, you will need storage to store data. In this chapter, we will focus on relational databases offered as managed services in Azure. This will help in understanding the differences between databases provisioned on-premises and their cloud versions, so you can decide which option suits
+you best.
+Understanding how relational databases work in cloud environments is important from both a design and implementation perspective. As you will see, there are some major differences present, so it’s important to have a solution for potential challenges
+and limitations.
+In this chapter, we’re going to cover the following
+main topics:
+Using relational databases in
+Microsoft Azure
+Using alternatives to Azure SQL for a
+relational database
+Backing
+up databases
+Understanding integration options for databases
+in Azure
+Learning about
+use cases
+Technical requirements
+To carry out the exercises in this chapter, you will need
+the following:
+The
+Azure CLI
+An IDE of your choice (preferably Visual
+Studio Code)
+Using relational databases in Azure
+Before we get
+started with describing the relational databases
+available in Azure, let’s revisit the concept of a relational database. In general, there are two types
+of databases:
+Relational
+Non-relational
+Relational databases are designed to reflect connections and dependencies between different entities. They allow you to design a schema that reflects both physical and virtual relations between various business concepts using foreign keys. What’s even more important is that once a schema is defined and implemented, a relational database will prevent breaking the data contract by rejecting changes that would not be compatible with the database
+schema itself.
+On the market, there are many different
+implementations of relational databases, including
+the following:
+Microsoft
+SQL Server
+PostgreSQL
+MySQL
+SQLite
+MariaDB
+While the features they offer may be different in detail, they are all full-blown relational databases, which can be used in both simple and advanced scenarios. When it comes to Azure, you can host any relational database by using an Azure virtual machine. As some databases can also run inside a container, you could leverage services such as Azure Container Apps or Azure Kubernetes Service to host them.
+Note
+Remember that running a database inside a container requires additional effort to not only persist its state but also make it stateful and reliable. You should approach this kind of hosting option with care that as an unstable database will heavily impact any application connecting
+to it.
+However, in this chapter, we’re going to focus on two major installations of a relational database offered as
+managed services:
+Azure SQL
+Azure Database
+for PostgreSQL
+Azure also offers two additional managed database options – Azure Database for MySQL and Azure Database for MariaDB. Unfortunately, the latter is scheduled for retirement by September 2025, meaning it won’t be possible to create new instances after that date and the service will drop support for
+existing instances.
+When it comes to using a relational database in Azure, there are not many differences when compared with versions installed on-premises. Of course, there are some licensing challenges (whether you can migrate an existing license to Azure or not), but from an implementation perspective, a relational database hosted in Azure is the same as one hosted on-premises. The noticeable differences come from the hosting options and performance of the
+provisioned
+database servers. For instance, there are three different types of Azure
+SQL offering:
+SQL Server on Azure
+Virtual Machines
+Azure SQL
+Managed Instance
+Azure
+SQL Database
+The first option is fully compatible with SQL Server installed on-premises. It’s basically a virtual machine with SQL Server installed, meaning you can log in to the machine and manage the database server as if it were a machine within your infrastructure. Azure SQL Managed Instance is an option that abstracts away most of the infrastructure but still ensures compatibility with SQL Server. Azure SQL Database is a fully managed database server, which removes the complexity of infrastructure and provides a management layer for the whole database server so you can treat your database as you would any other managed service
+in Azure.
+Note
+The different options of Azure SQL are also tied to different cloud models – SQL Server on Azure Virtual Machines is considered IaaS, Azure SQL Managed Instance is PaaS, and Azure SQL Database could be
+defined as
+Database-as-a-Service
+(
+DBaaS
+).
+You may wonder how to properly select the proper Azure SQL hosting model for your application. While the answer to that question isn’t simple, we could narrow down the possible scenarios so the choice becomes simpler. To get started, take a look at the following article in the documentation:
+https://learn.microsoft.com/en-us/azure/azure-sql/database/features-comparison?view=azuresql
+. It describes the differences between different flavors of Azure SQL, including both server-related and infrastructure-related discrepancies. Microsoft recommends using Azure SQL Database for greenfield applications, which don’t have specific database requirements. That’s a good choice for typical business applications – it allows you to ramp up development efforts and focus on implementing business value instead of setting up infrastructure for a database server. However, sometimes even those typical business applications require more control over the database. For instance, in Azure SQL Database, you can’t initiate a backup operation on your own. If you require 100% control over that process, you may need to consider using Azure SQL Managed
+Instance instead.
+Another big difference is cross-database queries/transactions. Those are also not available in Azure SQL Database. While the need for such a feature may depend on the architecture of your system (such transactions
+are often implemented in
+monolithic applications and are rarely applied in microservices), understanding the differences will help you make the right choice to avoid reimplementing database integration in
+the future.
+Let’s also look at the difference when creating a database using the CLI. Here’s an example of how Azure SQL Database is created using the
+Azure CLI:
+az sql server create \
+--name <server-name> \
+--resource-group <resource-group-name> \
+--location <location> \
+--admin-user <login> \
+--admin-password <password>
+az sql db create \ 
+--resource-group <resource-group-name> \ 
+--server <server-name> \ 
+--name <database-name> \ 
+--edition GeneralPurpose \ 
+--family Gen5 \ 
+--capacity 2
+In this example, we will create an Azure SQL Database instance using the General Purpose tier with
+two
+vCores. For comparison, let’s take a look at how an Azure SQL Managed Instance instance
+is created:
+az sql mi create \
+--admin-password <password> \
+--admin-user <login> \
+--name <instance-name> \
+--resource-group <resource-group-name> \
+--subnet <subnet> \
+--vnet-name <virtual-network> \
+--location <location>
+az sql midb create \
+-g <resource-group-name> \
+--mi <instance-name> \
+-n <database-name>
+Note how for Managed Instance, you need to provide a virtual network with a subnet. That version of Azure SQL is much more focused on infrastructure when compared with Azure SQL Database, which makes its management more complicated. While it’s not as difficult as when using a virtual machine, an additional layer of complexity should be considered when selecting it for
+your application.
+Note
+It’s worth mentioning that Azure SQL Managed Instance offers much better performance, but it’s also a much pricier option. If you opt for that type of Azure SQL database, make sure you’re utilizing
+its capabilities.
+Even though multiple flavors of Azure SQL exist and need to be evaluated when designing an application, once the choice is made, it will make no difference to your application (at least based on the code needed to integrate with a database). The same is applicable to other products representing a relational database – it shouldn’t be noticeable on most applications if they are connected to a cloud version of a database instead of one
+run
+on-premises. So, what’s the actual difference when using relational databases hosted in Azure? Let’s discuss this in the
+next section.
+Adjusting an application to work with a managed relational database
+Even though many
+applications wouldn’t be affected by changing a database from one hosted on-premises to a managed one, you should understand the possible issues if the databases aren’t compatible. The first possible problem is the difference in performance between databases. For example, Azure SQL Database offers two different
+purchasing tiers:
+DTU-based
+vCore-based
+A
+Database Transaction Unit
+(
+DTU
+) is an
+artificial metric used to indicate how much CPU and memory will be available for a database. The metric isn’t fixed – the actual performance provided depends on the service
+tier selected:
+1-4 IOPS per DTU for Basic and
+Standard tiers
+>25 IOPS per DTU for the
+Premium tier
+This difference may cause issues when deploying a database with a different tier depending on the environment. For instance, you may select the Basic tier for non-production scenarios and Premium for the production instance. The same workload might work fine in the Premium tier but fail for the Basic or Standard one. An even trickier scenario is when there’s no stable performance provided as the same amount of DTUs may provide
+different performance:
+100 DTUs is equal to
+400 IOPS
+100 DTUs is equal to
+100 IOPS
+This means that your application may experience performance issues from time to time as the available performance occasionally decreases. To deal with that issue, you’d need to either increase the tier (so you get more IOPS than required for your applications) or change the purchasing model
+to vCore.
+The vCore-based purchasing model is much closer to a typical on-premises SQL database as it allows you to select how many vCores (and memory) you need. It also comes with different tiers (General Purpose, Business Critical, and Hyperscale), which all provide
+different performance:
+320 IOPS per vCore in
+General Purpose
+4,000 IOPS per vCore in
+Business Critical
+Up to 327,680 IOPS for Hyperscale, which will depend on the workload
+Because of these
+differences, it may be difficult to migrate a legacy application to Azure SQL Database as it will be challenging to select a proper tier. It’s possible (with proper testing), but generally speaking, it’s much easier to choose a tier for a greenfield application rather than finding the correct value for something that previously worked with on-premises
+SQL Server.
+Note
+You can read more about a benchmark used to determine a value for a DTU
+here:
+https://learn.microsoft.com/en-us/azure/azure-sql/database/dtu-benchmark?view=azuresql
+.
+The second challenge when moving from an on-premises version of a SQL database to Azure is when your application depends on certain features available only for standalone Microsoft SQL Server. As the list of these features is quite lengthy, we’re not going to include it in this chapter. For a reference, check out the following
+link:
+https://learn.microsoft.com/en-us/azure/azure-sql/database/transact-sql-tsql-differences-sql-server?view=azuresql#t-sql-syntax-not-supported-in-azure-sql-database
+.
+However, remember that Azure SQL Database is just one of three different options available for a SQL database in Azure. If you need features that are not supported for that Azure service, you still have Azure SQL Managed Instance or SQL Server on Azure Virtual Machines. Choosing those options will pose other challenges (such as managing the infrastructure or the database), but regarding the database migration, you won’t need to rewrite
+your application.
+Let’s talk now about one more feature of Azure SQL that may impact your application –
+serverless compute
+.
+Using serverless compute in Azure SQL
+The serverless
+compute option for Azure SQL Database
+is available only if you select the vCore purchasing model. Each SQL database in that model is divided into
+two components:
+Compute
+Storage
+The general concept for a serverless database is as follows – the compute part is deallocated after a certain time if a database isn’t used. The storage part is safely persisted, so the data stored there isn’t lost. The benefit of a serverless SQL database is that it could potentially provide some cost savings. How much money would be saved depends on the utilization of the database. The problem with a serverless database, however, comes from the fact that the database needs to be re-allocated when you need it again. Even though the process doesn’t take much time (it could be a few or more seconds), the database isn’t available during that process. Look at
+Figure 15
+.1
+for
+a visualization.
+Figure 15.1 – Error when connecting to a serverless instance of Azure SQL that has deallocated
+As the database is just starting (because we made a connection), we need to handle that within an application, so it’s treated as a transient error.
+Figure 15
+.2
+depicts the
+concept visually.
+Figure 15.2 – Connecting to a serverless instance of Azure SQL Database with a retry policy
+The retry
+policy
+presented in
+Figure 15
+.2
+will take care of retrying the connection when the serverless instance starts. From the user’s/application’s perspective, the first call will take much longer (as the database is not yet ready) and then, once the database is available, the rest of the operations will happen
+as usual.
+The time needed for a database to go idle can be configured when an instance is created or on an
+existing instance:
+az sql db create \
+-g <resource-group-name> \
+-s <server-name> \
+-n <database-name> \
+-e GeneralPurpose \
+--compute-model Serverless \
+-f Gen5 \
+--min-capacity 0.5 \
+-c 2 \
+--auto-pause-delay 60
+The aforementioned command would create a serverless Azure SQL Database with two cores (the
+-c
+parameter), a minimum capacity of 0.5 vCores (how many cores are allocated from the beginning of the database isn’t paused), and an auto-pause delay of
+60 minutes.
+When working with a serverless option for the SQL database, you need to consider the usage patterns for it. While your application may rarely connect with the database, you could have additional features, such as database jobs or data processes, which constantly pool it. This would mean that even though you selected the serverless tier, you’re unable to use and utilize it.
+Note
+Choosing the right value for an auto-pause delay heavily depends on your use case and the behavior of your system. Like with DTUs, it’s best to properly test the application and the database to get the
+right result.
+One more
+important
+topic to discuss here is scaling out and scaling up databases. Let’s take
+a look.
+Performing scaling operations with Azure databases
+Databases such as
+Azure SQL, Azure Database for PostgreSQL, and Azure Database for MySQL offer a standard feature of scaling out or in and scaling up or down to allow a user to adjust a database’s performance depending on the actual utilization. Depending on your service of choice and its tier, you may have different options available when it comes to performing that operation. We will start with Azure SQL as it offers the most sophisticated
+scaling model.
+Scaling Azure SQL
+We mentioned that Azure SQL
+offers two separate purchasing models – DTU-based and vCore-based. The choice of a specific purchasing model not only affects the performance offered and the cost of a database; it also changes the way a database can be scaled and what happens once the scaling operation is finished. It’s important to remember that scaling up or down will always cause a brief disruption in connection with a database. This happens because that operation requires changing the underlying virtual machine and configuring it with more (or less) CPU and memory. If you plan to perform such an operation, you should always plan for it, so users of your application aren’t affected. If you’re unable to perform the operation outside of the core hours applicable to your application, you should ensure the application can handle a brief disconnection from the database. This can be achieved with several patterns, such as
+the following:
+Proper retry policy, which treats disconnection as a transient error and just retries
+the operations
+Circuit breaker, which terminates any attempts to connect to a database until
+it’s disabled
+Maintenance window, which prevents users from using
+the application
+Potentially, you could also leverage multiple replicas of a database. If your database is replicated, you could just switch your application from one instance to another, perform a scale-up or scale-down operation, and then restore the normal configuration of
+the application.
+Note that Azure SQL doesn’t support a typical scale-out or scale-in operation. Changing the number of resources allocated to an instance of a database is considered a scale-up or scale-down operation, with all the risks
+described previously.
+Note
+It’s worth mentioning that performing the scale operation in Azure SQL is done in a safe way; that is, once you initiate the operation, Azure attempts to set up a different instance for you, and only once it’s ready will the connections be initiated against it. If the operation fails, the original instance is unaffected.
+Some alternatives to a typical scaling up or down operation include
+the following:
+Read
+scale-out
+:
+https://learn.microsoft.com/en-us/azure/azure-sql/database/read-scale-out?view=azuresql
+Sharding
+:
+https://learn.microsoft.com/en-us/azure/azure-sql/database/elastic-scale-introduction?view=azuresql
+Take a look at those links for additional details. As the next step, we will discuss how a scaling operation can
+be performed in Azure Database for MySQL and Azure Database
+for PostgreSQL.
+Scaling Azure Database for PostgreSQL and Azure Database for MySQL
+Both Azure
+Database for PostgreSQL and Azure Database for
+MySQL follow the same pattern
+for scaling up and down. As a
+DTU-based purchasing model isn’t available for them, you can change the performance of those databases by changing the number of vCores available or the compute tier (General Purpose, Business Critical, or Memory Optimized). Both services are affected by the scaling operation in the same way as Azure SQL, meaning you need to apply the same safeguard for an application, which uses them as
+data storage.
+Azure Database for PostgreSQL offers one additional feature that may be useful in scenarios where your database gets bigger and bigger and you find it difficult to manage its size. The feature is
+called
+autogrow
+and can be enabled for both new and existing servers. Conceptually, it automatically resizes your database when it reaches at least 90% of its maximum capacity (or the available space is less than 64 GB) for databases bigger than 1 TB and at 80% of its maximum capacity (or less than 64GB). You can read more about it
+here:
+https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/how-to-auto-grow-storage
+.
+Let’s now talk about the alternative options to Azure SQL, which are available as managed databases
+in Azure.
+Using alternatives to Azure SQL for a relational database
+As mentioned at
+the beginning
+of this chapter, Azure offers four different managed
+relational databases:
+Azure SQL
+Azure Database
+for PostgreSQL
+Azure Database
+for MySQL
+Azure Database
+for MariaDB
+If you’re not satisfied with those options, you could also install any relational database on a virtual machine hosted in Azure and use it with your application. The important thing here is that other databases than Azure SQL offer much fewer features in general (as Azure SQL is considered a first-class citizen in the Azure environment). Still, they’re a viable option if you don’t need SQL Server to be hosted for
+your application.
+Let’s briefly describe how those managed services behave in Azure and what unique value they bring when selected for
+your project.
+Using Azure Database for PostgreSQL
+In Azure, there
+are two options available for
+hosting a managed version of a
+PostgreSQL database:
+Single server
+Flexible server
+As the former option is on the retirement path, the only viable version of managed PostgreSQL is the one with more granular configuration and better management. Before we describe the differences between those two options, let’s discuss how the managed version of the described database differs from the self-hosted one. Generally speaking, when going for the self-hosted option, you could either host an Azure virtual machine and install PostgreSQL there or run it on-premises. Of course, you could even use another cloud provider, or a managed service offering provided by one of your vendors. Still, those are either a managed or self-hosted version. The benefit of using managed PostgreSQL is not managing the installation by yourself. In detail, the following things won’t be in
+your scope:
+OS patching
+and configuration
+High-availability setup
+Backup and
+restore configuration
+Monitoring
+Security hardening
+For many applications (especially at the early stage of development), focusing on solving actual business problems instead of pumping money into infrastructure operations is a preferred way to move forward. This doesn’t mean though that being in control of all infrastructure aspects is a bad thing. It heavily depends on the type of service, the maturity of IT operations in a company, and many other things. If you have a team that specializes in
+provisioning infrastructure and
+managing it, having a self-hosted version of PostgreSQL will make lots of sense. For smaller companies and companies that have just started with their product development (such as start-ups), the managed version will be something they will most likely go for.
+A detailed comparison can be found in the
+documentation:
+https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/overview-postgres-choose-server-options
+.
+The main differences between the single server and flexible server options are
+as follows:
+Single server supports versions 10 and 11 of PostgreSQL databases, while flexible server supports versions 11, 12, 13, 14, 15,
+and 16.
+Flexible server uses Linux as
+the OS.
+PgBouncer (connection pooler) can be used only with
+flexible server.
+Flexible server has many more connections available (5,000 versus 1,982 for
+single server).
+With flexible server, you can stop
+the database.
+For the full list of differences, visit the following documentation
+page:
+https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/concepts-compare-single-server-flexible-server
+.
+Conceptually, Azure Database for PostgreSQL doesn’t differ much from the Azure SQL Database with vCore purchasing type. Once the database is deployed, there’s very little to do when it comes to management and configuration. It depends on your application’s requirements
+whether
+using PostgreSQL (both self-hosted and managed) is the
+right choice.
+Let’s now describe Azure Database
+for MySQL.
+Using Azure Database for MySQL
+Azure Database
+for MySQL previously offered a similar
+situation as Azure Database for PostgreSQL – it had two options available (single server and flexible server). As the single server option was retired on September 16, 2024, now only the flexible server can be deployed for MySQL. The service itself is a standard MySQL database hosted using Azure infrastructure, which is managed by Microsoft. As of the time of writing, Azure supports the
+following versions:
+5.7.44
+8.0.40
+8.4.2
+(preview)
+9.1.0
+(preview)
+Note
+The interesting thing here is that Microsoft still supports MySQL 5.7 (as requested by some customers). That version will be retired in September 2025, and customers who won’t migrate to a newer version of MySQL by then will be in the paid extended
+support program.
+Azure Database for MySQL is structured in the same way as Azure Database for PostgreSQL. This means that when it comes to selecting a tier of the service, you have three
+options available:
+Burstable
+General Purpose
+Business Critical
+An interesting option is the Burstable tier. It is backed by Azure virtual machines with burstable storage, meaning it can support applications with irregular demand for resources. It’s a great choice if your application has higher demand within specific hours. If you seek predictable and stable performance, though, it’s better to choose the General Purpose tier over the
+Burstable one.
+Note
+The Burstable tier (for both MySQL and PostgreSQL) has some additional limitations when compared with the rest of the tiers. For instance, it’s impossible to deploy that tier using a multi-availability zone setup. Check the differences in the documentation before making the
+choice:
+https://learn.microsoft.com/en-us/azure/mysql/flexible-server/concepts-limitations
+.
+Let’s now see what is
+planned for Azure Database for
+MariaDB in 2025 and whether it’s still a viable choice for a managed database
+in Azure.
+Using Azure Database for MariaDB
+As of the time of
+writing, Azure Database for MariaDB is
+scheduled for retirement in September 2025. This means that beyond that date, this service will no longer be supported, and the existing instances will be deleted. In the end, if you keep your databases running under MariaDB, you will lose all the data as Microsoft has no plans to keep the instances running on customer workloads. The advised migration plan includes migrating from Azure Database for MariaDB to Azure Database for MySQL. There’s a dedicated guide explaining how to do
+that:
+https://techcommunity.microsoft.com/blog/adformysql/migrating-from-azure-database-for-mariadb-to-azure-database-for-mysql/3838455
+.
+Currently, it’s not even possible to create a new instance of a managed MariaDB database. Still, if you want, you can install a self-hosted version and support it on your own. This is a viable option if you don’t consider changing the database engine as the right solution for your workload. Having a self-hosted database also protects you from being forced to change
+a database because the provider
+isn’t interested in keeping it.
+Making a choice about an alternative database engine in Azure
+When discussing
+the alternatives
+to Azure SQL Database, we mentioned that the available database engines share similar infrastructure and configuration options. They allow you to select the same tiers (meaning the underlying infrastructure is mostly the same), they all have an in-built backup and restore mechanism, and they share the same monitoring options (Azure Monitor). This means that there are two main choices to make when selecting
+a database:
+Which engine you’d like to support
+Whether you want to install the database on your own and manage the infrastructure or would prefer a
+managed service
+The solution to the first point depends on your application. If you want to use SQL Server, you will select Azure SQL. If you want a database that doesn’t require a license, you will most likely select PostgreSQL or MySQL. The managed databases offered by Azure differ mostly when we compare deployment options, availability guarantees, and overall management. From an application perspective, there are rarely features that would impact the selection of the
+database itself.
+For the second point, the solution is a little bit more complicated. Once the database engine is selected, we need to verify whether the managed version will work with our application. As mentioned at the beginning, when we discussed Azure SQL, there may be certain features that aren’t available for the managed version of databases. What’s even more important, when the managed version is selected, you don’t have control over the update policy for the database, security fixes, and the availability of new features. This may be important for applications that heavily depend on database access in terms of optimizations – sometimes, to optimize a query, you need to perform a series of low-level operations, very often at the OS level. Those operations wouldn’t be available for the managed version of the databases.
+On the other hand, managing a database is a complex process that requires people with expertise in the field. Some activities required to make the process work include
+the following:
+Managing
+the storage
+Performing and
+storing backups
+Implementing a process to restore
+a database
+Monitoring (setting up metrics, storing logs, or setting
+up alerts)
+Updating the database and
+underlying software
+Scaling up
+and out
+Networking
+For production systems, those activities require somebody working full-time to manage all the operations. As databases are the critical component for almost all applications, you would need more than a single person (as proper support needs to be provided 24/7). One thing that would simplify those operations would be hosting a database using Azure virtual machines. This would cover at least some of the activities (such as OS updates, monitoring, authentication, and backup) and help in keeping the
+setup cloud-oriented.
+Let’s talk now
+about
+one of the most important features of any database – performing a backup and restoring a database
+from it.
+Backing up a database
+Backing up a database is one
+of the most important topics when working with data. Frequent and reliable backups secure an application in case of an outage or a disaster and allow for a smooth recovery from those unpleasant events. In this section, we will focus on understanding how backups are executed for managed databases in Azure and how you can use them for
+application development.
+Selecting a type of backup
+In general, we could divide
+backups into
+two categories:
+Automated backup
+: They are
+performed with no human interaction using a fixed schedule, which is configured upfront and adjusted whenever needed. Automated backups are the most common type of backup as they require little to no supervision.
+On-demand backup
+: They
+require an action performed by an administrator or a service, and most of the time are performed only when necessary (without a schedule). These are helpful if you need to save a state of a database between automated backups (for instance, you’re planning to deploy a set of breaking changes to the database schema and want to restore it to the latest possible state in case things go wrong).
+In the context of Azure databases, all three services (Azure SQL, Azure Database for PostgreSQL, and Azure Database for MySQL) support both types
+of backups.
+Here are some useful resources you could use to perform a manual backup for
+your databases:
+Azure
+SQL
+:
+https://learn.microsoft.com/en-us/azure/azure-sql/database/database-export?view=azuresql&source=docs
+Azure Database for
+PostgreSQL
+:
+https://learn.microsoft.com/en-us/azure/backup/backup-postgresql-cli#run-an-on-demand-backup
+Azure Database for
+MySQL
+:
+https://learn.microsoft.com/en-us/azure/mysql/flexible-server/concepts-backup-restore#on-demand-backup
+Note
+In Azure, the preferred way for backing up databases is using automated backups. While you can run backup operations manually, it may require setting up additional resources (such as Recovery Vault), which are not covered in
+this book.
+If you’re interested in how you could configure automated backups for databases, use the
+following links:
+Azure
+SQL
+:
+https://learn.microsoft.com/en-us/azure/azure-sql/database/automated-backups-overview?view=azuresql
+Azure Database for
+PostgreSQL
+:
+https://learn.microsoft.com/en-us/azure/backup/backup-azure-database-postgresql
+Azure Database for
+MySQL
+:
+https://learn.microsoft.com/en-us/azure/mysql/flexible-server/concepts-backup-restore#automated-backup
+Let’s talk now about
+backup retention and places where backups may
+be stored.
+Storing database backups and choosing a retention policy
+The most common
+place to store backups for Azure databases is
+Azure Storage. With the
+use of that service, you can not only store backup files but also leverage its capability to replicate data locally and geographically. As backups are a critical part of application data (as they allow you to perform a recovery operation), they should be highly available and reliable. When choosing how backup files are replicated, you may opt for the
+following approach:
+Use LRS/ZRS replication for
+non-production environments.
+Use GRS, RA-GRS, GZRS, or RA-GZRS for the
+production environment.
+The reason for having such a distinction is cost optimization and simplification of operations. If you have many databases used in non-production, you won’t need to worry about data synchronization between paired regions (Azure Storage geo-replication supports eventual consistency only, so data may not be fully replicated once the database goes down).
+Note
+The fact that Azure Storage replicates data to the paired region may be significant if you need to design your application against certain regulations, which could prevent you from storing data in some regions. Always double-check whether the paired region is compliant with your legal requirements. If it’s not, make sure you disable automated replication or select LRS replication mode
+for backups.
+The problem of eventual consistency for backups is something that needs to be taken care of when designing an application. To understand how critical it could be for a system, let’s
+define the
+Recovery Point Objective
+(
+RPO
+) metric. RPO, once
+defined for an application, defines how much data may be lost. The amount of data potentially lost is expressed as a time window (e.g., 10 minutes, 30 seconds, 1 hour, etc.). As Azure Storage doesn’t
+provide a guarantee of how much time it
+could take to replicate data, fulfilling the RPO with that service may be difficult. To solve that issue, you would need to implement the
+following pattern.
+The last synchronization time for Azure Storage can be found with the following Azure
+CLI command:
+az storage account show \ 
+--name <storage-account-name> \ 
+--resource-group <resource-group-name> \ 
+--expand geoReplicationStats \ 
+--query geoReplicationStats.lastSyncTime
+Once you have the value, you can calculate what the difference is between now and the timestamp provided by the command. This can be explained with the
+following formula:
+time_diff = (now –
+last_sync_time)
+If
+time_diff > RPO value
+, you could potentially lose more data than is allowed for your system. To avoid such a problem, you need to constantly monitor the
+lastSyncTime
+property and synchronize backups manually
+if needed.
+Note
+If you use automated backups with Azure SQL, the storage account used to store backups isn’t visible and you don’t have access to it, meaning you can’t control the consistency of the backups
+replicated geographically.
+The question now is what to do if the system is unable to meet the provided RPO. In that case, you may need to handle backups manually. It’s the only solution that gives you full control over the replication process and can be adjusted to specific
+RPO requirements.
+You can read more about disaster recovery scenarios with the
+following links:
+https://learn.microsoft.com/en-us/azure/azure-sql/database/disaster-recovery-guidance?view=azuresql
+https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/concepts-backup-restore
+https://learn.microsoft.com/en-us/azure/mysql/flexible-server/concepts-business-continuity
+There’s also one
+more
+topic related
+to backups, which is the
+retention policy
+. A retention policy is a configuration, which defines how long backups are supposed to be stored. It also implies what the potential cost of storing backups is as the longer backups are stored and the bigger they are, the more expensive they
+will be.
+In general, we could divide backups into two additional categories:
+Point in time
+Long term
+Point-in-time backups
+are mostly
+used for differential backups and backing up a transaction log of a database, though it’s also possible to use them for full backups.
+Long-term backups
+are
+meant for full database backups. The typical storage duration for those backups differs from several days for point-in-time backups to years for long-term ones. Both additional categories allow you to take a different approach to a database
+restore operation:
+With
+Point-in-Time Restore
+(
+PITR
+), you
+can return a database to any point in time in the past. This is useful if you made an accidental mistake during migration, somebody broke the state of the database on purpose, or you’d like to compare what has changed since a specific point
+in time.
+Long-Term Retention
+(
+LTR
+) backup
+s are mostly used to satisfy various legal requirements. In some cases, you need to keep backups of data for more than a year (sometimes up to 10 years). In that case, you need to create full backups, which are ideally stored in cold storage, so you can optimize
+storage costs.
+Note
+The Archive tier in Azure Storage is the ideal option for storing long-term backups of databases. The cost of storing data is low and it’s highly unlikely you will need to go back to any of those backups on
+short notice.
+Let’s talk now
+about
+how
+backups may be used for development purposes and how to build a proper structure to store and
+access them.
+Using backups in development scenarios
+Backups are
+not just important when it comes to restoring your application from a potential outage or a disaster. They are also useful when you want to set up a development environment. There are two possibilities that we
+could consider:
+Setting up a dedicated development instance of a database
+in Azure
+Exporting a database and using
+it locally
+Utilizing a dedicated instance of a database, which is hosted in Azure, is a simple and quick way to organize a proper development environment. Such a database doesn’t require maintenance and can be easily created and deleted if needed. What’s more, the process of creating them could be easily automated. The downside of that approach is the additional cost incurred by running instances. Some companies also gravitate toward an approach where a single database is provided for a team. If possible, try to avoid such a solution as it makes development difficult due to developers sharing the same database instance. In such a scenario, changes introduced by a single developer will impact the whole team. See
+Figure 15
+.3
+for
+a reference.
+Figure 15.3 – Two developers working on two separate change sets using the same database
+If you look at
+Figure 15
+.3
+, you will see that there are two developers who introduce two separate
+change sets to the instance of a database. If those change sets aren’t compatible (for instance, one adds a non-nullable column while the second one adds some data and is unaware of the new required column), one of the developers may need to wait for another one to complete their work. A similar situation may arise if change sets are compatible but not yet merged with the main branch shared by the team. In that case, until the changes are reviewed and merged, the team may struggle with having a stable development environment. The solution to that problem is to have a dedicated database for each developer (as presented in
+Figure 15
+.4
+).
+Figure 15.4 – A dedicated database per developer
+Another option, as mentioned at the beginning of this section, is exporting a database and sharing it with the development team. For instance, you could use the
+SqlPackage
+tool to export an Azure SQL database as a
+BACPAC file:
+SqlPackage /Action:Export /TargetFile:”<local-path>\<file-name>.bacpac” \ /SourceConnectionString:”Server=tcp:{yourserver}.database.windows.net,1433;Initial Catalog=<database-name>;Persist Security Info=False;User ID=<username>;Password=<password>;MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;”
+This tool can be
+used with any SQL database and allows you to provide a connection string, which is then used to connect with the database and export it. You can read more about it here:
+https://learn.microsoft.com/en-us/sql/tools/sqlpackage/sqlpackage?view=sql-server-ver16
+.
+Another useful resource for exporting a database is the following documentation page:
+https://learn.microsoft.com/en-us/azure/azure-sql/database/database-export?view=azuresql
+. It explains how to use other tools, such as the Azure portal, PowerShell, or SQL Server Management Studio, to perform the export operation. Similar instructions can be found for MySQL (
+https://learn.microsoft.com/en-us/azure/mysql/flexible-server/concepts-migrate-import-export
+) and
+PostgreSQL (
+https://learn.microsoft.com/en-us/azure/postgresql/migrate/how-to-migrate-using-dump-and-restore?tabs=psql
+).
+The challenge of using exported databases locally is ensuring their consistency and removing sensitive data. For consistency, you could use a migration tool for the database schema and data, so all the changes are part of the code base. Removing sensitive data is a little bit trickier, though. While the team could use non-production data for their work, sometimes following that approach makes things more complicated, as artificial data is unable to represent the connections created by the live data coming from the production environment. In that case, companies often implement a concept called
+anonymization
+. Its
+purpose is to strip the data of any personal information, to which developers aren’t supposed to have access. Unfortunately, Azure doesn’t provide any native tools that could be helpful to perform that operation. Sure, Azure SQL has a feature called dynamic data masking, but it’s meant to limit access to some columns when an
+unauthorized user queries a database table. You can read more about dynamic data masking
+here:
+https://learn.microsoft.com/en-us/azure/azure-sql/database/dynamic-data-masking-overview?view=azuresql
+.
+Let’s talk now about integration options when working with databases
+in Azure.
+Understanding integration options for databases in Azure
+Up to now, we’ve discussed
+how databases in Azure work and what their major features are. Besides the native features of those databases (provided by their engines), managed databases in Azure also offer a set of integration options that can be useful in a number of scenarios. Let’s describe some of them case
+by case.
+Using Microsoft Entra ID authentication
+Azure SQL allows
+you to use
+Microsoft Entra ID as the identity provider for users using your database. This is useful if you want to provide a unified user experience for human users and also allow service principals to use their credentials to connect with a database. To use that feature, you need to first set a database admin with one of the
+following commands:
+az sql server ad-admin create // For Azure SQL Database
+az sql mi ad-admin create // For Azure SQL Managed Instance
+Note that the preceding operations (setting up a database admin with Microsoft Entra ID) can also be performed with infrastructure as code, Azure PowerShell, the Azure portal, or even the REST API. Check out the following link for
+reference:
+https://learn.microsoft.com/en-us/azure/azure-sql/database/authentication-aad-configure
+.
+Besides a database admin, you can also use Microsoft Entra ID to set up database users. To do that, you need to run a SQL query against the database for which you’d like to have a
+user created:
+CREATE USER [<Microsoft_Entra_principal_name>] FROM EXTERNAL PROVIDER;
+When running that command, you can provide a Microsoft Entra ID group, service principal, or user. Once the command runs successfully, the selected principal will be able to connect with
+the database using
+their credentials.
+Note
+Remember that adding a user in Azure SQL Database may not be enough for a principal to connect with the database. You may need to ensure that the principal either uses a whitelisted IP address or calls the database from within your network, so the connection
+is accepted.
+Integration with Microsoft Entra ID is also available for Azure Database for PostgreSQL (
+https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/concepts-azure-ad-authentication
+) and Azure Database for
+MySQL (
+https://learn.microsoft.com/en-us/azure/mysql/flexible-server/concepts-azure-ad-authentication
+).
+Let’s talk now
+about
+integrating databases with Azure
+Data Factory.
+Using Azure Data Factory with Azure databases
+Azure Data Factory is an
+orchestration
+service that can be used to implement data pipelines that load, transform, and process data. It natively supports connectors for all three database services we’re discussing in
+this chapter:
+Azure
+SQL
+:
+https://learn.microsoft.com/en-us/azure/data-factory/connector-azure-sql-database?tabs=data-factory
+Azure Database for
+PostgreSQL
+:
+https://learn.microsoft.com/en-us/azure/data-factory/connector-azure-database-for-postgresql?tabs=data-factory
+Azure Database for
+MySQL
+:
+https://learn.microsoft.com/en-us/azure/data-factory/connector-azure-database-for-mysql?tabs=data-factory
+Thanks to those connectors, you can easily start configuring a process that will connect with your database, query
+it for data, and process it further. It’s an alternative to implementing data pipelines
+in code.
+Integrating Azure databases with Office 365
+To integrate Azure SQL
+with Office 365, there
+are a number of different options you could leverage. There are third-party tools such as CData Sync or Layer2 that allow you to connect with your database and integrate with platforms such as Office 365. While they are commercial products, they offer quite an extensive set of features, which you may find useful if you look for an out-of-the-box solution ready to work with
+your datasets.
+Note
+What’s interesting is that both CData Sync and Layer2 support not only SQL Server (Azure SQL) but also MySQL and PostgreSQL, meaning you can use them to process data from all three
+database engines.
+Of course, if you look for a native approach, Azure still has things to offer. You could use Azure Data Factory, which will connect with both your Azure database and Office 365. In that case, you could use Microsoft 365 connectors (
+https://learn.microsoft.com/en-us/azure/data-factory/connector-office-365?tabs=data-factory
+) to get the data from Office 365 and copy it into a database. However, for now, there’s one quite significant limitation – the connector can only ingest data into Azure Blob Storage or Azure Data Lake Storage. If you want to ingest it into a database such as Azure SQL or similar, you need to chain the activities (steps in your data pipeline that process the data), so the source JSON data will be
+transformed into
+something that can be integrated with a database. Take a look at the connector documentation page for
+more information.
+Setting up firewall settings for Azure databases
+The important
+thing about databases in Azure is that they are private by default. This means that in order to allow other services to connect with them, you need to configure the firewall in a way that enables connectivity. Depending on whether your database has a public endpoint or not, the procedure to whitelist connectivity will be
+slightly different.
+IP whitelisting
+IP whitelisting is the
+simplest method of
+securing network access to your database. It’s basically a simple firewall that validates the IP address of the incoming requests and validates it against the table of allowed IP addresses. This method works if you have a database that is available publicly. If you want to allow a service to connect with it, you need to obtain its IP address and add it to the list of accepted IP addresses. This can be done using the Azure portal, Azure PowerShell, the Azure CLI, or even Azure Bicep and Terraform. For instance, here’s how you can whitelist an IP address for Azure Database
+for PostgreSQL:
+az postgres flexible-server firewall-rule create \
+--resource-group <resource-group-name> \
+--server-name <server-name> \
+--name <rule-name> \
+--start-ip-address <start-ipP \
+--end-ip-address <end-ip>
+In the preceding command, you need to provide a name for a rule (a custom value that describes what a rule is for) and a range of IP addresses. If you want to whitelist only a single IP address, you need to provide the same value for both the start IP address and the end IP address.
+You can find more information about the feature with the
+following links:
+https://learn.microsoft.com/en-us/azure/azure-sql/database/firewall-configure?view=azuresql
+https://learn.microsoft.com/en-us/azure/postgresql/flexible-server/concepts-firewall-rules
+https://learn.microsoft.com/en-us/azure/mysql/flexible-server/concepts-networking-public
+There’s also an
+option to whitelist connections
+coming from within the Azure environment without the need to provide a list of IP addresses. Let’s check
+it out.
+Allowing connection from within the Azure environment
+Some
+services (including Azure databases) have a special feature that allows you to enable connectivity from within the Azure environment without the need to define ranges of IP addresses. This feature has lots of drawbacks, including
+the following:
+Enabling connections from other subscriptions, even the ones you
+don’t manage
+Lack of proper control over whitelisted ranges of
+IP addresses
+Obscuring issues with network configuration, which leads to providing much broader network access
+than needed
+It has its use cases. Sometimes it may be impossible to integrate Azure services without enabling that feature as you don’t know the actual IP ranges or they’re so dynamic, which makes it impossible to manage them in a live system. You can read more about this particular functionality
+here:
+https://learn.microsoft.com/en-us/azure/azure-sql/database/network-access-controls-overview?view=azuresql#allow-azure-services
+.
+Securing Azure databases with Azure private endpoints
+An Azure private
+endpoint (with the Azure Private Link service) is a dedicated service to make your
+PaaS service, such as an Azure database, available only via its private IP address. With Azure private endpoints, you may disable the public endpoint of your database, so the only way to connect with it will be from within a virtual network. Take a look at
+Figure 15
+.5
+for
+a reference.
+Figure 15.5 – Connection diagram presenting communication with an Azure database with Azure private endpoint enabled
+In
+Figure 15
+.5
+, you can see how a connection is processed when Azure private endpoint is enabled. The process can be explained
+as follows:
+A client uses an FQDN to connect with a
+database server.
+To connect using an FQDN, a client needs to communicate with the DNS server, which will respond with a proper IP address to use
+for communication.
+As the FQDN used by the client is the public one, the DNS server translates the original query into another one, which is mapped to a private FQDN of
+the server.
+In response, the DNS server returns a private IP address to
+the client.
+The client uses the private IP address to connect to a database; however, the private IP address isn’t assigned to the server itself, but rather to an Azure private endpoint, which acts as a network interface for
+the server.
+With Azure private endpoints, you can make your database truly private. Nobody outside of a virtual network will be able to connect (which means that you also need to be inside the network to connect). Using private databases may pose some challenges during development. In that case, it’s worth considering setting up a point-to-site VPN or using
+dedicated
+instances in the cloud, which don’t have strict requirements for
+network isolation.
+Let’s now summarize some of our discussions from this chapter by talking about use cases for
+Azure databases.
+Learning about use cases
+Databases offered by
+Azure have one single purpose – they allow you to set up a database service without worrying about the whole infrastructure. Sure, you could leverage the IaaS-based option for Azure SQL with a virtual machine and SQL Server installed there, but the rest of the services (Azure SQL Database, Azure SQL Managed Instance, Azure Database for PostgreSQL, and Azure Database for MySQL) are designed toward typical benefits offered by PaaS services. Consider using an Azure database in the
+following cases:
+You don’t have the expertise needed to host and maintain your own
+database server.
+You need to prototype an application and don’t want to spend money and time
+on infrastructure.
+Your application doesn’t need a database of all the types and you could consider using the serverless tier of Azure SQL Database to
+optimize costs.
+Your system is cloud-based, and you want to avoid transferring data
+from/to on-premises.
+You want to use Microsoft Entra ID as the identity provider for
+your database.
+Azure-based databases are also a great option when starting a new project that will be hosted in the cloud. To migrate older applications to the cloud, viable options include Azure SQL Managed Instance or SQL Server on Azure Virtual Machines – consider them in lift-and-shift
+scenarios to avoid expensive
+database migration.
+That’s all for this chapter! Let’s summarize what we have learned and see what is going to be discussed in the
+next chapter.
+Summary
+In this chapter, we focused on managed databases offered by Azure – Azure SQL, Azure Database for PostgreSQL, and Azure Database for MySQL. We talked about things those services have in common (simplified deployment model, automated maintenance, and native replication capabilities), different purchasing models (DTU-based and vCore-based), and integration options, including integration with Microsoft Entra ID for authentication. We also mentioned how Azure SQL can support lift-and-shift scenarios using managed instances or Azure
+virtual machines.
+The knowledge from this chapter should help you better understand how to integrate your application with the selected Azure database. Remember that some applications may find Azure databases incompatible after migration – it’s important to make the initial assessment and validation before you start to move your workloads to the cloud. Note that lots of topics related to Azure databases are focused on operations and administration, hence they have not been included in
+this book.
+In the next chapter, we will discuss how to implement monitoring for an application hosted in Azure using Azure Monitor and Azure
+Application Insights.
+Join the CloudPro Newsletter with 44000+ Subscribers
+Want to know what’s happening in cloud computing, DevOps, IT administration, networking, and more? Scan the QR code to subscribe to
+CloudPro
+, our weekly newsletter for 44,000+ tech professionals who want to stay informed and ahead of
+the curve.
+https://packt.link/cloudpro

@@ -1,0 +1,3886 @@
+ how Spring Cloud has evolved from being rather Netflix OSS-centric to having a much larger scope as of today, used together with tools including Resilience4j and Micrometer Tracing. We also introduced how components from the latest release of Spring Cloud 2022 can be used to implement some of the design patterns we described in
+Chapter 1
+,
+Introduction to Microservices
+, in the
+Design patterns for microservices
+section. These design patterns are required to make a landscape of cooperating microservices production ready.
+Head over to the next chapter to see how we can implement service discovery using Netflix Eureka and Spring Cloud LoadBalancer!
+Questions
+What is the purpose of Netflix Eureka?
+What are the main features of Spring Cloud Gateway?
+What backends are supported by Spring Cloud Config?
+What are the capabilities that Resilience4j provides?
+What are the concepts of trace trees and spans used for in distributed tracing, and what is the paper called that originally defined them?
+
+9
+Adding Service Discovery Using Netflix Eureka
+In this chapter, we will learn how to use Netflix Eureka as a discovery service for microservices based on Spring Boot. To allow our microservices to communicate with Netflix Eureka, we will use the Spring Cloud module for Netflix Eureka clients. Before we delve into the details, we will elaborate on why a discovery service is needed and why a DNS server isn’t sufficient.
+The following topics will be covered in this chapter:
+Introduction to service discovery
+Setting up a Netflix Eureka server
+Connecting microservices to a Netflix Eureka server
+Setting up the configuration for development use
+Trying out Netflix Eureka as a discovery service
+Technical requirements
+For instructions on how to install tools used in this book and how to access the source code for this book, see:
+Chapter 21
+,
+Installation Instructions for macOS
+Chapter 22
+,
+Installation Instructions for Microsoft Windows with WSL 2 and Ubuntu
+The code examples in this chapter all come from the source code in
+$BOOK_HOME/Chapter09
+.
+If you want to view the changes applied to the source code in this chapter, that is, see what it took to add Netflix Eureka as a discovery service to the microservices landscape, you can compare it with the source code for
+Chapter 7
+,
+Developing Reactive Microservices
+. You can use your favorite
+diff
+tool and compare the two folders, that is,
+$BOOK_HOME/Chapter07
+and
+$BOOK_HOME/Chapter09
+.
+Introducing service discovery
+Service discovery
+is probably the most important
+support function required to make a landscape of cooperating microservices production-ready. Netflix Eureka was the first discovery server supported by Spring Cloud.
+We are strictly speaking about a
+service
+for
+service discovery
+, but instead of referring to it as a
+service discovery service
+, it will simply be referred to as a
+discovery service
+. When referring to an actual implementation of
+service discovery
+, like Netflix Eureka, the term
+discovery server
+will be used.
+We will see how easy it is to register microservices with Netflix Eureka when using Spring Cloud. We will also learn how a client can use Spring Cloud LoadBalancer to send HTTP requests to one of the instances registered in Netflix Eureka. Finally, we will try scaling the microservices up and down, together with running some disruptive tests to see how Netflix Eureka can handle different types of fault scenarios.
+Before we jump into the implementation details, we will look at the following topics:
+The problem with DNS-based service discovery
+Challenges with service discovery
+Service discovery with Netflix Eureka in Spring Cloud
+The problem with DNS-based service discovery
+Why can’t
+we simply start
+new instances of a microservice and rely on round-robin DNS?
+The idea behind round-robin DNS is that each instance of a microservice registers its IP address under the same name in a DNS server. When a client asks for IP addresses for the DNS name, the DNS server will return a list of IP addresses for the registered instances. The client can use this list of IP addresses to send requests to the microservice instances in a round-robin fashion, using the IP addresses one after another.
+Let’s try it out and see what happens! Follow these steps:
+Assuming that you have followed the instructions from
+Chapter 7
+,
+Developing Reactive Microservices
+, start the system landscape and insert some test data with the following command:
+cd $BOOK_HOME/Chapter07
+./test-em-all.bash start
+Scale up the
+review
+microservice to two instances:
+docker-compose up -d --scale review=2
+Ask the composite product service for the IP addresses it finds for the
+review
+microservice:
+docker-compose exec product-composite getent hosts review
+Expect an answer like the following:
+Figure 9.1: Review microservice IP addresses
+Great, the composite product service sees two IP addresses – in my case,
+192.168.96.9
+and
+192.168.96.8
+– one for each instance of the
+review
+microservice!
+If you want
+to, you
+can verify that these are the correct IP addresses by using the following commands. The commands ask each instance of the
+review
+microservice for its IP address:
+docker-compose exec --index=1 review cat /etc/hosts
+docker-compose exec --index=2 review cat /etc/hosts
+The last line in the output from each command should contain one of the IP addresses, as shown in the preceding code. For example:
+Figure 9.2: IP address output
+Now, let’s try out a couple of calls to the
+product-composite
+service and see
+whether it
+uses both instances of the
+review
+microservice:
+curl localhost:8080/product-composite/1 -s | jq -r .serviceAddresses.rev
+Unfortunately, we will only get responses from one of the microservice instances, as in this example:
+Figure 9.3: Response from one review instance only
+That was disappointing!
+Okay, so what is going on here?
+A DNS client asks a DNS server to resolve a DNS name and receives a list of IP addresses. Next, the DNS client tries out the received IP addresses one by one until it finds one that works, in most cases the first one in the list. A DNS client typically holds on to a working IP address; it does not apply a round-robin approach per request. Added to this, neither a typical DNS server implementation nor the DNS protocol itself is well suited for handling volatile microservice instances that come and go all the time. Because of this, even though DNS-based round-robin is appealing in theory, it is not very practical to use for the service discovery of microservice instances.
+Before we
+move on
+and learn how to handle service discovery in a better way, let’s shut down the system landscape:
+docker-compose down
+Challenges with service discovery
+So, we need
+something a bit more
+powerful than a plain DNS to keep track of available microservice instances!
+We must take the following into consideration when we’re keeping track of many small moving parts, that is, microservice instances:
+New instances can start up at any point in time.
+Existing instances can stop responding and eventually crash at any point in time.
+Some of the failing instances might be okay after a while and should start to receive traffic again, while others will not and should be removed from the service registry.
+Some microservice instances might take some time to start up; that is, just because they can receive HTTP requests doesn’t mean that traffic should be routed to them.
+Unintended network partitioning and other network-related errors can occur at any time.
+Building a robust
+and resilient discovery server
+is not an easy task, to say the least. Let’s see how we can use Netflix Eureka to handle these challenges!
+Service discovery with Netflix Eureka in Spring Cloud
+Netflix Eureka
+implements
+client-side service discovery, meaning that the clients run software that talks to the discovery server, Netflix Eureka, to get information about the available microservice instances.
+This is illustrated in the following diagram:
+Figure 9.4: Discovery server diagram
+The process is as follows:
+Whenever a microservice instance starts up – for example, the
+Review
+service – it registers itself to one of the Eureka servers.
+On a regular basis, each microservice instance sends a heartbeat message to the Eureka server, telling it that the microservice instance is okay and is ready to receive requests.
+Clients – for example, the
+Product Composite
+service – use a client library that regularly asks the Eureka service for information about available services.
+When the client needs to send a request to another microservice, it already has a list of available instances in its client library and can pick one of them without asking the discovery server. Typically, available instances are chosen in a round-robin fashion; that is, they are called one after another before the first one is called once more.
+In
+Chapter 17
+,
+Implementing Kubernetes Features to Simplify the System Landscape
+, we will look at an alternative approach to providing a discovery service using
+the
+server-side service
+concept in Kubernetes.
+Spring Cloud comes
+with an abstraction
+of how to communicate with a discovery service such as Netflix Eureka and provides an interface called
+DiscoveryClient
+. This can be used to interact with a discovery service to get information regarding available services and instances. Implementations of the
+DiscoveryClient
+interface are also capable of automatically registering a Spring Boot application with the discovery server.
+Spring Boot can find implementations of the
+DiscoveryClient
+interface automatically during startup, so we only need to bring in a dependency on the corresponding implementation to connect to a discovery server. In the case of Netflix Eureka, the dependency that’s used by our microservices is
+spring-cloud-starter-netflix-eureka-client
+.
+Spring Cloud also has
+DiscoveryClient
+implementations that support the use of either Apache ZooKeeper or HashiCorp Consul as a discovery server.
+Spring Cloud also comes with an abstraction – the
+LoadBalancerClient
+interface – for clients that want to make requests through a load balancer to registered instances in the discovery service. The standard reactive HTTP client,
+WebClient
+, can be configured to use the
+LoadBalancerClient
+implementation. By adding the
+@LoadBalanced
+annotation to a
+@Bean
+declaration that returns a
+WebClient.Builder
+object, a
+LoadBalancerClient
+implementation will be injected into the
+Builder
+instance as an
+ExchangeFilterFunction
+. Later in this chapter, in the
+Connecting microservices to a Netflix Eureka server
+section, we will look at some source code examples of how this can be used.
+In summary, Spring Cloud makes it very easy to use Netflix Eureka as a discovery service. With this
+introduction
+to service discovery and its challenges, as well as how Netflix Eureka can be used together with Spring Cloud, we are ready to learn how to set up a Netflix Eureka server.
+Setting up a Netflix Eureka server
+In this section, we will
+learn how to set up a Netflix Eureka server for service discovery. Setting up a Netflix Eureka server using Spring Cloud is really easy – just follow these steps:
+Create a Spring Boot project using Spring Initializr, as described in
+Chapter 3
+,
+Creating a Set of Cooperating Microservices
+, in the
+Using Spring Initializr to generate skeleton code
+section.
+Add a dependency to
+spring-cloud-starter-netflix-eureka-server
+.
+Add the
+@EnableEurekaServer
+annotation to the application class.
+Add a Dockerfile, similar to the Dockerfiles that are used for our microservices, with the exception that we export the default Eureka port,
+8761
+, instead of the default port for our microservices,
+8080
+.
+Add the Eureka server to our three Docker Compose files, that is,
+docker-compose.yml
+,
+docker-compose-partitions.yml
+, and
+docker-compose-kafka.yml
+, like this:
+eureka:
+build:
+spring-cloud/eureka-server
+mem_limit:
+512m
+ports:
+-
+"8761:8761"
+Finally, add some configuration. Please see the
+Setting up the configuration for development use
+section in this chapter, where we will go through the configuration for both the Eureka server and our microservices.
+That’s all it takes!
+The application class contains a workaround for a bug described in
+https://github.com/spring-cloud/spring-cloud-netflix/issues/4145
+. It affects the Spring Cloud version, 2022.0.1, used in this book. See the class
+CustomErrorController
+in
+EurekaServerApplication.java
+.
+You can find the
+source code for the Eureka server in the
+$BOOK_HOME/Chapter09/spring-cloud/eureka-server
+folder.
+Now that we have set up a Netflix Eureka server for service discovery, we are ready to learn how to connect microservices to it.
+Connecting microservices to a Netflix Eureka server
+In this section, we
+will learn how to
+connect microservice instances to a Netflix Eureka server. We will learn both how microservice instances register themselves to the Eureka server during their startup and how clients can use the Eureka server to find the microservice instances they want to call.
+To be able to register a microservice instance in the Eureka server, we need to do the following:
+Add a dependency to
+spring-cloud-starter-netflix-eureka-client
+in the build file,
+build.gradle
+:
+Implementation
+'org.springframework.cloud:spring-cloud-starter-netflix-eureka-client'
+When running tests on a single microservice, we don’t want to depend on having the Eureka server up and running. Therefore, we will disable the use of Netflix Eureka in all Spring Boot tests, that is, JUnit tests annotated with
+@SpringBootTest
+. This can be done by adding the
+eureka.client.enabled
+property and setting it to
+false
+in the annotation, like so:
+@SpringBootTest(webEnvironment=RANDOM_PORT, properties = {"eureka.client.enabled=false"})
+Finally, add some configuration. Please go to the
+Setting up the configuration for development use
+section, where we will go through the configuration for both the Eureka server and our microservices.
+There is one property in the configuration that is extra important:
+spring.application.name
+. It is used to give each microservice a virtual hostname, a name used by the Eureka service to identify each microservice. Eureka clients will use this
+virtual
+hostname in the URLs that are used to make HTTP calls to the microservice, as we will see as we proceed.
+To be able to look up available microservice instances through the Eureka server in the
+product-composite
+microservice, we also need to do the following:
+Add a Spring bean in the main application class,
+ProductCompositeServiceApplication
+, which creates a load balancer-aware
+WebClient
+builder:
+@Bean
+@LoadBalanced
+public
+WebClient.Builder
+loadBalancedWebClientBuilder
+()
+{
+return
+WebClient.builder();
+}
+For more information on how to use a
+WebClient
+instance as a load balancer client, see
+https://docs.spring.io/spring-cloud-commons/docs/current/reference/html/#webclinet-loadbalancer-client
+.
+The
+WebClient
+-builder bean can be used by the integration class,
+ProductCompositeIntegration
+, by injecting it into the constructor:
+private
+WebClient webClient;
+@Autowired
+public
+ProductCompositeIntegration
+(
+WebClient.Builder webClientBuilder,
+...
+)
+{
+this
+.webClient = webClientBuilder.build();
+  ...
+}
+The constructor uses the injected builder to create the
+webClient
+.
+Once a
+WebClient
+is built, it is immutable. This means that it can be reused by concurrent requests without risking them stepping on each other’s toes.
+We can now
+get
+rid of our hardcoded configuration of available microservices in
+application.yml
+. It looks like this:
+app:
+product-service:
+host:
+localhost
+port:
+7001
+recommendation-service:
+host:
+localhost
+port:
+7002
+review-service:
+host:
+localhost
+port:
+7003
+The corresponding code in the integration class,
+ProductCompositeIntegration
+, that handled the hardcoded configuration is simplified and replaced by a declaration of the base URLs to the APIs of the core microservices. This is shown in the following code:
+private
+static
+final
+String
+PRODUCT_SERVICE_URL
+=
+"http://product"
+;
+private
+static
+final
+String
+RECOMMENDATION_SERVICE_URL
+=
+"http://recommendation"
+;
+private
+static
+final
+String
+REVIEW_SERVICE_URL
+=
+"http://review"
+;
+The hostnames in the preceding URLs are not actual DNS names. Instead, they are the virtual hostnames that are used by the microservices when they register themselves to the Eureka server, in other words, the values of the
+spring.application.name
+property.
+Now that we’ve
+seen
+how to connect microservice instances to a Netflix Eureka server, we can move on and learn how to configure the Eureka server and the microservice instances that connect to it.
+Setting up the configuration for development use
+Now, it’s
+time for the trickiest part of setting up Netflix Eureka as a discovery service: setting up a working configuration for both the Eureka server and its clients, our microservice instances.
+Netflix Eureka is a highly configurable discovery server that can be set up for a number of different use cases, and it provides robust, resilient, and fault-tolerant runtime characteristics. One downside of this flexibility and robustness is that it has an almost overwhelming number of configuration options.
+Fortunately, Netflix Eureka comes with good default values for most of the configurable parameters – at least when it comes to using them in a production environment.
+When it comes to using Netflix Eureka during development, the default values cause long startup times. For example, it can take a long time for a client to make an initial successful call to a microservice instance that is registered in the Eureka server.
+Up to two minutes of waiting time can be experienced when using the default configuration values. This waiting time is added to the time it takes for the Eureka service and the microservices to start up. The reason for this waiting time is that the involved processes need to synchronize registration information with each other. The microservice instances need to register with the Eureka server, and the client needs to gather information from the Eureka server. This communication is mainly based on heartbeats, which happen every 30 seconds by default. A couple of caches are also involved, which slows down the propagation of updates.
+We will use a configuration that minimizes this waiting time, which is useful during development. In production environments, the default values should be used as a
+starting point!
+We will only use one Netflix Eureka server instance, which is okay in a development environment. In a production environment, you should always use two or more instances to ensure high availability for the Netflix Eureka server.
+Let’s start to learn what types of configuration parameters we need to know about.
+Eureka configuration parameters
+The configuration
+parameters for Eureka are divided into three groups:
+Parameters for the Eureka server, prefixed with
+eureka.server
+.
+Parameters for Eureka clients, prefixed with
+eureka.client
+. This is for clients who want to communicate with a Eureka server.
+Parameters for Eureka instances, prefixed with
+eureka.instance
+. This is for the microservice instances that want to register themselves in the Eureka server.
+Some of the available parameters are described in the Spring Cloud Netflix documentation:
+https://docs.spring.io/spring-cloud-netflix/docs/current/reference/html/
+.
+For an extensive list of available parameters, I recommend reading the source code:
+For Eureka server parameters, look at the
+org.springframework.cloud.netflix.eureka.server.EurekaServerConfigBean
+class for default values and the
+com.netflix.eureka.EurekaServerConfig
+interface for the relevant documentation.
+For Eureka client parameters, look at the
+org.springframework.cloud.netflix.eureka.EurekaClientConfigBean
+class for the default values and documentation.
+For Eureka instance parameters, look at the
+org.springframework.cloud.netflix.eureka.EurekaInstanceConfigBean
+class for default values and documentation.
+Let’s start to
+learn about configuration parameters for the Eureka server.
+Configuring the Eureka server
+To configure
+the Eureka server for use in a development environment, the following configuration can be used:
+server:
+port:
+8761
+eureka:
+instance:
+hostname:
+localhost
+client:
+registerWithEureka:
+false
+fetchRegistry:
+false
+serviceUrl:
+defaultZone:
+http://${eureka.instance.hostname}:${server.port}/eureka/
+server:
+waitTimeInMsWhenSyncEmpty:
+0
+response-cache-update-interval-ms:
+5000
+The first part of the configuration, for a Eureka
+instance
+and
+client
+, is a standard configuration for a standalone Eureka server. For details, see the Spring Cloud documentation, which we referred to previously. The last two parameters used for the Eureka server,
+waitTimeInMsWhenSyncEmpty
+and
+response-cache-update-interval-ms
+, are used to minimize the startup time.
+With the Eureka server configured, we are ready to see how clients to the Eureka server, that is, the microservice instances, can be configured.
+Configuring clients to the Eureka server
+To be able
+to connect to the Eureka server, the microservices have the following configuration:
+eureka:
+client:
+serviceUrl:
+defaultZone:
+http://localhost:8761/eureka/
+initialInstanceInfoReplicationIntervalSeconds:
+5
+registryFetchIntervalSeconds:
+5
+instance:
+leaseRenewalIntervalInSeconds:
+5
+leaseExpirationDurationInSeconds:
+5
+---
+spring.config.activate.on-profile:
+docker
+eureka.client.serviceUrl.defaultZone:
+http://eureka:8761/eureka/
+The
+eureka.client.serviceUrl.defaultZone
+parameter is used to find the Eureka server, using the hostname
+localhost
+when running without Docker and the hostname
+eureka
+when running as containers in Docker. The other parameters are used to minimize the startup time and the time it takes to deregister a microservice instance that is stopped.
+Now, we have everything in place that’s required to actually try out the discovery service using the Netflix Eureka server together with our microservices.
+Trying out the discovery service
+With all of the
+details in place, we are ready to try out Netflix Eureka:
+First, build the Docker images with the following commands:
+cd $BOOK_HOME/Chapter09
+./gradlew build && docker-compose build
+Next, start the system landscape and run the usual tests with the following command:
+./test-em-all.bash start
+Expect an output similar to what we have seen in previous chapters:
+Figure 9.5: Successful test output
+With the system
+landscape up and running, we can start by testing how to scale up the number of instances for one of the microservices.
+Scaling up
+Run the
+following commands to try out scaling up a service:
+Launch two extra
+review
+microservice instances:
+docker-compose up -d --scale review=3
+With the preceding command, we ask Docker Compose to run three instances of the
+review
+service. Since one instance is already running, two new instances will be started up.
+Once the new instances are up and running, browse to
+http://localhost:8761/
+and expect something like the following:
+Figure 9.6: Viewing instances registered with Eureka
+Verify that
+you can see three
+review
+instances in the Netflix Eureka web UI, as shown in the preceding screenshot.
+One way of knowing when the new instances are up and running is to run this command:
+docker-compose logs review | grep Started
+Expect output that looks as follows:
+Figure 9.7: New review instances
+We can also use a REST API that the Eureka service exposes. To get a list of instance IDs, we can issue a
+curl
+command, like this:
+curl -H "accept:application/json" localhost:8761/eureka/apps -s | jq -r .applications.application[].instance[].instanceId
+Expect a
+response that looks similar to the following:
+Figure 9.8: List of microservice instance IDs
+If you look into the test script,
+test-em-all.bash
+, you will find new tests that verify that we can reach Eureka’s REST API and that it reports four instances:
+# Verify access to Eureka and that all four microservices are # registered in Eureka
+assertCurl 200
+"curl -H "
+accept:application/json
+"
+$HOST
+:8761/eureka/apps -s"
+assertEqual 4 $(
+echo
+$RESPONSE
+| jq
+".applications.application | length"
+)
+Now that we have all of the instances up and running, let’s try out the client-side load
+balancer by making some requests and focusing on the address of the
+review
+service in the responses, as follows:
+curl localhost:8080/product-composite/1 -s | jq -r .serviceAddresses.rev
+Expect responses similar to the following:
+Figure 9.9: Review service addresses
+Note that the address of the
+review
+service changes in each response; the load balancer uses round-robin logic to call the available
+review
+instances, one at a time!
+We can also take a look into the
+review
+instance’s log records with the following command:
+docker-compose logs review | grep "Response size"
+You will see output that looks similar to the following:
+Figure 9.10: Review instance log records
+In the preceding
+output, we can see how the three review microservice instances,
+review_2
+,
+review_3
+, and
+review_1
+, in turn have responded to the requests.
+We can also try to scale down the instances, which we will do next.
+Scaling down
+Let’s also see
+what happens if we lose one instance of the
+review
+microservice. Run the following commands:
+We can simulate one instance stopping unexpectedly by running the following command:
+docker-compose up -d --scale review=2
+After the shutdown of the
+review
+instance, there is a short time period during which calls to the API might fail. This is caused by the time it takes for information regarding the lost instance to propagate to the client, the
+product-composite
+service. During this time frame, the client-side load balancer might choose the instance that no longer exists. To prevent this from occurring, resilience mechanisms such as timeouts and retries can be used. In
+Chapter 13
+,
+Improving Resilience Using Resilience4j
+, we will see how this can be applied. For now, let’s specify a timeout on our
+curl
+command, using the
+-m 2
+option to specify that we will wait no longer than two seconds for a response:
+curl localhost:8080/product-composite/1 -m 2
+If a timeout occurs, that is, the client-side load balancer tries to call an instance that
+no longer exists, the following response is expected from
+curl
+:
+Figure 9.11: Response from curl if a timeout occurs
+Besides that, we should expect normal responses from the two remaining instances; that is, the
+serviceAddresses.rev
+field should contain the addresses of the two instances, as in the following:
+Figure 9.12: Normal responses from remaining instances
+In the preceding sample output, we can see that two different container names and IP addresses are reported. This means that the requests have been served by the two remaining microservice instances.
+After trying out the scaling down of microservice instances, we can try out something that
+is a bit more disruptive: stopping the Eureka server and seeing what happens when the discovery server is temporarily unavailable.
+Disruptive tests with the Eureka server
+Let’s bring
+some disorder to
+our Eureka server and see how the system landscape manages it!
+To start with, what happens if we crash the Eureka server?
+As long as clients have read the information regarding available microservice instances from the Eureka server before it is stopped, the clients will be fine since they cache the information locally. However, new instances will not be made available to clients, and they will not be notified if any running instances are terminated. So, calls to instances that are no longer running will cause failures.
+Let’s try this out!
+Stopping the Eureka server
+To simulate
+a Eureka server crash, follow these steps:
+First, stop the Eureka server and keep the two
+review
+instances up and running:
+docker-compose up -d --scale review=2 --scale eureka=0
+Try a couple of calls to the API and extract the service address of the
+review
+service:
+curl localhost:8080/product-composite/1 -s | jq -r .serviceAddresses.rev
+The response will – just like before we stopped the Eureka server – contain the addresses of the two
+review
+instances, like so:
+Figure 9.13: Response with two review instance addresses
+This shows that the client can make calls to existing instances, even though the Eureka server is no longer running.
+Starting up an extra instance of the product service
+As a final test of
+the effects of a crashed Eureka server, let’s see what happens if we start up a new instance of the
+product
+microservice. Perform the following steps:
+Let’s try starting a new instance of the
+product
+service:
+docker-compose up -d --scale review=2 --scale eureka=0 --scale product=2
+Call the API a couple of times and extract the address of the
+product
+service with the following command:
+curl localhost:8080/product-composite/1 -s | jq -r .serviceAddresses.pro
+Since no Eureka server is running, the client will not be notified of the new
+product
+instance, and so all calls will go to the first instance, as in the following example:
+Figure 9.14: Address of the first product instance only
+We have seen some of the most important aspects of not having a Netflix Eureka server up and running. Let’s conclude the section on disruptive tests by starting up the Netflix Eureka server again and seeing how the system landscape handles self-healing, that is, resilience.
+Starting up the Eureka server again
+In this section, we will
+wrap up the disruptive tests by starting up the Eureka server again. We will also verify that the system landscape self-heals, which means the new instance of the
+product
+microservice gets registered with the Netflix Eureka server and the client gets updated by the Eureka server. Perform the following steps:
+Start the Eureka server with the following command:
+docker-compose up -d --scale review=1 --scale eureka=1 --scale product=2
+Make the following call a couple of times to extract the addresses of the product and the
+review
+service:
+curl localhost:8080/product-composite/1 -s | jq -r .serviceAddresses
+Verify that the following happens:
+All calls go to the remaining
+review
+instance, demonstrating that the client has detected that the second
+review
+instance is gone.
+Calls to the
+product
+service are load-balanced over the two
+product
+instances, demonstrating the client has detected that there are two
+product
+instances available.
+The response
+should contain the same address for the
+review
+instance and two different addresses for the two
+product
+instances, as shown in the following two examples:
+Figure 9.15: Product and review addresses
+This is the second response:
+Figure 9.16: Product and review addresses
+The IP addresses
+192.168.128.4
+and
+192.168.128.10
+belong to the two
+product
+instances.
+192.168.128.8
+is the IP address of the single remaining
+review
+instance.
+To summarize, the Eureka server provides a very robust and resilient implementation of a discovery service. If even higher availability is desired, multiple Eureka servers can be launched and configured to communicate with each other. Details on how to set up multiple Eureka servers can be found in the Spring Cloud documentation:
+https://docs.spring.io/spring-cloud-netflix/docs/current/reference/html/#spring-cloud-eureka-server-peer-awareness
+.
+Finally, shut down the system landscape with this command:
+docker-compose down
+This completes
+the tests of the discovery server, Netflix Eureka, where we have learned how to scale up and scale down microservice instances and what happens if a Netflix Eureka server crashes and later on comes back online.
+Summary
+In this chapter, we learned how to use Netflix Eureka for service discovery. First, we looked into the shortcomings of a simple DNS-based service discovery solution and the challenges that a robust and resilient service discovery solution must be able to handle.
+Netflix Eureka is a very capable service discovery solution that provides robust, resilient, and fault-tolerant runtime characteristics. However, it can be challenging to configure correctly, especially for a smooth developer experience. With Spring Cloud, it becomes easy to set up a Netflix Eureka server and adapt Spring Boot-based microservices, both so that they can register themselves to Eureka during startup and, when acting as a client to other microservices, to keep track of available microservice instances.
+With a discovery server in place, it’s time to see how we can handle external traffic using Spring Cloud Gateway as an edge server. Head over to the next chapter to find out how!
+Questions
+What is required to turn a Spring Boot application created with Spring Initializr into a fully fledged Netflix Eureka server?
+What is required to make a Spring Boot-based microservice register itself automatically as a startup service with Netflix Eureka?
+What is required to make it possible for a Spring Boot-based microservice to call another microservice that is registered in a Netflix Eureka server?
+Let’s assume that you have a Netflix Eureka server up and running, along with one instance of microservice
+A
+and two instances of microservice
+B
+. All microservice instances register themselves with the Netflix Eureka server. Microservice
+A
+makes HTTP requests to microservice
+B
+based on the information it gets from the Eureka server. What will happen if, in turn, the following happens?
+The Netflix Eureka server crashes
+One of the instances of microservice
+B
+crashes
+A new instance of microservice
+A
+starts up
+A new instance of microservice
+B
+starts up
+The Netflix Eureka server starts up again
+
+10
+Using Spring Cloud Gateway to Hide Microservices behind an Edge Server
+In this chapter, we will learn how to use Spring Cloud Gateway as an edge server, to control what APIs are exposed from our microservices-based system landscape. We will see how microservices that have public APIs are made accessible from the outside through the edge server, while microservices that have private APIs are only accessible from the inside of the microservice landscape. In our system landscape, this means that the product composite service and the discovery server, Netflix Eureka, will be exposed through the edge server. The three core services,
+product
+,
+recommendation
+, and
+review
+, will be hidden from the outside.
+The following topics will be covered in this chapter:
+Adding an edge server to our system landscape
+Setting up Spring Cloud Gateway, including configuring routing rules
+Trying out the edge server
+Technical requirements
+For instructions on how to install the tools used in this book and how to access the source code for this book, see:
+Chapter 21
+,
+Installation Instructions for macOS
+Chapter 22
+,
+Installation Instructions for Microsoft Windows with WSL 2 and Ubuntu
+The code examples in this chapter all come from the source code in
+$BOOK_HOME/Chapter10
+.
+If you want to view the changes applied to the source code in this chapter – that is, see what it took to add Spring Cloud Gateway as an edge server to the microservices landscape – you can compare it with the source code for
+Chapter 9
+,
+Adding Service Discovery Using Netflix Eureka
+.
+You can use your favorite
+diff
+tool and compare the two folders,
+$BOOK_HOME/Chapter09
+and
+$BOOK_HOME/Chapter10
+.
+Adding an edge server to our system landscape
+In
+this section, we will see how the edge server
+is added to the system landscape and how it affects the way external clients access the public APIs that the microservices expose. All incoming requests will now be routed through the edge server, as illustrated by the following diagram:
+Figure 10.1: Adding an edge server
+As
+we can see from the preceding
+diagram, external clients send all their requests to the edge server. The edge server can route the incoming requests based on the URL path. For example, requests with a URL that starts with
+/product-composite/
+are routed to the product composite microservice, and a request with a URL that starts with
+/eureka/
+is routed to the discovery server based on Netflix Eureka.
+To make the discovery service work with Netflix Eureka, we don’t need to expose it through the edge server. The internal services will communicate directly with Netflix Eureka. The reasons for exposing it are to make its web page and API accessible to an operator that needs to check the status of Netflix Eureka, and to see what instances are currently registered in the discovery service.
+In
+Chapter 9
+,
+Adding Service Discovery Using Netflix Eureka
+, we exposed both the
+product-composite
+service and the discovery server, Netflix Eureka, to the outside. When we introduce the edge server in this chapter, this will no longer be the case. This is
+implemented by removing the following
+port declarations for the two services in the Docker Compose files:
+product-composite:
+build:
+microservices/product-composite-service
+ports:
+-
+"8080:8080"
+eureka:
+build:
+spring-cloud/eureka-server
+ports:
+-
+"8761:8761"
+With the edge server introduced, we will learn how to set up an edge server based on Spring Cloud Gateway in the next section.
+Setting up Spring Cloud Gateway
+Setting up Spring Cloud
+Gateway as an edge server is straightforward and can be done with the following steps:
+Create a Spring Boot project using Spring Initializr, as described in
+Chapter 3
+,
+Creating a Set of Cooperating Microservices
+– refer to the
+Using Spring Initializr to generate skeleton code
+section.
+Add a dependency on
+spring-cloud-starter-gateway
+.
+To be able to locate microservice instances through Netflix Eureka, also add the
+spring-cloud-starter-netflix-eureka-client
+dependency.
+Add the edge server project to the common build file,
+settings.gradle
+:
+include
+':spring-cloud:gateway'
+Add a
+Dockerfile
+with the same content as for the microservices; see the
+Dockerfile
+content in the folder
+$BOOK_HOME/Chapter10/microservices
+.
+Add the edge server to our three Docker Compose files:
+gateway:
+environment:
+-
+SPRING_PROFILES_ACTIVE=docker
+build:
+spring-cloud/gateway
+mem_limit:
+512m
+ports:
+-
+"8080:8080"
+From the preceding code, we can see that the edge server exposes port
+8080
+to the outside of Docker Engine. To control how much memory is required, a memory limit of
+512
+MB is applied to the edge server, in the same way as we did for the other microservices.
+Since the edge server will handle all incoming traffic, we will move the composite health check from the product composite service to the edge server. This is described in the
+Adding a composite health check
+section next.
+Add configuration for routing rules and more. Since there is a lot to configure, it
+is handled in a separate section below,
+Configuring a Spring Cloud Gateway
+.
+You can find the source code for the Spring Cloud Gateway in
+$BOOK_HOME/Chapter10/spring-cloud/gateway
+.
+Adding a composite health check
+With an edge
+server in place, external health check requests also have to go through the edge server. Therefore, the composite health check that checks the status of all microservices has been moved from the
+product-composite
+service to the edge server. See
+Chapter 7
+,
+Developing Reactive Microservices
+– refer to the
+Adding a health API
+section for implementation details for the composite health check.
+The following has been added to the edge server:
+The
+HealthCheckConfiguration
+class has been added, which declares the reactive health contributor:
+@Bean
+ReactiveHealthContributor
+healthcheckMicroservices
+()
+{
+final
+Map<String, ReactiveHealthIndicator> registry =
+new
+LinkedHashMap
+<>();
+    registry.put(
+"product"
+,           () -> 
+      getHealth(
+"http://product"
+));
+    registry.put(
+"recommendation"
+,    () -> 
+      getHealth(
+"http://recommendation"
+));
+    registry.put(
+"review"
+,            () -> 
+      getHealth(
+"http://review"
+));
+    registry.put(
+"product-composite"
+, () -> 
+      getHealth(
+"http://product-composite"
+));
+return
+CompositeReactiveHealthContributor.fromMap(registry);
+  }
+private
+Mono<Health>
+getHealth
+(String baseUrl)
+{
+String
+url
+=
+baseUrl +
+"/actuator/health"
+;
+    LOG.debug(
+"Setting up a call to the Health API on URL: {}"
+, 
+      url);
+return
+webClient.get().uri(url).retrieve()
+      .bodyToMono(String.class)
+      .map(s ->
+new
+Health
+.Builder().up().build())
+      .onErrorResume(ex -> 
+      Mono.just(
+new
+Health
+.Builder().down(ex).build()))
+      .log(LOG.getName(), FINE);
+  }
+From
+the preceding code, we can see that a health check for the
+product-composite
+service has been added, instead of the health check used in
+Chapter 7
+,
+Developing Reactive Microservices
+!
+The main application class,
+GatewayApplication
+, declares a
+WebClient.Builder
+bean to be used by the implementation of the health indicator, as follows:
+@Bean
+@LoadBalanced
+public
+WebClient.Builder
+loadBalancedWebClientBuilder
+()
+{
+return
+WebClient.builder();
+  }
+From the preceding source code, we can see that
+WebClient.builder
+is annotated with
+@LoadBalanced
+, which makes it aware of microservice instances
+registered in the discovery server, Netflix Eureka. Refer to the
+Service Discovery with Netflix Eureka in Spring Cloud
+section in
+Chapter 9
+,
+Adding Service Discovery Using Netflix Eureka
+, for more details.
+With a composite health check in place for the edge server, we are ready to look at the configuration that needs to be set up for Spring Cloud Gateway.
+Configuring Spring Cloud Gateway
+When it comes to
+configuring Spring Cloud Gateway, the most important thing is setting up the routing rules. We also need to set up a few other things in the configuration:
+Since Spring Cloud Gateway will use Netflix Eureka to find the microservices it will route traffic to, it must be configured as a Eureka client in the same way as described in
+Chapter 9
+,
+Adding Service Discovery Using Netflix Eureka
+– refer to the
+Configuring clients to the Eureka server
+section.
+Configure Spring Boot Actuator for development usage, as described in
+Chapter 7
+,
+Developing Reactive Microservices
+– refer to the
+Adding a health API
+section:
+management.endpoint.health.show-details:
+"ALWAYS"
+management.endpoints.web.exposure.include:
+"*"
+Configure log levels so that we can see log messages from interesting parts of the internal processing in Spring Cloud Gateway, for example, how it decides where to route incoming requests to:
+logging:
+level:
+root:
+INFO
+org.springframework.cloud.gateway.route.
+RouteDefinitionRouteLocator:
+INFO
+org.springframework.cloud.gateway:
+TRACE
+For the full
+source code, refer to the configuration file,
+src/main/resources/application.yml
+.
+Routing rules
+Setting up routing
+rules can be done in two ways: programmatically, using a Java DSL, or by configuration. Using a Java DSL to set up routing rules programmatically can be useful in cases where the rules are stored in external storage, such as a database, or are given at runtime, for example, via a RESTful API or a message sent to the gateway. In more static use cases, I find it more convenient to declare the routes in the configuration file,
+src/main/resources/application.yml
+. Separating the routing rules from the Java code makes it possible to update the routing rules without having to deploy a new version of the microservice.
+A
+route
+is defined
+by the following:
+Predicates
+, which
+select a route based on information in the incoming HTTP request
+Filters
+, which can
+modify both the request and/or the response
+A
+destination URI
+, which
+describes where to send a request
+An
+ID
+, that is, the
+name of the route
+For a full list of available predicates and filters, refer to the reference documentation:
+https://cloud.spring.io/spring-cloud-gateway/single/spring-cloud-gateway.html
+.
+In the following subsections, we will first learn how to route requests to the
+product-composite
+service and the Eureka server. After that, we will see how predicates and filters can be used, even though they are not used in this book elsewhere.
+Routing requests to the product-composite API
+If we, for example, want to route
+incoming requests where the URL path starts with
+/product-composite/
+to our
+product-composite
+service, we can specify a routing rule like this:
+spring.cloud.gateway.routes:
+-
+id:
+product-composite
+uri:
+lb://product-composite
+predicates:
+-
+Path=/product-composite/**
+Some points to note from the preceding code:
+id: product-composite
+: The name of the route is
+product-composite
+.
+uri: lb://product-composite
+: If the route is selected by its predicates, the request will be routed to the service that is named
+product-composite
+in the discovery service, Netflix Eureka. The protocol
+lb://
+is used to direct Spring Cloud Gateway to use the client-side load balancer to look up the destination in the discovery service.
+predicates: - Path=/product-composite/**
+is used to specify what requests this route should match.
+**
+matches zero or more elements in the path.
+To be able to route requests to the
+Swagger UI
+set up in
+Chapter 5
+,
+Adding an API Description Using OpenAPI
+, an extra route to the
+product-composite
+service is added:
+-
+id:
+product-composite-swagger-ui
+uri:
+lb://product-composite
+predicates:
+-
+Path=/openapi/**
+Requests sent to the edge server with a URI starting with
+/openapi/
+will be directed to the
+product-composite
+service.
+When the Swagger UI is presented behind an edge server, it must be able to present an OpenAPI Specification of the API that contains the correct server URL – the URL of the edge server instead of the URL of the
+product-composite
+service itself. To enable the
+product-composite
+service to produce a correct server URL in the OpenAPI specification, the following configuration has been added to the
+product-composite
+service:
+server.forward-headers-strategy:
+framework
+For more details, see
+https://springdoc.org/index.html#how-can-i-deploy-springdoc-openapi-ui-behind-a-reverse-proxy
+.
+To verify that the correct server URL is set in the OpenAPI specification, the following test has been added to the test script,
+test-em-all.bash
+:
+assertCurl 200
+"curl -s  http://
+$HOST
+:
+$PORT
+/
+openapi/v3/api-docs"
+assertEqual
+"http://
+$HOST
+:
+$PORT
+"
+"
+$(echo $RESPONSE
+| jq -r .servers[].url)
+"
+Routing requests to the Eureka server’s API and web page
+Eureka
+exposes both an API and a web page for its clients. To provide a clean separation between the API and the web page in Eureka, we will set up routes as follows:
+Requests sent to the edge server with the path starting with
+/eureka/api/
+should be handled as a call to the Eureka API.
+Requests sent to the edge server with the path starting with
+/eureka/web/
+should be handled as a call to the Eureka web page.
+API requests will be routed to
+http://${app.eureka-server}:8761/eureka
+. The routing rule for the Eureka API looks like this:
+-
+id:
+eureka-api
+uri:
+http://${app.eureka-server}:8761
+predicates:
+-
+Path=/eureka/api/{segment}
+filters:
+-
+SetPath=/eureka/{segment}
+The
+{segment}
+part in the
+Path
+value matches zero or more elements in the path and will be used to replace the
+{segment}
+part in the
+SetPath
+value.
+Web page requests will be routed to
+http://${app.eureka-server}:8761
+. The web page will load several web resources, such as
+.js
+,
+.css
+, and
+.png
+files. These requests will
+be routed to
+http://${app.eureka-server}:8761/eureka
+. The routing rules for the Eureka web page look like this:
+-
+id:
+eureka-web-start
+uri:
+http://${app.eureka-server}:8761
+predicates:
+-
+Path=/eureka/web
+filters:
+-
+SetPath=/
+-
+id:
+eureka-web-other
+uri:
+http://${app.eureka-server}:8761
+predicates:
+-
+Path=/eureka/**
+From the preceding configuration, we can take the following notes. The
+${app.eureka-server}
+property is resolved by Spring’s property mechanism, depending on what Spring profile is activated:
+When running the services on the same host without using Docker, for example, for debugging purposes, the property will be translated to
+localhost
+using the
+default
+profile.
+When running the services as Docker containers, the Netflix Eureka server will run in a container with the DNS name
+eureka
+. Therefore, the property will be translated into
+eureka
+using the
+docker
+profile.
+The relevant parts in the
+application.yml
+file that define this translation look like this:
+app.eureka-server:
+localhost
+---
+spring.config.activate.on-profile:
+docker
+app.eureka-server:
+eureka
+With this, we
+have seen how to route requests to both the
+product-composite
+and the Eureka server. As a final step, let’s see how predicates and filters can be used in Spring Cloud Gateway.
+Routing requests with predicates and filters
+To learn a bit
+more about the routing capabilities in Spring Cloud Gateway, we will try
+out
+host-based routing
+, where Spring Cloud Gateway uses the hostname of the incoming request to determine where to route the request. We will use one of my favorite websites for testing HTTP codes:
+http://httpstat.us/
+.
+A call to
+http://httpstat.us/${CODE}
+simply returns a response with the
+${CODE}
+HTTP code and a response body, also containing the HTTP code, and a corresponding descriptive text. For example, see the following
+curl
+command:
+curl http://httpstat.us/200 -i
+This will return the HTTP code
+200
+, and a response body with the text
+200 OK
+.
+Let’s assume that we want to route calls to
+http://${hostname}:8080/headerrouting
+as follows:
+Calls to the
+i.feel.lucky
+host should return
+200 OK
+Calls to the
+im.a.teapot
+host should return
+418 I'm a teapot
+Calls to all other hostnames should return
+501 Not Implemented
+To implement these routing rules in Spring Cloud Gateway, we can use the
+Host
+route predicate to select requests with specific hostnames, and the
+SetPath
+filter to set the desired HTTP code in the request path. This can be done as follows:
+To
+make calls to
+http://i.feel.lucky:8080/headerrouting
+return
+200 OK
+, we can set up the following route:
+-
+id:
+host_route_200
+uri:
+http://httpstat.us
+predicates:
+-
+Host=i.feel.lucky:8080
+-
+Path=/headerrouting/**
+filters:
+-
+SetPath=/200
+To make calls to
+http://im.a.teapot:8080/headerrouting
+return
+418 I'm a teapot
+, we can set up the following route:
+-
+id:
+host_route_418
+uri:
+http://httpstat.us
+predicates:
+-
+Host=im.a.teapot:8080
+-
+Path=/headerrouting/**
+filters:
+-
+SetPath=/418
+Finally, to
+make calls to all other hostnames return
+501 Not Implemented
+, we can set up the following route:
+-
+id:
+host_route_501
+uri:
+http://httpstat.us
+predicates:
+-
+Path=/headerrouting/**
+filters:
+-
+SetPath=/501
+Okay, that was quite a bit of configuration, so let’s now try it out!
+Trying out the edge server
+To try out
+the edge server, we perform the following steps:
+First, build the Docker images with the following commands:
+cd $BOOK_HOME/Chapter10
+./gradlew clean build && docker-compose build
+Next, start the system landscape in Docker and run the usual tests with the following command:
+./test-em-all.bash start
+Expect output similar to what we have seen in previous chapters:
+Figure 10.2: Output from test-em-all.bash
+From the log output, note the second to last test result,
+http://localhost:8080
+. That is the output from the test that verifies that the server URL in Swagger UI’s OpenAPI specification is correctly rewritten
+as the URL of the edge server.
+With the system landscape, including the edge server, up and running, let’s explore the following topics:
+Examining what is exposed by the edge server outside of the system landscape running in the Docker engine.
+Trying out some of the most frequently used routing rules as follows:
+Using URL-based routing to call our APIs through the edge server
+Using URL-based routing to call the Swagger UI through the edge server
+Using URL-based routing to call Netflix Eureka through the edge server, both using its API and web-based UI
+Using header-based routing to see how we can route requests based on the hostname in the request
+Examining what is exposed outside the Docker engine
+To understand what
+the edge server exposes to the outside of the system landscape, perform the following steps:
+Use the
+docker-compose ps
+command to see which ports are exposed by our services:
+docker-compose ps gateway eureka product-composite product recommendation review
+As we can see in the following output, only the edge server (named
+gateway
+) exposes its port (
+8080
+) outside the Docker engine:
+Figure 10.3: Output from docker-compose ps
+If we want to see what routes the edge server has set up, we can use the
+/actuator/gateway/routes
+API. The response from this API is rather verbose. To limit the response to information we are interested in, we can apply a
+jq
+filter. In the following example, the
+id
+of the route and the
+uri
+that the request will be routed to are selected:
+curl localhost:8080/actuator/gateway/routes -s | jq '.[] | {"\(.route_id)": "\(.uri)"}' | grep -v '{\|}'
+This command will respond with the following:
+Figure 10.4: Spring Cloud Gateway routing rules
+This gives us a good overview of the actual routes configured in the edge server. Now, let’s try out the routes!
+Trying out the routing rules
+In this section, we will try out
+the edge server and the routes it exposes to the outside of the system landscape. Let’s start by calling the
+product-composite
+API and its Swagger UI. Then, we’ll call the Eureka API and visit its web page. Finally, we’ll conclude by testing the routes that are based on hostnames.
+Calling the product composite API through the edge server
+Let’s perform
+the following steps to
+call the product composite API through the edge server:
+To be able to see what is going on in the edge server, we can follow its log output:
+docker-compose logs -f --tail=0 gateway
+Now, in a separate terminal window, make the call to the
+product-composite
+API through the edge server:
+curl http://localhost:8080/product-composite/1
+Expect the normal type of response from the
+product-composite
+API:
+Figure 10.5: Output from retrieving the composite product with Product ID 1
+We should be able to find the following information in the log output:
+Figure 10.6: Log output from the edge server
+From the
+log output, we
+can see the pattern matching based on the predicate we specified in the configuration, and we can see which microservice instance the edge server selected from the available instances in the discovery server – in this case, it forwards the request to
+http://b8013440aea0:8080/product-composite/1
+.
+Calling the Swagger UI through the edge server
+To verify that we
+can reach the Swagger UI
+introduced in
+Chapter 5
+,
+Adding an API Description Using OpenAPI
+, through the edge server, open the URL
+http://localhost:8080/openapi/swagger-ui.html
+in a web browser. The resulting
+Swagger UI page should look like
+this:
+Figure 10.7: The Swagger UI through the edge server, gateway
+Note the server URL:
+http://localhost:8080
+; this means that the
+product-composite
+API’s own URL,
+http://product-service:8080/
+, has been replaced in the OpenAPI specification returned by the Swagger UI.
+If you want
+to, you can proceed and actually try
+out the
+product-composite
+API in the Swagger UI, as we did back in
+Chapter 5
+,
+Adding an API Description Using OpenAPI
+!
+Calling Eureka through the edge server
+To call Eureka
+through an edge server, perform the
+following steps:
+First, call the Eureka API through the edge server to see what instances are currently registered in the discovery server:
+curl -H "accept:application/json" \
+localhost:8080/eureka/api/apps -s | \
+jq -r .applications.application[].instance[].instanceId
+Expect a response along the lines of the following:
+Figure 10.8: Eureka listing the edge server, gateway, in the REST call
+Note that the edge server (named
+gateway
+) is also present in the response.
+Next, open
+the Eureka web page in a web
+browser using the URL
+http://localhost:8080/eureka/web
+:
+Figure 10.9: Eureka listing the edge server, gateway, in the web UI
+From
+the preceding screenshot, we
+can see the Eureka web page reporting the same available instances as the API response in the previous step.
+Routing based on the host header
+Let’s wrap up by testing
+the route configuration based on the hostname used in the requests to see predicates and filters in use!
+Normally, the hostname in the request is set automatically in the
+Host
+header by the HTTP client. When testing the edge server locally, the hostname will be
+localhost
+– that is not so useful when testing hostname-based routing. However, we can cheat by specifying another hostname in the
+Host
+header in the call to the API. Let’s see how this can be done:
+To call for the
+i.feel.lucky
+hostname, use this code:
+curl http://localhost:8080/headerrouting -H "Host: i.feel.lucky:8080"
+Expect the response
+200 OK
+.
+For the hostname
+im.a.teapot
+, use the following command:
+curl http://localhost:8080/headerrouting -H "Host: im.a.teapot:8080"
+Expect the response
+418 I'm a teapot
+.
+Finally, if not specifying any
+Host
+header, use
+localhost
+as the
+Host
+header:
+curl http://localhost:8080/headerrouting
+Expect the response
+501 Not Implemented
+.
+We can also use
+i.feel.lucky
+and
+im.a.teapot
+as real hostnames in the requests if we add them to the file
+/etc/hosts
+, specifying that they should be translated into the same IP address as
+localhost
+, that is,
+127.0.0.1
+. To do so, perform the following steps:
+Run the
+following command to add a row to the
+/etc/hosts
+file with the required information:
+sudo bash -c "echo '127.0.0.1 i.feel.lucky im.a.teapot' >> /etc/hosts"
+We can now perform the same routing based on the hostname, but without specifying the
+Host
+header. Try it out by running the following commands:
+curl http://i.feel.lucky:8080/headerrouting
+curl http://im.a.teapot:8080/headerrouting
+Expect the same responses as previously,
+200 OK
+and
+418 I'm a teapot
+.
+Wrap up the tests by shutting down the system landscape with the following command:
+docker-compose down
+Clean up the
+/etc/hosts
+file from the DNS name translation we added for the hostnames,
+i.feel.lucky
+and
+im.a.teapot
+. Edit the
+/etc/hosts
+file and remove the
+line we added:
+127.0.0.1 i.feel.lucky im.a.teapot
+These tests of the routing capabilities in the edge server end the chapter.
+Summary
+In this chapter, we have seen how Spring Cloud Gateway can be used as an edge server to control what services are allowed to be called from outside of the system landscape. Based on predicates, filters, and destination URIs, we can define routing rules in a very flexible way. If we want to, we can configure Spring Cloud Gateway to use a discovery service such as Netflix Eureka to look up the target microservice instances.
+An important topic we still need address is how we prevent unauthorized access to the APIs exposed by the edge server, and how we can prevent third parties from intercepting traffic.
+In the next chapter, we will see how we can secure access to the edge server using standard security mechanisms, such as HTTPS, OAuth, and OpenID Connect.
+Questions
+What are the elements used to build a routing rule in Spring Cloud Gateway called?
+What are the aforementioned elements used for?
+How can we instruct Spring Cloud Gateway to locate microservice instances through a discovery service such as Netflix Eureka?
+In a Docker environment, how can we ensure that external HTTP requests to the Docker engine can only reach the edge server?
+How do we change the routing rules so that the edge server accepts calls to the
+product-composite
+service on the
+http://$HOST:$PORT/api/product
+URL instead of the currently used
+http://$HOST:$PORT/product-composite
+?
+Join our community on Discord
+Join our community’s Discord space for discussion with the author and other readers:
+https://packt.link/SpringBoot3e
+
+11
+Securing Access to APIs
+In this chapter, we will see how we can secure access to the APIs and web pages exposed by the edge server introduced in the previous chapter. We will learn how to use HTTPS to protect against eavesdropping on external access to our APIs, and how to use OAuth 2.0 and OpenID Connect to authenticate and authorize users and client applications to access our APIs. Finally, we will use HTTP Basic authentication to secure access to the discovery server, Netflix Eureka.
+The following topics will be covered in this chapter:
+An introduction to the OAuth 2.0 and OpenID Connect standards
+A general discussion on how to secure the system landscape
+Protecting external communication with HTTPS
+Securing access to the discovery server, Netflix Eureka
+Adding a local authorization server to our system landscape
+Authenticating and authorizing API access using OAuth 2.0 and OpenID Connect
+Testing with the local authorization server
+Testing with an external OpenID Connect provider, Auth0
+Technical requirements
+For instructions on how to install the tools used in this book and how to access the source code for this book, see:
+Chapter 21
+,
+Installation Instructions for macOS
+Chapter 22
+,
+Installation Instructions for Microsoft Windows with WSL 2 and Ubuntu
+The code examples in this chapter all come from the source code in
+$BOOK_HOME/Chapter11
+.
+If you want to view the changes applied to the source code in this chapter, that is, see what it took to secure access to the APIs in the microservice landscape, you can compare it with the source code for
+Chapter 10
+,
+Using Spring Cloud Gateway to Hide Microservices behind an Edge Server
+. You can use your favorite
+diff
+tool and compare the two folders,
+$BOOK_HOME/Chapter10
+and
+$BOOK_HOME/Chapter11
+.
+Introduction to OAuth 2.0 and OpenID Connect
+Before introducing OAuth 2.0 and OpenID Connect, let’s clarify what we mean by authentication and authorization.
+Authentication
+means
+identifying a user by validating credentials supplied by the user, such as a username and password.
+Authorization
+is
+about giving access to various parts of, in our case, an API to an authenticated user.
+OAuth 2.0
+is an open
+standard for
+authorization delegation
+, and
+OpenID Connect
+is an
+add-on to OAuth 2.0 that enables client applications to verify the identity of users based on the authentication performed by the authorization server. Let’s look briefly at OAuth 2.0 and OpenID Connect separately to get an initial understanding of their purposes!
+Introducing OAuth 2.0
+OAuth 2.0 is a widely
+accepted open standard for authorization that enables a user to give consent for a third-party client application to access protected resources in the name of the user. Giving a third-party client application the right to
+act in the name of a user, for example, calling an API, is known as
+authorization delegation
+.
+So, what does this mean?
+Let’s start by sorting out the concepts used:
+Resource owner
+: The end user.
+Client
+: The third-party client application, for example, a web app or a native mobile app, that wants to call some protected APIs in the name of the end user.
+Resource server
+: The server that exposes the APIs that we want to protect.
+Authorization server
+: The authorization server issues tokens to the client after the resource owner, that is, the end user, has been authenticated. The management of user information and the authentication of users are typically delegated, behind the scenes, to an
+Identity Provider
+(
+IdP
+).
+A client is registered in the
+authorization server and is given a
+client ID
+and a
+client secret
+. The client secret must be protected by the client, like a password. A client also gets registered with a set of allowed
+redirect URIs
+that the authorization server will use after a user has been authenticated to send
+authorization codes
+and
+tokens
+that have been issued back to the client application.
+The following is an example by way of illustration. Let’s say that a user accesses a third-party client application and the client application wants to call a protected API to serve the user. To be allowed to access these APIs, the client application needs a way to tell the APIs that it is acting in the name of the user. To avoid solutions where the user must share their credentials with the client application for authentication, an
+access token
+is issued by an authorization server that gives the client application limited access to a selected set of APIs in the name of the user.
+This means that the user never has to reveal their credentials to the client application. The user can also give consent to the client application to access specific APIs on behalf of the user. An access token represents a time-constrained set of access rights, expressed as
+scopes
+in OAuth 2.0 terms. A
+refresh token
+can also be issued to a client application by the authorization server. A refresh token can be used by the client application to obtain new access tokens without having to involve the user.
+The OAuth 2.0 specification defines four authorization grant flows for issuing access tokens, explained as follows:
+Authorization code grant flow
+: This is the safest, but also the most complex, grant flow. This grant flow requires that the user interacts with the authorization server
+using a web browser for authentication and giving consent to the client application, as illustrated by the following diagram:
+Figure 11.1: OAuth 2.0 – authorization code grant flow
+Here’s what’s going on in this diagram:
+The client application initiates the grant flow by sending the user to the authorization server in the web browser.
+The authorization server will authenticate the user and ask for the user’s consent.
+The authorization server will redirect the user back to the client application with an authorization code. The authorization server will use a
+redirect URI
+specified by the client in
+step 1
+to know where to send the authorization code. Since the authorization code is passed back to the client application using the
+web browser, that is, to an unsecure environment where malicious JavaScript code can potentially pick up the authorization code, it is only allowed to be used once and only during a short time period.
+To exchange the authorization code for an access token, the client application is expected to call the authorization server again. The client application must present its client ID and client secret together with the authorization code for the authorization server. Since the client secret is sensitive and must be protected, this call must be executed from server-side code.
+The authorization server issues an access token and sends it back to the client application. The authorization server can also, optionally, issue and return a refresh token.
+Using the access token, the client can send a request to the protected API exposed by the resource server.
+The resource server validates the access token and serves the request in the event of a successful validation.
+Steps 6
+and
+7
+can be repeated as long as the access token is valid. When the lifetime of the access token has expired, the client can use their refresh token to acquire a new access token.
+Implicit grant flow
+: This flow is also web browser-based but intended for client applications that are not able to keep a client secret protected, for example, a single-page web application. The web browser gets an access token back from the authorization server instead of an authorization code. Since the implicit grant flow is less secure than the authorization
+code grant flow, the client can’t request a refresh token.
+Resource owner password credentials grant flow
+: If a client application can’t interact with a web browser, it can fall back on this grant flow. In this grant flow, the user must share their credentials with the client application and the client application will use these credentials to acquire an access token.
+Client credentials grant flow
+: In the case where a client application needs to call an API unrelated to a specific user, it can use this grant flow to acquire an access token using its own client ID and client secret.
+The full specification can be found here:
+https://tools.ietf.org/html/rfc6749
+. There are also a number of additional specifications that detail various aspects of OAuth 2.0; for an overview, refer to
+https://www.oauth.com/oauth2-servers/map-oauth-2-0-specs/
+. One additional specification that is worth some extra attention is
+RFC 7636 – Proof Key for Code Exchange by OAuth Public Clients
+(or
+PKCE
+for short),
+https://tools.ietf.org/html/rfc7636
+.
+This specification describes how an otherwise unsecure public client, such as a mobile native app or desktop application, can utilize the authorization code grant flow in a secure way by adding an extra layer of security.
+The OAuth 2.0 specification was published in 2012, and over the years, a lot of lessons have been learned about what works and what does not. In 2019, work began to establish OAuth 2.1, consolidating all the best practices and experiences from using OAuth 2.0. A draft version can be found here:
+https://tools.ietf.org/html/draft-ietf-oauth-v2-1-08
+.
+In my opinion, the most important improvements in OAuth 2.1 are:
+PKCE is integrated into the authorization code grant flow. The use of PKCE will be required by public clients to improve their security, as described above. For confidential clients, where the authorization server can verify their credentials, the use of PKCE is not required, only recommended.
+The implicit grant flow is deprecated and omitted from the specification, due to its less secure nature.
+The resource owner password credentials grant flow is also deprecated and omitted from the specification, for the same reasons.
+Given the direction in the upcoming OAuth 2.1 specification, we will only use the authorization code grant flow and the client credentials grant flow in this book.
+When it comes to automating tests against APIs that are protected by OAuth 2.0, the client credentials grant flow is very handy since it doesn’t require manual interaction using a web browser. We will use this grant flow later on in this chapter with our test script; see the
+Changes in the test script
+section.
+Introducing OpenID Connect
+OpenID Connect (abbreviated to
+OIDC
+) is, as
+has already been mentioned, an add-on to OAuth 2.0 that enables client applications to verify the identity of users. OIDC adds an extra token, an ID token, that the client application gets back from the authorization server after a completed grant flow.
+The ID token is encoded as a
+JSON Web Token
+(
+JWT
+) and contains a number of claims, such as the ID and email address of the user. The ID token is digitally signed using JSON web signatures. This makes it possible for a client application to trust the information in the ID token by validating its digital signature using public keys from the authorization server.
+Optionally, access tokens can also be encoded and signed in the same way as ID tokens, but it is not mandatory, according to the specification. Also important, OIDC defines a
+discovery endpoint
+, which is a standardized way to establish URLs to important endpoints, such as requesting authorization codes and tokens or getting the public keys to verify a digitally signed JWT. Finally, it also defines a
+user-info endpoint
+, which can be used to get extra information about an authenticated user given an access token for that user.
+For an overview of the available specifications, see
+https://openid.net/developers/specs/
+.
+In this book, we will only use authorization servers that comply with the OpenID Connect specification. This will simplify the configuration of resource servers by the use of their discovery endpoints. We will also use the optional support for digitally signed JWT access tokens to simplify how resource servers can verify the authenticity of the access tokens. See the
+Changes in both the edge server and the product-composite service
+section below.
+This concludes our introduction to the OAuth 2.0 and OpenID Connect standards. Later on in this chapter, we will learn more about how to use these standards. In the next section, we will get
+a high-level view of how the system landscape will be secured.
+Securing the system landscape
+To secure the system
+landscape as described in the introduction to this chapter, we will perform the following steps:
+Encrypt external requests and responses to and from our external API using HTTPS to protect against eavesdropping.
+Authenticate and authorize users and client applications that access our APIs using OAuth 2.0 and OpenID Connect.
+Secure access to the discovery server, Netflix Eureka, using HTTP basic authentication.
+We will only apply HTTPS for external communication to our edge server, using plain HTTP for communication inside our system landscape.
+In the chapter on service meshes (
+Chapter 18
+,
+Using a Service Mesh to Improve Observability and Management
+) that will appear later in this book, we will see how we can get help from a service mesh product to automatically provision HTTPS to secure communication inside a system landscape.
+For test purposes, we will add a local OAuth 2.0 authorization server to our system landscape. All external communication with the authorization server will be routed through the edge server. The edge server and the
+product-composite
+service will act as OAuth 2.0 resource servers; that is, they will require a valid OAuth 2.0 access token to allow access.
+To minimize the overhead of validating access tokens, we will assume that they are encoded as signed JWTs and that the authorization server exposes an endpoint that the resource servers can use to access the public keys, also known as a
+JSON Web Key Set
+, or
+jwk-set
+for short, required
+to validate the signing.
+The system landscape will look like the following:
+Figure 11.2: Adding an authorization server to the system landscape
+From the preceding diagram, we can note that:
+HTTPS is used for external communication, while plain text HTTP is used inside the
+system landscape.
+The local OAuth 2.0 authorization server will be accessed externally through the edge server.
+Both the edge server and the
+product-composite
+microservice will validate access tokens as signed JWTs.
+The edge server and the
+product-composite
+microservice will get the authorization server’s public keys from its
+jwk-set
+endpoint and use them to validate the signature of the JWT-based access tokens.
+Note that we will focus on securing access to APIs over HTTP, not on covering general best practices for securing web applications, for example, managing web application security risks
+pointed out by the
+OWASP Top Ten Project
+. Refer to
+https://owasp.org/www-project-top-ten/
+for more information.
+With this overview of how the system landscape will be secured, let’s start to see how we can protect external
+communication from eavesdropping using HTTPS.
+Protecting external communication with HTTPS
+In this section, we will
+learn how to prevent eavesdropping on external communication, for example, from the internet, via the public APIs exposed by the edge server. We will use HTTPS to encrypt communication. To use HTTPS, we need to do the following:
+Create a certificate
+: We will
+create our own self-signed certificate, sufficient for development purposes.
+Configure the edge server
+: It has to
+be configured to accept only HTTPS-based external traffic using the certificate.
+The self-signed certificate is created with the following command:
+keytool -genkeypair -alias localhost -keyalg RSA -keysize 2048 -storetype PKCS12 -keystore edge.p12 -validity 3650
+The source code comes with a sample certificate file, so you don’t need to run this command to run the following examples.
+The command will ask for a number of parameters. When asked for a password, I entered
+password
+. For the rest of the parameters, I simply entered an empty value to accept the default value. The certificate file created,
+edge.p12
+, is placed in the
+gateway
+projects folder,
+src/main/resources/keystore
+. This means that the certificate file will be placed in the
+.jar
+file when it is built and will be available on the classpath at runtime at
+keystore/edge.p12
+.
+Providing certificates using the classpath is sufficient during development, but not applicable to other environments, for example, a production environment. See the
+Replacing a self-signed certificate at runtime
+section below for how we can replace this certificate with an external certificate at runtime!
+To configure the edge
+server to use the certificate and
+HTTPS, the following is added to
+application.yml
+in the
+gateway
+project:
+server.port:
+8443
+server.ssl:
+key-store-type:
+PKCS12
+key-store:
+classpath:keystore/edge.p12
+key-store-password:
+password
+key-alias:
+localhost
+Some notes from the preceding source code:
+The path to the certificate is specified in the
+server.ssl.key-store
+parameter, and is set to
+classpath:keystore/edge.p12
+. This means that the certificate will be picked up on the classpath from the location
+keystore/edge.p12
+.
+The password for the certificate is specified in the
+server.ssl.key-store-password
+parameter.
+To indicate that the edge server talks HTTPS and not HTTP, we also change the port from
+8080
+to
+8443
+in the
+server.port
+parameter.
+In addition to these changes in the edge server, changes are also required in the following files to reflect the changes to the port and HTTP protocol, replacing
+HTTP
+with
+HTTPS
+and
+8080
+with
+8443
+:
+The three Docker Compose files,
+docker-compose*.yml
+The test script,
+test-em-all.bash
+Providing certificates using the classpath is, as mentioned previously, only sufficient during development. Let’s see how we can replace this certificate with an external certificate at runtime.
+Replacing a self-signed certificate at runtime
+Placing a self-signed certificate in the
+.jar
+file is only useful for development. For a working solution in runtime
+environments, for example, for test or production, it must be possible to use certificates signed by
+authorized
+CAs
+(short for
+Certificate Authorities
+).
+It must also be possible to specify the certificates to be used during runtime without the need to rebuild the
+.jar
+files and, when using Docker, the Docker image that contains the
+.jar
+file. When using Docker Compose to manage the Docker container, we can map a volume in the Docker container to a certificate that resides on the Docker host. We can also set up environment variables for the Docker container that points to the external certificate in the Docker volume.
+In
+Chapter 15
+,
+Introduction to Kubernetes
+, we will learn about Kubernetes, where we will see more powerful solutions for how to handle secrets, such as certificates, that are suitable for running Docker containers in a cluster; that is, where containers are scheduled on a group of Docker hosts and not on a single Docker host.
+The changes described in this topic have
+not
+been applied to the source code in the book’s GitHub repository; you need to make them yourself to see them in action!
+To replace the certificate packaged in the
+.jar
+file, perform the following steps:
+Create a second certificate and set the password to
+testtest
+when asked for it:
+cd $BOOK_HOME/Chapter11
+mkdir keystore
+keytool -genkeypair -alias localhost -keyalg RSA -keysize 2048 -storetype PKCS12 -keystore keystore/edge-test.p12 -validity 3650
+Update the Docker Compose file,
+docker-compose.yml
+, with environment variables for the location, the password for the new certificate, and a volume that maps to the folder where the new certificate is placed. The configuration of the edge server will look like the following after the change:
+gateway:
+environment:
+-
+SPRING_PROFILES_ACTIVE=docker
+-
+SERVER_SSL_KEY_STORE=file:/keystore/edge-test.p12
+-
+SERVER_SSL_KEY_STORE_PASSWORD=testtest
+volumes:
+-
+$PWD/keystore:/keystore
+build:
+spring-cloud/gateway
+mem_limit:
+512m
+ports:
+-
+"8443:8443"
+If the edge server is up and running, it needs to be restarted with the following commands:
+docker-compose up -d --scale gateway=0
+docker-compose up -d --scale gateway=1
+The
+docker-compose restart gateway
+command might look like a good candidate for restarting the gateway service, but it actually does not take changes in
+docker-compose.yml
+into consideration. Hence, it is not a useful command in this case.
+The new certificate is now in use!
+This concludes the section on how to protect external communication with HTTPS. In the next section, we
+will learn how to secure access to the discovery server, Netflix Eureka, using HTTP Basic authentication.
+Securing access to the discovery server
+Previously, we learned how to protect external communication with HTTPS. Now we will use HTTP Basic authentication
+to restrict access to the APIs and web pages on the discovery server, Netflix Eureka. This means that we will require a user to supply a username and password to get access. Changes are required both on the Eureka server and in the Eureka clients, described as follows.
+Changes in the Eureka server
+To protect the Eureka server, the
+following changes have been applied to the source code:
+In
+build.gradle
+, a dependency has been added for Spring Security:
+implementation
+'org.springframework.boot:spring-boot-starter-security'
+Security configuration has been added to the
+SecurityConfig
+class:
+The user is defined as follows:
+@Bean
+public
+InMemoryUserDetailsManager
+userDetailsService
+()
+{
+UserDetails
+user
+=
+User.withDefaultPasswordEncoder()
+      .username(username)
+      .password(password)
+      .roles(
+"USER"
+)
+      .build();
+return
+new
+InMemoryUserDetailsManager
+(user);
+}
+The
+username
+and
+password
+are injected into the constructor from the configuration file:
+@Autowired
+public
+SecurityConfig
+(
+@Value("${app.eureka-username}")
+String username,
+@Value("${app.eureka-password}")
+String password
+)
+{
+this
+.username = username;
+this
+.password = password;
+}
+All APIs and web pages are protected using HTTP Basic authentication by means of the following definition:
+@Bean
+public
+SecurityFilterChain
+configure
+(HttpSecurity http)
+throws
+Exception {
+  http
+// Disable CRCF to allow services to register themselves with Eureka
+.csrf()
+      .disable()
+    .authorizeRequests()
+      .anyRequest().authenticated()
+      .and()
+      .httpBasic();
+return
+http.build();
+}
+Credentials for the user are set up in the configuration file,
+application.yml
+:
+app:
+eureka-username:
+u
+eureka-password:
+p
+Finally, the test class,
+EurekaServerApplicationTests
+, uses the credentials from the configuration
+file when testing the APIs of the Eureka server:
+@Value("${app.eureka-username}")
+private
+String username;
+@Value("${app.eureka-password}")
+private
+String password;
+@Autowired
+public
+void
+setTestRestTemplate
+(TestRestTemplate testRestTemplate)
+{
+this
+.testRestTemplate = testRestTemplate.withBasicAuth(username, password);
+}
+The above are the steps required for restricting access to the APIs and web pages of the discovery server, Netflix Eureka. It will now use HTTP Basic authentication and require a user to supply a username and password to get access. The last step is to configure Netflix Eureka clients so that they pass credentials when accessing the Netflix Eureka server.
+Changes in Eureka clients
+For Eureka clients, the credentials
+can be specified in the connection URL for the Eureka server. This is specified in each client’s configuration file,
+application.yml
+, as follows:
+app:
+eureka-username:
+u
+eureka-password:
+p
+eureka:
+client:
+serviceUrl:
+defaultZone:
+"http://${app.eureka-username}:${app.eureka-
+password}@${app.eureka-server}:8761/eureka/"
+This concludes the section on how to restrict access to the Netflix Eureka server. In the
+Testing the protected discovery server
+section, we will run tests to verify that the access is protected. In the next section, we will learn how to add a local authorization server to the system landscape.
+Adding a local authorization server
+To be able to
+run tests locally and fully automated with APIs that are secured using OAuth 2.0 and OpenID Connect, we will add an authorization server that is compliant with these specifications to our system landscape. Historically, Spring Security has not provided an authorization server out of the box. But in April 2020, a
+community-driven project,
+Spring Authorization Server
+, led by the Spring Security team, was announced with the goal of delivering an authorization server. In August 2021, the Spring Authorization Server project was moved out of experimental status and became a member of the Spring project’s portfolio.
+For more information, see
+https://spring.io/blog/2020/04/15/announcing-the-spring-authorization-server
+and
+https://spring.io/blog/2021/08/17/spring-authorization-server-officially-moves-to-spring-projects
+.
+The Spring Authorization Server supports both the use of the OpenID Connect discovery endpoint and the digital signing of access tokens. It also provides an endpoint that can be accessed using the discovery information to get keys for verifying the digital signature of a token. With support for these features, it can be used as the authorization server in local and automated tests that verify that the system landscape works as expected.
+The authorization server in this book is based on the sample authorization server provided by the Spring Authorization Server project; see
+https://github.com/spring-projects/spring-authorization-server/tree/main/samples/default-authorizationserver
+.
+The following changes
+have been applied to the sample project:
+The build file has been updated to follow the structure of the other projects’ build files in this book.
+The port is set to
+9999
+.
+A Dockerfile has been added with the same structure as for the other projects in this book.
+The authorization server has been integrated with Eureka for service discovery in the same way as the other projects in this book.
+Public access has been added to the actuator’s endpoints.
+WARNING
+: As already warned about in
+Chapter 7
+,
+Developing Reactive Microservices
+, allowing public access to the actuator’s endpoints is very helpful during development, but it can be a security issue to reveal too much information in actuator endpoints in production systems. Therefore, plan for minimizing the information exposed by the actuator endpoints in production!
+Unit tests
+have been added that verify access to the most critical endpoints according to the OpenID Connect specification.
+The username and password for the single registered user are set to
+u
+and
+p
+, respectively.
+Two OAuth clients are registered,
+reader
+and
+writer
+. The
+reader
+client is granted a
+product:read
+scope, and the
+writer
+client is granted both a
+product:read
+and
+product:write
+scope. The clients are configured to have their client secret set to
+secret-reader
+and
+secret-writer
+, respectively.
+Allowed redirect URIs for the clients are set to
+https://my.redirect.uri
+and
+https://localhost:8443/webjars/swagger-ui/oauth2-redirect.html
+. The first URI will be used in the tests described below, and the second URI will be used by the Swagger UI component.
+By default, for security reasons, the authorization server does not allow redirect URIs that start with
+https://localhost
+.
+The authorization server has been customized to accept
+https://localhost
+for development and testing purposes. The applied customization is described here:
+https://docs.spring.io/spring-authorization-server/docs/1.0.0/reference/html/protocol-endpoints.html#oauth2-authorization-endpoint-customizing-authorization-request-validation
+.
+The source code for the
+authorization server is available in
+$BOOK_HOME/Chapter11/spring-cloud/authorization-server
+.
+To incorporate the authorization server in the system landscape, changes to the following files have been applied:
+The server has been added to the common build file,
+settings.gradle
+.
+The server has been added to the three Docker Compose files,
+docker-compose*.yml
+.
+The edge server,
+spring-cloud/gateway
+.
+A health check has been added for the authorization server in
+HealthCheckConfiguration
+.
+Routes to the authorization server for the URIs starting with
+/oauth
+,
+/login
+, and
+/error
+have been added in the configuration file,
+application.yml
+. These URIs are used to issue tokens for clients, authenticate users, and show error messages.
+Since these three URIs
+need to be unprotected by the edge server, they are configured in the new class
+SecurityConfig
+to permit all requests.
+With an understanding of how a local authorization server is added to the system landscape, let’s move on and see how to use OAuth 2.0 and OpenID Connect to authenticate and authorize access to APIs.
+Protecting APIs using OAuth 2.0 and OpenID Connect
+With the authorization server in place, we can enhance the edge server and the
+product-composite
+service to become OAuth 2.0 resource servers, so that they will require a valid access token to allow
+access. The edge server will be configured to accept any
+access token it can validate using the digital signature provided by the authorization server. The
+product-composite
+service will also require the access token to contain valid OAuth 2.0 scopes:
+The
+product:read
+scope will be required for accessing the read-only APIs.
+The
+product:write
+scope will be required for accessing the create and delete APIs.
+The
+product-composite
+service will also be enhanced with a configuration that allows its Swagger UI component to interact with the authorization server to issue an access token. This will allow users of the Swagger UI web page to test the protected API.
+We also need to enhance the test script,
+test-em-all.bash
+, so that it acquires access tokens and uses them when it performs the tests.
+Changes in both the edge server and the product-composite service
+The following changes have been
+applied in the source code for both the edge server and the
+product-composite
+service:
+Spring Security dependencies have been added to
+build.gradle
+to support OAuth 2.0 resource servers:
+implementation
+'org.springframework.boot:spring-boot-starter-security'
+implementation
+'org.springframework.security:spring-security-oauth2-resource-server'
+implementation
+'org.springframework.security:spring-security-oauth2-jose'
+Security configurations have been added to new
+SecurityConfig
+classes in both projects:
+@Configuration
+@EnableWebFluxSecurity
+public
+class
+SecurityConfig
+{
+@Bean
+SecurityWebFilterChain
+springSecurityFilterChain
+(
+ServerHttpSecurity http)
+{
+    http
+      .authorizeExchange()
+        .pathMatchers(
+"/actuator/**"
+).permitAll()
+        .anyExchange().authenticated()
+        .and()
+      .oauth2ResourceServer()
+        .jwt();
+return
+http.build();
+  }
+}
+Explanations for the
+preceding source code are as follows:
+The
+@EnableWebFluxSecurity
+annotation enables Spring Security support for APIs based on Spring WebFlux.
+.pathMatchers("/actuator/**").permitAll()
+is used to allow unrestricted access to URLs that should be unprotected, for example, the
+actuator
+endpoints, in this case. Refer to the source code for URLs that are treated as unprotected. Be careful about which URLs are exposed unprotected. For example, the
+actuator
+endpoints should be protected before going to production.
+.anyExchange().authenticated()
+ensures that the user is authenticated before being allowed access to all other URLs.
+.oauth2ResourceServer().jwt()
+specifies that authorization will be based on OAuth 2.0 access tokens encoded as JWTs.
+The authorization server’s OIDC discovery endpoint has been registered in the configuration file,
+application.yml
+:
+app.auth-server:
+localhost
+spring.security.oauth2.resourceserver.jwt.issuer-uri:
+http://${app.auth-server}:9999
+---
+spring.config.activate.on-profile:
+docker
+app.auth-server:
+auth-server
+L
+Later on in this chapter, when the system landscape is started up, you can test the discovery endpoint. You can, for example, find the endpoint that returns the keys required for verifying the digital signature of a token using this command:
+docker-compose exec auth-server curl localhost:9999/.well-known/openid-configuration -s | jq -r .jwks_uri
+We also need to make some
+changes that only apply to the
+product-composite
+service.
+Changes in the product-composite service only
+In addition to the common changes
+applied in the previous section, the following changes have also been applied to the
+product-composite
+service:
+The security configuration in the
+SecurityConfig
+class has been refined by requiring OAuth 2.0 scopes in the access token in order to allow access:
+.pathMatchers(POST,
+"/product-composite/**"
+)
+  .hasAuthority(
+"SCOPE_product:write"
+)
+.pathMatchers(DELETE,
+"/product-composite/**"
+)
+  .hasAuthority(
+"SCOPE_product:write"
+)
+.pathMatchers(GET,
+"/product-composite/**"
+)
+  .hasAuthority(
+"SCOPE_product:read"
+)
+By convention, OAuth 2.0 scopes need to be prefixed with
+SCOPE_
+when checked for authority using Spring Security.
+A method,
+logAuthorizationInfo()
+, has been added to log relevant parts from the JWT-encoded access token upon each call to the API. The access token can be acquired using the standard Spring Security
+SecurityContext
+, which, in a reactive environment, can be acquired using the static helper method,
+ReactiveSecurityContextHolder.getContext()
+. Refer to the
+ProductCompositeServiceImpl
+class for details.
+The use of OAuth has been disabled when running Spring-based integration tests. To
+prevent the OAuth machinery from kicking in when we are running integration tests, we disable it as follows:
+A security configuration,
+TestSecurityConfig
+, is added to be used during tests. It permits access to all resources:
+http.csrf().disable().authorizeExchange().anyExchange().permitAll();
+In each Spring integration test class, we configure
+TestSecurityConfig
+to override the existing security configuration with the following:
+@SpringBootTest(
+classes = {TestSecurityConfig.class},
+properties = {"spring.main.allow-bean-definition-
+overriding=true"})
+Changes to allow Swagger UI to acquire access tokens
+To allow access to the protected APIs
+from the Swagger UI component, the following changes have been applied in the
+product-composite
+service:
+The web pages exposed by the Swagger UI component have been configured to be publicly available. The following line has been added to the
+SecurityConfig
+class:
+.pathMatchers(
+"/openapi/**"
+).permitAll()
+.pathMatchers(
+"/webjars/**"
+).permitAll()
+The OpenAPI Specification of the API has been enhanced to require that the security schema
+security_auth
+is applied.
+The following line has been added to the definition of the interface
+ProductCompositeService
+in the
+API
+project:
+@SecurityRequirement(name = "security_auth")
+To define the semantics
+of the security schema
+security_auth
+, the class
+OpenApiConfig
+has been added to the
+product-composite
+project. It looks like this:
+@SecurityScheme(
+name = "security_auth", type = SecuritySchemeType.OAUTH2,
+flows = @OAuthFlows(
+authorizationCode = @OAuthFlow(
+authorizationUrl = "${springdoc.oAuthFlow.
+authorizationUrl}",
+tokenUrl = "${springdoc.oAuthFlow.tokenUrl}",
+scopes = {
+@OAuthScope(name = "product:read", description =
+"read scope"),
+@OAuthScope(name = "product:write", description =
+"write scope")
+}
+)))
+public
+class
+OpenApiConfig
+{}
+From the preceding class definition, we can see:
+The security schema will be based on OAuth 2.0.
+The authorization code grant flow will be used.
+The required URLs for acquiring an authorization code and access tokens will be supplied by the configuration using the parameters
+springdoc.oAuthFlow.authorizationUrl
+and
+springdoc.oAuthFlow.tokenUrl
+.
+A list of scopes (
+product:read
+and
+product:write
+) that Swagger UI will require to be able to call the APIs.
+Finally, some configuration is added to
+application.yml
+:
+swagger-ui:
+oauth2-redirect-url:
+/swagger-ui/oauth2-redirect.html
+oauth:
+clientId:
+writer
+clientSecret:
+secret-writer
+useBasicAuthenticationWithAccessCodeGrant:
+true
+oAuthFlow:
+authorizationUrl:
+https://localhost:8443/oauth2/authorize
+tokenUrl:
+https://localhost:8443/oauth2/token
+From the preceding configuration, we can see:
+The redirect URL that
+Swagger UI will use to acquire the authorization code.
+Its client ID and client secret.
+It will use HTTP Basic authentication when identifying itself for the authorization server.
+The values of the
+authorizationUrl
+and
+tokenUrl
+parameters, used by the
+OpenApiConfig
+class described above. Note that these URLs are used by the web browser and not by the
+product-composite
+service itself. So they must be resolvable from the web browser.
+To allow unprotected access to the Swagger UI web pages, the edge server has also been configured to allow unrestricted access to URLs that are routed to the Swagger UI component. The following is added to the edge server’s
+SecurityConfig
+class:
+.pathMatchers(
+"/openapi/**"
+).permitAll()
+.pathMatchers(
+"/webjars/**"
+).permitAll()
+With these changes in place, both the edge server and the
+product-composite
+service can act as OAuth 2.0 resource servers, and the Swagger UI component can act as an OAuth client. The last step we need to take to introduce the usage of OAuth 2.0 and OpenID Connect is to update the test script so it acquires access tokens and uses
+them when running the tests.
+Changes in the test script
+To start with, we need to acquire an access token before we can call any of the APIs, except the health
+API. This is done, as already mentioned above, using the OAuth 2.0 client credentials flow. To be able to call the create and delete APIs, we acquire an access token as the
+writer
+client, as follows:
+ACCESS_TOKEN=
+$(
+curl
+-
+k
+https
+:
+//
+writer
+:
+secret
+-
+writer
+@$HOST:$PORT
+/
+oauth2
+/
+token
+-
+d
+grant_type
+=
+client_credentials
+-
+d
+scope
+=
+"product:read product:write"
+-
+s
+|
+jq
+.
+access_token
+-
+r
+)
+From the preceding command, we can see that it uses HTTP Basic authentication, passing its client ID and client secret as
+writer:secret-writer@
+before the hostname.
+To verify that the scope-based authorization works, two tests have been added to the test script:
+# Verify that a request without access token fails on 401, Unauthorized
+assertCurl 401
+"curl -k https://
+$HOST
+:
+$PORT
+/product-composite/
+$PROD_ID_REVS_RECS
+-s"
+# Verify that the reader client with only read scope can call the read API but not delete API
+READER_ACCESS_TOKEN=$(curl -k https://reader:secret-reader@
+$HOST
+:
+$PORT
+/oauth2/token -d grant_type=client_credentials -d scope=
+"product:read"
+-s | jq .access_token -r)
+READER_AUTH=
+"-H \"Authorization: Bearer
+$READER_ACCESS_TOKEN
+\""
+assertCurl 200
+"curl -k https://
+$HOST
+:
+$PORT
+/product-composite/
+$PROD_ID_REVS_RECS
+$READER_AUTH
+-s"
+assertCurl 403
+"curl -k https://
+$HOST
+:
+$PORT
+/product-composite/
+$PROD_ID_REVS_RECS
+$READER_AUTH
+-X DELETE -s"
+The test script uses the reader client’s credentials to acquire an access token:
+The first test calls an API without supplying an access token. The API is expected to return the
+401 Unauthorized
+HTTP status.
+The second test verifies that the reader client can call a read-only API.
+The last test calls an updating API using the
+reader
+client, which is only granted a
+read
+scope. A request sent to the delete API is expected to return the
+403 Forbidden
+HTTP status.
+For the full source code, see
+test-em-all.bash
+.
+With the test script
+updated to acquire and use OAuth 2.0 access tokens, we are ready to try it out in the next section!
+Testing with the local authorization server
+In this section, we will try out the secured system landscape; that is, we will test all the security
+components together. We will use the local authorization server to issue access tokens. The following tests will be performed:
+First, we build from source and run the test script to ensure that everything fits together.
+Next, we will test the protected discovery server’s API and web page.
+After that, we will learn how to acquire access tokens using OAuth 2.0 client credentials and authorization code grant flows.
+With the issued access tokens, we will test the protected APIs. We will also verify that an access token issued for a reader client can’t be used to call an updating API.
+Finally, we will also verify that Swagger UI can issue access tokens and call the APIs.
+Building and running the automated tests
+To build and run automated tests, we
+perform the
+following steps:
+Build the Docker images from source with the following commands:
+cd $BOOK_HOME/Chapter11
+./gradlew build && docker-compose build
+Start the system landscape in Docker and run the usual tests with the following command:
+./test-em-all.bash start
+Note the new negative tests at the end that verify that we get a
+401 Unauthorized
+code back when not authenticated, and
+403 Forbidden
+when not authorized.
+Testing the protected discovery server
+With the protected discovery server, Eureka, up and running, we have to supply valid credentials to be
+able to access its APIs and web pages.
+For example, asking the Eureka server for registered instances can be done by means of the following
+curl
+command, where we supply the username and password directly in the URL:
+curl -H "accept:application/json" https://u:p@localhost:8443/eureka/api/apps -ks | jq -r .applications.application[].instance[].instanceId
+A sample response is as follows:
+Figure 11.3: Services registered in Eureka using an API call
+When accessing the web page on
+https://localhost:8443/eureka/web
+, we first have to accept an unsecure connection, since our certificate is self-signed, and next, we have to
+supply valid credentials, as specified in the configuration file (
+u
+as username and
+p
+as password):
+Figure 11.4: Eureka requires authentication
+Following a successful login, we will see the familiar web page from the Eureka server:
+Figure 11.5: Services registered in Eureka using the web page
+After ensuring that
+access to the Eureka server is protected, we will learn how to issue OAuth access tokens.
+Acquiring access tokens
+Now we are ready to
+acquire access tokens using grant flows defined by OAuth 2.0. We will first try out the client credentials grant
+flow, followed by the authorization code grant flow.
+Acquiring access tokens using the client credentials grant flow
+To get an access token for
+the
+writer
+client, that is, with
+both the
+product:read
+and
+product:write
+scopes, issue the following command:
+curl -k https://writer:secret-writer@localhost:8443/oauth2/token -d grant_type=client_credentials -d scope="product:read product:write" -s | jq .
+The client identifies itself using HTTP Basic authentication, passing its client ID,
+writer
+, and its client
+secret,
+secret
+.
+A sample response is as follows:
+Figure 11.6: Sample token response
+From the screenshot, we
+can see that we got the following information in the response:
+The access token itself.
+The scopes granted to the token. The
+writer
+client is granted both the
+product:write
+and
+product:read
+scope. It is also granted the
+openid
+scope, allowing access to information regarding the user’s ID, such as an email address.
+The type of token we got;
+Bearer
+means that the bearer of this token should be given access according to the scopes granted to the token.
+The number of seconds that the access token is valid,
+3599
+seconds in this case.
+To get an access token
+for the
+reader
+client, that is, with
+only the
+product:read
+scope, simply replace
+writer
+with
+reader
+in the preceding command, resulting in:
+curl -k https://reader:secret-reader@localhost:8443/oauth2/token -d grant_type=client_credentials -d scope="product:read" -s | jq .
+Acquiring access tokens using the authorization code grant flow
+To acquire an access token using the authorization code grant flow, we need to involve a web browser. This grant
+flow is a bit more complicated in order to make it secure in an environment that is partly unsecure (the web browser).
+In the first unsecure step, we will use the
+web browser to acquire an authorization code that can be used only once, to be exchanged for an access token. The authorization code will be passed from the web browser to a secure layer, for example, server-side code, which can make a new request to the authorization server to exchange the authorization code for an access token. In this secure exchange, the server has to supply a client secret to verify its identity.
+Perform the following steps to execute the authorization code grant flow:
+To get an authorization code for the
+reader
+client, use the following URL in a web browser that accepts the use of self-signed certificates, for example, Chrome:
+https://localhost:8443/oauth2/authorize?response_type=code&client_id=reader&redirect_uri=https://my.redirect.uri&scope=product:read&state=35725
+.
+When asked to log in by the web browser, use the credentials specified in the configuration of the authorization server,
+u
+and
+p
+:
+Figure 11.7: Trying out the authorization code grant flow
+We will be
+asked to give the
+reader
+client
+consent to call the APIs in our name:
+Figure 11.8: Authorization code grant flow consent page
+After clicking on the
+Submit Consent
+button, we will get the following response:
+Figure 11.9: Authorization code grant flow redirect page
+This might, at first glance, look a
+bit disappointing. The URL that the authorization
+server sent back to the web browser is based on the redirect URI specified by the client in the initial request. Copy the URL into a text editor and you will find something similar to the following:
+https://my.redirect.uri/?code=7XBs...0mmyk&state=35725
+Great! We can find the authorization code in the redirect URL in the
+code
+request parameter. Extract the authorization code from the
+code
+parameter and define an environment variable,
+CODE
+, with its value:
+CODE=7XBs...0mmyk
+Pretend you
+are the backend
+server that exchanges the authorization code with an access token using the following
+curl
+command:
+curl -k https://reader:secret-reader@localhost:8443/oauth2/token \
+ -d grant_type=authorization_code \
+ -d client_id=reader \
+ -d redirect_uri=https://my.redirect.uri \
+ -d code=$CODE -s | jq .
+A sample response is as follows:
+Figure 11.10: Authorization code grant flow access token
+From the screenshot, we
+can see that we got similar information in the response as
+we got from the client credentials flow, with the following exceptions:
+Since we used a more secure grant flow, we also got a
+refresh token
+issued
+Since we asked for an access token for the
+reader
+client, we only got a
+product:read
+scope, no
+product:write
+scope
+To get an authorization code for the
+writer
+client, use the following URL:
+https://localhost:8443/oauth2/authorize?response_type=code&client_id=writer&redirect_uri=https://my.redirect.uri&scope=product:read+product:write&state=72489
+.
+To exchange the code for an access token for the
+writer
+client, run the following command:
+curl -k https://writer:secret-writer@localhost:8443/oauth2/token \
+  -d grant_type=authorization_code \
+  -d client_id=writer \
+  -d redirect_uri=https://my.redirect.uri \
+  -d code=$CODE -s | jq .
+Verify that the
+response now also contains
+the
+product:write
+scope!
+Calling protected APIs using access tokens
+Now, let’s use the access
+tokens we have acquired to call the protected APIs.
+An OAuth 2.0 access token is expected
+to be sent as a standard HTTP
+authorization
+header, where the access token is prefixed with
+Bearer
+.
+Run the following commands to call the protected APIs:
+Call an API to retrieve a composite product without a valid access token:
+ACCESS_TOKEN=an-invalid-token
+curl https://localhost:8443/product-composite/1 -k -H "Authorization: Bearer $ACCESS_TOKEN" -i
+It should return the following response:
+Figure 11.11: Invalid token results in a 401 Unauthorized response
+The error message clearly states that the access token is invalid!
+Try using
+the API to retrieve a composite
+product using one of the access tokens acquired for the
+reader
+client from the previous section:
+ACCESS_TOKEN={a-reader-access-token}
+curl https://localhost:8443/product-composite/1 -k -H "Authorization: Bearer $ACCESS_TOKEN" -i
+Now we will get the
+200 OK
+status code and the expected response body will be returned:
+Figure 11.12: Valid access token results in a 200 OK response
+If we try to
+access an updating API, for example, the
+delete API, with an access token acquired for the
+reader
+client, the call will fail:
+ACCESS_TOKEN={a-reader-access-token}
+curl https://localhost:8443/product-composite/999 -k -H "Authorization: Bearer $ACCESS_TOKEN" -X DELETE -i
+It will fail with a response similar to the following:
+Figure 11.13: Insufficient scope results in a 403 Forbidden result
+From the error
+response, it is clear that we are forbidden to call the API since the
+request requires higher privileges than what our access token is granted.
+If we repeat the call to the delete API, but with an access token acquired for the
+writer
+client, the call will succeed with
+202 Accepted
+in the response.
+The
+delete
+operation should return
+202
+even if the product with the specified product ID does not exist in the underlying database, since the
+delete
+operation is idempotent, as described in
+Chapter 6
+,
+Adding Persistence
+. Refer to the
+Adding new APIs
+section.
+If you look into the log output using the
+docker-compose logs -f product-composite
+command, you should be able to find authorization information such as the following:
+Figure 11.14: Authorization info in the log output
+This information was extracted in the
+product-composite
+service from the JWT-encoded access token; the
+product-composite
+service did not need to communicate
+with the authorization server to get this information!
+With these tests, we have
+seen how to acquire an access token with the client credentials and authorization code grant flows. We have also seen how scopes can be used to limit what a client can do with a specific access token, for example, only use it for reading operations.
+Testing Swagger UI with OAuth 2.0
+In this section, we will learn
+how to use the Swagger UI component to
+access the protected API. The configuration described in the
+Changes in the product-composite service only
+section above allows us to issue an access token for Swagger UI and use it when calling the APIs from Swagger UI.
+To try it out, perform the following steps:
+Open the Swagger UI start page by going to the following URL in a web browser:
+https://localhost:8443/openapi/swagger-ui.html
+.
+On the start page, we can now see a new button, next to the
+Servers
+drop-down list, with the text
+Authorize
+.
+Click on the
+Authorize
+button to initiate an authorization code grant flow.
+Swagger UI will present a list of scopes that it will ask the authorization server to get access to. Select all scopes by clicking on the link with the text
+select all
+and then clicking on the
+Authorize
+button:
+Figure 11.15: Swagger UI asking for OAuth scopes
+You will then
+be redirected to the authorization server. If you
+are not already logged in from the web browser used, the authorization server will ask for your credentials as in the
+Acquiring access tokens using the authorization code grant flow
+section.
+Log in with username
+u
+and password
+p
+.
+The authorization server will ask for your consent. Select both scopes and click on the
+Submit Consent
+button.
+Swagger UI will complete
+the authorization process by
+showing information about the completed grant flow. Click on the
+Close
+button to get back to the start page:
+Figure 11.16: Swagger UI summarizing the OAuth grant flow
+Now you can try
+out the APIs in
+the same way as described in
+Chapter 5
+,
+Adding an API Description Using OpenAPI
+. Swagger UI will add the access token to the requests. If you look closely at the
+curl
+command reported below the
+Responses
+header, you can find the access token.
+This completes the tests we
+will perform with the local
+authorization server. In the next section, we will replace it with an external OpenID Connect-compliant provider.
+Testing with an external OpenID Connect provider
+So, the OAuth
+dance works fine with an authorization server we control ourselves. But what happens if we replace it with a certified OpenID Connect provider? In theory, it should work out of the box. Let’s find out, shall we?
+For a list of certified
+implementations of OpenID Connect, refer to
+https://openid.net/developers/certified/
+.
+We will use Auth0,
+https://auth0.com/
+, for our tests with an external OpenID provider. To be able to use Auth0 instead of our own authorization server, we will go through the following topics:
+Setting up an account with a
+reader
+and
+writer
+client and a user in Auth0
+Applying the changes required to use Auth0 as an OpenID provider
+Running the test script to verify that it is working
+Acquiring access tokens using the following grant flows:
+Client credentials grant flow
+Authorization code grant flow
+Calling protected APIs using the access tokens acquired from the grant flows
+Using the user info endpoint to get more information about a user
+Let us go through each of them in the following sections.
+Setting up and configuring an account in Auth0
+Most of the configuration
+required in Auth0 will be taken care of by a script that uses Auth0’s management API. But we must perform a few manual steps up to the point where Auth0 has created a client ID and client secret we can use to access the management API. Auth0’s service is multi-tenant, allowing us to create our own domain of OAuth objects in terms of clients, resource owners, and resource servers.
+Perform the following manual steps to sign up for a free account in Auth0 and create a client that we can use to access the management API:
+Open the URL
+https://auth0.com
+in your browser.
+Click on the
+hamburger menu
+(☰) in the top-right corner.
+Click on the
+Sign up
+button:
+Sign up with an email of your choice.
+After a successful sign-up, you will be asked to create a tenant domain. Enter the name of the tenant of your choice, in my case:
+dev-ml-3rd.eu.auth0.com
+.
+Fill in the information about your account as requested.
+Also, look in your mailbox for an email with the subject
+Please Verify Your Auth0 Account
+and use the instructions in the email to verify your account.
+Following sign-up, you will be directed to an
+onboarding
+page.
+In the menu to the left, click on
+Applications
+to get it expanded, then click on
+APIs
+to find the management API,
+Auth0 Management API
+. This API was created for you during the creation of your tenant. We will use this API to create the required definitions in the tenant.
+Click on
+Auth0 Management API
+and select the
+Test
+tab.
+A big button with the text
+Create & Authorize Test
+will appear. Click on it to get a client created that can be used to access the management API.
+Once created, a page is displayed with the header
+Asking Auth0 for tokens from my application
+. As a final step, we need to give the created client permission to use the management APIs.
+Click on the tab
+Machine to Machine Applications
+, next to the
+Test
+tab.
+Here we will find the test client,
+Auth0 Management API (Test Application)
+, and we can see that it is authorized to use the management API. If we click
+on the down arrow next to the
+Authorized
+toggle button, a large number of available privileges are revealed.
+Click on the
+All
+choice and then on the
+Update
+button. The screen should look similar to the following screenshot:
+Figure 11.17: Auth0 management API client permissions
+Click on the
+Continue
+button after understanding that you now have a very powerful client with access to all management APIs within your tenant.
+Now, we just need to
+collect the client ID and client secret of the created client. The easiest way to do that is to select
+Applications
+in the menu to the left (under the main menu choice
+Applications
+) and then select the application named
+Auth0 Management API (Test Application)
+.
+A screen similar to the following should be displayed:
+Figure 11.18: Auth0 Management API client application information
+Open the file
+$BOOK_HOME/Chapter11/auth0/env.bash
+and copy the following values from
+the screen above:
+Domain
+into the value of the variable
+TENANT
+Client ID
+into the value of the variable
+MGM_CLIENT_ID
+Client Secret
+into the value of the variable
+MGM_CLIENT_SECRET
+Complete the values required in the
+env.bash
+file by specifying an email address and password, in the variables
+USER_EMAIL
+and
+USER_PASSWORD
+, of a test user that the script will create for us.
+Specifying a password for a user like this is not considered best practice from a security perspective. Auth0 supports enrolling users who will be able to set the password themselves, but it is more involved to set up. For more information, see
+https://auth0.com/docs/connections/database/password-change
+. Since this is only used for test purposes, specifying a password like this is OK.
+We can now run the
+script that will create the following definitions for us:
+Two applications,
+reader
+and
+writer
+, or clients in OAuth terminology
+The
+product-composite
+API, a resource server in OAuth terminology, with the OAuth scopes
+product:read
+and
+product:write
+A user, a resource owner in OAuth terminology, that we will use to test the authorization code grant flow
+Finally, we will grant the
+reader
+application the scope
+product:read
+, and the
+writer
+application the scopes
+product:read
+and
+product:write
+Run the following commands:
+cd $BOOK_HOME/Chapter11/auth0
+./setup-tenant.bash
+Expect the following output (details removed from the output below):
+Figure 11.19: Output from setup-tenant.bash the first time it is executed
+Save a copy of the
+export
+commands printed at the end of the output; we will use them multiple times later on in this chapter.
+Look in your mailbox for
+the email specified for the test user. You will receive a mail with the subject
+Verify your email
+.
+Use the instructions in the email to verify the test user’s email address.
+Note that the script is idempotent, meaning it can be run multiple times without corrupting the configuration. If running the script again, it should respond with:
+Figure 11.20: Output from setup-tenant.bash the next time it is executed
+It can be very handy to be able to run the script again, for example, to get access to the client ID
+and client secret of the
+reader
+and
+writer
+.
+If you need to remove the objects created by
+setup-tenant.bash
+, you can run the script
+reset-tenant.bash
+.
+With an Auth0 account created and configured, we can move on and apply the necessary configuration changes in the system landscape.
+Applying the required changes to use Auth0 as an OpenID provider
+In this section, we will learn what
+configuration changes are required to be able to replace the local authorization server with Auth0. We only need to change the configuration for the two services that act as OAuth resource servers, the
+product-composite
+and
+gateway
+services. We also need to change our test script a bit, so that it acquires the access tokens from Auth0 instead of acquiring them from our local authorization server. Let’s start with the OAuth resource servers, the
+product-composite
+and
+gateway
+services.
+The changes described in this topic have
+not
+been applied to the source code in the book’s Git repository; you need to make them yourself to see them in action!
+Changing the configuration in the OAuth resource servers
+As already described, when using an OpenID Connect provider, we only have to configure the base URI to the
+standardized discovery endpoint in the OAuth resource servers.
+In the
+product-composite
+and
+gateway
+projects, update the OIDC discovery endpoint to point to Auth0 instead of to our local authorization server. Make the following change to the
+application.yml
+file in both projects:
+Locate the property
+spring.security.oauth2.resourceserver.jwt.issuer-uri
+.
+Replace its value with
+https://${TENANT}/
+, where
+${TENANT}
+should be replaced with your tenant domain name; in my case, it is
+dev-ml.eu.auth0.com
+. Do
+not
+forget the trailing
+/!
+In my case, the configuration of the OIDC discovery endpoint will look like this:
+spring.security.oauth2.resourceserver.jwt.issuer-uri: https:
+//dev-ml.eu.auth0.com/
+If you are curious, you can see what’s in the discovery document by running the following command:
+curl https://${TENANT}/.well-known/openid-configuration -s | jq
+Rebuild the
+product-composite
+and
+gateway
+services as follows:
+cd $BOOK_HOME/Chapter11
+./gradlew build && docker-compose up -d --build product-composite gateway
+With the
+product-composite
+and
+gateway
+services updated, we can move on and also update the test
+script.
+Changing the test script so it acquires access tokens from Auth0
+We also need to update the test script so it
+acquires access tokens from the Auth0 OIDC provider. This is done by performing the following changes in
+test-em-all.bash
+:
+Find the following command:
+ACCESS_TOKEN=
+$(
+curl
+-
+k
+https
+:
+//
+writer
+:
+secret
+-
+writer
+@$HOST:$PORT
+/
+oauth2
+/
+token
+-
+d
+grant_type
+=
+client_credentials
+-
+d
+scope
+=
+"product:read product:write"
+-
+s
+|
+jq
+.
+access_token
+-
+r
+)
+Replace it with these commands:
+export
+TENANT=...
+export
+WRITER_CLIENT_ID=...
+export
+WRITER_CLIENT_SECRET=...
+ACCESS_TOKEN=$(curl -X POST https://
+$TENANT
+/oauth/token \
+  -d grant_type=client_credentials \
+  -d audience=https://localhost:8443/product-composite \
+  -d scope=product:
+read
++product:write \
+  -d client_id=
+$WRITER_CLIENT_ID
+\
+  -d client_secret=
+$WRITER_CLIENT_SECRET
+-s | jq -r .access_token)
+Note from the preceding command that Auth0 requires us to specify the intended
+audience
+of the requested access token, as an extra layer of security. The audience is the API we plan to call using the access token. Given that an API implementation verifies the
+audience
+field, this would prevent the situation where someone tries to use an access token issued for another purpose to get access to an API.
+Set the values for the environment variables
+TENANT
+,
+WRITER_CLIENT_ID
+, and
+WRITER_CLIENT_SECRET
+in the preceding commands with the values returned by the
+setup-tenant.bash
+script.
+As mentioned above, you can run the script again to acquire these values without risking any negative side effects!
+Find the following command:
+READER_ACCESS_TOKEN=$(curl -k https://reader:secret-reader@
+$HOST
+:
+$PORT
+/oauth2/token -d grant_type=client_credentials -d scope=
+"product:read"
+-s | jq .access_token -r)
+Replace it with this command:
+export
+READER_CLIENT_ID=...
+export
+READER_CLIENT_SECRET=...
+READER_ACCESS_TOKEN=$(curl -X POST https://
+$TENANT
+/oauth/token \
+  -d grant_type=client_credentials \
+  -d audience=https://localhost:8443/product-composite \
+  -d scope=product:
+read
+\
+  -d client_id=
+$READER_CLIENT_ID
+\
+  -d client_secret=
+$READER_CLIENT_SECRET
+-s | jq -r .access_token)
+Note that we only request the
+product:read
+scope and not the
+product:write
+scope here.
+Set the values for the environment variables
+READER_CLIENT_ID
+and
+READER_CLIENT_SECRET
+in the preceding commands with the values returned by the
+setup-tenant.bash
+script.
+Now the access tokens are
+issued by Auth0 instead of our local authorization server, and our API implementations can verify the access tokens using information from Auth0’s discovery service configured in the
+application.yml
+files. The API implementations can, as before, use the scopes in the access tokens to authorize the client to perform the call to the API, or not.
+With this, we have all the required changes in place. Let’s run some tests to verify that we can acquire access tokens from Auth0.
+Running the test script with Auth0 as the OpenID Connect provider
+Now, we are ready to give Auth0 a try!
+Run the usual tests, but this
+time, using Auth0 as the OpenID Connect provider, with the following command:
+./test-em-all.bash
+In the logs, you will be able to find authorization information from the access tokens issued by Auth0. Run the command:
+docker-compose logs product-composite | grep "Authorization info"
+Expect the following outputs from the command:
+From calls using an access token with both the
+product:read
+and
+product:write
+scopes, we will see both scopes listed as follows:
+Figure 11.21: Authorization information for the writer client from Auth0 in the log output
+From calls using an access token with only the
+product:read
+scope, we will see that only that scope is listed as follows:
+Figure 11.22: Authorization information for the reader client from Auth0 in the log output
+As we can see from the log output, we now also get information regarding the
+intended audience
+for this access token. To strengthen security, we could add a test to our service that verifies that its URL,
+https://localhost:8443/product-composite
+in this case, is part of the audience list. This would, as mentioned earlier, prevent the situation where someone tries to use an access token issued for another purpose than to get access to our API.
+With the automated tests working together with Auth0, we can move on and learn how to acquire access tokens using the different types of grant flow. Let’s start with the client
+credentials grant flow.
+Acquiring access tokens using the client credentials grant flow
+If you want to acquire an
+access token from Auth0 yourself, you can do so by running the following command, using the client credentials grant flow:
+export TENANT=...
+export WRITER_CLIENT_ID=...
+export WRITER_CLIENT_SECRET=...
+curl -X POST https://$TENANT/oauth/token \
+  -d grant_type=client_credentials \
+  -d audience=https://localhost:8443/product-composite \
+  -d scope=product:read+product:write \
+  -d client_id=$WRITER_CLIENT_ID \
+  -d client_secret=$WRITER_CLIENT_SECRET
+Set the values for the environment variables
+TENANT
+,
+WRITER_CLIENT_ID
+, and
+WRITER_CLIENT_SECRET
+in the
+preceding commands with the values returned by the
+setup-tenant.bash
+script.
+Following the instructions in the
+Calling protected APIs using access tokens
+section, you should be able to call the APIs using the acquired access token.
+Acquiring access tokens using the authorization code grant flow
+In this section, we will learn how to acquire
+an access token from Auth0 using the authorization code grant flow. As already described above, we first need to acquire an authorization code using a web browser. Next, we can use server-side code to exchange the authorization code for an access token.
+Perform the following steps to execute the authorization code grant flow with Auth0:
+To get an authorization code for the default app client, use the following URL in the web browser:
+https://${TENANT}/authorize?audience=https://localhost:8443/product-composite&scope=openid email product:read product:write&response_type=code&client_id=${WRITER_CLIENT_ID}&redirect_uri=https://my.redirect.uri&state=845361
+.
+Replace
+${TENANT}
+and
+${WRITER_CLIENT_ID}
+in the preceding URL with the tenant domain name and writer client ID returned by the
+setup-tenant.bash
+script.
+Auth0 should present the following login screen:
+Figure 11.23: Authorization code grant flow with Auth0, the login screen
+Following a successful
+login, Auth0 will ask you to give the client application your consent:
+Figure 11.24: Authorization code grant flow with Auth0, the consent screen
+The authorization code
+is now in the URL in the browser, just like when we tried out the authorization code grant flow with our local authorization server:
+Figure 11.25: Authorization code grant flow with Auth0, access token
+Extract the code and run the following command to get the access token:
+CODE=...
+export TENANT=...
+export WRITER_CLIENT_ID=...
+export WRITER_CLIENT_SECRET=...
+curl -X POST https://$TENANT/oauth/token \
+ -d grant_type=authorization_code \
+ -d client_id=$WRITER_CLIENT_ID \
+ -d client_secret=$WRITER_CLIENT_SECRET  \
+ -d code=$CODE \
+ -d redirect_uri=https://my.redirect.uri -s | jq .
+Set the values for the environment variables
+TENANT
+,
+WRITER_CLIENT_ID
+, and
+WRITER_CLIENT_SECRET
+in the preceding commands to the values returned by the
+setup-tenant.bash
+script.
+Now that we have learned
+how to acquire access tokens using both grant flows, we are ready to try calling the external API using an access token acquired from Auth0 in the next section.
+Calling protected APIs using the Auth0 access tokens
+We can use access
+tokens issued by Auth0 to call our APIs, just like when we used access tokens issued by our local authorization server.
+For a read-only API, execute the following command:
+ACCESS_TOKEN=...
+curl https://localhost:8443/product-composite/1 -k -H "Authorization: Bearer $ACCESS_TOKEN" -i
+For an updating API, execute the following command:
+ACCESS_TOKEN=...
+curl https://localhost:8443/product-composite/999 -k -H "Authorization: Bearer $ACCESS_TOKEN" -X DELETE -i
+Since we have requested both scopes,
+product:read
+and
+product:write
+, both the preceding API calls are expected to return
+200 OK
+.
+Getting extra information about the user
+From the log output in
+Figures 11.21
+and
+11.22
+in the
+Running the test script with Auth0 as the OpenID Connect provider section
+, we could not see any information about the user that initiated the API request. If you want your API implementation to know a
+bit more about the user, it can call Auth0’s
+userinfo_endpoint
+. The URL of the
+userinfo
+endpoint can be found in the response of a request to the OIDC discovery endpoint, as described in the
+Changing the configuration in the OAuth resource servers
+section. To get user info related to an access token, make the following request:
+Export TENANT=...
+curl -H "Authorization: Bearer $ACCESS_TOKEN" https://$TENANT/userinfo -s | jq
+Set the values for the
+TENANT
+environment variable in the preceding commands to the values returned by the
+setup-tenant.bash
+script.
+Note that this command only applies to access tokens issued using the authorization code grant flow. Access tokens issued using the client credentials grant flow don’t contain any user information and will result in an error response if tried.
+A sample response is as follows:
+Figure 11.26: Requesting extra user information from Auth0
+This endpoint can also be used to verify that the user hasn’t revoked the access token in Auth0.
+Wrap up the tests by
+shutting down the system landscape with the following command:
+docker-compose down
+This concludes the section, where we have learned how to replace the local OAuth 2.0 authorization server with an external alternative. We have also seen how to reconfigure the microservice landscape to validate access tokens using an external OIDC provider.
+Summary
+In this chapter, we have learned how to use Spring Security to protect our APIs.
+We have seen how easy it is to enable HTTPS to prevent eavesdropping by third parties using Spring Security. With Spring Security, we have also learned that it is straightforward to restrict access to the discovery server, Netflix Eureka, using HTTP Basic authentication. Finally, we have seen how we can use Spring Security to simplify the use of OAuth 2.0 and OpenID Connect to allow third-party client applications to access our APIs in the name of a user, but without requiring that the user share credentials with the client applications. We have learned both how to set up a local OAuth 2.0 authorization server based on Spring Security and also how to change the configuration so that an external OpenID Connect provider, Auth0, can be used instead.
+One concern, however, is how to manage the configuration required. Each microservice instance must be provided with its own configuration, making it hard to get a good overview of the current configuration. Updating configuration that concerns multiple microservices will also be challenging. Added to the scattered configuration is the fact that some of the configurations we have seen so far contain sensitive information, such as credentials or certificates. It seems like we need a better way to handle the configuration for a number of cooperating microservices and also a solution for how to handle sensitive parts of the configuration.
+In the next chapter, we will explore the Spring Cloud Config Server and see how it can be used to handle these types of problems.
+Questions
+What are the benefits and shortcomings of using self-signed certificates?
+What is the purpose of OAuth 2.0 authorization codes?
+What is the purpose of OAuth 2.0 scopes?
+What does it mean when a token is a JWT?
+How can we trust the information that is stored in a JWT?
+Is it suitable to use the OAuth 2.0 authorization code grant flow with a native mobile app?
+What does OpenID Connect add to OAuth 2.0?
+
+12
+Centralized Configuration
+In this chapter, we will learn how to use the
+Spring Cloud Config Server
+to centralize managing the configuration of our microservices. As already described in
+Chapter 1
+,
+Introduction to Microservices
+, an increased number of microservices typically comes with an increased number of configuration files that need to be managed and updated.
+With the Spring Cloud Config Server, we can place the configuration files for all our microservices in a central configuration repository, which will make it much easier to handle them. Our microservices will be updated to retrieve their configuration from the configuration server at startup.
+The following topics will be covered in this chapter:
+Introduction to the Spring Cloud Config Server
+Setting up a config server
+Configuring clients of a config server
+Structuring the configuration repository
+Trying out the Spring Cloud Config Server
+Technical requirements
+For instructions on how to install tools used in this book and how to access the source code for this book, see:
+Chapter 21
+,
+Installation Instructions for macOS
+Chapter 22
+,
+Installation Instructions for Microsoft Windows with WSL 2 and Ubuntu
+The code examples in this chapter all come from the source code in
+$BOOK_HOME/Chapter12
+.
+If you want to view the changes applied to the source code in this chapter, that is, see what it took to add a configuration server to the microservice landscape, you can compare it with the source code for
+Chapter 11
+,
+Securing Access to APIs
+. You can use your favorite
+diff
+tool and compare the two folders
+$BOOK_HOME/Chapter11
+and
+$BOOK_HOME/Chapter12
+.
+Introduction to the Spring Cloud Config Server
+The Spring Cloud Config Server (shortened to
+Config Server
+) will be added
+to the existing microservice
+landscape behind the edge server, in the same way as for the other microservices:
+Figure 12.1: Adding a config server to the system landscape
+When it comes to setting up a config server, there are a number of options to consider:
+Selecting a storage type for the configuration repository
+Deciding on the initial client connection, either to the config server or to the discovery server
+Securing the configuration, both against unauthorized access to the API and by avoiding storing sensitive information in plain text in the configuration repository
+Let’s go through each option one by one and also introduce the API exposed by the config server.
+Selecting the storage type of the configuration repository
+As already described in
+Chapter 8
+,
+Introduction to Spring Cloud
+, the config server supports
+the storing of configuration files in a number of different backends, for example:
+Git repository
+Local filesystem
+HashiCorp Vault
+JDBC database
+In this chapter, we will use a local filesystem. To use the local filesystem, the config server needs to be launched with the native Spring profile enabled. The location of the configuration repository is specified
+using the
+spring.cloud.config.server.native.searchLocations
+property.
+Deciding on the initial client connection
+By default, a client connects
+first to the config server to retrieve its configuration. Based on the configuration, it connects to the discovery server, Netflix Eureka in our case, to register itself. It is also possible to do this the other way around, that is, the client first connects to the discovery server to find a config server instance and then connects to the config server to get its configuration. There are pros and cons to both approaches.
+In this chapter, the clients will first connect to the config server. With this approach, it will be possible to store the configuration of the discovery server in the config server.
+To learn more
+about the other alternative, see
+https://docs.spring.io/spring-cloud-config/docs/4.0.1/reference/html/#discovery-first-bootstrap
+.
+One concern with connecting to the config server first is that the config server can become a single point of failure. If the clients connect first to a discovery server, such as Netflix Eureka, there can be multiple config server instances registered so that a single point of failure can be avoided. When we learn about the
+service
+concept in Kubernetes later on in this book, starting with
+Chapter 15
+,
+Introduction to Kubernetes
+, we will see how we can avoid a single point of failure by running multiple containers, for example, config servers, behind each Kubernetes service.
+Securing the configuration
+Configuration information
+will, in general, be handled as sensitive
+information. This means that we need to secure the configuration information both in transit and at rest. From a runtime perspective, the config server does not need to be exposed to the outside through the edge server. During development, however, it is useful to be able to access the API of the config server to check the configuration. In production environments, it is recommended to lock down external access to the config server.
+Securing the configuration in transit
+When the configuration information
+is asked for by a microservice, or anyone using the API of the config server, it will be protected against eavesdropping by the edge server since it already uses HTTPS.
+To ensure that the API user is a known client, we will use HTTP basic authentication. We can set up HTTP basic authentication by using Spring Security in the config server and specifying the environment variables
+SPRING_SECURITY_USER_NAME
+and
+SPRING_SECURITY_USER_PASSWORD
+with the permitted
+credentials.
+Securing the configuration at rest
+To avoid a situation
+where someone with access to the configuration repository can steal sensitive information, such as passwords, the config server supports the encryption of configuration information when stored on disk. The config server supports the use of both symmetric and asymmetric keys. Asymmetric keys are more secure but harder to manage.
+In this chapter, we will use a symmetric key. The symmetric key is given to the config server at startup by specifying an environment variable,
+ENCRYPT_KEY
+. The encrypted key is just a plain text string that needs to be protected in the same way as any sensitive information.
+To learn more about the use
+of asymmetric keys, see
+https://docs.spring.io/spring-cloud-config/docs/4.0.1/reference/html/#_key_management
+.
+Introducing the config server API
+The config server exposes
+a REST API that can be used by its clients to retrieve their configuration. In this chapter, we will use the following endpoints in the API:
+/actuator
+: The standard actuator endpoint exposed by all microservices. As always, these should be used with care. They are very useful during development but must be locked down before being used in production.
+/encrypt
+and
+/decrypt
+: Endpoints for encrypting and decrypting sensitive information. These must also be locked down before being used in production.
+/{microservice}/{profile}
+: Returns the configuration for the specified microservice and the specified Spring profile.
+We will see some sample uses for the API when we try out the config server.
+Setting up a config server
+Setting up a config server
+on the basis of the decisions discussed is straightforward:
+Create a Spring Boot project using Spring Initializr, as described in
+Chapter 3
+,
+Creating a Set of Cooperating Microservices
+. Refer to the
+Using Spring Initializr to generate skeleton code
+section.
+Add the dependencies,
+spring-cloud-config-server
+and
+spring-boot-starter-security
+, to the Gradle build file,
+build.gradle
+.
+Add the annotation
+@EnableConfigServer
+to the application class,
+ConfigServerApplication
+:
+@EnableConfigServer
+@SpringBootApplication
+public
+class
+ConfigServerApplication
+{
+Add the configuration for the config server to the default property file,
+application.yml
+:
+server.port:
+8888
+spring.cloud.config.server.native.searchLocations:
+file:${PWD}/config-repo
+management.endpoint.health.show-details:
+"ALWAYS"
+management.endpoints.web.exposure.include:
+"*"
+logging:
+level:
+root:
+info
+---
+spring.config.activate.on-profile:
+docker
+spring.cloud.config.server.native.searchLocations:
+file:/config-repo
+The most important configuration is to specify where to find the configuration repository, indicated using the
+spring.cloud.config.server.native.searchLocations
+property.
+Add a routing rule to the edge server to make the API of the config server accessible from outside the microservice landscape.
+Add a Dockerfile and a definition of the config server to the three Docker Compose files.
+Externalize sensitive configuration parameters to the standard Docker Compose environment file,
+.env
+. The parameters are described below, in the
+Configuring the config server for use with Docker
+section.
+Add the config server to the common build file,
+settings.gradle
+:
+include
+':spring-cloud:config-server'
+The source code for the Spring Cloud Config Server can be found in
+$BOOK_HOME/Chapter12/spring-cloud/config-server
+.
+Now, let’s look into how to set up
+the routing rule referred to in
+step 5
+and how to configure the config server added in Docker Compose, as described in
+steps 6
+and
+7
+.
+Setting up a routing rule in the edge server
+To be able to access the API
+of the config server
+from outside the microservice landscape, we add a routing rule to the edge server. All requests to the edge server that begin with
+/config
+will be routed to the config server with the following routing rule:
+-
+id:
+config-server
+uri:
+http://${app.config-server}:8888
+predicates:
+-
+Path=/config/**
+filters:
+-
+RewritePath=/config/(?<segment>.*),
+/$\{segment}
+The
+RewritePath
+filter in the routing rule will remove the leading part,
+/config
+, from the incoming URL before it sends it to the config server.
+The edge server is also configured to permit all requests to the config server, delegating the security checks to the config server. The following line is added to the
+SecurityConfig
+class in the edge server:
+.pathMatchers(
+"/config/**"
+).permitAll()
+With this routing rule in place, we can use the API of the config server; for example, run the following command to ask for the configuration of the
+product
+service when it uses the
+docker
+Spring profile:
+curl https://dev-usr:dev-pwd@localhost:8443/config/product/docker -ks | jq
+We will run this command
+when we try out the config
+server later on.
+Configuring the config server for use with Docker
+The Dockerfile of the config server
+looks the same as for the other
+microservices, except for the fact that it exposes port
+8888
+instead of port
+8080
+.
+When it comes to adding the config server to the Docker Compose files, it looks a bit different from what we have seen for the other microservices:
+config-server:
+build:
+spring-cloud/config-server
+mem_limit:
+512m
+environment:
+-
+SPRING_PROFILES_ACTIVE=docker,native
+-
+ENCRYPT_KEY=${CONFIG_SERVER_ENCRYPT_KEY}
+-
+SPRING_SECURITY_USER_NAME=${CONFIG_SERVER_USR}
+-
+SPRING_SECURITY_USER_PASSWORD=${CONFIG_SERVER_PWD}
+volumes:
+-
+$PWD/config-repo:/config-repo
+Here are the explanations for the preceding source code:
+The Spring profile,
+native
+, is added to signal to the config server that the config repository is based on local files.
+The environment variable
+ENCRYPT_KEY
+is used to specify the symmetric encryption key that will be used by the config server to encrypt and decrypt sensitive configuration information.
+The environment variables
+SPRING_SECURITY_USER_NAME
+and
+SPRING_SECURITY_USER_PASSWORD
+are used to specify the credentials to be used for protecting the APIs using basic HTTP authentication.
+The
+volumes
+declaration will make the
+config-repo
+folder accessible in the Docker container at
+/config-repo
+.
+The values of the three preceding environment variables, marked in the Docker Compose file with
+${...}
+, are fetched
+by Docker Compose
+from the
+.env
+file:
+CONFIG_SERVER_ENCRYPT_KEY=my-very-secure-encrypt-key
+CONFIG_SERVER_USR=dev-usr
+CONFIG_SERVER_PWD=dev-pwd
+The information stored in the
+.env
+file, that is, the username, password, and encryption key, is sensitive and must be protected if used for something other than development and testing. Also, note that losing the encryption key will lead to a situation where the encrypted information in the config repository cannot be decrypted!
+Configuring clients of a config server
+To be able to get their configurations
+from the config server, our microservices need to be updated. This can be done with the following steps:
+Add the
+spring-cloud-starter-config
+and
+spring-retry
+dependencies to the Gradle build file,
+build.gradle
+.
+Move the configuration file,
+application.yml
+, to the config repository and rename it with the name of the client as specified by the property
+spring.application.name
+.
+Add a new
+application.yml
+file to the
+src/main/resources
+folder. This file will be used to hold the configuration required to connect to the config server. Refer to the following
+Configuring connection information
+section for an explanation of its content.
+Add credentials for accessing the config server to the Docker Compose files, for example, the
+product
+service:
+product:
+environment:
+-
+CONFIG_SERVER_USR=${CONFIG_SERVER_USR}
+-
+CONFIG_SERVER_PWD=${CONFIG_SERVER_PWD}
+Disable the use of the config server when running Spring Boot-based automated tests. This is done by adding
+spring.cloud.config.enabled=false
+to the
+@DataMongoTest
+,
+@DataJpaTest
+, and
+@SpringBootTest
+annotations. They look like this:
+@DataMongoTest(properties = {"spring.cloud.config.enabled=false"})
+@DataJpaTest(properties = {"spring.cloud.config.enabled=false"})
+@SpringBootTest(webEnvironment=RANDOM_PORT, properties = {"eureka.client.enabled=false", "spring.cloud.config.enabled=false"})
+Configuring connection information
+As mentioned
+previously, the
+src/main/resources/application.yml
+file now holds the client configuration that is required to connect to the config server. This file has the same content for all clients of the config server, except for the application name, as specified by the
+spring.application.name
+property (in the following example, set to
+product
+):
+spring.config.import:
+"configserver:"
+spring:
+application.name:
+product
+cloud.config:
+failFast:
+true
+retry:
+initialInterval:
+3000
+multiplier:
+1.3
+maxInterval:
+10000
+maxAttempts:
+20
+uri:
+http://localhost:8888
+username:
+${CONFIG_SERVER_USR}
+password:
+${CONFIG_SERVER_PWD}
+---
+spring.config.activate.on-profile:
+docker
+spring.cloud.config.uri:
+http://config-server:8888
+This configuration will make the client do the following:
+Connect to the config server using the
+http://localhost:8888
+URL when it runs outside Docker, and using the
+http://config-server:8888
+URL when running in a Docker container
+Use HTTP Basic authentication, based on the value of the
+CONFIG_SERVER_USR
+and
+CONFIG_SERVER_PWD
+properties, as the client’s username and password
+Try to reconnect to the config server during startup up to 20 times, if required
+If the connection attempt fails, the client will initially wait for 3 seconds before trying to reconnect
+The wait time for subsequent retries will increase by a factor of 1.3
+The maximum wait time between connection attempts will be 10 seconds
+If the client can’t connect to the config server after 20 attempts, its startup will fail
+This configuration is generally good for resilience against temporary connectivity problems with the config server. It is especially useful when the whole landscape of microservices and its config server are started up at once, for example, when using the
+docker-compose up
+command. In this scenario, many of the clients will be trying to connect to the config server before it is ready, and the
+retry
+logic will make the clients
+connect to the config server successfully once it is up and running.
+Structuring the configuration repository
+After moving the configuration
+files from each client’s source code to the configuration repository, we will have some common configuration in many of the configuration files, for example, for the configuration of actuator endpoints and how to connect to Eureka, RabbitMQ, and Kafka.
+The common parts have been placed in a common configuration file named
+application.yml
+. This file is shared by all clients. The configuration repository contains the following files:
+config-repo/
+├── application.yml
+├── auth-server.yml
+├── eureka-server.yml
+├── gateway.yml
+├── product-composite.yml
+├── product.yml
+├── recommendation.yml
+└── review.yml
+The configuration repository can be found in
+$BOOK_HOME/Chapter12/config-repo
+.
+Trying out the Spring Cloud Config Server
+Now it is time to try out the config server:
+First, we will build from source and run the test script to ensure that everything fits together.
+Next, we will try out the config server API to retrieve the configuration for our microservices.
+Finally, we will see how we can encrypt and decrypt sensitive information, for example, passwords.
+Building and running automated tests
+So, now we build
+and run verification
+tests of the system landscape, as follows:
+Build the Docker images with the following commands:
+cd $BOOK_HOME/Chapter12
+./gradlew build && docker-compose build
+Start the system landscape in Docker and run the usual tests with the following command:
+./test-em-all.bash start
+Getting the configuration using the config server API
+As described previously, we can reach the API
+of the config server through the edge
+server by using the URL prefix,
+/config
+. We also have to supply credentials as specified in the
+.env
+file for HTTP Basic authentication. For example, to retrieve the configuration used for the
+product
+service when it runs as a Docker container, that is, having activated the Spring profile
+docker
+, run the following command:
+curl https://dev-usr:dev-pwd@localhost:8443/config/product/docker -ks | jq .
+Expect a response with the following structure (many of the properties in the response are replaced by
+...
+to increase readability):
+{
+"name"
+:
+"product"
+,
+"profiles"
+:
+[
+"docker"
+],
+...
+"propertySources"
+:
+[
+{
+"name"
+:
+"...file [/config-repo/product.yml]..."
+,
+"source"
+:
+{
+"spring.config.activate.on-profile"
+:
+"docker"
+,
+"server.port"
+:
+8080
+,
+...
+}
+},
+{
+"name"
+:
+"...file [/config-repo/product.yml]..."
+,
+"source"
+:
+{
+"server.port"
+:
+7001
+,
+...
+}
+},
+{
+"name"
+:
+"...file [/config-repo/application.yml]..."
+,
+"source"
+:
+{
+"spring.config.activate.on-profile"
+:
+"docker"
+,
+...
+}
+},
+{
+"name"
+:
+"...file [/config-repo/application.yml]..."
+,
+"source"
+:
+{
+...
+"app.eureka-password"
+:
+"p"
+,
+"spring.rabbitmq.password"
+:
+"guest"
+}
+}
+]
+}
+The explanations for this response are as follows:
+The response contains properties from a number of
+property sources
+, one per property file and Spring profile that matched the API request. The property sources are returned in priority order; if a property is specified in multiple property sources, the first property in the response takes precedence. The preceding sample response contains the following property sources, in the following priority order:
+/config-repo/product.yml
+, for the
+docker
+Spring profile
+/config-repo/product.yml
+, for the
+default
+Spring profile
+/config-repo/application.yml
+, for the
+docker
+Spring profile
+/config-repo/application.yml
+, for the
+default
+Spring profile
+For example, the port used will be
+8080
+and not
+7001
+, since
+"server.port": 8080
+is specified before
+"server.port": 7001
+in the preceding response.
+Sensitive information, such as the passwords
+to Eureka and RabbitMQ, are returned
+in plain text, for example,
+"p"
+and
+"guest"
+, but they are encrypted on disk. In the configuration file,
+application.yml
+, they are specified as follows:
+app:
+eureka-password:
+'{cipher}bf298f6d5f878b342f9e44bec08cb9ac00b4ce57e98316f030194a225fac89fb'
+spring.rabbitmq:
+password:
+'{cipher}17fcf0ae5b8c5cf87de6875b699be4a1746dd493a99d926c7a26a68c422117ef'
+Encrypting and decrypting sensitive information
+Information can be encrypted
+and decrypted
+using the
+/encrypt
+and
+/decrypt
+endpoints exposed by the config server. The
+/encrypt
+endpoint can be used to create encrypted values to be placed in the
+property
+file in the config repository. Refer to the example in the previous section, where the passwords to Eureka and RabbitMQ are stored encrypted on disk. The
+/decrypt
+endpoint can be used to verify encrypted information that is stored on disk in the config repository.
+To encrypt the
+hello world
+string, run the following command:
+curl -k https://dev-usr:dev-pwd@localhost:8443/config/encrypt --data-urlencode "hello world"
+It is important to use the
+--data-urlencode
+flag when using
+curl
+to call the
+/encrypt
+endpoint, to ensure the correct handling of special characters such as
++
+.
+Expect a response along the lines of the following:
+Figure 12.2: An encrypted value of a configuration parameter
+To decrypt the encrypted
+value, run
+the following command:
+curl -k https://dev-usr:dev-pwd@localhost:8443/config/decrypt -d d91001603dcdf3eb1392ccbd40ff201cdcf7b9af2fcaab3da39e37919033b206
+Expect the
+hello world
+string as the response:
+Figure 12.3: A decrypted value of a configuration parameter
+If you want to use an encrypted value in a configuration file, you need to prefix it with
+{cipher}
+and wrap it in
+''
+. For example, to store the encrypted version of
+hello world
+, add the following line in a YAML-based configuration file:
+my-secret:
+'{cipher}d91001603dcdf3eb1392ccbd40ff201cdcf7b9af2 fcaab3da39e37919033b206'
+When the config server detects values in the format
+'{cipher}...'
+, it tries to decrypt them using its encryption key before sending them to a client.
+These tests conclude the chapter on centralized configuration. Wrap it up by shutting
+down the system
+landscape:
+docker-compose down
+Summary
+In this chapter, we have seen how we can use the Spring Cloud Config Server to centralize managing the configuration of our microservices. We can place the configuration files in a common configuration repository and share common configurations in a single configuration file while keeping microservice-specific configuration in microservice-specific configuration files. The microservices have been updated to retrieve their configuration from the config server at startup and are configured to handle temporary outages while retrieving their configuration from the config server.
+The config server can protect configuration information by requiring authenticated usage of its API with HTTP basic authentication and can prevent eavesdropping by exposing its API externally through the edge server that uses HTTPS. To prevent intruders who obtained access to the configuration files on disk from gaining access to sensitive information such as passwords, we can use the config server
+/encrypt
+endpoint to encrypt the information and store it encrypted on disk.
+While exposing the APIs from the config server externally is useful during development, they should be locked down before use in production.
+In the next chapter, we will learn how we can use
+Resilience4j
+to mitigate the potential drawbacks of overusing synchronous communication between microservices.
+Questions
+What API call can we expect from a review service to the config server during startup to retrieve its configuration?
+The review service was started up using the following command:
+docker compose up -d
+.
+What configuration information should we expect back from an API call to the config server using the following command?
+curl https://dev-usr:dev-pwd@localhost:8443/config/application/default -ks | jq
+What types of repository backend does Spring Cloud Config support?
+How can we encrypt sensitive information on disk using the Spring Cloud Config Server?
+How can we protect the config server API from misuse?
+Mention some pros and cons for clients that first connect to the config server as opposed to those that first connect to the discovery server.

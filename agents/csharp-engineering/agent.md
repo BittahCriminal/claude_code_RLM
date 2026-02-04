@@ -33,9 +33,9 @@ capabilities:
   - Dependency injection design
   - Unit testing strategies
   - Performance optimization
-knowledge_sources: []
----
-
+knowledge_sources:
+  - csharp-engineering_9781835888926_8e72aa38adde79cc
+  - csharp-engineering_9781836206637_1ac93cf899123a76
 # C# Software Engineering Agent
 
 <!-- KNOWLEDGE SOURCES WILL BE ADDED HERE AFTER IMPORT -->

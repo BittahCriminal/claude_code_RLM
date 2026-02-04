@@ -1,0 +1,1657 @@
+processed independently of the others. Basic transformations allow you to change events into more useful formats, which you can then repartition into a newly keyed event stream with a new partition count. Event streams with the same key, the same partitioner algorithm, and the same partition count are said to be
+copartitioned
+, which guarantees data locality for a given consumer instance. The partition assignor is used to ensure that partitions between consumer instances are evenly distributed and that copartitioned event streams are correctly coassigned.
+Copartitioning and partition assignment are important concepts for understanding stateful processing, which is covered in
+Chapter 7
+. First, though, you must consider how to handle processing multiple partitions from multiple event streams. Out-of-order events, late events, and the order in which events are selected for processing all have a significant impact on the design of your services. This will be the topic of the next chapter.
+
+Chapter 6.
+Deterministic Stream Processing
+Event-driven microservices usually have topologies that are more complex than those introduced in the previous chapter. Events are consumed and processed from multiple event streams, while stateful processing (covered in the next chapter) is required to solve many business problems. Microservices are also subject to the same faults and crashes as nonmicroservice systems. It is not uncommon to have a mixture of microservices processing events in near–real time while other, newly started microservices are catching up by processing historical data.
+Here are the three main questions addressed in this chapter:
+How does a microservice choose the order of events to process when consuming from multiple partitions?
+How does a microservice handle out-of-order and late-arriving events?
+How do we ensure that our microservices produce deterministic results when processing streams in near–real time versus when processing from the beginning of the streams?
+We can answer these questions by examining timestamps, event scheduling, watermarks, and stream times, and how they contribute to deterministic processing. Bugs, errors, and changes in business logic will also necessitate reprocessing, making deterministic results important. This chapter also explores how out-of-order and late-arriving events can occur, strategies for handling them, and mitigating their impact on our workflows.
+Note
+This chapter is fairly information-dense despite my best efforts to find a simple and concise way to explain the key concepts. There are a number of sections where I will refer you to further resources to explore on your own, as the details often go beyond the scope of this book.
+Determinism with Event-Driven Workflows
+An event-driven microservice has two main processing states. It may be processing events at near–real time, which is typical of long-running microservices. Alternately, it may be processing events from the past in an effort to catch up to the present time, which is common for underscaled and new services.
+If you were to rewind the consumer group offsets of the input event streams to the beginning of time and start the microservice run again, would it generate the same output as the first time it was run? The overarching goal of deterministic processing is that a microservice should produce the same output whether it is processing in real time or catching up to the present time.
+Note that there are workflows that are explicitly nondeterministic, such as those based on the current wall-clock time and those that query external services. External services may provide different results depending on when they are queried, especially if their internal state is updated independently of that from the services issuing the query. In these cases there is no promise of determinism, so be sure to pay attention to any nondeterministic operations in your workflow.
+Fully deterministic processing is the ideal case, where every event arrives on time and there is no latency, no producer or consumer failures, and no intermittent network issues. Since we have no choice but to deal with these scenarios, the reality is that our services can only achieve a best effort at determinism. There are a number of components and processes that work together to facilitate this attempt, and in most cases best-effort determinism will be sufficient for your requirements. There are a few things you need to achieve this: consistent timestamps, well-selected event keys, partition assignment, event scheduling, and strategies to handle late-arriving events.
+Timestamps
+Events can happen anywhere and at any time and often need to be reconciled with events from other producers. Synchronized and consistent timestamps are a hard requirement for comparing events across distributed systems.
+An event stored in an event stream has both an offset and a timestamp. The offset is used by the consumer to determine which events it has already read, while the timestamp, which indicates when that event was created, is used to determine when an event occurred relative to other events and to ensure that events are processed in the correct order.
+The following timestamp-related concepts are illustrated in
+Figure 6-1
+, which shows their temporal positions in the event-driven workflow:
+Event time
+The local timestamp assigned to the event by the producer at the time the event occurred.
+Broker ingestion time
+The timestamp assigned to the event by the event broker. You can configure this to be either the event time or the ingestion time, with the former being much more common. In scenarios where the producer’s event time is unreliable, broker-ingestion time can provide a sufficient substitute.
+Consumer ingestion time
+The time in which the event is ingested by the consumer. This can be set to the event time specified in the broker record, or it can be the wall-clock time.
+Processing time
+The wall-clock time at which the event has been processed by the consumer.
+Figure 6-1.
+Event scheduler ordering the input events by timestamp
+You can see that it’s possible to propagate the event time through the event broker to the consumer, enabling the consumer logic to make decisions based on
+when
+an event happened. This will help answer the three questions posed at the start of the chapter. Now that we’ve mapped out the types of timestamps, let’s take a look at how they’re generated.
+Synchronizing Distributed Timestamps
+A fundamental limitation of physics is that two independent systems cannot be guaranteed to have precisely the same system-clock time. Various physical properties limit how precise system clocks can be, such as material tolerances in the underlying clock circuitry, variations in the operating temperature of the chip, and inconsistent network communication delays during synchronization. However, it is possible to establish local system clocks that are
+nearly
+in sync and end up being good enough for most computing purposes.
+Consistent clock times are primarily accomplished by synchronizing with Network Time Protocol (NTP) servers. Cloud service providers such as Amazon and Google offer redundant satellite-connected and atomic clocks in their various regions for instant synchronization.
+Synchronization with NTP servers within a local area network can provide very accurate local system clocks,
+with a drift of only a few mS after 15 minutes
+.
+This can be reduced to
+1 mS or less with more frequent synchronizations in best-case scenarios
+according to David Mills, NTP’s inventor, though intermittent network issues may prevent this target from being reached in practice. Synchronization across the open internet can result in much larger skews, with accuracy being reduced to ranges of +/− 100mS, and is a factor to be considered if you’re trying to resynchronize events from different areas of the globe.
+NTP synchronization is also prone to failure, as network outages, misconfiguration, and transient issues may prevent instances from synchronizing. The NTP servers themselves may also otherwise become unreliable or unresponsive.
+The clock within an instance may be affected by multitenancy issues, just as in VM-based systems sharing the underlying hardware.
+For the vast majority of business cases, frequent synchronization to NTP servers can provide sufficient consistency for system event time. Improvements to NTP servers
+and GPS usage
+have begun to push NTP synchronization accuracy consistently into the submillisecond range. The creation time and ingestion time values assigned as the timestamps can be highly consistent, though minor out-of-order issues will still occur. Handling of late events is covered later in this chapter.
+Processing with Timestamped Events
+Timestamps provide a way to process events distributed across multiple event streams and partitions in a consistent temporal order. Many use cases require you to maintain order between events based on time, and need consistent, reproducible results regardless of when the event stream is processed. Using offsets as a means of comparison works only for events within a single event stream partition, while events quite commonly need to be processed from multiple different event streams.
+Example: Selecting order of events when processing multiple partitions
+A bank must ensure that both deposit and withdrawal event streams are processed in the correct temporal order. It keeps a stateful running tally of withdrawals and deposits, applying an overdraft penalty when a client’s account balance drops below $0. For this example, the bank has its deposits in one event stream and its withdrawals in another stream, as shown in
+Figure 6-2
+.
+Figure 6-2.
+In which order should events be processed?
+A naive approach to consuming and processing records, perhaps a round-robin processor, might process the $10 deposit first, the $25 withdrawal second (incurring a negative balance and overdraft penalties), and the $20 deposit third. This is incorrect, however, and does not represent the temporal order in which the events occurred. This example makes clear that you must consider the event’s timestamp when consuming and processing events. The next section discusses this in greater detail.
+Event Scheduling and Deterministic Processing
+Deterministic processing requires that events be processed consistently, such that the results can be reproduced at a later date. Event scheduling is the process of selecting the next events to process when consuming from multiple input partitions.
+For an immutable log-based event stream, records are consumed in an offset-based order.
+However, as
+Figure 6-2
+demonstrates, the processing order of events must be interleaved based on the
+event time
+provided in the record, regardless of which input partition it comes from, to ensure correct results.
+Tip
+The most common event-scheduling implementation selects and dispatches the event with the oldest timestamp from all assigned input partitions to the downstream processing topology.
+Event scheduling is a feature of many stream-processing frameworks, but is typically absent from basic consumer implementations. You will need to determine if it is required for your microservice implementation.
+Warning
+Your microservice will need event scheduling if the order in which events are consumed and processed matters to the business logic.
+Custom Event Schedulers
+Some streaming frameworks allow you to implement custom event schedulers.
+For example, Apache Samza lets you implement a
+MessageChooser
+class, where you select which event to process based on a number of factors, such as prioritization of certain event streams over others, the wall-clock time, event time, event metadata, and even content within the event itself. You should take care when implementing your own event scheduler, however, as many custom schedulers are nondeterministic in nature and won’t be able to generate reproducible results if reprocessing is required.
+Processing Based on Event Time, Processing Time, and Ingestion Time
+A time-based order of event processing requires you to select
+which
+point in time to use as the event’s timestamp, as per
+Figure 6-1
+. The choice is between the locally assigned event time and broker ingestion time.
+Both timestamps occur only once each in a produce-consume workflow, whereas the wall-clock and consumer ingestion time change depending on when the application is executed.
+In most scenarios, particularly when all consumers and all producers are healthy and there is no event backlog for any consumer group, all four points in time will be within a few seconds of each other. Contrarily, for a microservice processing historic events, event time and consumer ingestion time will differ significantly.
+For the most accurate depiction events in the real world, it is best to use the locally assigned event time
+provided you can rely on its accuracy
+. If the producer has unreliable timestamps (and you can’t fix it), your next best bet is to set the timestamps based on when the events are ingested into the event broker. It is only in rare cases where the event broker and the producer cannot communicate that there may be a substantial delay between the true event time and the one assigned by the broker.
+Timestamp Extraction by the Consumer
+The consumer must know the timestamp of the record before it can decide how to order it for processing.
+At consumer ingestion time, a
+timestamp extractor
+is used to extract the timestamp from the consumed event. This extractor can take information from any part of the event’s payload, including the key, value, and metadata.
+Each consumed record has a designated event-time timestamp that is set by this extractor. Once this timestamp has been set, it is used by the consumer framework for the duration of its processing.
+Request-Response Calls to External Systems
+Any non-event-driven requests made to external systems from within an event-driven topology may introduce nondeterministic results. By definition, external systems are managed externally to the microservice, meaning that at any point in time their internal state and their responses to the requesting microservice may differ. Whether this is significant depends entirely on the business requirements of your microservice and is up to you to assess.
+Watermarks
+Watermarking is used to track the progress of event time through a processing topology and to declare that all data of a given event time (or earlier) has been processed. This is a common technique used by many of the leading stream-processing frameworks, such as Apache Spark, Apache Flink, Apache Samza, and Apache Beam.
+A whitepaper from Google
+describes watermarks in greater detail and provides a good starting point for anyone who would like to learn more about it.
+A watermark is a declaration to downstream nodes
+within the same processing topology
+that all events of time
+t
+and prior have been processed. The node receiving the watermark can then update its own internal event time and propagate its own watermark downstream to its dependent topology nodes. This process is shown in
+Figure 6-3
+.
+Figure 6-3.
+Watermark propagation between nodes in a single topology
+In this figure, the consumer node has the highest watermark time because it’s consuming from the source event stream. New watermarks are generated periodically, such as after a period of wall-clock or event time has elapsed or after some minimum number of events has been processed. These watermarks propagate downstream to the other processing nodes in the topology, which update their own event time accordingly.
+Note
+This chapter only touches on watermarks to give you an understanding of how they’re used for deterministic processing.
+If you would like to dig deeper into watermarks, consider Chapters 2 and 3 of the excellent book
+Streaming Systems
+, by Tyler Akidau, Slava Chernyak, and Reuven Lax (O’Reilly, 2018).
+Watermarks in Parallel Processing
+Watermarks are particularly useful for coordinating event time between multiple independent consumer instances.
+Figure 6-4
+shows a simple processing topology of two consumer instances.
+Each consumer instance consumes events from its own assigned partition, applies a
+groupByKey
+function, followed by an
+aggregate
+function.
+This requires a
+shuffle
+, where all events with the same key are sent to a single downstream aggregate instance.
+In this case, events from instance 0 and instance 1 are sent to each other based on the key to ensure all events of the same key are in the same partition.
+Figure 6-4.
+Watermark propagation between nodes in a single topology with multiple processors
+There is a fair bit to unpack in this diagram, so let’s take a look at it from the start.
+Watermarks are generated at the source function, where the events are consumed from the event stream partition. The watermarks define the event time at that consumer and are propagated downstream as the event time of the consumer node is incremented (#1 in
+Figure 6-4
+).
+Downstream nodes update their event time as the watermarks arrive, and in turn generate their own new watermark to propagate downstream to its successors. Nodes with multiple inputs, such as
+aggregate
+, consume events and watermarks from multiple upstream inputs. The node’s event time is the
+minimum
+of all of its input sources’ event times, which the node keeps track of internally (#2 in
+Figure 6-4
+).
+In the example, both
+aggregate
+nodes will have their event time updated from 13 to 15 once the watermark from the groupByKey-1 node arrives (#3 in
+Figure 6-4
+). Note that the watermark does not affect the event scheduling of the node; it simply notifies the node that it should consider any events with a timestamp earlier than the watermark to be considered late. Handling late events is covered later in this chapter.
+Spark, Flink, and Beam, among other heavyweight processing frameworks, require a dedicated cluster of processing resources to perform stream processing at scale. This is particularly relevant because this cluster also provides the means for cross-task communications and centralized coordination of each processing task.
+Repartitioning events, such as with the
+groupByKey
++
+aggregate
+operation in this example, use cluster-internal communications and
+not
+event streams in the event broker.
+Stream Time
+A second option for maintaining time in a stream processor, known simply as
+stream time
+, is the approach favored by Apache Kafka Streams. A consumer application reading from one or more event streams maintains a stream time for its topology, which is the highest timestamp of processed events. The consumer instance consumes and buffers events from each event stream partition assigned to it, applies the event-scheduling algorithm to select the next event to process, and then updates the stream time if it is larger than the previous stream time. Stream time will never be decreased.
+Figure 6-5
+shows an example of stream time. The consumer node maintains a single stream time based on the highest event-time value it has received. The stream time is currently set to 20 since that was the event time of the most recently processed event. The next event to be processed is the smallest value of the two input buffers—in this case, it’s the event with event time 30. The event is dispatched down to the processing topology, and the stream time will be updated to 30.
+Figure 6-5.
+Stream time when consuming from multiple input streams
+Stream time is maintained by processing each event completely through the topology before processing the next one. In cases where a topology contains a repartition stream, each topology is split into two, and each subtopology maintains its own distinct stream time. Events are processed in a depth-first manner, such that only one event is being processed in a subtopology at any given time. This is different than the watermark-based approach where events can be buffered at the inputs of each processing node, with each node’s event time independently updated.
+Stream Time in Parallel Processing
+Consider again the same two-instance consumer example from
+Figure 6-4
+, but this time with the stream time approach championed by Kafka Streams (see
+Figure 6-6
+). A notable difference is that the Kafka Streams approach sends the repartitioned events
+back
+to the event broker using what’s known as an
+internal event stream
+. This stream is then reconsumed by the instances, with all repartitioned data colocated by key within single partitions. This is functionally the same as the shuffle mechanism within the heavyweight cluster, but does not require a dedicated cluster (note: Kafka Streams is very microservice friendly).
+Figure 6-6.
+Shuffling events via a repartition event stream
+In this example, events from the input stream are repartitioned according to their key and are written into the repartition event stream. The events keyed on
+A
+and
+B
+end up in
+P1
+, while the events keyed on
+X
+and
+Z
+end up in
+P0
+. Also note that the event time has been maintained for each event, and not overwritten by the current wall-clock time. Recall that the repartition should be treated only as a logical shuffling of existing event data. Rewriting the event time of an event would completely destroy the original temporal ordering.
+Notice the subtopologies shown in the figure. Because of the repartition event stream, the processing topology is effectively cut in half, meaning that work on each subtopology can be done in parallel. Subtopologies
+1
+and
+3
+consume from the repartition stream and group events together, while subtopologies
+0
+and
+2
+produce the repartitioned events. Each subtopology maintains its own stream time, since both are consuming from independent event streams.
+Tip
+Watermarking strategies can also use repartition event streams. Apache Samza offers a standalone mode that is similar to Kafka Streams, but uses watermarking instead of stream time.
+Out-of-Order and Late-Arriving Events
+In an ideal world, all events are produced without issue and available to the consumer with zero latency. Unfortunately for all of us living in the real world, this is never the case, so we must plan to accommodate out-of-order events. An event is said to be out of order if its timestamp isn’t equal to or greater than the events ahead of it in the event stream. In
+Figure 6-7
+, event
+F
+is out of order because its timestamp is lower than
+G
+’s, just as event
+H
+is out of order as its timestamp is lower than
+I
+’s.
+Bounded data sets, such as historical data processed in batch, are typically fairly resilient to out-of-order data. The entire batch can be thought of as one large window, and an event arriving out of order by many minutes or even hours is not really relevant provided that the processing for that batch has not yet started. In this way, a bounded data set processed in batch can produce results with high determinism. This comes at the expense of high latency, especially for the traditional sorts of nightly batch big-data processing jobs where the results are available only after the 24-hour period, plus batch processing time.
+For unbounded data sets, such as those in ever-updating event streams, the developer must consider the requirements of latency and determinism when designing the microservice. This extends beyond the technological requirements into the business requirements, so any event-driven microservice developer must ask, “Does my microservice handle out-of-order and late-arriving events according to business requirements?” Out-of-order events require the business to make specific decisions about how to handle them, and to determine whether latency or determinism takes priority.
+Consider the previous example of the bank account. A deposit followed by an immediate withdrawal must be processed in the correct order lest an overdraft charge be incorrectly applied, regardless of the ordering of events or how late they may be. To mitigate this, the application logic may need to maintain state to handle out-of-order data for a time period specified by the business, such as a one-hour grace window.
+Figure 6-7.
+Out-of-order events in an event stream partition
+Tip
+Events from a single partition should always be processed according to their offset order, regardless of their timestamp. This can lead to out-of-order events.
+An event can be considered
+late
+only when viewed from the perspective of the consuming microservice. One microservice may consider
+any
+out-of-order events as late, whereas another may be fairly tolerant and require many hours of wall-clock or event time to pass before considering an event to be late.
+Late Events with Watermarks and Stream Time
+Consider two events, one with time
+t
+, the other with time
+t
+′. Event
+t
+′ has an
+earlier
+timestamp than event
+t
+.
+Watermarks
+The event
+t
+′ is considered late when it arrives
+after
+the watermark
+W(t)
+. It is up to the specific node how to handle this event.
+Stream time
+The event
+t
+′ is considered late when it arrives
+after
+the stream time has been incremented past
+t
+′. It is up to each operator in the subtopology how to handle this event.
+Tip
+An event is late only when it has missed a deadline specific to the consumer.
+Causes and Impacts of Out-of-Order Events
+There are several ways that out-of-order events can occur.
+Sourcing from out-of-order data
+The most obvious, of course, is when events are sourced from out-of-order data. This can occur when data is consumed from a stream that is already out of order or when events are being sourced from an external system with existing out-of-order
+timestamps
+.
+Multiple producers to multiple partitions
+Multiple producers writing to multiple output partitions can introduce out-of-order events. Repartitioning an existing event stream is one way in which this can happen.
+Figure 6-8
+shows the repartitioning of two partitions by two consumer instances. In this scenario the source events indicate which product the user has interacted with. For instance, Harry has interacted with products ID12 and ID77. Say that a data analyst needs to rekey these events on the user ID, such that they can perform session-based analysis of the user’s engagements. The resultant output streams may end up with some out-of-order events.
+Figure 6-8.
+Shuffling events via a repartition event stream
+Note that each instance maintains its own internal stream time and that there is no synchronization between the two instances. This can cause a time skew that produces out-of-order events, as shown in
+Figure 6-9
+.
+Figure 6-9.
+Shuffling events via a repartition event stream
+Instance 0 was only slightly ahead of instance 1 in stream time, but because of their independent stream times, the events of time
+t
+= 90 and
+t
+= 95 are considered out of order in the repartitioned event stream. This issue is exacerbated by unbalanced partition sizes, unequal processing rates, and large backlogs of events. The impact here is that the previously
+in-order
+event data is now
+out of order
+, and thus as a consumer you cannot depend on having consistently incrementing time in each of your event streams.
+Tip
+A single-threaded producer will not create out-of-order events in normal operation unless it is sourcing its data from an out-of-order source.
+Since the stream time is incremented whenever an event with a higher timestamp is detected, it is possible to end up in a scenario where a large number of events are considered late due to reordering. This may have an effect on processing depending on how the consumers choose to handle out-of-order events.
+Time-Sensitive Functions and Windowing
+Late events are predominantly the concern of time-based business logic, such as aggregating events in a particular time period or triggering an event after a certain period of time has passed. A late event is one that arrives after the business logic has already finished processing for that particular period of time. Windowing functions are an excellent example of time-based business logic.
+Windowing
+means grouping events together by time. This is particularly useful for events with the same key, where you want to see
+what happened
+with events of that key in that period of time. There are three main types of event windows, but again, be sure to check your stream-processing framework for more information.
+Tip
+Windowing can be done using either event time or processing time, though event-time windowing typically has more business applications.
+Tumbling windows
+A tumbling window is a window of a fixed size. Previous and subsequent windows do not overlap.
+Figure 6-10
+shows three tumbling windows, each aligned on
+t
+,
+t
++ 1, and so on. This sort of windowing can help answer questions such as “When is the peak hour for product usage?”
+Figure 6-10.
+Tumbling windows
+Sliding windows
+A sliding window has a fixed window size and incremental step known as the
+window slide
+. It must reflect only the aggregation of events currently in the window. A sliding window can help answer questions such as “How many users clicked on my product in the past hour?”
+Figure 6-11
+shows an example of the sliding window, including the size of the window and the amount that it slides forward.
+Figure 6-11.
+Sliding windows
+Session windows
+A session window is a dynamically sized window. It is terminated based on a timeout due to inactivity, with a new session started for any activity happening after the timeout.
+Figure 6-12
+shows an example of session windows, with a session gap due to inactivity for user C. This sort of window can help answer questions such as “What does a user look at in a given browsing session?”
+Figure 6-12.
+Session windows
+Each of these window functions must deal with out-of-order events. You must decide how long to wait for any out-of-order events before deeming them too late for consideration. One of the fundamental issues in stream processing is that you can never be sure that you have received all of the events. Waiting for out-of-order events can work, but eventually your service will need to give up, as it cannot wait indefinitely. Other factors to consider include how much state to store, the likelihood of late events, and the business impact of not using the late events.
+Handling Late Events
+The strategy for handling out-of-order and late-arriving events should be determined at a
+business level
+prior to developing an engineering solution, as strategies will vary depending on the importance of the data. Critical events such as financial transactions and system failures may be required to be handled regardless of their position in the stream. Alternately, measurement-style events, such as temperature or force metrics, may simply be discarded as no longer relevant.
+Business requirements also dictate how much latency is acceptable, as waiting for events to arrive may increase determinism but at the expense of higher latency. This can negatively affect the performance characteristics of time-sensitive applications or those with tight service-level agreements. Thankfully, microservices provide the flexibility necessary to tailor determinism, latency, and out-of-order event handling characterstics on a per-service basis.
+There are several ways in which a late-arriving event can be handled, regardless of whether your framework uses watermarks or stream time.
+Drop event
+Simply drop the event. The window is closed, and any time-based aggregations are already complete.
+Wait
+Delay output of the window results until a fixed amount of time has passed. This incurs higher determinism at the expense of increased latency. The old window(s) need to remain available for updating until the predetermined amount of time has passed.
+Grace period
+Output the windowed result as soon as the window is deemed complete. Then, keep the window(s) around and available for the predetermined grace period. Whenever a late event arrives for that window, update the aggregation and output the newly updated aggregation. This is similar to the wait strategy, except updates are generated as late events arrive.
+Regardless of how long a microservice waits, eventually events will simply be too late and will need to be discarded. There is no cut-and-dry technical rule for how your microservice should handle late events; just ensure that your business requirements are sufficiently met. If the protocol for handling late events is not specified in the microservice’s business requirements, then the business must work to resolve that.
+Here are a few questions to help you determine good guidelines for handling late events:
+How likely are late events to occur?
+How long does your service need to guard against late events?
+What are the business impacts of dropping late events?
+What are the business benefits of waiting a long time to capture late events?
+How much disk or memory does it take to maintain state?
+Do the expenses incurred in waiting for late events outweigh the benefits?
+Reprocessing Versus Processing in Near-Real Time
+Immutable event streams provide the ability to rewind consumer group offsets and replay processing from an arbitrary point in time. This is known as
+reprocessing
+, and it’s something that every event-driven microservice needs to consider in its design. Reprocessing is typically performed only on event-driven microservices that use event time for processing events, and not those that rely on wall-clock time aggregations and windowing.
+Event scheduling is an important part of being able to correctly reprocess historical data from event streams. It ensures that microservices process events in the same order that they did during near–real time. Handling out-of-order events is also an important part of this process, as repartitioning an event stream through the event broker (instead of using a heavyweight framework like Spark, Flink, or Beam) can cause out-of-order events.
+Here are the steps to follow when you want to reprocess your event streams:
+Determine the starting point
+. As a best practice, all stateful consumers should reprocess events from the very beginning of
+each
+event stream that they are subscribed to. This applies to entity event streams in particular, as they contain important facts about the entities under question.
+Determine which consumer offsets to reset
+. Any streams that contain events used in stateful processing should be reset to the very beginning, as it is difficult to ensure that you will end up with a correct state if you start in the wrong location (consider what would happen if you reprocessed someone’s bank balance and accidentally omitted previous paychecks).
+Consider the volume of data
+. Some microservices may process huge quantities of events. Consider how long it may take to reprocess the events, and any bottlenecks that may exist. Quotas (see
+“Quotas”
+) may be needed to ensure that your microservice doesn’t overwhelm the event broker with I/O. Additionally, you may need to notify any downstream consumers if you are expecting to generate large amounts of reprocessed output data. They may need to scale their services accordingly if autoscaling (see
+“Autoscaling Applications”
+) is not enabled.
+Consider the time to reprocess
+. It is possible that reprocessing may take many hours to do, so it’s worth calculating how much downtime you may need. Ensure that your downstream consumers are also okay with possibly stale data while your service reprocesses. Scaling the number of consumer instances to maximum parallelism can significantly reduce this downtime and can be scaled down once reprocessing has completed.
+Consider the impact
+. Some microservices perform actions that you may not want to occur when reprocessing. For instance, a service that emails users when their packages have shipped should
+not
+re-email users when reprocessing events, as it would be a terrible user experience and completely nonsensical from a business perspective. Carefully consider the impact of reprocessing on the business logic of your system, as well as potential issues that may arise for downstream
+consumers
+.
+Intermittent Failures and Late Events
+An event may be late during near-real-time processing (watermark or stream time is incremented) but may be available as expected within the event stream during event-stream reprocessing. This issue can be hard to detect, but it really illustrates the connected nature of event-driven microservices and how upstream problems can affect downstream consumers. Let’s take a quick look at how this can occur.
+Producer/Event Broker Connectivity Issues
+In this scenario, records are
+created
+in timestamp order but can’t be
+published
+until a later time (see
+Figure 6-13
+). During normal operation, producers send their events as they occur, and consumers consume them in near-real-time. This scenario is tricky to identify when it’s happening and can go unnoticed even in retrospect.
+Figure 6-13.
+Normal operation prior to producer/broker connection outage
+Say a producer has a number of records ready to send, but it is unable to connect to the event broker. The records are timestamped with the
+local
+time that the event occurred. The producer will retry a number of times and either eventually succeed or give up and fail (ideally a noisy failure so that the faulty connection can be identified and rectified). This scenario is shown in
+Figure 6-14
+. Events from stream A are still consumed, with the watermark/stream time incremented accordingly. However, upon consuming from stream B, the consumer ends up with no new events, so it can simply assume that no new data is available.
+Figure 6-14.
+Temporary producer/broker connection outage
+Eventually the producer will be able to write records to the event stream. These events are published in the correct event-time order that they actually occurred, but because of the wall-clock delay, near-real-time consumers will have marked them as late and treat them as such. This is shown in
+Figure 6-15
+.
+Figure 6-15.
+The producer is able to reconnect and publish its temporarily delayed events, while the consumer has already incremented its event time
+One way to mitigate this is to wait a predetermined amount of time before processing events, though this approach does incur a latency cost and will only be useful when production delays are shorter than the wait time. Another option is to use robust late-event-handling logic in your code such that your business logic is not impacted by this scenario.
+Summary and Further Reading
+This chapter looked at determinism and how best to approach it with unbounded streams. It also examined how to select the next events to process between multiple partitions to ensure best-effort determinism when processing in both near-real-time and when reprocessing. The very nature of an unbounded stream of events combined with intermittent failures means that full determinism can never be completely achieved. Reasonable, best-effort solutions that work most of the time provide the best tradeoff between latency and correctness.
+Out-of-order and late-arriving events are factors that you must consider in your designs. This chapter explored how watermarks and stream time can be used to identify and handle these events. If you would like to read more about watermarks, check out Tyler Akidau’s excellent articles,
+“The World Beyond Batch Streaming 101”
+and
+102
+. Additional considerations and insights into distributed system time can be found in Mikito Takada’s online book
+Distributed Systems for Fun and Profit
+.
+
+Chapter 7.
+Stateful Streaming
+Stateful streaming underpins the most important components of an event-driven microservice, as most applications will need to maintain some degree of state for their processing requirements.
+“Materializing State from Entity Events”
+briefly covered the principles of materializing an event stream into local state. This chapter takes a much deeper look at how to build, manage, and use state for event-driven microservices.
+State Stores and Materializing State from an Event Stream
+Let’s start with some definitions:
+Materialized state
+A projection of events from the source event stream (immutable)
+State store
+Where your service’s business state is stored (mutable)
+Both materialized state and state stores are required and used extensively in stateful microservices, but it’s important to distinguish between them. Materialized states enable you to use common business entities in your microservice applications, whereas state stores enable you to store business state and intermediate
+computations
+.
+Each microservice design must also take into account where the service will store its data. There are two main options for storing and accessing state:
+Internally, such that the data is stored in the same container as the processor, allocated in memory or on disk.
+Externally, such that the data is stored outside of the processor’s container, in some form of external storage service. This is often done across a network.
+Figure 7-1
+shows examples of both internal and external state storage.
+Figure 7-1.
+Internal and external state stores
+The choice of internal or external storage depends primarily on the microservice’s business responsibilities and technical requirements. But before evaluating these two options in greater depth, you’ll need to consider the role of the changelog.
+Recording State to a Changelog Event Stream
+A
+changelog
+is a record of all changes made to the data of the state store. It is the stream in the table-stream duality, with the table of state transformed into a stream of individual events. As a permanent copy of the state maintained
+outside
+of the microservice instance, the changelog can be used to rebuild state, as shown in
+Figure 7-2
+, and serve as a way of checkpointing event processing progress.
+Tip
+Changelogs optimize the task of rebuilding failed services because they store the results of previous processing, allowing a recovering processor to avoid reprocessing all input events.
+Figure 7-2.
+A state store with changelogging enabled
+Changelog streams are stored in the event broker just like any other stream and, as noted, provide a means of rebuilding the state store. Changelog streams should be compacted since they only need the most recent key/value pair to rebuild the state.
+Changelogs can scale and recover state in a highly performant manner, especially for internal state stores. In both cases, the newly created application instance just needs to load the data from the associated changelog partitions, as shown in
+Figure 7-3
+.
+Figure 7-3.
+State store being restored from a changelog
+Changelogs are either provided as a built-in feature, such as in
+the Kafka Streams client,
+or implemented by the application developer. Basic producer/consumer clients tend not to provide any changelogging or stateful support.
+Materializing State to an Internal State Store
+Internal state stores coexist in the same container or VM environment as the microservice’s business logic. Specifically, the existence of the internal state store is tied to the existence of the microservice instance, with both running on the same underlying hardware.
+Each microservice instance materializes the events from its assigned partitions, keeping each partition’s data logically separate within the store. These logically separate materialized partitions permit a microservice instance to simply drop the state for a revoked partition after a consumer group rebalance. This avoids resource leaks and multiple sources of truth by ensuring that materialized state exists only on the instance that owns the partition. New partition assignments can be rebuilt by consuming the input events from the event stream or from the changelog.
+High-performance key/value stores, such as RocksDB, are typically used to implement internal state stores and are optimized to be highly efficient with local solid-state drives (SSDs), enabling performant operations on data sets that exceed main memory allocation. While key/value stores tend to be the most common implementation for internal state stores, any form of data store can be used. A relational or document data store implementation would not be unheard of, but again, it would need to be instantiated and contained within each individual microservice instance.
+Materializing Global State
+A
+global state store
+is a special form of the internal state store. Instead of materializing only the partitions assigned to it, a global state store materializes the data of
+all
+partitions for a given event stream, providing a complete copy of the event data to each microservice instance.
+Figure 7-4
+illustrates the difference between global and nonglobal materialized state.
+Figure 7-4.
+Global materialized state and nonglobal materialized state
+Global state stores are useful when a full data set is required by each instance, and tend to comprise small, commonly used, and seldom-changing data sets. Global materialization cannot be effectively used as the driver for event-driven logic, as each microservice instance possesses a full copy of the data and thus would produce duplicate outputs and nondeterministic results. For this reason, it is best to reserve global materialization for common data set lookup and dimension tables.
+Advantages of Using Internal State
+Scalability requirements are offloaded from the developer
+A major benefit of using internal state stores on local disk is that all scalability requirements are fully offloaded to the event broker and compute resource clusters. This allows the application development team to focus strictly on writing application logic while relying on the microservices capability teams to provide the scaling mechanisms common to all event-driven microservices. This approach ensures a single unit of scalability, where each application can be scaled simply by increasing and decreasing the instance count.
+It’s important to understand your application’s performance requirements when you’re considering internal state storage. With modern cloud computing, local disk does not necessarily mean disk that is physically attached, as network-attached storage can mimic local disk and provide the same logical support for your applications. A high-throughput stateful streaming microservice can easily consume hundreds of thousands of events per second. You must carefully consider the performance characteristics required by the application to ensure it can meet its latency requirements.
+High-performance disk-based options
+Maintaining all state within main memory is not always possible in an event-driven microservice, especially if costs are to be kept low. Physically attached local disk can be quite performant for the majority of modern microservice use cases. Local disk implementations tend to favor high random-access patterns, generally supported by SSDs. For instance, the latency for a random-access read from an SSD using RocksDB
+is approximately 65 microseconds
+, which means a single thread will have a sequential access ceiling of approximately 15.4k requests/second. In-memory performance is significantly faster,
+serving millions of random-access requests per second
+as the norm. The local-disk and local-memory approach allows for extremely high throughput and significantly reduces the data-access bottleneck.
+Flexibility to use network-attached disk
+Microservices may also use network-attached disk instead of local disk, which significantly increases the read/write latency. Since events typically must be processed one at a time to maintain temporal and offset order, the single processing thread will spend a lot of time awaiting read/write responses, resulting in significantly lower throughput per processor. This is generally fine for any stateful service that doesn’t need high-performance processing, but can be problematic if event volumes are high.
+Accessing “local” data stored on network-attached disk has a much higher latency than accessing physically local data stored in the system’s memory or attached disk. While RocksDB paired with a local SSD has an estimated throughput of 15.4k request/second,
+introducing a network latency of only 1 mS round-trip time
+to an identical access pattern reduces the throughput cap to just 939 requests/second. While you might be able to do some work to parallelize access and reduce this gap, remember that events must be processed in the offset sequence in which they are consumed and that parallelization is not possible in many cases.
+One major benefit of network-attached disk is that the state can be maintained in the volume and migrated to new processing hardware as needed. When the processing node is brought back up, the network disk can be reattached and processing can resume where it left off, instead of being rebuilt from the changelog stream. This greatly reduces downtime since the state is no longer completely ephemeral as with a local disk, and also increases the flexibility of microservices to migrate across compute resources, such as when you are using inexpensive on-demand nodes.
+Disadvantages of Using Internal State
+Limited to using runtime-defined disk
+Internal state stores are limited to using only disk that is defined and attached to the node at the service’s runtime. Changing either the size or quantity of attached volumes typically requires that the service be halted, the volumes adjusted, and the service restarted. In addition, many compute resource management solutions allow only for volume size to be
+increased
+, as decreasing a volume’s size means that data would need to be deleted.
+Wasted disk space
+Data patterns that are cyclical in nature, such as the traffic generated to a shopping website at 3 p.m. versus 3 a.m., can require cyclical storage volume. That is, these patterns may require a large maximum disk for peak traffic but only a small amount otherwise. Reserving full disk for the entire time can waste both space and money when compared to using external services that charge you only per byte of data stored.
+Scaling and Recovery of Internal State
+Scaling processing up to multiple instances and recovering a failed instance are identical processes from a state recovery perspective. The new or recovered instance needs to materialize any state defined by its topology before it can begin processing new events. The quickest way to do so is to reload the changelog topic for each stateful store materialized in the application.
+Using hot replicas
+While it is most common to have only a single replica of materialized state for each partition, additional replicas can be created through some careful state management or leveraged directly by the client framework.
+Apache Kafka has this functionality built into its Streams framework
+via a simple configuration setting. This setting provides highly available state stores and enables the microservice to tolerate instance failures with zero downtime.
+Figure 7-5
+shows a three-instance deployment with an internal state store replication factor of 2. Each stateful partition is materialized twice, once as the leader and once as a replica. Each replica must manage its own offsets to ensure that it is keeping up with the offsets of the leader replica. Instance 0 and instance 1 are processing stream B events and joining them on the copartitioned materialized state. Instance 1 and instance 2 are also maintaining hot replicas of stream A-P0 and A-P1, respectively, with instance 2 otherwise not processing any other events.
+Figure 7-5.
+Stream-table join with three instances and two hot replicas per materialized input partition
+When the leader is terminated, the consumer group must rebalance the assignment of partitions. The partition assignor determines the location of the hot replica (it previously assigned all partitions and knows all partition-to-instance mappings) and reassigns the partitions accordingly. In
+Figure 7-6
+, instance 1 has terminated, and the remaining microservice instances are forced to rebalance their partition assignments. Instances with hot replicas are given priority to claim partition ownership and resume processing immediately. The partition assignor has selected instance 2 to resume processing of stream B-P1.
+Figure 7-6.
+Rebalance due to instance 1 termination
+Once processing has resumed, new hot replicas must be built from the changelog to maintain the minimum replica count. The new hot replicas are built and added to the remaining instances, as shown in
+Figure 7-7
+.
+Figure 7-7.
+Normal processing with two instances and two hot replicas per materialized input partition
+Note
+One of the main tradeoffs with a hot-replica approach is the use of additional disk to maintain the replicas in exchange for the reduction in downtime due to an instance failure.
+Restoring and scaling from changelogs
+When a newly created microservice instance joins the consumer group, any stateful partitions that it is assigned can be reloaded simply by consuming from its changelog. During this time the instance should not be processing new events, as doing so could produce nondeterministic and erroneous results.
+Restoring and scaling from input event streams
+If no changelog is maintained, the microservice instance can rebuild its state stores from the input streams. It must re-consume all of its input events from the very beginning of its assigned event stream partitions. Each event must be consumed and processed in strict incrementing order, its state updated, and any subsequent output events produced.
+Warning
+Consider the impact of events produced during a full reprocessing. Downstream consumers may need to process these idempotently or eliminate them as duplicates.
+This process can take much longer to rebuild state than restoring from a changelog. So, it’s best to employ this strategy only for simple topologies where duplicate output is not a concern, input event stream retention is short, and the entity event streams are sparse.
+Materializing State to an External State Store
+External state stores exist outside of a microservice’s container or virtual machine, but are typically located within the same local network. You can implement an external data store using your preferred technology, but you should select it based on the needs of the microservice’s problem space. Some common examples of external store services include relational databases; document databases; a Lucene-based geospatial search system; and distributed, highly available key/value stores.
+Keep in mind that while a specific microservice’s external state store may use a common data storage platform, the data set itself must remain logically isolated from all other microservice implementations. Sharing materialized state between microservices is a common anti-pattern for implementers of external data stores who seek to use a common materialized data set to serve multiple business needs. This can lead to tight coupling between otherwise completely unrelated products or features and should be avoided.
+Warning
+Do not share direct state access with other microservices. Instead, all microservices must materialize their own copy of state. This eliminates direct couplings and isolates microservices against unintentional changes, but at the expense of extra processing and data storage resources.
+Advantages of External State
+Full data locality
+Unlike internal state stores, external state stores can provide access to all materialized data for each microservice instance, though each instance is still responsible for materializing its own assigned partitions. A single materialized data set eliminates the need for partition locality when you are performing lookups, relational queries on foreign keys, and geospatial queries between a large number of elements.
+Tip
+Use state stores with strong read-after-write guarantees to eliminate inconsistent results when using multiple instances.
+Technology
+External data stores can leverage technology that the organization is already familiar with, reducing the time and effort it takes to deliver a microservice to production. Basic consumer/producer patterns are especially good candidates for using external data stores, as covered in
+Chapter 10
+. Function-as-a-Service solutions are also excellent external data store candidates, as covered in
+Chapter 9
+.
+Drawbacks of External State
+Management of multiple technologies
+External state stores are managed and scaled independently of the microservice business logic solution. One of the risks of an external data store is that the microservice owner is now on the hook for ensuring that it is maintained and scaled appropriately. Each team must implement proper resource allocation, scaling policies, and system monitoring to ensure that their data service is suitable and resilient for the microservice’s load. Having managed data services provided by the organization’s capabilities team or by a third-party cloud platform vendor can help distribute some of this responsibility.
+Note
+Each team must fully manage the external state stores for its microservices. Do not delegate responsibility of external state store management to its own team, as this introduces a technical cross-team dependency. Compose a list of acceptable external data services with guides on how to properly manage and scale them. This will prevent each team from having to independently discover its own management solutions.
+Performance loss due to network latency
+Accessing data stored in an external state store has a much higher latency than accessing data stored locally in memory or on disk. In
+“Advantages of Using Internal State”
+, you saw that using a network-attached disk introduces a slight network delay and can significantly reduce throughput and performance.
+While caching and parallelization may reduce the impact of the network latency, the tradeoff is often added complexity and an increased cost for additional memory and CPU. Not all microservice patterns support caching and parallelization efforts either, with many requiring the processing thread to simply block and wait for a reply from the external data store.
+Financial cost of external state store services
+Financial costs tend to be higher with external data stores than with similarly sized internal data stores. Hosted external state store solutions often charge by the number of transactions, the size of the data payload, and the retention period for the data. They may also require over-provisioning to handle bursty and inconsistent loads. On-demand pricing models with flexible performance characteristics may help reduce costs, but you must be sure they still meet your performance needs.
+Full data locality
+Though also listed as a benefit, full data locality can present some challenges. The data available in the external state store originates from multiple processors and multiple partitions, each of which is processing at its own rate. It can be difficult to reason about (and debug) the contributions of any particular processing instance to the collective shared state.
+Race conditions and nondeterministic behavior must also be carefully avoided, as each microservice instance operates on its own independent stream time. The stream time guarantees of a single microservice instance do not extend to all of them.
+For example, one instance may attempt to join an event on a foreign key that has not yet been populated by a separate instance. Reprocessing the same data at a later time may execute the join. Because the stream processing of each instance is completely separate from the others, any results obtained through this approach are likely to be nondeterministic and nonreproducible.
+Scaling and Recovery with External State Stores
+Scaling and recovery of microservices using an external state store simply require that you add a new instance with the necessary credentials to access the state store. In contrast, scaling and recovery of the underlying state store are dependent completely upon the selected technology and are much more complicated.
+To reiterate an earlier point, having a list of acceptable external data services with guides on how to properly manage, scale, back up, and restore them is essential for providing developers a sustainable way forward. Unfortunately, the number of state store technologies is prohibitively large and effectively impossible to discuss in this book. Instead, I’ll simply generalize the strategies of building state into three main techniques: rebuilding from the source streams, using changelogs, and creating
+snapshots
+.
+Using the source streams
+Created by consuming events from the beginning of time from the source streams creates a fresh copy of the state store. The consumer group input offsets are rewound to the beginning of time for all input streams. This method incurs the longest downtime of all options, but is easily reproducible and relies only on the persistent storage of the event broker to maintain the source data. Keep in mind that this option is really a full application reset and will also result in the reproduction of any output events according to the business logic of the microservice.
+Using changelogs
+External state stores typically do not rely on using broker-stored changelogs to record and restore state, though there is no rule preventing this. Much like an internal state store, external state stores can be repopulated from a changelog. Just like when rebuilding from source streams, you must create a fresh copy of the state store. If rebuilding from changelogs, the microservice consumer instances must ensure they rebuild the entire state as stored in the changelog before resuming processing.
+Warning
+Rebuilding external state stores from source event streams or changelogs can be prohibitively time-consuming due to network latency overhead. Make sure you can still meet the microservice SLAs in such a scenario.
+Using snapshots
+It is far more typical for external state stores to provide their own backup and restoration process, and many hosted state store services provide simple “one-click” solutions to do so. Best practices for capturing and restoring state should be followed depending on the given state store implementation.
+If the stored state is idempotent, there is no need to ensure that the offsets are precisely in line with the materialized state. In this case, setting the consumer offsets to values from a few minutes before the snapshot was taken should ensure that no data is missed. This also ensures that events are processed with an “at-least-once”
+guarantee
+.
+If the stored state is not idempotent and any duplicate events are not acceptable, then you should store your consumer’s partition offsets alongside the data within the data store. This ensures that the consumer offsets and the associated state are consistent. When state is restored from the snapshot, the consumer can set its consumer group offsets to those found in the snapshot from the exact time that the snapshot was created. This is covered in more detail in
+“Maintaining consistent state”
+.
+Rebuilding Versus Migrating State Stores
+Changes to existing state store data structures frequently need to accompany new business requirements. A microservice may need to add new information to existing events, perform some extra join steps with another materialized table, or otherwise store newly derived business data. In such an event, the existing state store will need to be updated to reflect the data, either through rebuilding or migration.
+Rebuilding
+Rebuilding the microservice’s state stores is typically the most common method of updating the internal state of an application. The microservice is first stopped, with the consumer input stream offsets reset to the beginning. Any intermediate state, such as that stored in a changelog or located in the external state store, must be deleted. Lastly, the new version of the microservice is started up, and the state is rebuilt as events are read back in from the input event streams. This approach ensures that the state is built exactly as specified by the new business logic. All new output events are also created and propagated downstream to the subscribing consumers. These are not considered duplicate events, as the business logic and output format may have changed, and these changes must be propagated downstream.
+Rebuilding state requires that all necessary input event stream events still exist, particularly anything that requires materialization of state and aggregations. If your application is critically reliant upon a set of input data, you must ensure that such source data is readily available outside of your microservice implementation’s data store.
+Tip
+Rebuilding takes time, and it’s important to account for that in the microservice’s SLA. One of the main benefits of practicing rebuilding is that it helps you test your disaster recovery
+preparedness by running through the recovery process required when a microservice fails and all state is lost.
+Finally, some business requirements absolutely require you to reprocess data from the beginning of time, such as those that extract fields that are present only in the input events. You cannot obtain this data in any other way than replaying the input events, at which point rebuilding the state store is the only viable option.
+Migrating
+Large state stores can take a long time to rebuild or can result in prohibitively expensive data transfer costs when compared to the impact of the change. For instance, consider a business requirement change where an additional, yet optional, field is to be added to a microservice’s output event stream. This change may require you to add another column or field to the microservice’s state store. However, it could be that the business has no need to reprocess older data and wants only to apply the logic to new input events going forward. For a state store backed by a relational database, you’d just need to update the business logic alongside the associated table definition. You can perform a simple insertion of a new column with a nullable default, and after a quick series of tests you can redeploy the application.
+Migrations become much riskier when the business need and the data being changed are more complex. Complex migrations are error-prone and can yield results that are incorrect compared to the results of a complete rebuild of the data store. The database migration logic is not a part of the business logic, so inconsistencies can be introduced that would otherwise not arise during a full rebuild of the application. These types of migration errors can be hard to detect if not caught during testing and can lead to inconsistent data. When following a migration-based approach, be sure to perform strict testing and use representative test data sets to compare that approach with a rebuild-based one.
+Transactions and Effectively Once Processing
+Effectively once processing
+ensures that any updates made to the single source of truth are consistently applied, regardless of any failure to the producer, the consumer, or the event broker. Effectively once processing is also sometimes described as
+exactly once processing
+, though this is not quite accurate. A microservice may process the same data multiple times, say due to a consumer failure and subsequent recovery, but fail to commit its offsets and increment its stream time. The processing logic will be executed each time the event is processed,
+including any side effects that the code may create
+, such as publishing data to external endpoints or communicating with a third-party service. That being said, for most event brokers and most use cases, the terms
+exactly once
+and
+effectively once
+are used interchangeably.
+Idempotent writes
+are one commonly supported feature among event broker implementations such as Apache Kafka and Apache Pulsar. They allow for an event to be written once, and only once, to an event stream. In the case that the producer or event broker fails during the write, the idempotent write feature ensures that a duplicate of that event is not created upon retry.
+Transactions
+may also be supported by your event broker. Currently, full transactional support is offered only by Apache Kafka, though Apache Pulsar is making progress towards its own implementation. Much like a relational database can support multitable updates in a single transaction, an event broker implementation may also support the atomic writing of multiple events to multiple separate event streams. This allows a producer to publish its events to multiple event streams in a single, atomic transaction. Competing event broker implementations that lack transactional support require that the client ensure its own effectively once processing. The next section covers both of these options and evaluates how you can leverage them for your own microservices.
+Tip
+Transactions are extremely powerful and give Apache Kafka a significant advantage over its competitors. In particular, they can accommodate new business requirements that would otherwise require a complex refactoring to ensure atomic production.
+Example: Stock Accounting Service
+The stock accounting service is responsible for issuing a notification event when stock of any given item is low. The microservice must piece together the current stock available for each product based on a chain of additions and subtractions made over time. Selling items to customers, losing items to damage, and losing items to theft are all events that reduce stock, whereas receiving shipments and accepting customer returns increase it. These events are shown in the same event stream for simplicity in this example, as illustrated in
+Figure 7-8
+.
+Figure 7-8.
+A simple stock accounting service
+This stock accounting service is quite simple. It calculates the current running total of stock based off of the event stream changes and stores it in its data store. The business logic filters on a threshold value and decides whether to issue a notification to stock management about low or oversold stock. It must be ensured that each input event is applied effectively once to the aggregated state, as applying it more than once is incorrect, as is not applying it at all. This is where effectively once processing comes into play.
+Effectively Once Processing with Client-Broker Transactions
+Effectively once processing can be facilitated by any event broker that supports transactions. With this approach, any output events, updates made to
+internal state backed by a changelog
+, and the incrementing of the consumer offsets are wrapped together within a single atomic transaction. This is possible only if all three of these updates are stored within their own specific event stream in the broker. The offset update, the changelog update, and the output event are committed atomically within a single transaction as shown in
+Figure 7-9
+.
+Figure 7-9.
+Client-broker transactions—committing offsets and changelogs
+The atomic transaction between the producer client and the event broker will publish all events to their corresponding event streams. In the case of permanent failure by the producer, as in
+Figure 7-10
+, the broker will ensure that none of the events in the transaction is committed. Event stream consumers typically abstain from processing events that are in uncommitted transactions. The consumer must respect offset order, and so it will block, wait for the transaction to complete, and then proceed to process the event. In the case of transient errors, the producer can simply retry committing its transaction, as it is an idempotent operation.
+Figure 7-10.
+Failed commit for a client-broker transaction
+In the case that the producer suffers a fatal exception during a transaction, its replacement instance can simply be rebuilt by restoring from the changelogs as shown in
+Figure 7-11
+. The consumer group offsets of the input event streams are also reset according to the last known good position stored in the offset event stream.
+New transactions can begin once the producer is recovered, and all previous incomplete transactions are failed and cleaned up by the event broker. The transactional mechanisms will vary to some extent depending on the broker implementation, so make sure to familiarize yourself with the one you are using.
+Figure 7-11.
+Restoring the state from the broker using changelogs and previous offsets
+Effectively Once Processing Without Client-Broker Transactions
+Effectively once processing of events is also possible for implementations that do not support client-broker transactions, though it requires more work and a careful consideration of duplicate events. First, if upstream services are not able to provide effectively once event production guarantees, then it is possible that they may produce duplicate records. Any duplicate events created by upstream processes need to be identified and filtered out. Second, state and offset management need to be updated in a
+local transaction
+to ensure that the event processing is applied only once to the system state. By following this strategy, clients can be assured that the internal state generated by their processor is consistent with the logical narrative of the input event streams. Let’s take a look at these steps in more detail.
+Warning
+It is better to use an event broker and client that support idempotent writes than it is to try to solve deduplication after the fact. The former method scales well to all consumer applications, whereas the latter is expensive and difficult to scale.
+Generating duplicate events
+Duplicate events are generated when a producer successfully writes the events to an event stream, but either fails to receive a write acknowledgment and retries, or crashes before updating its own consumer offsets. These scenarios are slightly
+different
+:
+Producer fails to receive acknowledgment from broker and retries
+In this scenario, the producer still has the copies of the events to produce in its memory. These events, if published again, may have the same timestamps (if they use event creation time) and same event data, but will be assigned new offsets.
+Producer crashes immediately after writing, before updating its own consumer offsets
+In this case, the producer will have successfully written its events, but will
+not
+have updated its consumer offsets yet. This means that when the producer comes back up, it will repeat the work that it had previously done, creating logically identical copies of the events but with new timestamps. If processing is deterministic, then the events will have the same data. New offsets will also be assigned.
+Note
+Idempotent production
+is supported by numerous event brokers and can mitigate failures due to crashes and retries, such as in the two preceding scenarios. It cannot mitigate duplicates introduced through faulty business logic.
+Identifying duplicate events
+If idempotent production of events is
+not
+available and there are duplicates (with unique offsets and unique timestamps) in the event stream, then it is up to you to mitigate their impact. First, determine if the duplicates actually cause any problems. In many cases duplicates have a minor, if not negligible, effect and can simply be ignored. For those scenarios where duplicate events
+do
+cause problems, you will need to figure out how to identify them. One way to do this is to have the producer
+generate
+a unique ID for each event, such that any duplicates will generate the same unique hash.
+This hash function is often based on the properties of the internal event data, including the key, values, and creation time of the event. This approach tends to work well for events that have a large data domain, but poorly for events that are logically equivalent to one another. Here are a few scenarios where you could generate a unique ID:
+A bank account transfer, detailing the source, destination, amount, date, and time
+An ecommerce order, detailing each product, the purchaser, date, time, total amount, and payment provider
+Stock debited for shipment purposes, where each event has an associated
+orderId
+(uses an existing unique data ID)
+One factor these examples have in common is that each ID is composed of elements with a very high cardinality (that is, uniqueness). This significantly reduces the chances of duplicates between the IDs. The deduplication ID (dedupe ID) can either be generated with the event or be generated by the consumer upon consumption, with the former being preferable for distribution to all consumers.
+Warning
+Guarding against duplicate events produced without a key is extremely challenging, as there is no guarantee of partition locality. Produce events with a key, respect partition locality, and use idempotent writes whenever possible.
+Guarding against duplicates
+Any effectively once consumer must either identify and discard duplicates, perform idempotent operations, or consume from event streams that have idempotent producers. Idempotent operations are not possible for all business cases, and without idempotent production you must find a way to guard your business logic against duplicate events. This can be an expensive endeavor, as it requires that each consumer maintain a state store of previously processed dedupe IDs. The store can grow very large depending on the volume of events and the offset or time range that the application must guard against.
+Perfect deduplication requires that each consumer indefinitely maintain a lookup of each dedupe ID already processed, but time and space requirements can become prohibitively expensive if an attempt is made to guard against too large a range. In practice, deduplication is generally only performed for a specific rolling time-window or offset-window as a best-effort attempt.
+Tip
+Keep deduplication stores small by using time-to-live (TTL), a maximum cache size, and periodic deletions. The specific settings needed will vary depending on the sensitivity of your application to duplicates and the impact of duplicates occurring.
+Deduplication should be attempted only within a single event stream partition, as deduplication between partitions will be prohibitively expensive. Keyed events have an added benefit over unkeyed events, since they will consistently be distributed to the same partition.
+Figure 7-12
+shows a deduplication store in action. In this figure you can see the workflow that an event goes through before being passed off to the actual business logic. In this example the TTL is arbitrarily set to 8,000 seconds, but in practice would need to be established based on business requirements.
+Figure 7-12.
+Deduplication using persisted state
+Tip
+A maximum cache size is used in the deduplication store to limit the number of events maintained, particularly during reprocessing.
+Note that you are responsible for maintaining durable backups of the deduplication table, just as for any other materialized table. In the case of a failure, the table must be rebuilt prior to resuming the processing of new events.
+Maintaining consistent state
+A microservice can leverage the transactional capabilities of its state store instead of the event broker to perform effectively once processing. This requires moving the consumer group’s offset management from the event broker and into the data service, allowing a single stateful transaction to atomically update both the state and input offsets. Any changes made to the state coincide completely with those made to the consumer offsets, which maintains consistency within the service.
+In the case of a service failure, such as a timeout when committing to the data service, the microservice can simply abandon to transaction and revert to the last known good state. All consumption is halted until the data service is responsive, at which point consumption is restored from the last known good offset. By keeping the official record of offsets synchronized with the data in the data service, you have a consistent view of state that the service can recover from. This process is illustrated in Figures
+7-13
+,
+7-14
+, and
+7-15
+.
+Figure 7-13.
+Normal transactional processing of events
+Figure 7-14.
+Failure occurs in transactional processing
+Figure 7-15.
+Recovery of offsets during state restoration process
+Note that this approach gives your processor effectively once
+processing
+, but not effectively once event
+production
+. Any events produced by this service are subject to the limitations of at-least-once production, as the nontransactional client-broker production of events is subject to the creation of duplicates.
+If you must have events transactionally produced alongside updates to the state store, refer to
+Chapter 4
+. Using a change-data table can provide eventually consistent, effectively once updates to the state store with at-least-once production to the output event stream.
+Summary
+This chapter looked at internal and external state stores, how they work, their advantages, their disadvantages, and when to use them. Data locality plays a large role in the latency and throughput of systems, allowing them to scale up in times of heavy load. Internal state stores can support high-performance processing, while external state stores can provide a range of flexible options for supporting the business needs of your microservices.
+Changelogs play an important role in the backup and restoration of microservice state stores, though this role may also be performed by transaction-supporting databases and regularly scheduled snapshots. Event brokers that support transactions can enable extremely powerful effectively once processing, offloading the responsibility of duplication prevention from the consumer, while deduplication efforts can enable effectively once processing in systems without such support.
+
+Chapter 8.
+Building Workflows with Microservices
+Microservices, by their very definition, operate on only a small portion of the overall business workflow of an organization. A
+workflow
+is a particular set of actions that compose a business process, including any logical branching and compensatory actions. Workflows commonly require multiple microservices, each with its own bounded context, performing its tasks and emitting new events to downstream consumers. Most of what we’ve looked at so far has been how single microservices operate under the hood. Now we’re going to take a look at how multiple microservices can work together to fulfill larger business workflows, and some of the pitfalls and issues that arise from an event-driven microservice approach.
+Here are some of the main considerations for implementing EDM workflows.
+Creating and modifying workflows
+How are the services related within the workflow?
+How can I modify existing workflows without:
+Breaking work already in progress?
+Requiring changes to multiple microservices?
+Breaking monitoring and visibility?
+Monitoring workflows
+How can I tell when the workflow is completed for an event?
+How can I tell if an event has failed to process or is stuck somewhere in the
+workflow
+?
+How can I monitor the overall health of a workflow?
+Implementing distributed transactions
+Many workflows require that a number of actions happen together or not at all. How do I implement distributed transactions?
+How do I roll back distributed transactions?
+This chapter covers the two main workflow patterns, choreography and orchestration, and evaluates them against these considerations.
+The Choreography Pattern
+The term
+choreographed architectures
+(also known as
+reactive architectures
+) commonly refers to highly decoupled microservice architectures.
+Microservices react to their input events as they arrive, without any blocking or waiting, in a manner fully independent from any upstream producers or subsequent downstream consumers. This is much like a dance performance, where each dancer must know his or her own role and perform it independently, without being controlled or told what to do during the dance.
+Choreography is common in event-driven microservice architectures. Event-driven architectures focus strictly on providing
+reusable event streams
+of relevant business information, where consumers can come and go without any disruption to the upstream workflow. All communications are done strictly through the input and output event streams. A producer in a choreographed system does not know who the consumers of its data are, nor what business logic or operations they intend to perform. The upstream business logic is fully isolated from the downstream consumers.
+Choreography is desirable in the majority of interteam communications, as it allows for loosely coupled systems and reduces coordination requirements. Many business workflows are independent of one another and do not require strict coordination, which makes a choreographed approach ideal for communication. New microservices can be easily added to a choreographed architecture, while existing ones can be removed just as easily.
+The relationships between the microservices define the workflow of a choreographed architecture. A series of microservices operating together can be responsible for providing the business functionality of the workflow. This choreographed workflow is a form of
+emergent behavior
+, where it is not just the individual microservices that dictate the workflow, but the relationships between them as well.
+Note
+Direct-call microservice architectures focus on providing reusable
+services
+, to be used as building blocks for business workflows. Event-driven microservice architectures, on the other hand, focus on providing reusable
+events
+, with no foreknowledge of downstream consumption. The latter architecture enables the usage of highly decoupled, choreographed architectures.
+It is important to note that choreography belongs to the domain of event-driven architectures, because the decoupling of the producer and consumer services allows them to carry out their responsibilities independently. Contrast this with the direct-call microservice architecture, where the focus is on providing
+reusable services
+to compose more extensive business functionality and workflows, and where one microservice directly calls the API of another. By definition, this means the calling microservice must know two things:
+Which
+service needs to be called
+Why
+the service needs to be called (the expected business value)
+As you can see, a direct-call microservice is tightly coupled and fully dependent on the existing microservice’s bounded contexts.
+A Simple Event-Driven Choreography Example
+Figure 8-1
+shows the output of a choreographed workflow in which service A feeds directly into service B, which in turn feeds into service C. In this particular case, you can infer that the services have a dependent workflow of A → B → C. The output of service C indicates the result of the workflow as a whole.
+Figure 8-1.
+Simple event-driven choreographed workflow
+Now, say that the workflow needs to be rearranged such that the business actions in service C must be performed before those in service B, as shown in
+Figure 8-2
+.
+Figure 8-2.
+Business changes required by the simple event-driven choreographed
+workflow
+Both services C and B must be edited to consume from streams 1 and 2, respectively. The format of the data within the streams may no longer suit the needs of the new workflow, requiring breaking schema changes that may significantly affect other consumers (not shown) of event stream 2. A whole new event schema may need to be created for event stream 2, with the old data in the event stream ported over to the new format, deleted, or left in place. Finally, you must ensure that processing has completed for all of the output events of services A, B, and C before swapping the topology around, lest some events be incompletely processed and left in an inconsistent state.
+Creating and Modifying a Choreographed Workflow
+While choreography allows for simple addition of new steps at the end of the workflow, it may be problematic to insert steps into the middle or to change the order of the workflow. The relationships between the services may also be difficult to understand outside the context of the workflow, a challenge that is exacerbated as the number of services in the workflow increases. Choreographed workflows can be brittle, particularly when business functions cross multiple microservice instances. This can be mitigated by carefully respecting the bounded contexts of services and ensuring that full business functionality remains local to a single service. However, even when correctly implemented, small business logic changes may require you to modify or rewrite numerous services, especially those that change the order of the workflow itself.
+Monitoring a Choreographed Workflow
+When monitoring a choreographed workflow, you need to take into account its scale and scope. In isolation, distributed choreographed workflows can make it difficult to discern the processing progress of a specific event. For event-driven systems, monitoring business-critical workflows may necessitate listening to each output event stream and materializing it into a state store, to account for where an event may have failed to process or have gotten stuck in processing.
+For example, modifying the workflow order in
+Figure 8-2
+requires also changing the workflow visibility system. This assumes that observers care about
+each
+event stream in that workflow and want to know everything about each event. But what about visibility into workflows where you may
+not
+care about each event stream in the workflow? What about workflows spread out across an entire organization?
+Consider now a much larger-scale example, such as an order fulfillment process at a large multinational online retailer. A customer views items, selects some for purchase, makes a payment, and awaits a shipping notification. There may be many dozens or even hundreds of services involved in supporting this customer workflow. Visibility into this workflow will vary depending on the needs of the observer.
+The customer may only really care where the order is in the progression from payment to fulfillment to shipping notification. You could reasonably monitor this by tapping off events from three separate event streams. It would be sufficiently resilient to change due to both the “public” nature and the low number of event streams it is consuming from. Meanwhile, a view into the full end-to-end workflow could require consuming from dozens of event streams. This may be more challenging to accomplish due to both the volume of events and the independence of event streams, particularly if the workflow is subject to regular change.
+Tip
+Be sure you know what it is you’re trying to make visible in the choreographed workflow. Different observers have different requirements, and not all steps of a workflow may require explicit exposure.
+The Orchestration Pattern
+In the orchestration pattern a central microservice, the orchestrator, issues commands to and awaits responses from subordinate worker microservices. Orchestration can be thought of much like a musical orchestra, where a single conductor commands the musicians during the performance. The orchestrator microservice contains the entire workflow logic for a given business process and sends specific events to worker microservices to tell them what to do.
+Tip
+The orchestrator awaits responses from the instructed microservices and handles the results according to the workflow logic. This is in contrast to the choreographed workflow, in which there is no centralized coordination.
+The orchestration pattern allows for a flexible definition of the workflow within a single microservice. The orchestrator keeps track of which parts of the workflow have been completed, which are in process, and which have yet to be started. The workflow orchestrator issues command events to subordinate microservices, which perform the required task and provide the results back to the orchestrator, typically by issuing requests and responses through an event stream.
+If a payment microservice attempts to fulfill payment three times before failing, it must make those three attempts
+internal
+to the payment microservice. It does
+not
+make one attempt and notify the orchestrator that it failed and wait to be told to try again or not. The orchestrator should have no say about how payments are processed, including how many attempts to make, as that is part of the bounded context of the payment microservice. The only thing the orchestrator needs to know is if the payment has
+completely
+succeeded or if it has
+completely
+failed. From there, it may act accordingly based on the workflow logic.
+Tip
+Ensure the orchestrator’s bounded context is limited strictly to workflow logic and that it contains minimal business fulfillment logic. The orchestrator contains only the workflow logic, while the services under orchestration contain the bulk of the business logic.
+Note that the business responsibilities of a nonorchestrator microservice in an orchestrated pattern are identical to those of the same microservice in the choreographed pattern. The orchestrator is responsible only for orchestration and workflow logic, and not at all for the fulfillment of business logic of any of the microservices themselves. Let’s look at a simple example that illustrates these boundaries.
+A Simple Event-Driven Orchestration Example
+Figure 8-3
+shows an orchestration version of the architecture in
+Figure 8-1
+.
+Figure 8-3.
+Simple orchestrated event-driven workflow
+The orchestrator keeps a materialization of the events issued to services A, B, and C, and updates its internal state based on the results returned from the worker microservice (see
+Table 8-1
+).
+Table 8-1.
+Materialization of events issued from orchestration service
+Input event ID
+Service A
+Service B
+Service C
+Status
+100
+<results>
+<results>
+<results>
+Done
+101
+<results>
+<results>
+Dispatched
+Processing
+102
+Dispatched
+null
+null
+Processing
+Event ID 100 has been successfully processed, while event IDs 101 and 102 are in different stages of the workflow. The orchestrator can make decisions based on these results and select the next step according to the workflow logic. Once the events are processed, the orchestrator can also take the necessary data from service A, B, and C’s results and compose the final output. Assuming the operations in services A, B, and C are independent of one another, you can make changes to the workflow simply by changing the order in which events are sent. In the following orchestration code, events are simply consumed from each input stream and processed according to the workflow business logic:
+while
+(
+true
+)
+{
+Event
+[]
+events
+=
+consumer
+.
+consume
+(
+streams
+)
+for
+(
+Event
+event
+:
+events
+)
+{
+if
+(
+event
+.
+source
+==
+"Input Stream"
+)
+{
+//process event + update materialized state
+producer
+.
+send
+(
+"Stream 1"
+,
+...)
+//Send data to stream 1
+}
+else
+if
+(
+event
+.
+source
+==
+"Stream 1-Response"
+)
+{
+//process event + update materialized state
+producer
+.
+send
+(
+"Stream 2"
+,
+...)
+//Send data to stream 2
+}
+else
+if
+(
+event
+.
+source
+==
+"Stream 2-Response"
+)
+{
+//process event + update materialized state
+producer
+.
+send
+(
+"Stream 3"
+,
+...)
+//Send data to stream 3
+}
+else
+if
+(
+event
+.
+source
+==
+"Stream 3-Response"
+)
+{
+//process event, update materialized state, and build output
+producer
+.
+send
+(
+"Output"
+,
+...)
+//Send results to output
+}
+}
+consumer
+.
+commitOffsets
+()
+}
+A Simple Direct-Call Orchestration Example
+Orchestration can also use a request-response pattern, where the orchestrator synchronously calls the microservice’s API and awaits a response for results. The topology shown in
+Figure 8-4
+is nearly identical to the one in
+Figure 8-3
+, aside from substitution of direct calls.
+Figure 8-4.
+Simple direct-call orchestrated workflow
+The normal benefits and restrictions of direct-call services apply here as well. That being said, this pattern is particularly useful for implementing workflows with Function-as-a-Service solutions (see
+Chapter 9
+).
+Comparing Direct-Call and Event-Driven Orchestration
+Direct-call and event-driven orchestration workflows are fairly similar when examined close-up. For instance, it might seem that the event-driven system is really just a request-response system, and in these simple examples, it certainly is. But when you zoom out a bit, there are a number of factors to consider when choosing which option to use.
+Event-driven workflows:
+Can use the same I/O monitoring tooling and lag scaling functionality as other event-driven microservices
+Allow event streams to still be consumed by other services, including those outside of the orchestration
+Are generally more durable, as both the orchestrator and the dependent services are isolated from each other’s intermittent failures via the event broker
+Have a built-in retry mechanism for failures, as events can remain in the event stream for retrying
+Direct-call workflows:
+Are generally faster, as there’s no overhead in producing to and consuming from event streams
+Have intermittent connectivity issues that may need to be managed by the orchestrator
+To summarize, direct-call aka synchronous request-response workflows are generally faster than event-driven ones, provided all dependent services are operating within their SLAs. They tend to work well when very quick responses are required, such as in real-time operations. Meanwhile, event-driven workflows have more durable I/O streams, producing slower but more robust operations, and are particularly good at handling intermittent failures.
+Keep in mind that there’s quite a lot of opportunity to mix and match these two options. For example, an orchestration workflow may be predominantly event-driven, but require that a request-response call be made directly to an external API or preexisting service. When mixing these two options together, make sure that each service’s failure modes are handled as expected.
+Creating and Modifying an Orchestration Workflow
+The orchestrator can keep track of events in the workflow by materializing each of the incoming and outgoing event streams and response-request results. The workflow itself is defined solely within the orchestration service, allowing a single point of change for altering the workflow. In many cases, you can incorporate changes to a workflow without disrupting partially processed events.
+Orchestration results in a tight coupling between services. The relationship between the orchestrator and the dependent worker services must be explicitly defined.
+It is important to ensure that the orchestrator is responsible only for orchestrating the business workflow. A common anti-pattern is creating a single “God” service that issues granular commands to many weak minion services. This anti-pattern spreads workflow business logic between the orchestrator and the worker services, making for poor encapsulation, ill-defined bounded contexts, and difficulty in scaling ownership of the workflow microservices beyond a single team. The orchestrator should delegate full responsibility to the dependent worker services to minimize the amount of business logic it performs.
+Monitoring the Orchestration Workflow
+You gain visibility into the orchestration workflow by querying the materialized state, so it’s easy to see the progress of any particular event and any issues that may have arisen in the workflow. You can implement monitoring and logging at the orchestrator level to detect any events that result in workflow failures.
+Distributed Transactions
+A
+distributed
+transaction is a transaction that spans two or more microservices. Each microservice is responsible for processing its portion of the transaction, as well as reversing that processing in the case that the transaction is aborted and reverted. Both the fulfillment and reversal logic must reside within the same microservice, both for maintainability purposes and to ensure that new transactions cannot be started if they can’t also be rolled back.
+Warning
+It is best to avoid implementing distributed transactions whenever possible, as they can add significant risk and complexity to a workflow. You must account for a whole host of concerns, such as synchronizing work between systems, facilitating rollbacks, managing transient failures of instances, and network connectivity, to name just a few.
+While it is still best to avoid implementing distributed transactions whenever possible, they still have their uses and may be required in some circumstances, particularly when such avoidance would otherwise result in even more risk and complexity.
+Distributed transactions in an event-driven world are often known as
+sagas
+and can be implemented through either a choreographed pattern or an orchestrator pattern. The saga pattern requires that the participating microservices be able to process reversal actions to revert their portion of the transaction. Both the regular processing actions and the reverting actions should be idempotent, such that any intermittent failures of the participating microservices do not leave the system in an inconsistent state.
+Choreographed Transactions: The Saga Pattern
+Distributed transactions with choreographed workflows can be complex affairs, as each service needs to be able to roll back changes in the event of a failure. This creates strong coupling between otherwise loosely coupled services and can result in some unrelated services having strict dependencies on one another.
+The choreographed saga pattern is suitable for simple distributed transactions, particularly those with strong workflow ordering requirements that are unlikely to change over time. Monitoring the progress of a choreographed transaction can be difficult, because it requires a full materialization of each participating event stream, as in the orchestrated approach.
+Choreography Example
+Continuing with the previous choreographed workflow example, consider the series of microservices A, B, C. The input event stream to service A kicks off a transaction, with the work of services A, B, and C being fully completed, or consequently canceled and rolled back. A failure at any step in the chain aborts the transaction and begins the rollback. The resultant workflow is shown in
+Figure 8-5
+.
+Figure 8-5.
+Choreographed transaction success
+Suppose now that service C is unable to complete its part of the transaction. It must now reverse the workflow, either by issuing events or by responding to the previous service’s request. Services B and A must revert their portion of the transaction, in order, as shown in
+Figure 8-6
+.
+Figure 8-6.
+Choreographed transaction failure with rollbacks
+Service A, the original consumer of the input event, must now decide what to do with the failed transaction results. A curious situation is already evident in the preceding two figures. The status of a successful transaction comes from the output of microservice C. However, the status of the aborted transaction comes out of microservice A, so a consumer would need to listen to both the output of C and the failed transaction stream from A to get a complete picture of finalized transactions.
+Warning
+Remember the single-writer principle. No more than one service should publish to an event stream.
+Even when consuming from both the output and failed transactions streams, the consumer will still not be able to get the status of ongoing transactions or of transactions that have gotten stuck in processing. This would require that each event stream be materialized, or that the internal state of each microservice be exposed via API, as discussed earlier in this chapter. Making changes to the workflow of a choreographed transaction requires dealing with the same challenges as a nontransactional workflow, but with the added overhead of rolling back changes made by the previous microservice in the workflow.
+Choreographed transactions can be somewhat brittle, generally require a strict ordering, and can be problematic to monitor. They work best in services with a very small number of microservices, such as a pair or a trio with very strict ordering and a low likelihood of needing workflow changes.
+Orchestrated Transactions
+Orchestrated transactions build on the orchestrator model, with the addition of logic to revert the transaction from any point in the workflow. You can roll back these transactions by reversing the workflow logic and ensuring that each worker microservice can provide a complementary reversing action.
+Orchestrated transactions can also support a variety of signals, such as timeouts and human inputs. You can use timeouts to periodically check the local materialized state to see how long a transaction has been processing. Human inputs via a REST API (see
+Chapter 13
+) can be processed alongside other events, handling cancellation instructions as required. The centralized nature of the orchestrator allows for close monitoring of the progress and state of any given transaction.
+The transaction can be aborted at any point in the workflow due to a return value from one of the worker microservices, a timeout, or an interrupt sent from a human operator.
+A simple two-stage orchestrated transaction topology is shown in
+Figure 8-7
+.
+Figure 8-7.
+Simple orchestrated transaction topology
+Events are consumed from the input stream and processed by the orchestrator. In this example, the orchestrator is using direct request-response calls to the workflow’s microservices. A request is made to service A, and the orchestrator blocks while awaiting a response. Once it obtains the response, the orchestrator updates its internal state and calls service B, as shown in
+Figure 8-8
+.
+Figure 8-8.
+Simple orchestrated transaction with a failure in the transaction
+Service B cannot perform the necessary operation and, after exhausting its own retries and error-handling logic, eventually returns a failure response to the orchestrator. The orchestrator must now enact its rollback logic based on the current state of that event, ensuring that it issues rollback commands to all required microservices.
+Tip
+Each microservice is fully responsible for ensuring its own retry policy, error handling, and intermittent failure management. The orchestrator does not manage any of these.
+Figure 8-9
+demonstrates the orchestrator issuing a rollback command to service A (service B’s failure response indicates it did not write anything to its internal data store). In this example, Service A performs the rollback successfully, but if it were to fail during its rollback, it would be up to the orchestrator to determine what to do next. The orchestrator could reissue the command a number of times, issue alerts via monitoring frameworks, or terminate the application to prevent further issues.
+Figure 8-9.
+Issuing the rollback commands in an orchestrated transaction
+Once the transaction has been rolled back, it is up to the orchestrator to decide what to do next to finalize the processing of that event. It may retry the event a number of times, discard it, terminate the application, or output a failure event. The orchestrator, being the single producer, publishes the transaction failure to the output stream and lets a downstream consumer handle it. This differs from choreography, where there is no single stream from which to consume all output without discarding the single writer principle.
+Caution
+Just as each microservice is fully responsible for its own state changes, it is also responsible for ensuring that its state is consistent after a rollback. The orchestrator’s responsibility in this scenario is limited to issuing the rollback commands and awaiting confirmations from the dependent microservices.
+The orchestrator can also expose the status of transactions in progress in the same output stream, updating the transaction entity as worker services return results. This can provide high visibility into the state of underlying transactions and allows for stream-based monitoring.
+Orchestrated transactions offer better visibility into workflow dependencies, more flexibility for changes, and clearer monitoring options than choreographed transactions. The orchestrator instance adds overhead to the workflow and requires
+management
+, but can provide to complex workflows the clarity and structure that choreographed transactions cannot provide.
+Compensation Workflows
+Not all workflows need to be perfectly reversible and constrained by transactions. There are many unforeseen issues that can arise in a given workflow, and in many cases you might just have to do your best to complete it. In case of failure, there are actions you can take after the fact to remedy the situation.
+Ticketing and inventory-based systems often use this approach. For example, a website that sells physical products may not have sufficient inventory at the time of purchase to handle a number of concurrent transactions. Upon settling the payments and evaluating its available inventory, the retailer may discover that there is insufficient stock to fulfill the orders. It has several options at this point.
+A strict transaction-based approach would require that the most recent transactions be rolled back—that is, the money returned to the payment provider, and the customer alerted that the item is now out of stock and the order has been cancelled. While technically correct, this could lead to a poor customer experience and a lack of trust between the customer and the retailer. A
+compensating workflow
+can remedy the situation based on the business’s customer satisfaction policies.
+As a form of compensation, the business could order new stock, notify the customer that there has been a delay, and offer a discount code for the next purchase as an apology. The customer could be given the option to cancel the order or wait for the new stock to arrive. Music, sport, and other performance venues often use this approach in the case of oversold tickets, as do airlines and other ticket-based travel agencies. Compensation workflows are not always possible, but they are often useful for handling distributed workflow operations with customer-facing products.
+Summary
+Choreography allows for loose coupling between business units and independent workflows. It is suitable for simple distributed transactions and simple nontransactional workflows, where the microservice count is low and the order of business operations is unlikely to ever change.
+Orchestrated transactions and workflows provide better visibility and monitoring into workflows than choreography. They can handle more complicated distributed transactions than choreography and can often be modified in just a single location. Workflows that are subject to changes and contain many independent microservices are well suited to the orchestrator pattern.
+Finally, not all systems require distributed transactions to successfully operate. Some workflows can provide compensatory actions in the case of failure, relying on nontechnical parts of the business to solve customer-facing issues.
+
+Chapter 9.
+Microservices Using Function-as-a-Service
+Functions-as-a-Service (FaaS) is a “serverless” solution that has become increasingly popular in recent years. FaaS solutions enable individuals to build, manage, deploy, and scale application functionality without having to manage infrastructural overhead. They can provide significant value in event-driven systems as a means of implementing simple to moderately complex solutions.
+A
+function
+is a piece of code that is executed when a specific triggering condition occurs. The function starts up, runs until completion, and then terminates once its work is completed. FaaS solutions can easily scale the number of function executions up and down depending on load, providing close tracking for highly variable loads.
+It may be helpful to think of a FaaS solution as a basic consumer/producer implementation that regularly fails. A function will always end after a predetermined amount of time, and any connections and state associated with it will go away. Keep this in mind as you design your functions.
+Designing Function-Based Solutions as Microservices
+FaaS solutions may comprise many different functions, with the sum of their operations constituting the solution to the business bounded context. There are many ways to create function-based solutions, far more than this chapter can cover, but there are a few general design principles that will help guide you through the process.
+Ensure Strict Membership to a Bounded Context
+The functions and internal event streams composing a solution must strictly belong to a bounded context, such that the owner of the function and data is clearly identified. It is common for an organization to have ownership questions around functions, services, and event streams when implementing microservice solutions in large
+numbers
+. While many microservice solutions map 1:1 to a bounded context, an
+n
+:1 mapping is not uncommon, as multiple functions may be used for a single bounded context. It’s important to identify
+which
+function belongs to
+which
+bounded context, because the high granularity of functions can blur those lines.
+Some practical ways of maintaining bounded contexts with functions include:
+Ensure that data stores are kept private from external contexts.
+Use standard request-response or event-driven interfaces when coupling to other contexts.
+Maintain strict metadata around which function belongs to which context (a 1:1 mapping of function to product).
+Maintain function code within a repository mapped to the bounded context.
+Commit Offsets Only After Processing Has Completed
+Offsets are committed at one of two times: when the function starts or when the function has completed its processing. Committing offsets only after processing has completed for a given event or batch of events is a FaaS best practice. It is important for you to understand how offsets for your specific function-based solutions are handled, so let’s take a look at the implications of each approach.
+When the function has completed its processing
+The approach of committing offsets after processing has completed aligns with how other microservice implementations commit offsets, whether they’re based on a basic producer/consumer or stream-processing framework. This strategy provides the strongest guarantee that events will be processed at least once and is equivalent to the offset management strategies used with non-FaaS solutions.
+When the function has first started
+Offsets may be committed once the batch of events to process has been passed off to the function. This simple approach is used in many FaaS frameworks that rely on framework-specific retry mechanisms and alerting to mitigate repetitive event processing failures. Functions that call other functions in a choreography pattern often rely on this strategy, as it greatly simplifies the tracking of event processing.
+Committing offsets before processing has completed can be problematic, however. If the function is unable to successfully process an event, and numerous retries fail, then data loss is likely. The event will typically be shunted into a dead-letter queue or simply discarded. While many function-based microservices are not sensitive to data loss, those that are should not use this strategy.
+Less Is More
+An often-cited feature of FaaS frameworks is that they make it easy to write a single function and reuse it in multiple services. Following this approach, however, can lead to a highly fragmented solution that makes it difficult to discern exactly what is going on within the bounded context. Additionally, ownership of a given function becomes ambiguous, and it may not be clear if changes to a function could negatively affect other services. While versioning of functions can help with this issue, it can also lead to conflicts when multiple products need to maintain and improve different versions of a function.
+FaaS solutions may incorporate multiple functions to solve the business requirements of the bounded context, and while this is not an uncommon or bad practice, a good rule of thumb for FaaS solutions is that fewer functions are better than many granular functions. Testing, debugging, and managing just one function is much easier than doing the same for multiple functions.
+Choosing a FaaS Provider
+Just like the event brokers and container management systems (CMSes), FaaS frameworks are available as both free-to-use open source solutions and paid third-party cloud providers. An organization that runs its own in-house CMS for its microservice operations can also benefit from using an in-house FaaS solution. There are a number of free open source options available, such as OpenWhisk, OpenFaaS, and Kubeless, that can leverage existing container management services.
+Apache Pulsar offers its own built-in FaaS solution that runs alongside its event broker. By leveraging a common resource-provisioning framework, your FaaS solution can align with your microservice solution.
+Third-party service providers such as Amazon Web Services (AWS), Google Cloud Platform (GCP), and Microsoft Azure also have their own proprietary FaaS frameworks, each of which offers attractive features and functionality but remains tightly integrated with its provider’s proprietary event broker. This is a significant issue only because currently all three providers limit retention within their event brokers to seven days.
+Integrations between cloud providers and open source event brokers do exist (such as
+Kafka Connect
+), but may require additional effort to set up and manage. That being said, if your organization is already a subscriber to AWS, GCP, or Azure services, then the overhead to start experimenting is low.
+Building Microservices Out of Functions
+There are four main components you must consider when working with function-based solutions, regardless of your FaaS framework or event broker:
+The function
+Input event stream
+Triggering logic
+Error and scaling policies, with metadata
+The first component of a FaaS implementation is the function itself. It can be implemented in any code supported by the FaaS framework.
+public
+int
+myfunction
+(
+Event
+[]
+events
+,
+Context
+context
+)
+{
+println
+(
+"hello world!"
+);
+return
+0
+;
+}
+The
+events
+parameter contains the array of individual events to be processed, with each event containing a
+key
+,
+value
+,
+timestamp
+,
+offset
+, and
+partition_id
+. The
+Context
+parameter contains information about the function and its context, such as its name, the event stream ID, and the function’s remaining lifespan.
+Next, you need to wire up some triggering logic for the function. This will be covered in greater detail in the next section, but for now, say that the function is triggered whenever a new event arrives in one of its subscribed event streams. The triggering logic is often associated with a function by way of a
+function-trigger map
+, which is usually concealed behind the scenes of your FaaS framework. Here is an example:
+Function
+Event stream(s)
+Trigger
+Policies and metadata
+myFunction
+myInputStream
+onNewEvent
+< … >
+You can see that
+myFunction
+is set to trigger when a new event is delivered to
+myInputStream
+. You’ll also notice that there is a column named Policies and Metadata, which is a bit of a catch all that includes configurations such as the following:
+Consumer group
+Consumer properties, such as batch size and batch window
+Retry and error handling policies
+Scaling policies
+Once the triggers, metadata, and policies are established, the function is ready to process incoming events. When a new event arrives in its input event stream, the function will be started by the FaaS framework, get passed a batch of events, and begin processing. Upon completion, the function will terminate and wait for more events to come in. This is a typical implementation of the event-stream listener pattern, which is discussed more in the next section.
+Tip
+Each function-based microservice implementation must have its own independent consumer group, just as with other non-FaaS microservices.
+Now keep in mind that this is just a logical representation of the components needed to successfully trigger and operate a function. A FaaS framework’s function coding requirements, function management, and triggering mechanisms vary by provider and implementation, so be sure to refer to the documentation for your FaaS
+framework
+.
+There is also a moderately complex interplay between triggering mechanisms, event consumption, consumer offsets, nested functions, failures, and at-least-once event processing. These are the subject of the remainder of this chapter.
+Cold Start and Warm Starts
+A
+cold start
+is the default state of the function upon starting for the first time, or after a sufficient period of inactivity. A container must be started and the code loaded, event broker connections may need to be created, and any other client connections to external resources need to be established. Once everything is stable and ready to process, the function is now in a warm state and ready to process events. The warm function begins processing events, and upon expiry or completion, is suspended and put into hibernation.
+Most FaaS frameworks attempt to reuse terminated functions whenever possible. In many scenarios, a function processing a steady stream of events will hit the timeout expiry and be briefly terminated, just to be brought back a moment later by a triggering mechanism. The suspended instance is simply reused, and provided that the connections to the event broker and any state stores haven’t expired during the interim, processing can resume immediately.
+Starting Functions with Triggers
+Triggers are used to tell a function to start up and begin processing. The supported triggers vary depending on your FaaS framework, but tend to all fall into the same general categories, as described shortly. For now, let’s take a look at which signals can be used to kick off functions, to give you an idea of when you may want to use them.
+Triggering Based on New Events: The Event-Stream Listener
+Functions can be triggered when an event is produced into an event stream. The
+event-stream listener trigger
+isolates event consumption behind a predefined consumer, reducing the amount of overhead code that a developer must write. Events are injected directly into the function in a form of an array of events, in sequential order from an event stream, or as a cluster of unordered events if consuming from a queue. You can create multiple mappings from event streams to functions, such that a function can consume events from many different streams.
+FaaS solutions from Google, Microsoft, and Amazon provide this trigger for usage with their proprietary event brokers, but currently do not support triggering directly from open source brokers. The generalized structure of this approach is shown in
+Figure 9-1
+.
+Figure 9-1.
+Integrated event-stream listener with FaaS framework
+Conversely, open source solutions such as OpenFaaS, Kubeless, Nuclio, and others provide a variety of triggering plug-ins with various event brokers, such as Kafka, Pulsar, and NATS, to name a few. For instance, Apache Kafka Connect allows you to
+trigger the functions of third-party FaaS frameworks
+.
+Since Kafka Connect runs outside of the FaaS framework, you would end up with an event-stream listener as per
+Figure 9-2
+.
+Figure 9-2.
+External event-stream listener application provided by Kafka Connect
+Though not shown in the previous examples, function results can be output to their own event streams, not just for the purpose of outputting data but also for tracking the function’s success.
+Synchronous
+triggers require the function to complete before they issue the next events. This is particularly important for maintaining the processing order and is limited by the parallelism of the event stream being processed.
+Conversely,
+asynchronous
+triggering can issue multiple events to multiple functions, each one reporting back as it is completed. This will
+not
+maintain the processing order, however, and should be used only when processing order is not important to the business logic.
+Batch size
+and
+batch window
+are two important properties to consider in stream-listener triggers. The batch size dictates the maximum number of events to dispatch for processing, while the batch window indicates the maximum amount of time to wait for additional events, instead of triggering the function immediately. Both of these parameters are used to ensure that the overhead of starting the function is spread among the batch of records to reduce costs.
+A function executed by a stream-listener trigger looks something like the following:
+public
+int
+myEventfunction
+(
+Event
+[]
+events
+,
+Context
+context
+)
+{
+for
+(
+Event
+event:
+events
+)
+try
+{
+println
+(
+event
+.
+key
++
+", "
++
+event
+.
+value
+);
+}
+catch
+(
+Exception
+e
+)
+{
+println
+(
+"error printing "
++
+event
+.
+toString
+);
+}
+//Indicates to the FaaS framework that batch processing was completed.
+context
+.
+success
+();
+return
+0
+;
+}
+Tip
+Much like a containerized microservice, triggers for the event-stream listener pattern can be configured to start processing events from a stream’s latest offsets, earliest offsets, or anywhere in between.
+Triggering Based on Consumer Group Lag
+A consumer group’s lag metric is another way to trigger functions. You can detect lag by periodically polling the offsets of an individual application’s consumer groups and computing the delta between the current consumer offset and the head offset of the stream (see
+“Consumer Offset Lag Monitoring”
+for more on lag monitoring). While similar to the stream listener trigger, lag monitoring can also be used for scaling non-FaaS microservices.
+Lag monitoring typically involves computing and reporting lag metrics to your monitoring framework of choice. The monitoring framework can then call the FaaS framework to tell it to start up the functions registered on the event stream. A high lag value can indicate that multiple function instances can be started to more quickly process the load, while a low lag value may require only a single function instance to process the backlog. You can tailor the relationship between lag quantity and function startup on a microservice-by-microservice basis, ensuring compliance with SLAs.
+One of the major differences between the previously mentioned event-stream listener trigger and this one is that with lag triggering, the function does
+not
+consume the events until
+after
+it is started. Functions started by the lag trigger have a wider domain of responsibilities, including establishing a client connection with the event broker, consuming the events, and committing back any offset updates. This makes functions triggered by lag much more similar to basic producer/consumer clients, albeit with a limited lifespan. The following example function illustrates this
+workflow
+:
+public
+int
+myLagConsumerfunction
+(
+Context
+context
+)
+{
+String
+consumerGroup
+=
+context
+.
+consumerGroup
+;
+String
+streamName
+=
+context
+.
+streamName
+;
+EventBrokerClient
+client
+=
+new
+EventBrokerClient
+(
+consumerGroup
+,
+...);
+Event
+[]
+events
+=
+client
+.
+consumeBatch
+(
+streamName
+,
+...);
+for
+(
+Event
+event:
+events
+)
+{
+// Do event processing work
+doWork
+(
+event
+);
+}
+//Commit the offsets back to the event broker
+client
+.
+commitOffsets
+();
+//Indicates to the FaaS framework that the function succeeded.
+context
+.
+success
+();
+//Return, letting the lag-triggering system know it was a success
+return
+0
+;
+}
+The consumer group and stream name are passed in as parameters in the context. The client is created, events are consumed and processed, and the offsets are committed back to the event broker. The function indicates a
+success
+result back to the FaaS framework and then returns.
+If the function is frequently triggered by the lag monitor, there is a good chance that it will still be warm from the last iteration, and the overhead of connecting to the event broker client may not be a factor. This, of course, depends on the timeouts used by the client and event broker configurations. For longer periods of inactivity, consumer group rebalancing and client cold starts will slightly reduce the amount of work that a function instance can process.
+Triggering on a Schedule
+Functions can also be scheduled to start up periodically and at specific datetimes. The scheduled functions start up at the specified interval, poll the source event-streams for new events, and process them or shut down as necessary. The polling period should be kept low so that SLAs are maintained, but polling too frequently may put undue load on both the FaaS framework and event broker.
+Client code for a time-based trigger looks identical to that of the consumer group lag trigger example.
+Triggering Using Webhooks
+Functions can also be triggered by direct invocation, allowing custom integration with monitoring frameworks, schedulers, and other third-party applications.
+Triggering on Resource Events
+Changes made to resources can also be a source of triggers. For instance, creating, updating, or deleting a file in a filesystem can trigger functions, as can the same modifications made to a row in a data store. Since most of the events in the event-driven microservice domain are generated via event streams, this particular resource trigger isn’t often used in most business workflows. It is, however, quite useful when you are integrating with external sources of data that require an FTP or other file service to drop their files into.
+Performing Business Work with Functions
+FaaS approaches work particularly well for solutions that can leverage the on-demand, flexible nature of processing resource provisioning. Simple topologies are a great candidate, as are those that are stateless, those that do not require deterministic processing of multiple event streams, and those that scale very wide, such as queue-based processing. Anything with a highly variable volume can benefit from FaaS solutions, as their horizontal scaling capabilities and on-demand characteristics allow for rapid provisioning and release of compute resources.
+FaaS solutions can perform extremely well when concurrency and determinism are not concerns. However, once determinism comes into play, you must take great care to ensure correctness and consistency in the event stream processing. Much like the basic consumer solutions in the next chapter, FaaS solutions require that you provide an event scheduler to ensure consistent processing results. Copartitioned data can only be successfully and consistently processed by a single function at a time, similar to how the full-featured lightweight and heavyweight frameworks must use only a single thread.
+Maintaining State
+Given the short lifespan of functions, most stateful FaaS-based solutions require the use of an external stateful service. Part of the reason is the goal of many FaaS providers to supply quick, highly scalable units of processing power independent of the data’s location. Having functions that require local state from previous executions limits current execution to the nodes that have that state co-located. This greatly reduces the flexibility of FaaS providers, so they often enforce a “no local state” policy and require that everything stateful be stored external to the executors.
+Although previous local state may be available if a function starts in a warm state, there is no guarantee that this will always be the case. Functions connect to external state stores exactly as any other client would—by creating a connection to the state store and using the corresponding API. Any state must be persisted and retrieved explicitly by the function.
+Tip
+Be sure to use strict access permissions for your function’s state, such that nothing outside of its bounded context is allowed access.
+Some FaaS frameworks have added durable stateful function support, such as
+Microsoft Azure’s Durable Functions
+, which abstracts away the explicit management of state and allows you to use local memory, which is automatically persisted to external state. This allows developers to suspend functions and bring them back to life without needing to write code to explicitly store and retrieve the state. This greatly simplifies stateful workflows and provides the option to standardize state management across function implementations.
+FaaS frameworks will continue to grow and include new features. Simple management of state is a common need in function-based solutions, so keep a lookout for state handling improvements in the FaaS frameworks of your choice.
+Functions Calling Other Functions
+Functions are often used to execute other functions and may also be used for both choreographed and orchestrated workflows. Communication between functions can be facilitated asynchronously through events, via request-response calls, or with a combination of both. These choices depend highly on the FaaS framework and the problem space of the bounded context. It’s common to use choreography and orchestration design patterns when implementing a multifunction solution.
+Tip
+To avoid out-of-order processing issues, ensure that all processing is completed for one event before processing the next event.
+Event-Driven Communication Pattern
+The output of one function can be produced into an event stream for another consuming function. A bounded context may be made up of many functions and many internal event streams, with varying triggering and scaling logic for each function definition. Each function processes incoming events at its own rate, with events being consumed, work being performed, and outputs produced accordingly. An example of this design is shown in
+Figure 9-3
+.
+Figure 9-3.
+Multifunction event-driven FaaS topology representing a single microservice
+In this example, function A is triggered independently of the triggers for functions B and C. Event streams 2 and 3 are considered internal event streams, with access to their contents completely restricted to any functions outside of the bounded context. Each function consumes events from its source stream using the same consumer group, as the functions are all colocated within the same bounded context. This ensures that the functions are effectively operating in the same way as a non-FaaS-based microservice.
+There are several benefits of using an event-based communication pattern. Each function within the topology can manage its own consumer offsets, committing each offset once its work is done. No coordination between functions needs to occur outside of the event stream processing. The preceding figure shows a choreography-based design pattern, though orchestration can also be used. Additionally, any failures in the event processing will not result in any data loss, as the events are durably stored in the event broker and will simply be reprocessed by the next function instance.
+Direct-Call Pattern
+In the direct-call pattern, a function can call other functions directly from its own code. Direct invocation of other functions can be performed asynchronously, which is essentially a “fire-and-forget” approach, or synchronously, where the calling function awaits for a return value.
+Choreography and asychronous function calling
+Asychronous direct calls lead to a choreography-based FaaS solution. One function simply invokes the next one based on its business logic, leaving it up to that function and the FaaS framework to handle the next steps, including any failures or errors. An asynchronous direct-call function topology is a simple way to chain function calls together.
+Figure 9-4
+illustrates an example.
+Figure 9-4.
+Choreographed asynchronous function calls within a bounded context
+Function A invokes function B as it processes its batch of events, and once done, function A can simply update its consumer offsets and terminate. Meanwhile, function B continues its processing and produces any outputs to the output event stream.
+One major downside to asynchronous direct calls is in ensuring that the consumer offsets are updated only in the case of successful processing. In the example, function B has no feedback to function A, and so only errors in function A will prevent the workflow from incorrectly committing the consumer group offsets. However, losing events may not matter to some workflows, and in those cases this problem can be
+dismissed
+.
+Another potentially major issue is that events may be processed out of order due to multiple invocations of function B. Consider the code for function A:
+public
+int
+functionA
+(
+Event
+[]
+events
+,
+Context
+context
+)
+{
+for
+(
+Event
+event:
+events
+)
+{
+//Do function A's processing work
+//Invoke function B asynchronously per event
+//Does not wait for return value
+asyncfunctionB
+(
+event
+);
+}
+context
+.
+success
+();
+return
+0
+;
+}
+Function B is called inline with the work from function A. Depending on your FaaS framework, this may result in multiple instances of function B being created, each of which runs independently of the others. This will create a race condition where some executions of function B will finish before others, potentially leading to out-of-order processing of events.
+Similarly, writing your code as follows will not solve ordering problems either. Processing will still happen out of order, as function A’s processing work will be executed for all events in the batch prior to function B’s execution.
+public
+int
+functionA
+(
+Event
+[]
+events
+,
+Context
+context
+)
+{
+for
+(
+Event
+event:
+events
+)
+{
+//Do function A's processing work
+}
+//Invoke function B asynchronously with entire batch of events
+asyncFunctionB
+(
+events
+);
+context
+.
+success
+()
+return
+0
+;
+}
+In-order processing requires strictly executing function A before B, for each event, before processing the next event. An event must be completely processed before the next one can be started; otherwise, nondeterministic behavior will likely result. This is particularly true if functions A and B are acting on the same external data store, as function B may rely on data written by function A.
+In many cases, asynchronous calls are not sufficient for the needs of the bounded context. In these cases, consider whether using synchronous calls in an orchestrated manner is more suitable.
+Orchestration and synchronous function calling
+Synchronous function calls allow you to invoke other functions and await the results before proceeding with the remaining business logic. This allows for the implementation of the orchestration pattern, as covered in
+Chapter 8
+.
+Event stream—triggered processing
+In the following example, a single orchestration function is triggered when new events arrive in a partitioned event stream. The function starts up and begins processing the input batch of events, dispatching event sequentially for each function.
+Figure 9-5
+shows an example of function-based orchestration within a single bounded context.
+Figure 9-5.
+Orchestrated synchronous function calls within a bounded context
+Here is an example of the orchestration code:
+public
+int
+orchestrationFunction
+(
+Event
+[]
+events
+,
+Context
+context
+)
+{
+for
+(
+Event
+event:
+events
+)
+{
+//Synchronous function Calls
+Result
+resultFromA
+=
+invokeFunctionA
+(
+event
+);
+Result
+resultFromB
+=
+invokeFunctionB
+(
+event
+,
+resultFromA
+);
+Output
+output
+=
+composeOutputEvent
+(
+resultFromA
+,
+resultFromB
+);
+//Write to the output stream
+producer
+.
+produce
+(
+"Output Stream"
+,
+output
+);
+}
+//This will tell the FaaS framework to update the consumer offsets
+context
+.
+success
+();
+return
+0
+;
+}
+The orchestration function invokes functions A and B in order and awaits the results from each function. The output of function A can be sent to B if needed. Each event is fully processed through the workflow before the next one is started, ensuring that offset order is respected. Once the consumer function has completed processing each event in the batch, it can issue a success message and update the offsets accordingly.
+Queue-triggered event processing
+If you use a queue with individual commit capabilities, the triggering mechanism can simply trigger an individual orchestration function for each event. The orchestrator will need to commit the processing confirmation back to the queue after it has completed its work. In the case that the orchestrator fails to process the work, it will simply be picked up by the next orchestrator instance created.
+Termination and Shutdown
+A function is terminated once it has completed its work or it reaches the end of its allocated lifespan, generally in the range of 5–10 minutes. The function instance is suspended and enters a state of hibernation, where it may be immediately revived. The suspended function may also eventually be evicted from the hibernation cache due to resource or time constraints.
+You will need to decide how to handle any open connections and resource assignments made to a function prior to its termination. In the case of a consumer client, the function instance may be assigned specific event stream partitions. Terminating the function instance without revoking these assignments may result in processing delays, as ownership in the consumer group won’t be reassigned until a timeout is reached. Events from those partitions won’t be processed until a consumer group rebalance is performed, or the terminated function instance comes back online and resumes processing.
+If your function is almost always online and processing events, closing connections and rebalancing the consumer group may not be necessary. The function will likely only be momentarily suspended at the end of it lifespan, go briefly into hibernation, and be restored to runtime immediately. Conversely, for a consumer function that runs only intermittently, it is best to close down all connections and relinquish assignment of the event stream partitions. The next function instance will have to re-create the connection regardless of whether it’s a warm start or cold start. When in doubt, cleaning up connections is generally a good idea; it lightens the load on external data stores and on the event broker and reduces the chances that suspended functions are laying claim to partition ownership.
+Tuning Your Functions
+Each function has specific needs based on its workload. Optimizing the resources that a function uses during its execution can ensure that performance remains high while costs remain low. There are a few things to consider when establishing the resources and tuning the parameters of your functions.
+Allocating Sufficient Resources
+Each function can be allocated a specific amount of CPU and memory. It is important to tune these parameters to the needs of your function; overallocation can be expensive, while underallocation may result in your functions crashing or taking too long to complete.
+Maximum execution time is another factor, as it limits how long a function may run. This parameter is closely related to the batch size, as the time a function needs to process events is very often linearly related, on average, with the number of events to process. Set the maximum execution time higher than the maximum expected time to process a specific batch size of events to avoid unnecessary function timeout errors.
+Lastly, you must consider any external I/O to state stores belonging within the bounded context of the function-based solution. The workload of a function varies with the flow of input events, with some workloads requiring consistent I/O to external state, and other workloads requiring only sporadic I/O. A failure to provide sufficient I/O resources can result in degraded throughput and performance.
+Batch Event-Processing Parameters
+If a function is unable to process its assigned batch of events during its execution lifespan, the execution of the function is considered to have failed and the batch must be processed again. However, barring any changes to the function’s allocated execution time or the batch size of input events, it is likely to simply fail again. Therefore, one of two things must occur:
+Increase the maximum execution time of the function.
+Decrease the maximum batch size of events processed by the function.
+Tip
+Functions that establish their own connections to the event broker and manage the consumption of events can also periodically commit offsets during execution, ensuring partial completion of the batch. This does not work when the function is passed the batch of consumed events, as it has no way to update the consumer offsets during processing.
+Additionally, some event-listener triggering systems, such as those provided by Amazon and Microsoft, give you the option to automatically halve the batch size on failure and re-execute the failed function. Subsequent errors result in the input batch being halved again and the function re-executed, until it reaches the point where it can complete its processing on time.
+Scaling Your FaaS Solutions
+FaaS solutions provide exceptional capabilities for the parallelization of work, especially for queues and event streams where the order in which data is processed is not important. For partitioned event streams, if the order of events is indeed important, the maximum level of parallelization is limited by the number of partitions in your event streams, just as it is for all microservice implementations.
+Scaling policies are typically the domain of the FaaS framework, so check your framework documentation to see what options are offered. Typical options involve scaling based on consumer input lag, time of day, processing throughput, and performance characteristics.
+For functions that instantiate and manage their own event broker connections, beware the impact of partition assignment rebalancing when a consumer enters or leaves the consumer group. A consumer group can end up in a state of near-constant rebalancing if consumers are frequently joining and leaving the consumer group, preventing progress from being made. In extreme circumstances it is possible to get stuck in a virtual deadlock of rebalancing, where the functions spend their life cycle repeatedly having partitions assigned and removed. This problem can occur when you use many short-lived functions with small consumer batch sizes and can be made worse by scaling policies that are overly sensitive to delay. Instituting a step-based scaling policy or using a hysteresis loop can provide sufficient scaling responsiveness without putting the consumer group into a state of excessive rebalancing.
+Static partition assignments eliminate the rebalancing overhead of dynamically assigned consumer groups and can also be used to copartition event streams. Functions will start with the foreknowledge of which partitions they will consume from; there will be no rebalancing, and events can simply be consumed whenever the function is triggered. This approach does require a more careful consideration of the work that your function is performing, as you need to ensure that each partition is being consumed.
+Caution
+Be careful about thrashing triggers and scaling policy. Frequent rebalancing of partition assignments can be expensive for event brokers. Try to scale your function count up or down at most once every few minutes.
+Summary
+Function-as-a-Service is an area of cloud computing that is growing rapidly. Many FaaS frameworks offer a variety of function development, management, deployment, triggering, testing, and scalability tools that allow you to build your microservices using functions. Functions can be triggered by new events in an event stream, consumer group lag status, wall-clock time, or custom logic.
+Function-based solutions are particularly useful in handling stateless and simple stateful business problems that do not require event scheduling. The orchestration pattern allows multiple functions to be called in strict sequential order, while also respecting the order of events from the event stream. Since the FaaS framework space is growing and evolving rapidly, it’s important to keep up with the newest features of the platforms of interest to you and your organization.
+
+Chapter 10.
+Basic Producer and Consumer Microservices
+Basic producer and consumer (BPC) microservices ingest events from one or more event streams, apply any necessary transformations or business logic, and emit any necessary events to output event streams. Synchronous request-response I/O may also be a part of this workflow, but that topic is covered in more detail in
+Chapter 13
+. This chapter focuses strictly on event-driven components.
+BPC microservices are characterized by the use of basic consumer and producer clients. Basic consumer clients do not include any event scheduling, watermarks, mechanisms for materialization, changelogs, or horizontal scaling of processing instances with local state stores. These capabilities typically belong only to more full-featured frameworks, which Chapters
+11
+and
+12
+will discuss in more depth. While it is certainly possible for you to develop your own libraries to provide these features, doing this is quite beyond the scope of this chapter. Thus, you must carefully consider if the BPC pattern will work for your business requirements.
+Producer and consumer clients are readily available in most commonly used languages, lowering the cognitive overhead in getting started with event-driven microservices. The entire workflow of the bounded context is contained within the code of the single microservice application, keeping the responsibilities of the microservice localized and easy to understand. The workflow can also easily be wrapped into one or more containers (depending on the complexity of the implementation), which can then be deployed and executed with the microservice’s container management
+solution
+.
+Where Do BPCs Work Well?
+BPC microservices can fulfill a wide range of business requirements despite lacking most of the full-featured framework components. Simple patterns such as stateless transformations are easily implemented, as are stateful patterns where deterministic event scheduling is not required.
+External state stores are more commonly used than internal state stores in BPC implementations, as scaling local state between multiple instances and recovering from instance failures is difficult without a full-featured streaming framework. External state stores can provide multiple microservice instances with uniform access as well as data backup and recovery mechanisms.
+Let’s look at a few use cases in which basic BPC implementations work particularly well.
+Integration with Existing and Legacy Systems
+Legacy systems can participate in event-driven architectures by integrating a basic producer/consumer client into their codebase. This integration often begins early in the adoption of event-driven microservices and may even be part of your strategy for bootstrapping legacy systems into the event-driven ecosystem (see
+Chapter 4
+). Legacy systems produce their own data to the event broker’s single source of truth as required and consume back any events that they need from other event streams.
+In some scenarios it’s not possible to safely modify the legacy codebase to produce and consume data from event streams.
+The
+sidecar
+pattern is particularly applicable to this scenario, as it enables some event-driven functionality without affecting the source codebase.
+Example: Sidecar pattern
+An ecommerce store has a frontend that displays all the stock and product data it contains. Previously, the frontend service would source all of its data by synchronizing with a read-only subordinate data store using a scheduled batch job, as in
+Figure 10-1
+.
+Figure 10-1.
+Scheduled batch between monoliths
+Today, there are two event streams, one with product information and one with product stock levels. You can use a sidecar implementation to sink this data into the data store, where a BPC consumes the events and upserts them into the associated data sets. The frontend gains access to a near-real time data feed of product updates, without having to change any of the system code, as in
+Figure 10-2
+.
+Figure 10-2.
+Using the sidecar to upsert data into the frontend data store
+The sidecar resides inside its own container but must be part of the single deployable of the frontend service. Additional tests must be performed to ensure that the integrated sidecar operates as expected. The sidecar pattern allows you to add new functionality to a system without requiring significant changes to the legacy codebase.
+Stateful Business Logic That Isn’t Reliant Upon Event Order
+Many business processes do not have any requirements regarding the order in which events arrive, but do require that
+all
+necessary events
+eventually
+arrive.
+This is known as a gating pattern and is one in which the BPC works well as an implementation.
+Example: Book publishing
+Say that you work for a book publisher and there are three things that must be done before a book is ready to be sent to the printer. It is not important in which order these events occur, but it is important that each one occurs prior to releasing the book to the printers:
+Contents
+The contents of the book must have been written.
+Cover art
+The cover art for the book must have been created.
+Pricing
+The prices must be set according to regions and formats.
+Each of these event streams acts as a driver of logic. When a new event comes in on any of these streams, it is first materialized in its proper table and subsequently used to look up every other table to see if the other events are present.
+Figure 10-3
+illustrates an example.
+Figure 10-3.
+Gating the readiness of a book
+In this example, the book ending with ISBN 0010 will already have been published to the output book event stream. Meanwhile, the book ending with ISBN 0011 is currently waiting for cover art to be available and has not been published to the output stream.
+Tip
+Explicit approval from a human being may also be required in the gating pattern. This is covered in more detail in
+“Example: Newspaper publishing workflow (approval pattern)”
+.
+When the Data Layer Does Much of the Work
+The BPC is also a suitable approach when the underlying data layer performs most of the business logic, such as a geospatial data store; free-text search; and machine learning, AI, and neural network applications. An ecommerce company may ingest new products scraped from websites and perform classification using a BPC microservice, with the backend data layer being a batch-trained machine learning categorizer. Alternately, user behavior events, such as opening the application, may be correlated with a geospatial data store to determine the nearest retailers from which to show advertisements. In these scenarios, the complexity of processing the event is offloaded entirely to the underlying data layer, with the producer and consumer components acting as simple integration mechanisms.
+Independent Scaling of the Processing and Data Layer
+The processing needs and the data storage needs of a microservice are not always linearly related. For instance, the volume of events that a microservice must process may vary with time. One common load pattern, which is incorporated into the following example, mirrors the sleep/wake cycle of a local population, with intensive activity during the day and very low activity during the night.
+Example: Perform aggregations on event data to build user engagement profiles
+Consider a scenario where user behavior events are aggregated into 24-hour sessions. The data from these sessions is used to determine which products are the most recently popular and in turn used to drive advertisements for sales. Once the 24-hour aggregation session is completed, it is flushed from the data store and emitted to an output event stream, freeing up the data storage space. Each user has an aggregation maintained in an external data store, which looks something like this:
+Key
+Value
+userId, timestamp
+List(productId)
+The processing needs of the service change with the sleep/wake cycles of the people using the product. At nighttime, when most users are asleep, very little processing power is needed to perform the aggregations compared to what’s required during the day. In the interest of saving money on processing power, the service is scaled down in the night.
+The partition assignor can reassign the input event stream partitions to a single processor instance, as it can handle the consumption and processing of all user events. Note that despite the volume of events being low, the domain of potential users remains constant and so the service requires full access to all user aggregations. Scaling down the processing has no impact on the size of state that the service must maintain.
+During the day, additional processing instances can be brought online to handle the increased event load. The query rate of the data store will also increase in this particular scenario, but caching, partitioning, and batching can help keep the load lighter than the linear increase in processing requirements.
+Tip
+Service providers such as Google, Amazon, and Microsoft offer highly scalable pay-per-read/write data stores that accommodate this pattern very well.
+Hybrid BPC Applications with External Stream Processing
+BPC microservices can also leverage external stream-processing systems to do work that may otherwise be too difficult to do locally. This is a hybrid application pattern, with business logic spread between the BPC and the external stream-processing framework. The heavyweight frameworks of
+Chapter 11
+are excellent candidates for this, as they can provide large-scale stream processing with simple integrations.
+The BPC implementation can perform operations that would otherwise be unavailable to it, while still having access to any necessary language features and libraries. For example, you could use the external stream-processing framework to perform complex aggregations across multiple event streams, while using the BPC microservice to populate a local data store with the results and serve up request-response queries.
+Example: Using an External Stream-Processing Framework to Join Event Streams
+Say your BPC service needs to leverage the joining capabilities of a stream-processing framework, which is particularly good at joining large sets of materialized event streams. The external stream processor will simply materialize event streams into tables and join those rows together that have the same key. This simple join operation is shown in
+Figure 10-4
+.
+Figure 10-4.
+A typical outsourceable operation performed at scale by a stream-processing framework
+The hybrid BPC needs to use a compatible client to start up the work on the external stream processing framework. This client will transform the code into instructions for the framework, which will itself handle consuming, joining, and producing events into the joined output event stream. This design outsources the work to an external processing service that will return the results in the form of an event stream. The workflow for this would look like
+Figure 10-5
+.
+Figure 10-5.
+A hybrid workflow showing an external stream-processing application sending results back to the BPC via an intermediate event stream
+Tip
+The BPC instantiates a client to run the external stream processing work. When the BPC is terminated, the external stream processing instance should also be terminated to ensure that no ghost processes are left running.
+The major advantage of this pattern is that it unlocks stream-processing features that may otherwise be unavailable to your microservice. Availability is limited to languages with corresponding stream-processing clients, and not all features may be supported for all languages.
+This pattern is frequently used in tandem with both lightweight and heavyweight frameworks; for example, it’s one of the primary use cases for SQL-based stream operations, such as those provided by
+Confluent’s KSQL
+. Technology options like these provide a way to
+augment
+the offerings of the BPC, giving it access to powerful stream-processing options that it would not have otherwise.
+The main drawbacks of this pattern relate to the increase in complexity. Testing the application becomes much more complex, as you must also find a way to integrate the external stream-processing framework into your testing environment (see
+Chapter 15
+). Debugging and development complexity also increase, because the introduction of the streaming framework increases the number of moving parts and potential for bugs. Finally, handling the bounded context of the microservice may become more difficult, as you need to ensure that you can easily manage the deployment, rollback, and operations with hybrid application deployments.
+Summary
+The BPC pattern is simple yet powerful. It forms the foundation of many stateless and stateful event-driven microservice patterns. You can easily implement stateless streaming and simple stateful applications using the BPC pattern.
+The BPC pattern is also flexible. It pairs well with implementations where the data storage layer does most of the business work. You can use it as an interfacing layer between event streams and legacy systems, as well as leverage external stream processing systems to augment its capabilities.
+Due to its basic nature, however, it does require you to invest in libraries to access mechanisms such as simple state materialization, event scheduling, and timestamp-based decision making. These components intersect with the offerings found in Chapters
+11
+and
+12
+, and thus you will need to decide how much in-house development you would like to do versus adopting more purpose-built solutions.

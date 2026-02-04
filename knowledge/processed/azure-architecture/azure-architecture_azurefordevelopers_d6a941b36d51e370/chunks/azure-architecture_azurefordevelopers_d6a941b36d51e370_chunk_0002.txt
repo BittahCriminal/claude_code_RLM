@@ -1,0 +1,2976 @@
+earn.microsoft.com/en-us/azure/azure-functions/durable/durable-functions-overview
+.
+
+Part 3:Containers in Microsoft Azure
+This part introduces the fundamentals of containerized application development and deployment in the Azure ecosystem. You will explore how to build, manage, and run containers using Azure services designed for flexibility and scalability. From managing private container images to deploying microservices and running ad hoc workloads, this part provides a practical guide to working with containers in
+real-world scenarios.
+By the end of this part, you will understand how to choose the right container platform for your use case and integrate containers into your application life cycle
+with ease.
+This part has the
+following chapters:
+Chapter 9
+,
+Learning About Azure Container Registry
+Chapter 10
+,
+Building Ad Hoc Workloads Using Azure Container Instances
+Chapter 11
+,
+Developing Microservices with Azure Container Apps
+Chapter 12
+,
+Hosting Containers with Azure App Service
+
+9
+Learning About Azure Container Registry
+When developing applications, you often need to consider how they will be built and hosted. To make the right call, you will need to consider things such as the hosting platform, development environment, and frameworks you’re using. While some applications are perfectly fine when hosted in-process, some may require a more elaborate approach. To ensure you can host your applications anywhere, you need to leverage containerization. As containerized applications need to be shared, you’ll need to build container
+images and use container registries to host them. One such registry is the
+Azure Container
+Registry service
+.
+This chapter will allow you to start utilizing Azure Container Registry as your private catalog of container images. As this service natively integrates with a number of other Azure services, knowing how to use it properly will be crucial in further extending your knowledge about developing applications
+in Azure.
+In this chapter, we’re going to cover the following
+main topics:
+Publishing and pulling a container image using Azure
+Container Registry
+Structuring
+your registry
+Integrating Azure Container Registry with
+CI/CD pipelines
+Using cache and
+multi-arch images
+Learning about
+use cases
+Technical requirements
+To perform the exercises from this chapter, you’ll need the following
+software installed:
+Azure CLI.
+IDE of
+your choice.
+Container runtime (Docker Engine, Colima, or similar) and the Docker CLI. Note that you could use a tool such as Podman to perform the exercises in this chapter, but you will need to translate its commands to the
+Docker CLI.
+The source code for this chapter can be found
+here:
+https://github.com/PacktPublishing/Azure-for-Developers-Third-Edition/tree/main/ch09
+.
+Publishing and pulling a container image using Azure Container Registry
+Containers
+are one of
+the best ways to run and host your application in a platform-agnostic way. When an application is containerized, you can start it
+on any machine
+that supports
+running containers. It’s also one of the prerequisites for running services running technologies such as Kubernetes. The common thing for all containerization technologies is a container registry. Let’s quickly
+characterize it.
+To create a
+container, you need a
+container image
+. A container image is a package that can be used to create an instance of an application and host it on a platform of choice. The difference between images and containers is crucial to understanding what we’re going to cover in
+this chapter:
+Images define
+the layers of which your application consists. Each image is uniquely identified by its tag and can be hosted and shared using a container registry. Images are not hosted on platforms such as Kubernetes or by container engines – they encapsulate everything needed to run an application and act as a blueprint for an instance of
+your application.
+Containers are instances of your application based on the selected image. A container is a living organism – you may connect to it, place it inside a network, and interact based on the provided interface. You can create multiple containers based on the same image and control them individually, whether it’s CPU/memory quotas, network segmentation, or
+authorization policies.
+By using simple developer terms, you could think about images and containers as classes and objects. An image (class) defines the behavior and implementation; when you create a container (instance) you can utilize the interface defined by
+the former.
+If you
+want to publish a container
+image, you need to decide which registries you’re going to use. The most common separation of registries is separating them based on their
+network availability:
+Public registries
+– These
+are available to anyone without additional layers of network protection. They may require authentication and implement authorization or be available anonymously. An example
+of such a registry is
+Docker Hub
+.
+Private registries
+– These
+are not available over the public internet and provide additional layers of protection to secure your images from unauthorized access and exfiltration. Azure Container Registry is an example of a private registry. Other cloud providers also offer their own private registries. An example
+of a cloud-agnostic private registry is
+Harbor
+(
+https://goharbor.io/
+).
+For most production workloads, you’ll be rather interested in using private registries. Public registries are great for personal projects or publicly available images such as Linux distributions
+or frameworks.
+Let’s see now how we can push and pull images using Azure Container Registry. To get started, we’ll need an instance of our
+registry deployed.
+Deploying Azure Container Registry
+Creating
+an instance of Azure Container Registry is one of the simplest operations you can do in Azure. All you need is a single Azure
+CLI command:
+az acr create \
+-n <registry-name> \
+-g <resource-group-name> \
+--sku Basic
+The preceding command will create a container registry with the given name, in the selected resource group, and with the
+Basic
+tier. The reason we’re selecting the
+Basic
+tier is both pricing (this is the cheapest option) and the lack of non-functional requirements, which would push us into selecting more advanced tiers. Don’t worry, we’ll cover them later in
+the chapter.
+Note
+Azure Container Registry has some strict naming requirements for the name of a registry. If you experience errors related to the selected name, make sure it contains alphanumerical
+characters only.
+Once the
+container registry is created, the most important parameter for now is something called the login server. You can obtain it using the
+following command:
+az acr show \
+-n <registry-name> \
+-g <resource-group-name> \
+--query loginServer
+In my case, the result of that command was
+afd09cr.azurecr.io
+. This value will be important when pushing and pulling images so make sure you note it somewhere so you can use
+it later.
+Alternatively, we could deploy the same configuration using the following
+Bicep code:
+resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
+  name: '<registry-name>'
+  location:
+resourceGroup().location
+  sku: {
+    name: 'Basic'
+  }
+  properties: {}
+}
+To deploy such a template, use the
+following command:
+az deployment group create \
+--template-file <path-to-bicep-file> \
+--resource-group <resource-group-name>
+Once the
+command is executed, your container registry should be created in the selected resource group. Then, you can obtain the value of its login server in the same way as we did for deploying a registry using the
+Azure CLI.
+Great, we have a registry we can work with. It’s time to write a simple Dockerfile to test push and
+pull operations.
+Preparing a Dockerfile
+A Dockerfile is
+a text file used to describe layers building your container image. If you’re not familiar with this concept, I strongly advise you to read its documentation and reference:
+https://docs.docker.com/reference/dockerfile/
+.
+For our purpose, we’ll try to prepare a generic image that we can easily run and
+modify later:
+To keep things as simple as possible, let’s use the following
+HTML file:
+<html>
+<head>
+<title>Chapter 9</title>
+</head>
+<body>
+<h1>Hello!</h1>
+</body>
+</html>
+Now, we’ll prepare a Dockerfile that will host that file on an instance of the
+nginx
+server:
+FROM nginx:latest
+COPY index.html /usr/share/nginx/html/index.html
+Let’s build our image now using the following Docker
+CLI command:
+docker build -t azure-
+for-developers:ch09 .
+For the image
+name and tag of my Docker image, I selected
+azure-for-developers:ch09
+. In your case, it can be any value you want. Once the image is built, let’s test it locally using the
+following command:
+docker run -d -p 8080:80 azure-for-developers:ch09
+This command should create a container based on our image and run it locally, forwarding port
+8080
+on the host machine (your computer) to port
+80
+on the container. Now, try to access
+http://localhost:8080
+on your computer. You should see a simple web page looking exactly as presented in
+Figure 9
+.1
+.
+Figure 9.1 – Running container hosting HTML page using nginx
+Great, we have everything we need to integrate our work with Azure Container Registry. Let’s try to push our image to the registry created in the
+previous section.
+Pushing an image to the container registry
+To push
+an image to a container
+registry, we’ll need to perform one additional operation. To understand why we need to do it, run the
+following command:
+docker images
+As a result, you should see a list of all the container images you have locally. Here’s an excerpt from the output of the command when I run it on
+my computer:
+REPOSITORY           TAG  IMAGE ID
+azure-for-developers ch09 5d91ec40bf95
+The important thing for us is the first two columns. The first one is
+REPOSITORY
+, and the second one is
+TAG
+. Container registries use the concept of repositories to separate images that describe completely different services. Tags are used to version your images and separate the different stages of the development of an application (for instance, alpha, beta, release candidate, etc.). They can also indicate different flavors of your image (such as different Linux distributions). Now, if we want to push an image to a registry, we need to somehow point our image to it. As we cannot simply push an image using the
+docker push
+command (because it’d assume we’re pushing to a public registry), we need to retag our image. To do so, let’s use the
+following command:
+docker tag azure-for-developers:ch09 <login-server>/azure-for-developers:ch09
+As you
+can see, the change we’re
+introducing is prepending the name of our image with the name of the login server we got previously. Now, let’s try to push
+our image:
+docker push afd09cr.azurecr.io/azure-for-developers:ch09
+The push refers to repository [afd09cr.azurecr.io/azure-for-developers]
+97182578e5ec: Waiting
+34a52cbc3961: Waiting
+d1875670ac8a: Waiting
+58b3c2408a08: Waiting
+af17adb1bdcc: Waiting
+67b9310357e1: Waiting
+302e3ee49805: Waiting
+cd986b3703ae: Waiting
+e386844d8966
+: Waiting
+failed to authorize: failed to fetch anonymous token: unexpected status from GET request to https://afd09cr.azurecr.io/oauth2/token?scope=repository%3Aazure-for-developers%3Apull&scope=repository%3Aazure-for-developers%3Apull%2Cpush&service=afd09cr.azurecr.io: 401 Unauthorized
+It seems
+there’s a problem
+with our push – we’re getting
+401 Unauthorized
+in response. This happens because we didn’t authenticate before connecting with our container registry and we’re unauthorized to perform the push operation against the data plane. In the next section, we’ll discuss what our options are to fix
+that issue.
+Connecting with Azure Container Registry
+Azure
+Container Registry supports two authentication methods when
+making connections:
+Microsoft
+Entra ID
+Admin
+user (login)
+As a rule of thumb, I’d suggest using Microsoft Entra ID as your default method of authentication and authorization. It allows you to easily integrate with other Azure services and keep configuration as simple as possible. Admin user is a viable option if you need to connect to Azure Container Registry outside of Azure. It’s basically a login and password setup, which is quick to configure but doesn’t allow you to control who is accessing your
+container registry.
+We’ll try now to configure Microsoft Entra ID authentication for Azure Container Registry and use
+it locally:
+If you want to use Microsoft Entra ID to access Azure Container Registry, add the
+AcrPush
+role to the account accessing the registry. If it’s you, you need to add that role to your account. There are multiple ways of adding a role assignment for an account in Azure – for this exercise, I suggest you try adding it
+using Bicep:
+resource acrpush 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid('acrpush', acr.id)
+  scope: acr
+  properties: {
+    principalId: '<object-id>'
+    roleDefinitionId: resourceId('Microsoft.Authorization/
+    roleDefinitions', '8311e382-0749-4cb8-b61a-304f252e45ec')
+  }
+}
+With the
+presented code snippet, you can easily assign the
+AcrPush
+role (represented by the GUID
+8311e382-0749-4cb8-b61a-304f252e45ec
+) for any principal in your Microsoft Entra ID tenant – all you need is to replace the
+<object-id>
+placeholder with the object ID of a principal you want to use for interacting with Azure Container Registry. If you want to find the value of that identifier, you could use the
+az ad sp list
+command, which allows you to find a principal based on its name using the
+--spn
+parameter. This snippet will create an assignment on your registry level and will automatically fetch the role definition ID based on the
+parameters provided.
+Now, let’s sign in to our registry with the
+following command:
+az acr login -n <registry-name>
+Once the login operation succeeds, let’s test the
+push
+command
+once again:
+docker push <login-server>/azure-for-developers:ch09
+The push refers to repository [afd09cr.azurecr.io/azure-for-developers]
+e386844d8966: Pushed
+58b3c2408a08: Pushed
+cd986b3703ae: Pushed
+302e3ee49805: Pushed
+34a52cbc3961: Pushed
+97182578e5ec: Pushed
+af17adb1bdcc: Pushed
+d1875670ac8a: Pushed
+67b9310357e1: Pushed
+ch09: digest: sha256:5d91ec40bf954f5e5454fa8c1efcc1700 a619b51a12d744a51a5515dfd32bfe1 size: 856
+Great, it seems
+everything works as intended. As you can see, using Microsoft Entra ID as an authentication method allows you to keep everything as part of your code base and quickly set up proper access to
+a registry.
+There’s an alternative way of connecting to Azure Container Registry, named admin user. In order to use it, we need to enable it. You can do this by running the following
+CLI command:
+az acr update \
+-n <registry-name> \
+--admin-enabled true
+If you want to keep everything in Bicep, you can also do it by updating the registry definition in your
+Bicep file:
+resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
+name: '<registry-name>'
+location: resourceGroup().location
+sku: {
+name: 'Basic'
+}
+properties: {
+adminUserEnabled: true
+}
+}
+Once the
+deployment is complete, you should be able to fetch the credentials using the
+Azure CLI:
+az acr credential show -n afd09cr
+{
+"passwords": [
+{
+"name": "password",
+"value": "9IVq7eNAPzmR2Dsb3yN64j..."
+},
+{
+"name": "password2",
+"value": "zz/12mhMZ5UrGV6QGUfSCM..."
+}
+],
+"username": "afd09cr"
+}
+Those
+credentials can be used to get access to your container registry instance. If you want to utilize them, simply use the
+docker login
+command instead of
+acr login
+.
+Note
+When using the Azure CLI to connect to your instance of Azure Container Registry, the CLI will obtain and cache proper credentials based on the internal logic. Note that if you have high permissions (such as Global Administrator) in your Azure environment, you may not need to assign
+AcrPush
+nor configure an admin user in order to access any
+container registry.
+This way of obtaining access to a container registry is useful in scenarios where a client connecting to Azure Container Registry doesn’t have an Azure account or isn’t hosted in Azure. An example of such a scenario is implementing a CI/CD pipeline where your runners aren’t hosted on
+Azure VMs.
+So far, we’ve been able to create an image and push it to our instance of the container registry. Let’s see what needs to be done to pull an image on
+a machine.
+Pulling an image from Azure Container Registry
+Pulling an image from an instance of a container registry follows the same principles as pushing it. We
+still need to obtain
+a full reference to our image (login server, repository, and tag) and be able to au
+thorize our operation. If you secured access using the admin user, you won’t need to do anything extra – that method gives full access to the data plane of Azure Container Registry, so you can push and pull images without limitations.
+If you’re using Microsoft Entra ID, though, you’ll need to assign a new role to a principal. This role is
+named
+AcrPull
+:
+resource acrpull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid('acrpull', acr.id)
+  scope: acr
+  properties: {
+    principalId: '<object-id>'
+    roleDefinitionId: resourceId('Microsoft.Authorization/
+    roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
+  }
+}
+In the
+preceding code snippet, the
+GUID we are using (
+7f951dda-4ed3-4680-a7ca-43fe172d538d
+) is the identifier of the
+AcrPull
+role and is the same for each Azure environment. Now, if you want to pull an image, you can simply use the
+following command:
+docker pull afd09cr.azurecr.io/azure-for-developers:ch09
+ch09: Pulling from azure-for-developers
+Digest: sha256:5d91ec40bf954f5e5454fa8c1efcc1700a 619b51a12d744a51a5515dfd32bfe1
+Status: Downloaded newer image for afd09cr.azurecr.io/azure-for-developers:ch09
+afd09cr.azurecr.io/azure-for-developers:ch09
+Remember that you need to log in to Azure Container Registry first before pulling an image! You’ll need to perform that operation each time a new machine is provisioned – a scenario common for
+CI/CD pipelines.
+Let’s learn more about Azure Container Registry by discussing more about the internal structure of this service and other
+available capabilities.
+Structuring your registry
+In the previous section, we mentioned that you can host multiple images inside the same registry. To separate
+different services, you should leverage a
+repository
+. In Azure Container Registry, repositories are created automatically each time you push
+a new image or artifact. The reason we’re making such a separation now is that Azure Container Registry can not only host
+images but it’s also designed to host any artifact that is compatible with
+Open Container Initiative
+(
+OCI
+) artifacts.
+This standard allows you to package any content (such as files, audio, or even images) using the same specification as we’re using for container images. In our case, one of the use cases for using OCI artifacts in Azure Container Registry would be storing Bicep modules. As we’ll be treating Azure Container Registry as a generic registry for hosting artifacts, we need to discuss the proper structure and place it appropriately when architecting
+a solution.
+Choosing the correct amount of registries
+To get started, let’s consider the following problem: we’ve deployed one container registry to
+satisfy the requirements given by one of our development teams. After several weeks, another team decided to containerize their application and is in desperate need of having a dedicated registry. While we could simply deploy another instance of Azure Container Registry, there could be better alternatives that we
+should consider.
+The initial setup may look like the one presented in
+Figure 9
+.2
+. This diagram presents a simple design, where each team has its own registry deployed
+in Azure.
+Figure 9.2 – A dedicated registry for each developmen
+t team
+While such a setup may look simple to deploy and manage, it may quickly become insufficient if we consider additional requirements such as environment separation. The evolution of that design is presented in
+Figure 9
+.3
+.
+Figure 9.3 – A dedicated registry per team and environment
+If we go
+for that option, each team will have a dedicated registry per environment. The advantage of such a setup is the ability to offload some operational work to dedicated engineers and decouple the architecture of the infrastructure from the architecture of
+different applications.
+It may be also worth mentioning that having a dedicated registry per environment isn’t the only viable case when developing an application. If you develop a system that is deployed globally and needs to be dynamically provisioned, you may find it beneficial to have a dedicated registry for each specific geographical location. We can visualize that with the following diagram (
+Figure 9
+.4
+):
+Figure 9.4 – Registries deployed per geographical location
+Using multiple container registries for various locations is useful when you want to keep predictable
+performance (by avoiding network latency) or it is required to be compliant with regulations or network policies. Note that with Azure Container Registry, you have two methods of
+achieving that:
+The first idea is to deploy each registry individually to
+separate regions.
+The second idea is based on the geo-replication feature in Azure Container Registry, where you can manage a single instance of a registry and let Azure replicate all the objects stored
+within it.
+In most cases, using geo-replication rather than deploying individual instances of Azure Container Registry will be the preferred way of making all the registry objects available in a separate region, unless you really need to isolate your infrastructure (for instance, you may need to integrate it with a
+different network).
+Note
+When considering geo-replication, remember that it’s available only for the Premium SKU in Azure Container Registry. This could be a good point in discussing the differences between deploying separate registries versus using geo-replication and managing a
+single registry.
+If you want to
+read more about geo-replication in Azure Container Registry, take a look at the following
+documentation:
+https://learn.microsoft.com/en-us/azure/container-registry/container-registry-geo-replication
+.
+Coming back to the team we discussed, we need to remember that some teams may require a different number of environments. If we decide to control them centrally, it may be difficult
+to properly manage which images or artifacts are deployed to which environment. The centralized approach is presented in
+Figure 9
+.5
+.
+Figure 9.5 – Centralized approach for hosting registries
+There’s one issue when it comes to using the centralized approach – we’re unable to control which applications access which artifact. If we want to change that, we’ll need to use scope maps. Let’s discuss them to get a better understanding of how
+they work.
+Using scope maps
+If, for some reason, we don’t want to deploy multiple registries (for instance, cost savings), we could
+deploy only a few centralized instances of Azure Container Registry and allow multiple services to access them. Now, if we don’t want to give each application full access to the contents of a registry, we need to somehow limit it. In order to do that in Azure Container Registry, we need to use
+scope maps
+. Each scope
+map is a simple mapping between repositories and provided credentials. It allows you to limit access for an account only to a subset of repositories created in Azure Container Registry and ensure that an application or a service is unable to access data they are not
+supposed to.
+To create a scope map, we could use the following Azure
+CLI command:
+az acr scope-map create \
+-n <map-name> \
+-r <registry-name> \
+--repository azure-for-developers content/read
+The preceding command will create a new scope map with the given name for a provided registry
+and will allow a principal to read the contents of a repository. For reference, I used the same repository as we created in the
+previous section.
+Now, to see the scope map in action, we need to generate credentials using it. This can be achieved with one
+more command:
+az acr token create \
+--scope-map <map-name> \
+-r <registry-name> \
+-n <token-name>
+The result of running that command is a set of credentials that will look
+like this:
+"passwords": [
+  {
+    "creationTime": "2024-09-29T16:07:34.172290+00:00",
+    "expiry": null,
+    "name": "password1",
+    "value": "k2EGSUkLy3ipiE1MySuwgN2OP3Zfygbz/..."
+  },
+  {
+    "creationTime": "2024-09-29T16:07:34.172305+00:00",
+    "expiry": null,
+    "name": "password2",
+    "value": "jhJB3FQCT2Le6b/ir+m+5+Q9uDffxvpfOBb/..."
+  }
+],
+"username": "my-token"
+As you can see, it’s a similar value to the admin user credentials we discussed previously in the chapter. The obvious downside of using scope maps is the need to switch to the user and password authorization model. On the other hand, scope maps eliminate the main issue
+of using an admin user, which is the lack of proper control over who and how accesses an instance of the
+container registry.
+Let’s test our credentials now. To do that, we can leverage the Docker CLI and run the
+following command:
+docker login \
+-u "<token-name>" \
+-p " <password-value> " \
+ <login-server>
+With credentials used, you shouldn’t be able to push an image to our container registry as the set of permissions used for the token generation contains only read permissions. Here’s the result of pushing an image on
+my computer:
+docker push afd09cr.azurecr.io/azure-for-developers:ch09
+The push refers to repository [afd09cr.azurecr.io/azure-for-developers]
+e386844d8966: Already exists
+34a52cbc3961: Layer already exists
+97182578e5ec: Layer already exists
+cd986b3703ae: Layer already exists
+58b3c2408a08: Layer already exists
+af17adb1bdcc: Layer already exists
+d1875670ac8a: Layer already exists
+302e3ee49805: Layer already exists
+67b9310357e1: Layer already ex
+ists
+failed commit on ref "manifest-sha256:b20a51824e72a90a20f23507d02ab6595f84dc63e8b306ae54ac43c5d3a76d61": server message: insufficient_scope: authorization failed
+As you can see, I got an
+authorization failed
+response from Azure Container Registry. This is the expected result as the CLI used scoped credentials, which don’t provide permission
+to write anything to a registry. By using scope maps, you can easily limit access to segments of your registry to improve security. For centralized registries, it’s a must for every platform to be
+considered production-ready.
+Note
+The downside of using scope maps as of the time of writing is their lack of Microsoft Entra ID support. They are still a viable option for properly managing security and access to your registry, but the fact that you’re unable to link them with service principals or managed identities somehow limits their
+use cases.
+Let’s talk now about how we can structure our registry when using it for hosting both images and
+other artifacts.
+Hosting images and generic artifacts
+We talked
+about how Azure Container Registry can
+be used to host not only container images but also other artifacts that are compatible with OCI. One such artifact is the Bicep modules. Yes, you can use Azure Container Registry as a place where you push modules representing your infrastructure. However, this introduces a challenge when trying to keep things separated.
+While it’s perfectly fine to host both images and OCI artifacts in the same registry, it’s often a better idea to perform a split. There are a number of benefits of such
+an approach:
+Consumers of container images are (most of the time) different from consumers of
+OCI artifacts.
+While you could use scope maps to limit access to different parts of the registry, you may not want to change the authentication method and use Azure RBAC as often
+as possible.
+The life cycle of OCI artifacts will be most likely different from container images and you don’t always want to handle two separate scenarios using the same piece of infrastructure (the
+same registry).
+Remember that
+in Azure Container Registry, there’s no concept of a repository in a repository. This means that there’s no way to
+keep all the OCI artifacts under the same umbrella repository and keep the rest separated. If you need to use the same registry for all types of artifacts, you’ll need to introduce proper naming conventions and use wildcards when building scope maps to
+limit access.
+Container images are used to host applications, whereas OCI artifacts (such as Bicep modules) are used for everything but hosting an application. This is the reason I always suggest having separate registries and separate things stored in Azure Container Registry logically. It’s not only easier in the long term but also allows you to develop your system incrementally without cross-cutting responsibilities
+and concerns.
+Let’s talk now about integrating Azure Container Registry with
+CI/CD pipelines.
+Integrating Azure Container Registry with CI/CD pipelines
+Integrating your CI/CD pipeline with Azure Container Registry is one of the most common
+things you will be
+developing when building a containerized application. The good thing here is the simplicity of that operation – most of the time, all you need is to obtain proper credentials and use them in your pipeline. There are also other things we need to take into account (such as networking). We’ll discuss them shortly in
+this section.
+Designing a CI/CD pipeline for Azure Container Registry
+Let’s start by discussing how our pipeline should be structured to use Azure Container Registry. From
+the pipeline
+perspective, a connection with Azure Container Registry must be made to either pull or push an image (or artifact). The operation used depends on the purpose of
+the pipeline:
+If we’re building an application, we’ll most likely need to push an image as
+the artifact.
+If we’re running a custom-build agent, we may need to pull an image of that agent and then run the rest of the pipelines after a
+container starts.
+We may need to pull an image to run a custom tool or a service while executing other pipeline steps. This includes scenarios such as running a mock, a database, or other required service (e.g.,
+for testing).
+The integration between the CI/CD pipeline and Azure Container Registry depends on the tool we’re using. In this section, we’ll cover GitHub Actions and Azure DevOps
+as examples.
+Choosing the proper authentication method
+When building a CI/CD pipeline and integrating it with Azure Container Registry, the most
+important aspect is authentication. Previously in this chapter, we discussed two separate methods
+of authentication:
+Microsoft
+Entra ID
+Admin user (or tokens with
+scope maps)
+Your choice of method will depend on the capabilities of your CI/CD tool. Many tools offer so-called shared/managed agents, which are provisioned by the tool itself and are not managed by you. Those agents are not able to connect natively to Azure unless you explicitly provide credentials. If you recall, the Azure CLI allows you to authenticate to Azure using service principal credentials (username and password, or username and certificate). In such a case, it would be possible to use Microsoft Entra ID to connect to Azure Container Registry. For such agents, though, it’s impossible to use a managed identity and avoid sharing credentials unless you use a federated identity for making the connection. Workload identity is a method of achieving a trust relationship between Azure DevOps and the selected service principal, so it can obtain Azure tokens without the need to deploy your infrastructure for CI/CD runners inside Azure. It can be extremely useful in scenarios where you have your agents provisioned within your on-premises network but want to avoid providing and maintaining credentials for service principals (as agents hosted on-premises cannot be integrated with a
+managed identity).
+An alternative
+is to either use an admin user or generate scoped credentials using scope maps. The advantage of such an approach is simpler management and a lower security risk (because a leaked scoped credential for the container registry doesn’t give an attacker access to Azure’s control plane). It also simplifies the pipeline slightly as you don’t need to store and pass Azure credentials and use them to authenticate
+to Azure.
+Integrating Azure DevOps with Azure Container Registry
+Azure DevOps offers a native integration method with Azure Container Registry using service connections. As Azure Container Registry is compatible with Docker Registry, you can use
+the same method to
+authenticate to a generic Docker registry and your instance of Azure Container Registry. The process of creating such a service connection is out of the scope of this book; however, there’s a detailed tutorial explaining how you could implement it in Azure DevOps
+at
+https://learn.microsoft.com/en-us/azure/devops/pipelines/ecosystems/containers/publish-to-acr?view=azure-devops&tabs=javascript%2Cportal%2Cmsi#create-a-docker-registry-service-connection
+.
+Note
+Azure DevOps allows you to choose how you want to authenticate to Azure Container Registry by selecting between service principal authentication, managed identity, or workload identity. Using service principal authentication will require admin access to the Microsoft Entra ID tenant as Azure DevOps needs to leverage the Azure Resource Manager connection created as a prerequisite. If you’re using self-hosted agents, though, I strongly recommend you use the managed identity authentication model, which greatly simplifies the
+whole process.
+Once a
+service connection
+is created, you can utilize it in any pipeline
+like so:
+trigger:
+- master
+pool:
+  vmImage: ubuntu-latest
+steps:
+- task: Docker@2
+  inputs:
+    containerRegistry: 'AFD09'
+    repository: 'azure-for-developers'
+    command: 'buildAndPush'
+    Dockerfile: '**/Dockerfile'
+The preceding code snippet uses a single task,
+Docker@2
+, which is a generic task for interacting with container registries. This performs both
+build
+and
+push
+commands using the Docker CLI. It implicitly chooses the container registry defined when creating a service connection. If needed, we could split the operation into two
+separate tasks:
+- task: Docker@2
+  inputs:
+    containerRegistry: 'AFD09'
+    repository: 'azure-for-developers'
+    command: 'build'
+    Dockerfile: '**/Dockerfile'
+- task: Docker@2
+  inputs:
+    containerRegistry: 'AFD09'
+    repository: 'azure-for-developers'
+    command: 'push'
+There are a number of use cases for splitting the commands into two separate steps. One of
+them is running tests
+after an image is built. The native Docker commands have one limitation though – they don’t allow you to pass additional parameters, which are useful in some scenarios. One of those scenarios is a multi-stage build, often used not only to build smaller images but also to extract results of tests while building a final image. In order to overcome that limitation, we’d need to run
+commands manually:
+- task: Bash@3
+  inputs:
+    targetType: 'inline'
+    script: |
+      docker login -u $(Username) -p $(Password) mycr.azurecr.io
+      docker build --target build -t azure-for-developers:09 .
+- task: Docker@2
+  inputs:
+    containerRegistry: 'AFD09'
+    repository: 'azure-for-developers'
+    command: 'push'
+    tags: '09'
+With such a setup, we could introduce additional steps between building and pushing an image
+to create an interim
+container, run it, and extract the results of tests. Then, if the tests are successful, we could proceed with pushing an image to a
+container registry.
+Note
+Multi-stage builds for container images are a common pattern that can be used in any CI/CD tool allowing you to run
+Docker commands.
+Let’s see how we could achieve the same results in
+GitHub Actions.
+Integrating Azure Container Registry with GitHub Actions
+GitHub Actions offers a similar model for integrating with Azure Container Registry as Azure
+DevOps, but the main difference is the lack of service connections. Instead, we need to manually provide the
+necessary information for the actions used in our pipeline. One of the possibilities to connect with Azure Container Registry is using the
+Azure/docker-login@v1
+action:
+- name: Azure Container Registry Login
+  uses: Azure/docker-login@v1
+  with:
+    username: ${{ secrets.Username }}
+    password: ${{ secrets.Password }}
+    login-server: myserver.azurecr.io
+The issue with that action, though, is the fact that it currently may be considered deprecated. Instead, it’s advised to use the
+following actions:
+- name: Login to Docker Hub
+  uses: docker/login-action@v3
+  with:
+    username: ${{ secrets.Username }}
+    password: ${{ secrets.Password }}
+    registry:  myserver.azurecr.io
+- name: Build and push
+  uses: docker/build-push-action@v6
+  with:
+    push: true
+    tags: azure-for-developers:09
+These
+two actions work in a very similar way to tasks used in Azure DevOps. You use a separate action for connecting
+with a selected container registry and then build and push an image in the next action. Note that
+docker/build-push-action
+allows you to decide whether you want to perform
+push
+or not – it’s possible to just build an image by setting the
+push
+parameter
+to
+false
+.
+Let’s talk about one more thing related to CI/CD and containers, which
+is caching.
+Using caching in CI/CD pipelines
+Container images are useful when sharing applications or services and running them without
+worrying about installing dependencies or ensuring compatibility. They have one disadvantage though – they tend to grow quite big in lots of scenarios, and this requires significant network bandwidth if you need to download them often. In low-scale scenarios, the size of a container image can be ignored – most likely, it won’t impact your network devices and connection. However, when building highly scalable solutions or hosting tens or even hundreds of containers, the ability to shorten between downloading an image and creating a container will have a significant impact on your ability to provide a
+reliable solution.
+To understand the impact of an image download on your infrastructure and application, first, we need to understand how container engines operate. Let’s consider the following scenario – we have a small cluster of three separate virtual machines (
+Figure 9
+.6
+). Each of those machines will run containers based on the
+same image.
+Figure 9.6 – Small cluster of virtual machines running the same container
+The way container
+engines work in such a scenario can be described by the
+following process:
+The client asks to run the container based on the
+my-image:v1
+container image.
+Engine checks whether an image is available on the
+host machine.
+If an image isn’t available, proceed to download it; otherwise, jump to the
+next step.
+Create a container based on an image and
+run it.
+This is, of course, a simplified process, but it will do the trick of explaining why we need to look at image sizes at some point in time. If the container engine requires an image to be available on the host machine, it means the image needs to be downloaded. If there’s no caching mechanism available for an engine, an image will be downloaded each time we request a container based on any image. Most of the popular container engines will automatically cache an image the first time it’s downloaded. This will happen every time a new image is selected (or you request a new
+image tag).
+Note
+Container images are layered, which allows the sharing of certain parts of an image between different images. This also means that requesting a new image may not necessarily imply that you need to download everything it defines – in many cases, only a subset of layers is downloaded, which improves performance and allows the container engine to save
+disk space.
+In CI/CD, it’s important to make a distinction between managed and self-hosted build agents. If you’re using self-hosted ones, the caching of container images will be mostly done by the container engine. Such agents are persistent, meaning you don’t lose data after your pipeline runs. This may simplify operational overhead but can also cause some issues with disk space, especially if you run workloads running completely
+different containers.
+For managed agents, which are considered ephemeral, running containers may be challenging as
+they exist only for the time a pipeline runs. This means that everything downloaded by your pipeline will disappear shortly after it is completed. To overcome that issue, some CI/CD tools implement a caching mechanism that you can leverage to improve the performance of your
+CI/CD pipelines.
+An example of such a mechanism is the cache in Azure DevOps, which is implemented with the
+following task:
+- task: Cache@2
+    inputs:
+      key: 'docker | "$(Agent.OS)" | cache'
+      path: $(Pipeline.Workspace)/docker
+      cacheHitVar: CACHE_RESTORED
+This allows you to define three
+important parameters:
+key
+– A unique key identifying a
+specific cache.
+path
+– The path where the cache
+is restored.
+cacheHitVar
+– A variable that is set if a cache is found for the
+given key.
+Note that the value of the
+key
+parameter is custom and can be set to any value depending on your needs. In our example, we use only a single variable based on the operating system running our agent. It could include other information such as an agent version, the version of your application, or some pipeline-specific value. It’s important to define a key that can be used for cache restoration – if you use a dynamic value (such as the current time), you may never hit a cache as the key will be different each time a cache
+is restored.
+When using a cache for Docker, we also need to save and load cached data so our container engine can leverage cached data. In order to do that, we could use these
+two commands:
+docker save
+docker load
+It’s important
+to use them with a condition based on the variable set by the
+cacheHitVar
+parameter:
+- script: |
+      docker load -i $(Pipeline.Workspace)/docker
+/cache.tar
+displayName: Docker restore
+    condition: and(not(canceled()), eq(variables.CACHE_RESTORED, 
+    'true'))
+This allows you to save the cache only if it hasn’t been hit and load it if the cache is available for
+your pipeline.
+You can
+read more about this feature in the Azure DevOps documentation here:
+https://learn.microsoft.com/en-us/azure/devops/pipelines/release/caching?view=azure-devops
+. I strongly recommend you go through all the explanations as caching in general is quite a difficult topic, and requires implementing additional mechanisms to monitor the cache and revoke it if needed. You also need to consider data retention and the actual benefits of implementing that mechanism. As caching in Azure DevOps is a managed feature, you won’t have full control over how data is stored and where. In some scenarios, implementing a cache may even worsen the pipeline’s performance. As with everything, make sure you measure the performance before and after implementing a cache to see whether there are
+any improvements.
+Let’s talk now about one of the newer additions to Azure Container Registry, which is support for cache and
+multi-arch images.
+Using cache and multi-arch images
+Azure Container Registry is a live Azure service that gets new features and improvements
+constantly. Some of the most interesting functionalities
+added recently are artifact cache and multi-arch images. We’ll discuss them in this section in detail as they can be easily incorporated into many applications and are easy
+to implement.
+Leveraging artifact cache in Azure Container Registry
+Before we start discussing how artifact cache works in Azure Container Registry, let’s understand
+why one would need to
+use a registry as a cache. In the most basic scenario, when you want to run a container, your container engine checks whether a container image is available locally. If it’s not, it will try to download it first. The process is visualized in
+Figure 9
+.7
+:
+Figure 9.7 – The process of downloading and caching a container locally by using a public registry (Docker Hub)
+This approach has some serious issues that need to be addressed in
+real systems:
+The selected public registry may not
+be available.
+We have no SLA for bandwidth, connection performance,
+and stability.
+Even though, in such a scenario, the cache is represented by our host, it cannot be considered a shared cache that we could reuse across the whole platform. This is why a much better solution is using a proxy cache, which will take care of caching the images and downloading them if needed. Such a process is presented in
+Figure 9
+.8
+:
+Figure 9.8 – Using Azure Container Registry as a proxy cache
+In the
+process with a proxy cache, we simply change the way we reference container images. Let’s say that you want to
+pull an image of
+nginx
+. To do that, you’d use the
+following command:
+docker pull nginx:latest
+By design, such a command will try to download the image from a public registry (in that case, Docker Hub). However, if you want to avoid add, you could reference the same image but this time using your registry name as
+the prefix:
+docker pull <registry-name>.azurecr.io/nginx:latest
+This will tell your container engine to fetch the image from the specific registry instead of the one defined implicitly. However, normally, images from other registries are not available in your private registry. To make them available, we need to introduce some kind of mapping. This is exactly what artifact cache does in Azure Container Registry – it allows you to define cache rules, which will be triggered and will cause image download whenever needed. Once the image is downloaded, any subsequent calls for the same container image won’t require accessing the public registry and will be handled by Azure Container
+Registry instead.
+An example of such a cache rule is presented
+as follows:
+<registry-name>.azurecr.io/* => mcr.microsoft.com/*
+If you add such a rule to your registry, all image calls will be considered to reference
+mcr.microsoft.com
+instead of your registry (technically, the calls will be performed against your own registry). As this rule uses wildcards, it may be too “greedy” in most scenarios (though it can be useful if you deploy a proxy cache registry for Microsoft images only). This is why you could make it
+more specific:
+<registry-name>.azurecr.io/azure/* => mcr.microsoft.com/azure/*
+<registry-name>.azurecr.io/dotnet/* => mcr.microsoft.com/dotnet/*
+As you
+can see, we could introduce
+a repository-level rule, which is much easier to handle and can be utilized with no issues even if you want to use the same registry
+to store.
+To learn more
+about the artifact cache feature, take a look at the detailed tutorial in the documentation, which covers how it can be implemented using the Azure
+portal:
+https://learn.microsoft.com/en-us/azure/container-registry/container-registry-artifact-cache
+.
+Now, we’re going to cover the last topic planned for this chapter, which is multi-arch images in Azure
+Container Registry.
+Working with multi-arch images in Azure Container Registry
+When containers were initially introduced, there was not much of a focus on providing multiple
+versions of the same image for different processor architectures. Nowadays, the situation is different – ARM
+processors are gaining in popularity, especially in the cloud area. Images produced for the standard x86 architecture cannot be used on machines running ARM CPUs, so there are two possible solutions for
+the problem:
+We need to prepare separate images for
+different architectures.
+We use the same image but make it support
+multiple architectures.
+For operational simplicity and less complicated processes, the favored way of working is leveraging multi-arch images. To understand how a container image supports multiple architectures, we could use one of the publicly available images. Use the following command to download the
+image locally:
+docker pull mcr.microsoft.com/mcr/hello-world:latest
+Then, we can utilize the
+docker manifest inspect
+command to check the manifest of
+the image:
+docker manifest inspect mcr.microsoft.com/mcr/hello-world:latest
+In response, you
+will get the
+following JSON object (I removed parts that aren’t important
+right now):
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+  "manifests": [
+    {
+      "platform": {
+        "architecture": "amd64",
+        "os": "linux"
+      }
+    },
+    {
+      "platform": {
+        "architecture": "arm64",
+        "os": "linux"
+      }
+    },
+    {
+      "platform": {
+        "architecture": "amd64",
+        "os": "windows",
+      }
+    }
+  ]
+}
+What is
+important for us now is the
+platform
+section. As you can see, it defines which processor architecture and
+operating system an image is intended for. Any image can be created for single or multiple platforms – it’s up to the author to decide and express
+the intent.
+Note
+Some tools, such
+as Docker for Windows, can run images even if they aren’t originally intended for a specific platform. For hosting scenarios, however, any kind of emulation is often discouraged, so an image that fully supports a processor architecture or operating system
+is advised.
+When it comes to working with Azure Container Registry and multi-arch images, there’s not much of a difference when compared to working with images intended for a single platform. The majority of work is performed when working with your container engine. For instance, if you want to prepare your image for different processor architectures using the Docker CLI, you’d need to use the
+following command:
+docker buildx build --platform linux/amd64,linux/arm64 .
+In the preceding example, we’re building an image for two separate platforms (Linux as the operating system, and
+amd64
+and
+arm64
+as the architecture). However, for Azure Container Registry to fully support the multi-arch build, it’s better to take a slightly different approach. Build your container image for multiple architectures separately and then use the following commands to push them to
+the registry:
+docker tag <my-image>:amd64 <registry-name>.azurecr.io/<my-image>:amd64
+docker tag <my-image>:arm64 <registry-name>.azurecr.io/<my-image>:arm64
+docker push <registry-name>.azurecr.io/<my-image>:amd64
+docker push <registry-name>.azurecr.io/<my-image>:arm64
+Those
+commands will push the
+images to the registry but we still need to provide a manifest that links them. To do that, run the
+following commands:
+docker manifest create <registry-name>.azurecr.io/<my-image>:multi-arch \
+<registry-name>.azurecr.io/<my-image>:arm64 \
+<registry-name>.azurecr.io/<my-image>:amd64
+docker manifest push <registry-name>.azurecr.io/<my-image>:multi-arch
+Once you complete all the steps, any client that supports multi-arch images will be able to fetch the correct version of the image based on the manifest and run it on the
+desired platform.
+We’re slowly approaching the end of
+Chapter 9
+. For the final input, let’s talk about use cases for Azure
+Container Registry.
+Learning about use cases
+Azure Container Registry is a great service if you want to quickly deploy a private container registry. With
+just a few clicks, you can deploy your very own host for container images, which is fully integrated with Microsoft Azure. As it’s one of the simpler Azure services, you can also be sure that it doesn’t have a steep learning curve to really utilize
+its potential.
+It’s also worth remembering that you can host generic OCI artifacts with all instances of Azure Container Registry. If you are looking for a place where you can store artifacts of your CI/CD pipelines or Bicep modules, Azure Container Registry seems like a good choice. Of course, it doesn’t provide as many features as typical artifact registries such as Artifactory or Nexus but is a great choice for simpler architectures or if you just don’t want to deploy a
+third-party component.
+Azure Container Registry offers one additional feature we haven’t discussed: tasks. These can be
+used to automate some operations such as updating a base image for your container images or rebuilding an image based on code changes. Most of the time, they’re used for a number of operational acti
+vities. If you’re interested in the topic, I recommend taking a look at the documentation
+at
+https://learn.microsoft.com/en-us/azure/container-registry/container-registry-tasks-overview
+.
+That’s all I have for you in this chapter. Let’s summarize all the lessons and see what awaits in the
+next chapter.
+Summary
+In this chapter, we discussed Azure Container Registry, which is a managed Azure offering for a private container registry. We talked about deployment methods and how we can integrate with the service to push and pull container images. We also saw what the authentication methods are and how one can limit access to repositories in a registry. It’s also worth mentioning that the knowledge from this chapter will become useful in the next chapters as some Azure services, such as Azure Web Apps and Azure Container Apps, integrate with Azure Container Registry and require prior knowledge of
+this service.
+We also went through CI/CD integration for Azure Container Registry, which should be helpful if you’re planning on automating the process of building and deploying
+your application.
+In the next chapter, we’ll take another step into containerized applications in Microsoft Azure by discussing Azure Container Instances, used for running ad hoc jobs and processes
+using containers.
+
+10
+Building Ad Hoc Workloads Using Azure Container Instances
+Up to now, we’ve been focusing on using services such as Azure App Service or Azure Functions, which allow you to host your application’s code in a similar way to hosting it on a server. They are suited for deploying
+either typical applications (
+customer relationship management systems
+(
+CRMs
+), landing pages, blogs,
+content management systems
+(
+CMSs
+)) or event-driven
+functions and jobs. Sometimes, though, you need a simple service that allows you to run a piece of code for a moment and then discard
+obsolete infrastructure.
+An example of such a service
+is
+Azure Container Instances
+. It’s a fully managed cloud product with minimal configuration and small operational overhead. Thanks to that simplicity, you can quickly learn how to use and utilize it
+when needed.
+In this chapter, we’re going to cover the following
+main topics:
+Integrating Azure Container Instances with a
+web application
+Using Azure Container Instances for
+batch jobs
+Designing an application using Azure
+Container Instances
+Learning about
+use cases
+Technical requirements
+To perform the exercises from this chapter, you’ll need
+the following:
+Azure CLI
+IDE of your choice (recommended – Visual
+Studio Code)
+Docker CLI and container runtime available on your computer (Docker, Colima,
+or similar)
+The source code for this chapter is available
+at
+https://github.com/PacktPublishing/Azure-for-Developers-Third-Edition/tree/main/ch10
+.
+Integrating Azure Container Instances with a web application
+Before we
+get started with Azure Container Instances, let’s try to understand how one can run a container. As you remember, containerized applications are built with two
+main steps:
+Building a
+container image
+Creating an instance of a container based on a selected
+container image
+Depending on your needs, you may need a different tool to run such applications in a controlled manner. For typical applications (a single instance that can be scaled out when needed), you could use Azure App Service with containers (we will be discussing that in
+Chapter 12
+). For complex systems that require running tens or hundreds of containers, platforms such as Kubernetes are a much better choice. There are also options other than Azure App Service and Kubernetes that are designed to host multiple containers with minimal operational effort, such as Azure Container Apps (discussed in
+Chapter 11
+). They all have one thing in common – they are persistent. This means that once you deploy the service and run your application there, you’ll be charged for it until you remove the
+deployed instance.
+Note
+Azure Container Apps may not fully fit the definition of a persistent service as Container Apps instances can be priced based on consumption. However, they’re still meant to host persistent workloads most of the time and are too complex to be used for ad hoc deployments
+or jobs.
+Azure Container Instances, on the contrary, is a unique service. Container instances require minimal configuration to get started and can be quickly set up to run a provided container. They’re also very easy to manage as it’s up to Azure to find the appropriate host where
+your container could run. Let’s get started with a simple example to have a better understanding of the
+required steps.
+Deploying your first container with Azure Container Instances
+To deploy
+an instance of a container in Azure Container Instances, we need two things – a resource group and an instance of Azure Container Instances. We can create them with just
+two commands:
+az group create \
+-n <resource-group-name> \
+-l <location>
+az container create \
+--g <resource-group-name> \
+--n <container-instances-name> \
+--image mcr.microsoft.com/azuredocs/aci-helloworld \
+--dns-name-label <dns-label> \
+--ports 8080
+--cpu 1 \
+--memory 2
+While I think the first command is self-explanatory, let’s focus on the second one. We’re creating an instance of Azure Container Instances, which will run one of the publicly available container images. We will attach a custom DNS name to it, which will then be part of the URL used to access our application. We’re also opening port
+8080
+to make the application available (the exact port to open depends on the container image). The last two parameters are there to determine how many CPUs (
+--cpu
+) and how much memory (
+--memory
+) will be provisioned. In our example, we’re going to get 1 vCPU and 2 GB
+of memory.
+Note
+Remember that the selected DNS label needs to be unique for the whole region where your instance of Azure Container Instances will
+be deployed.
+Once the
+command completes execution, let’s try to obtain the URL of our application with the
+following command:
+az container show \
+-n <container-instances-name> \
+-g <resource-group-name> \
+--query ipAddress.fqdn
+The value returned by the command will look like
+the following:
+"afd10.westeurope.azurecontainer.io"
+As your application could be available over HTTP or HTTPS, we need to prepend it with a proper HTTP protocol. Depending on the configuration of Azure Container Instances that you deployed, it could be HTTP or HTTPS. As we didn’t configure a secure endpoint for our application, HTTPS can’t be used. Instead, use HTTP
+to access it using the full URL (
+fully qualified domain name
+(
+FQDN
+) with HTTP). Use the full URL in your browser to access the application – you should see a web page similar to the one presented in
+Figure 10
+.1
+.
+Figure 10.1 – Azure Container Instances running a standard web application
+In this
+example, we used a boilerplate image prepared by Microsoft, which confirmed that our application was running. While it’s not yet the target scenario I’d like to discuss, we can already highlight the following
+key takeaways:
+By deploying the example container, we didn’t need to worry about underlying infrastructure. In fact, we didn’t even specify what kind of hardware
+is needed.
+The configuration of our instance of Azure Container Instances can be kept to a minimum while still providing a
+working deployment.
+The application is automatically available publicly, and we don’t need to manage ingress as the integral element of the
+application’s infrastructure.
+Let’s now try to build an example application that can run a job in the background by preparing a container image, pushing it to our instance of Azure Container Registry, and running it using Azure
+Container Instances.
+Building a custom image and running it using Azure Container Instances
+In this exercise, we
+will prepare the
+following components:
+A
+Docker image
+Azure
+Container Registry
+An instance of Azure Container Instances running our
+Docker image
+Let’s get started with
+the exercise:
+We will start by writing a Dockerfile executing a couple of commands, which will emulate a job running on a machine. Here’s an example of what it could
+look like:
+FROM ubuntu:latest
+RUN mkdir /job
+WORKDIR /job
+# Create a new file with a unique name each 30 seconds
+CMD while true; do date +%s > $(date +%s).txt; sleep 30; done
+Now, build the image and run it locally to test it. For
+<image-tag>
+, you could use any value – for
+instance,
+my-application:v1
+:
+docker build -t <image-tag> .
+docker run -d <image-tag>
+As a result, you’ll get a full identifier for a container running on your computer. Use it to gain access to its filesystem (here, I’m using the identifier returned for my computer; in your case, it will be a different value). In the following example, we’re using the
+docker exec
+command, which allows you to run a command inside a running container (you can read more about it
+here:
+https://docs.docker.com/reference/cli/docker/container/exec/
+):
+docker exec -it 4f7dcf5128a5c828ed3527f478285a9ad332efe1932e132f80848b839438769b /bin/bash
+root@4f7dcf5128a5:/job# ls –la
+total 28
+drwxr-xr-x 1 root root 4096 Oct 19 15:16 .
+drwxr-xr-x 1 root root 4096 Oct 19 15:14 ..
+-rw-r--r-- 1 root root   11 Oct 19 15:14 1729350867.txt
+-rw-r--r-- 1 root root   11 Oct 19 15:14 1729350897.txt
+-rw-r--r-- 1 root root   11 Oct 19 15:15 1729350927.txt
+-rw-r--r-- 1 root root   11 Oct 19 15:15 1729350957.txt
+-rw-r--r-- 1 root root   11 Oct 19 15:16 1729350987.txt
+As you
+can see, files are
+being created twice per minute, and the overall process seems to be working as intended. We can now create an instance of Azure Container Registry and push the image there. To do that, use the
+following commands:
+az acr create \
+-g <resource-group-name> \
+-n <container-registry-name> \
+--sku Basic \
+--admin-enabled
+docker tag <image-tag> <container-registry-name>.azurecr.io/<image-tag>:latest
+az acr login -n <container-registry-name>
+docker push <container-registry-name>.azurecr.io/<image-tag>:latest
+After a
+moment, you should
+see your image available in the Azure Container Registry instance you created. The last step left for us is using the created container image as the source for a container run using Azure Container Instances. Let’s try to
+execute it:
+az container create \
+-g <resource-group-name> \
+-n <container-instances-name> \
+--image <container-registry-name>.azurecr.io/<image-tag>:latest
+After a moment, the CLI should ask you for credentials to authenticate to Azure Container Registry. This is one of the use cases for admin credentials in Azure Container Registry, though it’s also possible to use a
+managed identity to leverage
+role-based access control
+(
+RBAC
+) authorization instead. Once you provide both username and password, the deployment will start, and you should be able to see an instance of Azure Container Instances created
+for you.
+Note
+To use admin credentials, your Azure Container Registry instance must have that feature enabled. If you’re uncertain how to work with an admin user in Azure Container Registry, reference
+Chapter 9
+, where we
+discussed it.
+Once deployments finish, our container should start and begin performing the commands, which we incorporated into the container image. You can simply check that by
+running
+ls -la
+inside the running container. Here’s an example for my instance of Azure
+Container Instances:
+az container exec -g afd-rg -n afd1002 --exec-command "ls -la"
+total 36
+drwxr-xr-x 1 root root 4096 Oct 26 17:26 .
+drwxr-xr-x 1 root root 4096 Oct 26 17:23 ..
+-rw-r--r-- 1 root root   11 Oct 26 17:23 1729963424.txt
+-rw-r--r-- 1 root root   11 Oct 26 17:24 1729963454.txt
+-rw-r--r-- 1 root root   11 Oct 26 17:24 1729963484.txt
+-rw-r--r-- 1 root root   11 Oct 26 17:25 1729963514.txt
+-rw-r--r-- 1 root root   11 Oct 26 17:25 1729963544.txt
+-rw-r--r-- 1 root root   11 Oct 26 17:26 1729963574.txt
+-rw-r--r-- 1 root root   11 Oct 26 17:26 1729963604.txt
+I used the
+az container exec
+command to run the
+ls -la
+command inside the running container (deployed inside the
+afd-rg
+resource group and named
+afd1002
+). As you can see, the result of running that command is what we
+expected – files are being created constantly until the container is stopped
+or crashes.
+We’ll dive into the topic of such containers later in the chapter when we discuss batch jobs. Let’s see now what we could do in a real-case scenario to integrate Azure Container Instances with a
+web application.
+Using Azure Container Instances with web applications
+As you’ve seen, Azure Container Instances
+can be easily used to run both one-time jobs and continuous processes if needed. This makes Azure a great choice for offloading some work from your main web application, as you don’t need to worry about scaling or performance. Let’s consider the following scenario – you want to generate a PDF file for a record in your database, but as the process takes several seconds to complete, you don’t want to do it in your main application. One possible solution is to deploy a dedicated service, which will be decoupled from the main application thanks to a queue (
+Figure 10
+.2
+):
+Figure 10.2 – An application offloading a heavy process to a dedicated component with a queue
+The downside of such a solution could be the additional cost of infrastructure and operations related to the second service. If the dedicated service is simply another application that is hosted on a web server and runs all the time, we have fixed one issue, but we’re still far from the
+optimal solution.
+We could replace the dedicated service with a simple orchestrator that spins up an instance of Azure Container Instances each time a new PDF needs to be generated (
+Figure 10
+.3
+):
+Figure 10.3 – Offloading a process to an orchestrator running containers
+Such a process
+looks similar to platforms such as Kubernetes but, of course, is much, much simpler. The general idea remains, though – you run a dedicated process as an isolated container, which is alive only until it is complete. Once the job is done, the container is removed, and you can reclaim used resources. With Azure Container Instances, implementation of such an architecture is really simple – all you need is to find a proper way to provision containers. Let’s see how we can implement
+that mechanism.
+Deploying Azure Container Instances using Azure Bicep
+If we want to
+deploy infrastructure from our code using Azure Bicep, we will need to install an SDK allowing us to perform such an operation. The whole concept will consist of the following
+two elements:
+A Bicep template we
+can parametrize
+A piece of code triggering the deployment by calling the correct
+SDK functions
+To get started, we can prepare the following
+Bicep template:
+param parLocation string = resourceGroup().location
+param parTimestamp string = utcNow()
+param parCustomerId string
+resource aci 'Microsoft.ContainerInstance/containerGroups@2021-03-01' = {
+  name: 'aci-${parTimestamp}'
+  location: parLocation
+  properties: {
+    containers: [
+      {
+        name: 'myjob'
+        properties: {
+          image: '<acr-name>.azurecr.io/<image-name>:latest'
+          environmentVariables: [
+            {
+              name: 'customerId'
+              value: parCustomerId
+            }
+          ]
+          resources: {
+            requests: {
+              cpu: 1
+              memoryInGB: 3
+            }
+          }
+        }
+      }
+    ]
+    restartPolicy: 'Always'
+    osType: 'Linux'
+  }
+}
+Let’s discuss the template to have a better understanding of what it does. As you can see, it consists of
+three parameters:
+ParLocation
+: Used to define the deployment location of
+the resources.
+ParTimestamp
+: Used to provide a unique name for each instance of
+the resource.
+ParCustomerId
+: Custom value passed down to the
+starting container.
+Once
+deployed, this template would create a new instance of Azure Container Instances and start a new container using the provided image definition. We could also pass a custom value (
+customerId
+) to allow the container to fetch correct data (for instance, use it to query a database). That custom value will be available later as an environment variable for the application running inside the container. This is useful in various scenarios as this functionality allows you to pass a dynamic value and inject it into
+a container.
+Note
+Remember that each instance of Azure Container Instances can run
+multiple containers.
+Now, if we want to deploy such a template, we will need to install the correct package. The package we need is Azure SDK, which is available for several different
+programming languages:
+.NET –
+https://learn.microsoft.com/en-us/dotnet/azure/sdk/azure-sdk-for-dotnet
+Java –
+https://learn.microsoft.com/en-us/azure/developer/java/sdk/
+Go –
+https://learn.microsoft.com/en-us/azure/developer/go/overview
+Python –
+https://learn.microsoft.com/en-us/azure/developer/python/sdk/azure-sdk-overview
+All those
+SDKs will provide a method to deploy a template, though we need to remember that
+Azure Resource Manager
+(
+ARM
+) is
+working with ARM templates rather than Bicep files. This is why we will need to compile the template first and use the result as our
+deployment artifact.
+Tip
+While the process of transforming a Bicep file into an ARM template may look cumbersome, it shouldn’t be much of a problem in most cases. You could implement a task run locally each time the Bicep file is saved so that Azure CLI starts in the background and transforms the file. You could also leverage a
+continuous integration/continuous deployment
+(
+CI/CD
+) pipeline
+and just transform the file each time the application
+is built.
+The method we need to use is named
+BeginCreateOrUpdate()
+and is available as part of an object named
+DeploymentClient
+. Here’s how you can perform deployment using
+Python code:
+import os
+import json
+from azure.identity import AzureCliCredential
+from azure.mgmt.resource import ResourceManagementClient
+from azure.mgmt.resource.resources.models import DeploymentMode
+credential = AzureCliCredential()
+subscription_id = os.environ["AZURE_SUBSCRIPTION_ID"]
+resource_client = ResourceManagementClient(credential, subscription_id)
+with open("aci.json", "r") as template_file:
+    template_body = json.load(template_file)
+rg_deployment_result = resource_client.deployments.begin_create_or_update(
+    "<resource_group_name>",
+    "<deployment_name>",
+    {
+        "properties": {
+            "template": template_body,
+            "parameters": {
+                "parCustomerId": {
+                    "value": "18363875"
+                },
+            },
+            "mode": DeploymentMode.incremental
+        }
+    }
+)
+The same
+could be achieved using, for instance, Go. Here’s a code snippet of the same operation we performed for Python but written in Go (reference
+https://github.com/PacktPublishing/Azure-for-Developers-Third-Edition/tree/main/ch10
+for the full code needed to perform
+the deployment):
+deploy, err := deploymentsClient.BeginCreateOrUpdate(
+        ctx,
+        resourceGroupName,
+        deploymentName,
+        armresources.Deployment{
+            Properties: &armresources.DeploymentProperties{
+                Template: template,
+                Parameters: "{\"parCustomerId\": 
+                    {\"value\": \"18363875\"}}",
+                Mode: to.Ptr(armresources.DeploymentModeIncremental),
+            },
+        },
+        nil,
+    )
+As you can
+see, for both Python and Go, we’re using the very same method for deployment; in fact, the same is true for .NET and Java. For all the languages, what you need to remember is how the code will
+be executed:
+The application needs to authenticate to Azure and have the necessary permissions to deploy resources (the Contributor role on a resource group level will be more
+than enough).
+You need to use an ARM template instead of a
+Bicep file.
+When creating a deployment, remember to pass all the required parameters if the template doesn’t provide
+default values.
+An alternative approach for deploying Azure Container Instances would be to use a dedicated SDK published by Microsoft. Those SDKs (called Management SDKs) allow you to execute operations against ARM, so you can create or update a service, change its properties, or even delete
+it programmatically.
+Interacting with Azure Container Instances using a dedicated SDK
+If you decide
+to use a dedicated SDK to deploy Azure Container Instances, you need to understand what scope of operations is available there. As with the SDK for interacting with ARM, the SDK for Azure Container Instances can be found for all major
+programming languages:
+Java:
+https://search.maven.org/artifact/com.azure.resourcemanager/azure-resourcemanager-containerinstance/2.44.0/jar/
+.
+NET:
+https://www.nuget.org/packages/Azure.ResourceManager.ContainerInstance/1.2.1
+Python:
+https://pypi.org/project/azure-mgmt-containerinstance/10.1.0
+Go:
+https://github.com/Azure/azure-sdk-for-go/tree/sdk/resourcemanager/containerinstance/armcontainerinstance/v2.4.0/sdk/resourcemanager/containerinstance/armcontainerinstance/
+Each version of the SDK allows you to perform the
+following operations:
+Attach to
+a container
+Execute
+a command
+Get
+container logs
+Start/stop
+a container
+Update the
+container definition
+Those operations open several different possibilities when it comes to building an application. We can use them not only to monitor a background process but also to extract generated results or even open a WebSockets connection and start reading the output stream from a
+running container.
+Note
+The SDK allows you to perform even more operations, but most of them are related to the Azure resources themselves (add a tag; delete a resource) so aren’t that useful when discussing web
+application integration.
+One
+possible way to leverage the dedicated SDK would be to combine the deployment of Azure Container Instances on demand using the previously discussed SDK and then use the dedicated SDK to read the results generated by a container. Let’s consider the following example (
+Figure 10
+.4
+):
+Figure 10.4 – An application fetching logs from a running container
+The example from
+Figure 10
+.4
+includes the
+following components:
+Application
+: A generic service that provisions a new instance of Azure Container Instances to perform some
+background work.
+Log stream (container)
+: An instance of Azure Container Instances that performs background work and reports the progress by sending the data to the
+standard output.
+Log aggregator
+: An aggregating or streaming service (for instance, Prometheus exporter) that can read the data streamed by
+our container.
+This example would involve the following operations provided
+by SDKs:
+Create/update Azure
+container instance.
+Start
+a container.
+Attach to a container and
+fetch logs.
+You may wonder what’s the trick in here. To understand that, let’s look at what happens under the hood when you attach to a container run by Azure Container Instances using an SDK. All SDKs are an overlay for the REST API provided by the Azure service. In the case of attaching to a running container, it will use the following
+HTTP call:
+POST https://management.azure.com/subscriptions/<subscription-id>/resourceGroups/<resource-group-name>/providers/Microsoft.ContainerInstance/containerGroups/<container-instances-name>/containers/<container-name>/attach?api-version=2023-05-01
+Note
+that the API version used in the request may change depending on the actual requirement (you can use any version that supports the “
+attach” operation).
+What’s important here is that in response, you will get the
+following JSON:
+{
+  "webSocketUri": "wss://web-socket-uri",
+  "password": "password"
+}
+This JSON contains a URI to a WebSocket endpoint, which you could use to stream logs from both standard output and standard error provided by the
+running container.
+An alternative approach would require reading logs on demand by executing a command inside a running container – for instance,
+the following:
+tail –n 100 <log-file>
+The easiest option would be to just use the
+tail
+command and execute it with the SDK. In the previous example, we would read the last 100 lines of the log file created inside the
+running container.
+Another idea for the integration would be to fetch the results of a running background task scheduled as a container. The idea is presented in
+Figure 10
+.5
+:
+Figure 10.5 – An application scheduling work via an orchestrator and fetching results from a running container
+With
+such an approach, we could utilize our ability to run a command inside a running container. Let’s consider the
+following algorithm:
+var fileExist = container.Execute('-e /result.txt')
+if fileExist == 0:
+    var results = container.Execute('cat /result.txt')
+else:
+    // Check again in 5 minutes
+The preceding pseudocode presents an idea where you check for the existence of a file that is supposed to be generated by a running container. If a file isn’t available, we just proceed and check again in 5 minutes. All operations could be performed by simply executing two different commands inside the running container. This is, of course, a very simple example that may not always be connected with a real business scenario. Instead of checking if a file exists, we could simply change the flow of such an application by using a queue. Check
+Figure 10
+.6
+for
+a reference.
+Figure 10.6 – Using a queue to orchestrate communication between an application and a container running inside Azure Container Instances
+In the concept
+presented in
+Figure 10
+.6
+, you can see that we’re using two queues. The first queue is used to publish a message from an application and consume it inside a container. The second queue is used to notify an application about a process that finished. If the process includes a file being created, we would just wait inside a container until the file is ready and then send a message to an application. In the end, we could use the message to either pass the content of the file or (if it’s too big) send just the metadata and allow the application to call the container and fetch the content by itself (as presented in
+Figure 10
+.7
+).
+Figure 10.7 – Executing a command inside a container from an application once it is notified about a file
+Let’s now discuss how we could use Azure Container Instances for
+batch jobs.
+Using Azure Container Instances for batch jobs
+Batch jobs
+are basically a set of similar tasks that can be scheduled and executed together. They’re often performed in the background and may require hours or days to complete. Most of the time, batch jobs are scheduled to interact with a database or generate files based on the provided data. Depending on the expected artifact type (local file; dataset in a database), we can either run a job and discard it or find a way to persist
+the result.
+Azure Container Instances allows you to run any batch job of your choice, but you will need to understand how to collect its results. If the artifacts are going to be persisted to a database, the implementation will be fairly simple – all you need is to connect to a database and save the results. If you need, for instance, to export files and save them to a file share, the complexity of the process will depend on how difficult it is to connect to the share (a public share in Azure will be much easier to connect to than a share hosted inside your corporate
+network on-premises).
+An interesting feature of Azure Container Instances is volumes, which work in a similar way to the volumes used when working, for example, with Docker. To work with them, you will need two
+additional components:
+Azure
+storage account
+File share created with
+File Service
+Those two components can be easily created with just two Azure
+CLI commands:
+az storage account create \
+--resource-group <resource-group-name> \
+--name <storage-account-name> \
+--location <location> \
+az storage share create \
+--name <file-share-name> \
+--account-name <storage-account-name>
+Once both the account and file share are created, you could create a new instance of Azure
+Container Instances:
+az container create \
+--resource-group <resource-group-name> \
+--name <container-instances-name> \
+--image <image-name-and-tag> \
+--azure-file-volume-account-name <storage-account-name> \
+--azure-file-volume-account-key <storage-account-key> \
+--azure-file-volume-share-name <file-share-name> \
+--azure-file-volume-mount-path <mount-path>
+Note
+If you’d like to mount a share to a container that exposes a web application, remember to add
+--port
+and
+--dns-label
+parameters to
+the command.
+Once a new
+instance of the service is created, it will make the file share mounted at the
+<mount-path>
+parameter value. There are certain limitations to that
+approach, however:
+As we’re mounting
+a
+Server Message Block
+(
+SMB
+) share, we’re unable to use a managed identity to authenticate to
+Azure Storage.
+Mounts don’t work for
+Windows containers.
+The container must run
+as root.
+Even though using an Azure Files share as a mount target won’t work in all scenarios, it’s an interesting approach if you don’t want to export the results of your batch jobs as part of the script or
+application’s code.
+It’s also worth remembering that Azure Container Instances can be made more or less reliable depending on the
+restart policy
+. When using Azure CLI or Azure Bicep, you can set the value of the parameter responsible for determining what Azure Container Instances should do at the end. Let’s consider the
+following command:
+Az container create \
+-g <resource-group-name> \
+-n <container-instances-name> \
+--restart-policy <Always|Never|OnFailure>
+As you
+can see, the
+--restart-policy
+parameter takes one of three different values (
+Always
+,
+Never
+, and
+OnFailure
+). For batch jobs, you need to decide which value reflects the actual
+use case:
+Use
+Always
+if you want to restart the job no matter if it succeeded or failed. It will work best if it’s up to the external process to decide what to do and how to handle overlapping requests. In such a scenario, your container works only as a trigger for
+another component.
+Use
+Never
+if your container runs a process that requires external interaction if it fails and is also a one-time job. An example of such a process would be a container interacting with dynamic data and capturing its state at a particular moment
+in time.
+Use
+OnFailure
+for all jobs that are idempotent. They can be restarted at any time as they’re self-healing, but once completed, they shouldn’t
+run again.
+Setting the correct value for the restart policy is one of the most important things for running batch jobs in Azure Container Instances as it reflects their non-functional requirements and directly translates to the reliability of
+the process.
+Let’s now discuss the last topic planned for this chapter – designing an application using Azure
+Container Instances.
+Designing an application using Azure Container Instances
+By now, you
+should be quite familiar with all the capabilities of Azure Container Instances and major use cases for this particular service. If we recap the main features of Azure Container Instances we discussed, we could list the
+following things:
+Serverless platform allowing you to run a workload anytime and pay only
+for usage
+Runtime isolation, which enables you to make your workloads compliant with internal and
+external regulations
+Persistent storage thanks to File Service mounts hosted on
+Azure Storage
+Portability and platform-agnostic
+deployment model
+Co-scheduled container groups that give you the ability to deploy several containers as a single unit to share network, storage,
+and lifecycle
+If you select Azure Container Instances as your hosting platform, you will need to remember similar things as with other container-based platforms. The most important thing when designing an application based on Azure Container Instances will be understanding if you need (and where) to persist your data. Many storage solutions could be used in that case – a file share, a database, an FTP server, or a data lake service. We already mentioned that Azure Container Instances can easily leverage volumes in tandem with Azure Storage. Such an approach is a great solution if your data needs to be ingested and processed further. The same is true for databases as well, but typical relational databases (when integrated with customer-facing applications) are rarely used in typical
+data analysis/processing
+scenarios. However, if your workloads are supposed to prepare data or move it between different storage solutions, Azure Container Instances could be just the
+right match.
+Figure 10.8 – Using Azure Container Instances to push data to Azure Storage and ingesting it using three different Azure services
+With
+Azure Container Instances, the approach for
+storage integration
+will depend on
+several factors:
+Type of
+data stored
+Storage
+placement (cloud/on-premises)
+The volume of data stored (file mounts may perform better in some scenarios when compared with
+various databases)
+Authentication method when connecting to the
+storage solution
+For instance, if your intent is to store multiple small files, you may want to process them in batches instead of doing them one by one. If the process can be split into smaller ones, you could leverage container groups and just spin up multiple identical containers that will work on your data in an
+organized fashion.
+Figure 10.9 – A concept of spinning up multiple containers querying a database and processing data in parallel
+Storage placement will be important from the network perspective – fortunately, Azure Container Instances supports virtual networks in Azure, so it’s possible to connect them to private networks
+as well.
+Note
+When considering networking for Azure Container Instances, you need to remember about limitations. One thing that isn’t supported is placing Azure Load Balancer in front of your Azure Container Instances instance. You also won’t be able to support global peering or expose containers integrated with a virtual network using a public
+IP FQDN.
+When it
+comes to the volume of data stored, you need to consider the limitations of the selected storage solution. As your containers will most likely run your custom code, you will need to implement a proper mechanism for connecting to a storage and storing data. The downside of Azure container instances is how abstract they are when it comes to used infrastructure. As you don’t control any of the typical aspects of the hosting environment (CPU, memory utilization, network interfaces), you may find Azure Container Instances quite cumbersome in scenarios that require careful optimization. If that’s the case, you may find other services such as Azure Functions or Azure Container Apps better suited for
+your application.
+One of the most important aspects of applications is
+monitoring
+. Azure Container Instances doesn’t change much here – you can use the same mechanism for your application as you would use in any other cloud service. One thing to remember, though, is the dynamic nature of containers. If you spin up multiple instances of your service or job and those are short-living processes, you will need to implement a proper identifier to distinguish logs and metrics coming from different containers. Without that, it may be difficult to properly debug and troubleshoot
+your application.
+Figure 10.10 – Publishing logs and metrics from Azure Container Instances to Azure Monitor or Azure Application Insights
+The last thing
+to remember is how Azure container instances relate to
+orchestrators
+such as Kubernetes. You need to remember that Azure Container Instances doesn’t provide typical mechanisms for the scalability or reliability of your services. Sure, you can use the proper restart policy, which we discussed in the previous section, but generally speaking, it’s quite a simple and straightforward service. There’s no such thing as node affinity, QoS of containers, service discovery, or load balancing. In some scenarios, running the same container
+on a
+virtual machine
+(
+VM
+) can be cheaper than doing the same using Azure Container Instances. This is why you should consider that Azure service for ephemeral and stateless workloads, which can be easily restarted or load-balanced by an external mechanism.
+One of the most interesting use cases for Azure container instances is using them for virtual nodes in Azure Kubernetes Service. As Kubernetes takes care of properly load balancing containers and ensuring they meet availability criteria, even if a virtual node fails, it will spin up another to replace the
+broken one.
+Learning about use cases
+When it comes to
+use cases for Azure Container Instances, we need to keep in mind that it’s quite a simple service that can be often overshadowed by other, more complex Azure products such as Azure Container Apps or Azure Functions. This is why it’s important to understand where Azure Container Instances is useful and why you should use it instead of
+other services.
+Personally, I always find Azure Container Instances extremely helpful if I need to quickly deploy and run a small job. Such a job could be a one-time action – by using Azure Container Instances, I save time by not forcing myself to configure additional infrastructure (such as Azure Functions requiring an Azure App Service plan and a proper deployment model). Being able to quickly spin up a running container could be also useful in scenarios where you need to quickly process some data. To fully utilize that approach, we’d need to use storage mounts and link them to the containers. This sounds like a much more complicated setup than it is – we talked in this chapter about the possibility of integrating Azure Storage with Azure Container Instances and how transparent and simple the
+configuration is.
+Another use case for Azure Container Instances is running ephemeral workloads. Being able to quickly start a container and integrate it with an external service may be beneficial in many scenarios. For instance, you could utilize Azure Container Instances for CI/CD runners, especially having them integrated with your network. Such runners could be considered ephemeral, so even if they get restarted, the state can be safely created with no real impact on
+other workloads.
+In theory, it would be also possible to run a web application with a web server using Azure Container Instances. While it’s technically possible, I personally don’t consider that a viable approach. Azure container instances lack several important features required for typical web applications, such as predictable scaling, stable performance, and isolated tiers, making them
+less useful.
+That’s all for
+Chapter 10
+! Let’s summarize all the sections and see what we’ll cover in the
+next chapter.
+Summary
+In this chapter, we took a look at Azure Container Instances – a serverless platform for running ad hoc jobs and simple services. We discussed how a container can be started using Azure Container Instances and what kind of operations are available when it’s running. We also talked about batch jobs and how you could utilize Azure Container Instances in such a scenario. While those are quite simple scenarios, they should provide enough information for you to be able to start working with Azure Container Instances on
+your own.
+One of the major topics in this chapter was related to using Azure Container Instances with web applications as an additional component or layer responsible for proceeding with data in an asynchronous way. Having that kind of understanding of how you’re supposed to work with various cloud services will become handy when designing your own systems. While you could implement most functionalities using only a single service, incorporating additional services such as Azure Container Instances allows you to decentralize your application and offload some work to a
+dedicated component.
+In the next chapter, we’re going to explain Azure Container Apps – one of the newer services in Azure, which provides an easy-to-learn and robust platform for hosting even more complex,
+container-based applications.
+
+11
+Developing Microservices with Azure Container Apps
+As of now, we’ve been discussing containers in Azure by either talking about infrastructure for container images (Azure Container Registry) or running simple workloads in a serverless fashion (Azure Container Instances). However, the services we’re developing daily are different when it comes to their complexity and requirements for reliability and flexibility. For more microservice-oriented architectures, one of the most popular choices is platforms based on Kubernetes (such as Azure Kubernetes Service). They offer advanced configuration options and can be applied for several different use cases. Unfortunately, they have one major downside – they are difficult to maintain and, most of the time, require a dedicated team to administer clusters. Fortunately, Azure offers a solution, which sits in a sweet spot between Azure Container Instances and Azure Kubernetes Service – this solution is named Azure
+Container Apps.
+Thanks to Azure Container Apps, you can build systems based on containers, which are not too complicated for developers to create and maintain while offering advanced features for more complex scenarios (including ingress service, service discovery, or built-in observability functionality). In the chapter, we’ll discuss a subset of available features that are especially useful for developers of applications. This includes things such as revisions, deployments, and environment
+variables setup.
+In this chapter, we’re going to cover the following
+main topics:
+Understanding the differences between Azure App Service and Azure
+Container Apps
+Planning for hosting an application with Azure
+Container Apps
+Deploying an application using Azure
+Container Apps
+Learning about managing an application with Azure
+Container Apps
+Learning about
+use cases
+Technical requirements
+To perform exercises in this chapter, you will need
+the following:
+Azure CLI
+An IDE of your choice (preferably Visual
+Studio Code)
+The source code for this chapter is available
+at
+https://github.com/PacktPublishing/Azure-for-Developers-Third-Edition/tree/main/ch11
+.
+Understanding the differences between Azure App Service and Azure Container Apps
+When we discussed Azure App Service, one of the major things to remember was how it is structured. As you remember, for typical web applications hosted using Azure App Service we need two
+separate components:
+Azure App Service plan – Our
+hardware providing compute (CPU, memory,
+disk space)
+.
+Azure Web App/Azure Function App – A web server hosting our application and allowing
+us to interact
+with it thanks to the dedicated management layer for
+configuration management.
+In Azure Container Apps, things
+work differently – we no longer need to provision the server ourselves – it’s a serverless platform, which simplifies operations and deployment so developers can focus on building an application reflecting requirements given by
+the business.
+As the name suggests, Azure Container Apps is also meant to host containers instead of running our application in-process. The deployment and hosting model looks similar to the one offered by Kubernetes, but it’s aimed rather at giving developers as smooth a learning curve as possible. It’s worth mentioning that Azure App Service can also host containers (as we will discuss in
+Chapter 12
+). The difference here comes from the approach you need to take when hosting the same application using either of those two services. In Azure App Service, when you want to host a container, you still need to utilize an Azure App Service plan. Also, the whole management layer stays as you’d host a typical application in-process. The only thing that changes is the source of the application – for containers, you need to integrate Azure App Service with either a public or private container registry. The rest of the setup stays as
+it was.
+To help you better understand the similarities and differences, let’s list them with a proper description. The things that are similar for both Azure App Service and Azure Container Apps are
+as follows:
+Both can be used for hosting
+web applications.
+Both allow you to use containers as a
+deployment method.
+Both can be used with an
+autoscaling feature.
+Both enable you to use an in-built authentication mechanism, so you can offload authentication to the platform instead of keeping it in
+your application.
+Both can be placed inside a virtual network for enhanced security
+and isolation.
+As usual, when we compare those two services, we can find several
+significant differences:
+Azure App Service
+can be deployed as a fully isolated workload for predictable performance and increased security, while Azure Container Apps offers dedicated tiers, which will provide stable performance but not
+dedicated hardware.
+Azure Container Apps
+comes with a dedicated ingress object for handling incoming traffic; Azure App Service requires the deployment of an additional component (such as Azure Application Gateway or Azure Front Door) to achieve
+similar results.
+Azure Container Apps is billed using artificial units of vCPU-seconds and GiB-seconds, reflecting the utilization of the CPU and memory of the workloads they’re hosting. In Azure App Service you pay a fixed monthly price, which can be increased or decreased depending on the number of running instances of
+your applications.
+Before we jump to the next topic, let’s emphasize one more key difference between Azure App Service
+and Azure
+Container Apps – the architecture you can build with them. Even though both services have similarities, Azure Container Apps will be much better suited for microservices when compared with Azure App Service. For single-tenant deployment scenarios, Azure Container Apps will be easier to utilize and maintain thanks to its lightweight deployment model and serverless nature. While Azure App Service can be used for such deployments, it works much better in multi-tenant scenarios, where you deploy a single application handling heavy load and scale it
+if needed.
+Let’s now see how we can plan a hosting and deployment strategy using Azure
+Container Apps.
+Planning for hosting an application with Azure Container Apps
+We have talked about differences and similarities between Azure App Service and Azure Container Apps that shed some light on proper planning for the deployment of an application based on one of those platforms. As we’re focusing on Azure Container Apps now, we need to understand how to properly integrate our application with that service and what is needed to achieve
+expected reliability.
+Let’s start by discussing available deployment options to see how they can work with the services
+we’re building.
+Selecting the proper deployment option
+Azure Container Apps is no
+different from other Azure services when it comes to deploying an application. As we discussed previously, the prerequisite is making our application available as a container image, which can be hosted on the selected platform. There are two elements we need to develop to deploy an application with Azure
+Container Apps:
+Manual or automated pipeline for
+the application
+Manual or automated pipeline
+for infrastructure
+We are dividing
+deployment into two separate components as they are not strictly linked to each other. You can deploy your infrastructure separately from the application itself (though you need to remember, that infrastructure comes as the prerequisite for the first deployment of the application). We could design our CI/CD process as presented in
+Figure 11
+.1
+.
+Figure 11.1 – High-level design of CI/CD pipeline for Azure Container Apps
+If you take a close look at the diagram, you will see we’re structuring the deployment process in two separate phases, which reuse the same conceptual steps. They both start with a code repository (it could be Git, SVN, Mercurial, or any other version control system) and end with an Azure Container Apps instance. For both application and infrastructure, we could follow the Continuous Integration approach (build and test the application, validate it, and prepare for deployment) and link it with Continuous Deployment (so all the changes are automatically pushed to the
+selected environment).
+Note
+We mentioned that pipelines could be manual or automated – the choice depends on the selected toolset, your skills, and actual requirements. Remember though, that the manual approach could work for limited use cases and will be difficult to manage and replicate. CI/CD pipelines, by definition, aim at full automation and benefit from all kinds of automated checks to relieve engineers from
+repeatable tasks.
+As Azure Container Apps uses containers, any deployment will need to utilize a container registry. This is applicable if you want to have full control over the process. There’s also a possibility to leverage the built-in feature of Azure Container Apps to build a container image. Internally, it uses CNCF
+Buildpacks (
+https://buildpacks.io/
+) to automatically detect the parameters of your application and generate
+a container.
+Let’s describe all the
+components involved in the process of building an application for Azure
+Container Apps:
+CI/CD pipeline
+CI/CD agent (managed
+or self-hosted)
+Container registry
+The thing we need to fully understand is which components are mandatory, and which are optional. If we treat a CI/CD pipeline as something provided by our CI/CD software, then we will need to answer the
+following questions:
+Where do we want to build a
+container image?
+How do we want to build a
+container image?
+How will Azure Container Apps access and download our
+container image?
+The advantage of platforms such as Azure is their ability to handle lots of different tasks that normally would be performed on your end. If we focus on the first question, which is
+Where do we want to build a container image?
+, we can think about various solutions. It could be our CI/CD agent, a dedicated virtual machine, or Azure Container Registry. It’s true that we could utilize the same container registry we use to host container images to build our image. In Azure, it can be done with the
+following command:
+az acr build --registry <registry-name> --image <image-name> .
+When performing that command, it’s important to remember that you need to execute it in the same place as you would do with similar commands such as
+docker build
+. Once the command starts, it will send the local context (files and configuration) to the selected Azure Container Registry and start building an image. This allows you to keep your host clean – you don’t need to install Docker Engine or a similar tool to be able to build your
+container images.
+Note
+Building container images using Azure Container Registry isn’t free. Each time you build an image, you execute a task in your registry. Tasks are priced per second – make sure you verify the price for your region if you plan to heavily utilize
+that feature.
+It seems that one
+component of our deployment pipeline for Azure Container Apps could be offloaded to Azure if needed. It doesn’t necessarily mean you should always utilize Azure Container Registry as your image builder. In some projects, you may not be able to use it that way due to regulations and compliance. For greenfield projects though, or in more agile companies (at least when compared with a typical enterprise company), it’s an interesting alternative. You don’t need to configure and host a container engine on your own, which means it cuts some
+operational costs.
+The container registry part will be required for all deployments of services in Azure Container Apps that don’t use public images as sources. It’s also worth mentioning that Azure Container Apps may provision Azure Container Registry on its own if you don’t provide one when deploying an application. This happens when using Azure CLI with a dedicated extension for Azure Container Apps. You can install it using the
+following command:
+az extension add --name containerapp --upgrade
+From now on, you will have access to
+az containerapp
+commands, which you can use both locally and in your CI/CD pipelines. The behavior of the commands will be the same in all environments, so you can easily test your idea before actually pushing it to your repository. Let’s consider the
+following example:
+az containerapp up \
+--name <container-app-name> \
+--source <path-to-application-source> \
+--ingress external
+This command will create a new instance of Azure Container Apps with external ingress (meaning the application will be accessible from the public internet), a given name, and from the provided local path indicated by the
+--source
+parameter. As you can see, it performs lots of operations at once – if needed, you could use other commands to have more control over the process. The interesting thing, though, about that command is that it’s able to look at your local files, build a container image, and push it to the container registry. If you wanted to split it into two separate steps, you could do something
+like this:
+docker build –t <image-name> .
+az containerapp up \
+--name <container-app-name> \
+--source <path-to-application-source> \
+--image <image-name> \
+--ingress external
+Of course, you could also replace the preceding
+docker build
+command with
+az acr build
+to keep everything in the cloud. It doesn’t really matter here how you build your container image – the point is that the process can be simplified by utilizing a single Azure
+CLI command.
+Note
+Keep in mind that the
+az containerapp up
+command can do all the heavy lifting by itself but may not be applicable in each scenario. If you require custom authentication against your repository or need to build a container image on a different CI/CD agent than the one deploying Azure Container Apps, you will still need to separate
+the commands.
+As you can see, you
+can perform similar operations for Azure Container Apps with a completely different approach. The one advantage of that service over more advanced platforms such as Kubernetes is simplicity. To deploy both infrastructure and application, we don’t need to implement additional tools besides Azure CLI. Of course, it’s possible to incorporate additional elements in our pipelines that will validate and test deployments or check them against implemented policies. Conceptually, however, we’re good to go with a
+minimal toolset.
+When working with Azure CLI, you may find the following two
+commands confusing:
+az
+containerapp up
+az
+containerapp create
+The first one is an additional layer atop, which performs various additional operations, as mentioned in this section. It will take care of creating an Azure Container App, building the application, and deploying it. The second one allows you to create an Azure Container App resource in Azure and configure it, but won’t create Azure Container Registry and won’t build the container image used for our service. In short, the former is more useful for developers who seek the ability to deploy an application quickly and without much of a hassle. If you opt for more control or just focus on individual infrastructure components, the
+latter will most likely be
+more useful.
+You can read more about the
+az containerapp create
+command
+here:
+https://learn.microsoft.com/en-us/cli/azure/containerapp?view=azure-cli-latest#az-containerapp-create
+Let’s discuss now how we can manage multiple revisions (versions) of
+our application.
+Managing revisions in Azure Container Apps
+Each application deployed
+to its hosting environment has a defined lifetime. Applications are developed, tested, deployed, and maintained over the course of months or years. In the end, most, if not every, application is decommissioned and often replaced with a new version. In this section, we’re interested in what happens between deploying and decommissioning an application.
+Let’s start with a simple visualization of the process presented in
+Figure 11
+.2
+:
+Figure 11.2 – High-level development and deployment process for an application
+After deploying the first version of your application, you will most likely start working on the next one. The next version will be deployed after testing and may replace the currently working one. Such a process works if there are no integrations depending on the exact version of your application. Let’s take a look at
+Figure 11
+.3
+:
+Figure 11.3 – Deploying a new version of an application with an existing integration
+If we proceed with
+deployment of the new version (
+Version 2
+) of our application to replace the existing one (
+Version 1
+) we need to ensure any client (
+External System
+) calling the current version can safely use the new one. In other words, we need to ensure our application is backwards compatible. This can be achieved in a
+few ways:
+On the application level – Make sure it can handle requests for all the
+supported versions.
+On the infrastructure level – By deploying multiple versions of the application and properly routing the incoming traffic (this can be achieved by an API gateway and using a proper identifier for
+a version).
+On the process level – Make sure all the customers of your services switch to the
+new version.
+For Azure Container Apps, we
+will focus on the second method of ensuring compatibility. There’s a dedicated feature called
+revisions
+, which
+allows you to update your instance of Azure Container Apps and properly label each version. Thanks to that, you will be able to control how much traffic is sent to
+each revision.
+We will talk more about revisions in the third section of this chapter, named
+Deploying an application using Azure Container Apps
+. Before we continue, however, let’s discuss one more important topic related to properly planning a deployment – the scalability of Azure
+Container Apps.
+Understanding the scalability of Azure Container Apps
+When it comes to deploying an
+application, it’s important to consider how it will scale in the future. While, for many applications, the initial deployment may consist of a single instance only, we need to have a clear plan for how and when the scale operation will happen. As Azure Container Apps is a service focused on hosting smaller services rather than monoliths, its approach to scalability will be different when compared with Azure App Service or Azure Virtual Machines (assuming you would consider using Azure Virtual Machines to host
+your application).
+The interesting thing about Azure Container Apps is that you can scale it per revision. This is presented in
+Figure 11
+.4
+:
+Figure 11.4 – Different number of instances (replicas) per revision
+As each revision allows you to have a different number of replicas, it means you can scale them independently. This introduces a number of
+interesting possibilities:
+You can deploy pre-release versions of your application to a small subset of your customers without making it a
+full-blown deployment.
+You can gradually sunset old revisions the more customers are updating to the newer versions of
+your application.
+You can dynamically manage different versions of the application and scale them out/in depending on the
+current demand.
+While the preceding scenarios are achievable with a custom implementation, it’s also possible to utilize the in-built scaling mechanism of Azure Container Apps. We have three separate scaling rules
+to use:
+HTTP
+TCP
+Custom
+The HTTP rule is based on the number of concurrent HTTP requests reaching a revision. The TCP rule does the same but for TCP connections. The custom rule is the most sophisticated one – conceptually, it’s based on CPU and memory utilization, but it can use event-driven data sources as well. This includes services such as Azure Service Bus, Azure Event Hubs, Apache Kafka, and Redis. While the HTTP and TCP rules are easy to implement and use (you can configure them when deploying an Azure Container Apps instance), the custom rule requires the use of something that is called the KEDA scaler. We will not cover KEDA
+in this chapter, but if you’re interested in the topic, take a look at the following
+page:
+https://keda.sh/docs/2.16/scalers/
+.
+The interesting
+thing about the KEDA scaler is that it supports scaling based on authentication. What does that mean exactly? To understand the topic, we need to realize that this scaler uses Azure services to understand the current load of your application. In other words, it monitors the number of messages that are supposed to be handled by your service and makes scaling decisions based on their performance. It’s a much better scaling mechanism than typical resource utilization monitoring, as in many scenarios, CPU and memory utilization starts to be visible too late. Let’s consider the following example: Your application processes messages coming from various devices. Those messages are published in a queue for decoupling and asynchronous processing. The application may perform just fine most of the time and CPU and memory utilization will be stable. However, an increased number of messages may not directly translate to increased CPU or memory usage. If your application is unable to handle the increased load, the messages will just stay in a queue longer than usual without affecting
+resource utilization.
+Note
+Of course, the actual behavior of the application will depend on the implementation. If you process messages in the background and will be constantly fetching new messages from a queue, the increased CPU and memory utilization of the service will start to be noticeable as messages will be constantly processed instead of staying in
+a queue.
+This is why the typical scaling based on CPU or memory won’t work properly. To be able to handle such scenarios in a proper way and ensure a stable process, you will need to utilize a scaler mechanism, which understands the context of your application and
+its integration.
+So how does
+Azure Container Apps support that mechanism? Thanks to the fact that you can base your scaling mechanism on services such as Azure Service Bus or Azure Event Hubs, you can make the whole platform aware of the current load affecting your application. The more messages that are coming, the more replicas of your service will be scheduled and hosted. It’s a more service-oriented mechanism than traditional hosting of the whole platform (as we have with Azure App Service or Azure Virtual Machines). Conceptually, scaling in Azure Container Apps works similarly to Azure Functions, where scaling is also based on triggers of the functions. It allows for much more granular control over what and how is scaled and allows you to consider when designing
+your system.
+Let’s discuss now how we can deploy an application using Azure
+Container Apps.
+Deploying an application using Azure Container Apps
+Until now, we’ve
+been mostly focused on the introduction to Azure Container Apps and presenting its main features. In this section, we will try to deploy an application and see how we can utilize different capabilities of this
+Azure service.
+To get started, we will prepare a simple containerized application that we can use
+for deployments.
+Preparing a simple application
+To be able to focus on
+Azure Container Apps, our application will be as simple as possible. To do that properly, we need to create a Dockerfile and push it to a registry. Let’s start with
+the Dockerfile:
+FROM nginx:latest
+COPY index.html /usr/share/nginx/html/index.html
+As you can see, we will use the latest available version of nginx to host a simple HTML page. The code for the HTML page will look
+like this:
+<html>
+<head>
+    <title>Chapter 11</title>
+</head>
+<body>
+    <h1>Hello!</h1>
+</body>
+</html>
+Now, before we build and push the container image, we need a container registry. You can create it with the
+following command:
+az group create \
+-n <resource-group-name> \
+-l <location>
+az acr create \
+-g <resource-group-name> \
+-n <container-registry-name> \
+--sku Basic
+Once the registry is created, we can build the container image locally and push it there. Note that we’re going to prepend our container registry name when tagging our image, so we don’t need to
+retag it:
+az acr login \
+-n <container-registry-name> \
+-g <resource-group-name>
+docker build -t <container-registry-name>.azurecr.io/app .
+docker push <container-registry-name>.azurecr.io/app
+Once the
+image is pushed successfully, we can proceed to the next step of deploying our application to Azure
+Container Apps.
+Deploying an application to Azure Container Apps
+Deploying an
+application to an Azure Container Apps instance isn’t a difficult task. All it takes is the
+following steps:
+Before we deploy our application to Azure Container Apps, we need to ensure that the proper toolset is available on our machine. Use the following command to install extensions providing additional commands for working with that
+Azure service:
+az extension add --name containerapp --upgrade
+Now, we need to create a dedicated environment for our Azure Container App. Environments are boundaries that allow you to group applications that are supposed to work together or that require the same level of isolation and security. You can create an environment with a
+single command:
+az containerapp env create \
+-n <environment-name> \
+-g <resource-group-name> \
+--location <location>
+For the name of the environment, you can select any value. In many cases, it will include the name of a project and hosting environment (such as
+dev
+/
+test
+/
+prod
+). Also, as we’re not providing additional details, Azure will create a Log Analytics workspace for us as it’s part of each Azure Container Apps environment. If you want to create it on your own or point the environment to the existing workspace, use the
+following command:
+az containerapp env create \
+-n <environment-name> \
+-g <resource-group-name> \
+--location <location> \
+--logs-workspace-id <workspace-id>
+Once the
+environment is created, we can utilize it by creating an instance of Azure Container Apps pointing to it. This can be done with the
+following command:
+az containerapp create \
+--name <container-app-name> \
+--resource-group <resource-group-name> \
+--environment <environment-name> \
+--image <container-registry-name>.azurecr.io/app \
+--target-port 80 \
+--ingress external
+This command will create Azure Container App leveraging the environment we created and the image pushed to the container registry we created. It will also make it public as we’re defining ingress as external. However, when you run the command, you will see the following error (or one similar
+to mine):
+Failed to provision revision for container app 'afd11'. Error details: The following field(s) are either invalid or missing. Field 'template.containers.afd11.image' is invalid with details: 'Invalid value: "afdch11cr.azurecr.io/app": GET https:?scope=repository%3Aapp%3Apull&service=afdch11cr.azurecr.io: UNAUTHORIZED: authentication required, visit https://aka.ms/acr/authorization for more information.'
+It seems that we cannot use the custom image that was pushed to the private registry as Azure Container Apps isn’t authorized to access it. To fix it, first enable the admin user in Azure Container Registry (take a look at
+Chapter 9
+, where we
+discussed it).
+With the
+admin user enabled, we can utilize its credentials and use them for
+our deployment:
+az containerapp create \
+--name <container-app-name> \
+--resource-group <resource-group-name> \
+--environment <environment-name> \
+--image <container-registry-name>.azurecr.io/app \
+--target-port 80 \
+--ingress external \
+--registry-username <admin-user-name> \
+--registry-password <admin-user-password> \
+--registry-name \
+<container-registry-name>.azurecr.io
+After a moment, the deployment should be completed and Azure Container App ready to server requests. To check that, let’s fetch
+its URL:
+az containerapp show \
+--name <container-app-name> \
+-g <resource-group-name>  \
+--query properties.configuration.ingress.fqdn
+The result will be a unique URL you can use to access your application. In my case, it was
+the following:
+"afd11.icymeadow-e19f2bcb.westeurope.azurecontainerapps.io"
+You can now test your application – copy the URL and paste it into your browser’s
+address bar.
+You should be able to see the message we added to the HTML embedded within the container
+image (see
+Figure 11
+.5
+).
+Figure 11.5 – Our simple application hosted by Azure Container Apps
+Congratulations! You just deployed your first application using Azure Container Apps. Let’s now see how we can update it and use revisions to support
+multiple versions.
+Updating the application
+To see the
+updated application, we first need to make some changes to the original code. Change the current HTML to
+the following:
+<html>
+<head>
+    <title>Chapter 11</title>
+</head>
+<body>
+    <h1>Hello!</h1>
+    <h2>Azure Container Apps are the best!</h2>
+</body>
+</html>
+Now, let’s create a new image and push it to
+the registry:
+docker build -t <container-registry-name>.azurecr.io/app:2.0 .
+docker push <container-registry-name>.azurecr.io/app:2.0
+The next step involves using the
+CLI to update our instance of Azure Container Apps. To complete the
+update
+operation, we need to use the
+following command:
+az containerapp update \
+-n <container-app-name> \
+-g <resource-group-name>  \
+--image <container-registry-name>.azurecr.io/app:2.0
+As a result, you should be able to see the updated version of the application (
+Figure 11
+.6
+):
+Figure 11.6 – Updated application with the newest content
+We need to remember, however, that the
+update
+operation we performed replaced the previous version of the application with a new one. If we want to preserve the old version, we need to use revisions. We’ll describe that in the next section. Before we proceed, we may need to clarify revision modes in Azure Container Apps. To have a better understanding, let’s run the
+following command:
+az containerapp revision list \
+-n <container-app-name> \
+-g <resource-group-name> \
+-o table \
+--all \
+--query "[].{Name:name, Active:properties.active}"
+As a result, you
+should see the
+following output:
+Name            Active
+--------------  --------
+afd11--rd93y1x  False
+afd11--af5hnd8  True
+As you can see, we have two revisions already – one is active and the other one is inactive. It turns out that with each deployment to Azure Container Apps, a new revision gets created. Because the default revision mode is
+Single
+, in our application, only one revision is active, meaning we can’t access the rest of them. If we want to be able to run multiple revisions, we will need to change the revision mode to
+Multiple
+. Check the next section for
+detailed instructions.
+Updating the application using revisions
+If you want to have your
+application deployed with multiple revisions in Azure Container Apps, you need to configure it to support them. You can do that with a
+single command:
+az containerapp revision set-mode \
+-n <container-app-name> \
+-g <resource-group-name> \
+--mode Multiple
+Now, we can activate the previous revision, representing the very first version of
+our application:
+az containerapp revision activate \
+--revision "<revision-name>" \
+--name <container-app-name> \
+-g <resource-group-name>
+Now our
+application will have two revisions up and running and available to the users. Each revision will be available under a different URL. In fact, with two active revisions, the application can be accessed using three different URLs (your URLs will be slightly different as both the name of the container app and revision
+will differ):
+https://afd11.icymeadow-e19f2bcb.westeurope.azurecontainerapps.io/
+: The main URL pointing to the most
+recent revision.
+https://afd11--rd93y1x.icymeadow-e19f2bcb.westeurope.azurecontainerapps.io/
+: The dedicated URL for the most
+recent revision.
+https://afd11--rd93y1x.icymeadow-e19f2bcb.westeurope.azurecontainerapps.io/
+: The dedicated URL for the
+older revision.
+As revisions have their own URL, you can easily route users to the individual version of your application using various methods. This could be done using a dedicated gateway or a traffic manager and implementing routing by convention (such as a header or additional segment in the URL).
+See
+Figure 11
+.7
+for details.
+Figure 11.7 – Routing traffic to Azure Container Apps revisions using a gateway and URL segments
+In the concept
+presented in
+Figure 11
+.7
+, the logic behind selecting the correct version is implemented within
+the gateway:
+If the URL contains
+V1
+, the request is forwarded to
+revision
+V1
+.
+If the URL contains
+V2
+, the request is forwarded to
+revision
+V2
+.
+If you don’t need to explicitly route the traffic to your revisions, you can change the traffic settings of each revision and decide how many requests are routed to a particular revision. For instance, if you want to split the traffic 50/50 for the two revisions, you could use the
+following command:
+az containerapp ingress traffic set \
+--revision-weight \
+    <revision-1-name>=50 <revision-2-name>=50 \
+--name <container-app-name> \
+-g <resource-group-name>
+Once the command is executed, go to the main URL of your container app and refresh your browser tab several times. You will see that, for the same URL, the revision you accessed is different from time
+to time.
+Note
+Splitting the traffic 50/50 doesn’t give you a guarantee that traffic will be split equally with each request. In fact, this setting informs you about the probability of accessing a particular revision for a single user. At a higher scale, you’re much more likely to see an even distribution than for a
+single user.
+With the concepts
+described in this section, you could
+implement advanced deployment strategies such as
+canary deployments
+(
+Figure 11
+.8
+and
+Figure 11
+.9
+).
+Figure 11.8 – Initial setup for weights when using canary deployment
+In
+Figure 11
+.8
+, you can see the initial configuration for weights when deploying a new version of your application. You forward only 20% of the total traffic to the new revision in case there are any bugs or issues with the most recent release. Once you’re ready, you can update the weights and route all the traffic to the new version (
+Figure 11
+.9
+).
+Figure 11.9 – Updated weights to route all the traffic to the new version (revision)
+The same can be
+done as a blue/green deployment. In that case, you’d operate with the maximum and the minimum value for weight and switch between 0 and
+100 only.
+Azure Container Apps has many more features available to developers, which makes development easier. This includes add-ons, environment variables, and storage mounts. We will describe them in the next section of
+this chapter.
+Learning about managing an application with Azure Container Apps
+When it comes to management, Azure Container Apps consists of two
+main elements:
+Operations related to infrastructure (domains,
+certificates, network)
+App-related operations (secrets, storage mounts, session
+management, scaling)
+In this section, we’re going to cover the latter as those operations will allow you to better understand how to work with your applications hosted using Azure Container Apps as the
+hosting platform.
+Managing environment variables
+One of the most common scenarios
+for working with cloud services is configuring environment variables. When using container-based solutions, environment variables are the easiest way to customize the behavior of an application and inject custom values. In Azure Container Apps, using environment variables is also a standard pattern to provide dynamic parameters for
+an application.
+You can provide environment variables using one of the commands we used previously to deploy a new version of
+our application:
+az containerapp update \
+-n <container-app-name> \
+-g <resource-group-name> \
+--set-env-vars <key>=<value>
+If you want to set multi-environment variables with a single command, all you need is to provide
+--set-env-vars
+more
+than once:
+az containerapp update \
+-n <container-app-name> \
+-g <resource-group-name> \
+--set-env-vars <key>=<value> \
+--set-env-vars <key2>=<value2>
+When it comes to using variables in your application, it all depends on the technology stack you’re using. Generally speaking, there’s no additional layer needed to obtain environment variables for your applications when they’re set on the Azure Container
+App level.
+Note
+Remember, that setting environment variables on a running instance of your container app will require restarting it to fetch new values. If you wanted to avoid that, you’d need to implement a custom mechanism for listening to changes and notifying
+your application.
+It’s also
+possible to reference secrets using environment variables in Azure Container Apps. The difference here is the syntax we use to reference it when setting
+the variable:
+az containerapp update \
+-n <container-app-name> \
+-g <resource-group-name> \
+--set-env-vars <key>=secretref:<secret-name>
+The preceding example, however, will not be sufficient to properly access the secret as it’s also required to have the secret configured on the Azure Container App level in order to reference it. We could do that when either creating or updating our instance of Azure
+Container Apps:
+az containerapp create \
+-n <container-app-name> \
+-g <resource-group-name> \
+--image <container-image> \
+--environment <environment-name>\
+--secrets DB_PASSWORD=<secret-value>
+It’s worth remembering that Azure Container Apps doesn’t store secrets – instead, Azure Key Vault is used to store sensitive values, and you use only Key Vault references to securely retrieve secrets from
+the vault.
+Note
+When referencing secrets, you need to ensure they already exist. You can’t both create and reference the same secret with a single Azure CLI command for creating/updating an instance of Azure
+Container Apps.
+Let’s check now how we can configure storage mounts for applications hosted on Azure
+Container Apps.
+Configuring and managing storage mounts
+The main use case for storage
+mounts is giving your application the
+ability to store and/or read files from a given location. It’s useful when you want to either collect files from your customers or inject preprocessed information for an application for further use. Such a setup is a much better approach than forcing your application to actively handle all the data and manage the storage on
+its own.
+In Azure Container Apps, there are three different kinds of mounts you
+can utilize:
+Container-scoped storage
+Replica-scoped storage
+Azure Files
+It’s quite important to understand the differences between them, so you can select the correct solution for your application. The most important thing about those mounts is whether they provide persistent storage or ephemeral. Both container-scoped and replica-scoped storage mounts are meant for ephemeral storage. For them, the difference lies in the actual scope of the mount. If you create container-scoped storage, its lifetime is tied to the container. For replica-scoped storage, the lifetime of a mount depends on the time the replica is active. See
+Figure 11
+.8
+for a better view of
+the topic.
+Figure 11.10 – A replica with a storage mount and multiple services accessing it
+Figure 11
+.10
+presents
+a situation where you have
+a single replica with multiple services running there. If a single service gets terminated, the storage mount is still available to the rest of the services (even if they’re not utilizing it). Such a setup is useful if you don’t fully control when the storage is accessed, or you don’t need to isolate the mount from services. For container-based mounts, one of the most obvious use cases is cache. For replica-based mounts, it could be logs or building a data sink for further processing by an
+external service.
+Note
+It’s worth noting that replica-based mounts allow you to persist files even if a container restarts. One of the possible use cases for them is also providing better reliability and data consistency for a single container. Still, you need to remember that such mounts are ephemeral, and you cannot fully rely on the availability of data
+stored there.
+A different type of storage mount is Azure Files. It provides data persistence so you can use it to save data and have it replicated based on the replication settings of your share. The one thing common for Azure Files and replica-based mounts is that they both can be used multiple times for a single container. In other words, you can have multiple mounts of the same type for the
+same container.
+When it comes to configuring storage mounts, the process depends on the storage mount type. For container-scoped mounts, you don’t need to configure anything – the filesystem available for a container is managed automatically and gets erased once a container is destroyed. For replica-based and Azure Files mounts, you need to leverage the YAML definition of your Azure Container App to manage them. YAML definitions used by Azure Container Apps are like YAML files leveraged by Kubernetes – you can use them to manage your deployments and their configuration without using other methods such as the Azure portal or Azure CLI. To get the YAML for your container app, use the
+following command:
+az containerapp show \
+    -n <container-app-name> \
+    -g <resource-group-name> \
+    -o yaml
+Once you get
+the result, note you’re getting the
+typical output defining the configuration of our cloud service (you could use a similar command to get details of Azure App Service or Azure Container Registry). The reason we use YAML is, later, when we want to update our container app, we can use YAML as an input. In our case, we will be interested in the
+template
+object. For my instance, it looks
+like this:
+template:
+    containers:
+    - image: afdch11cr.azurecr.io/app:2.0
+      imageType: ContainerImage
+      name: afd11
+      resources:
+        cpu: 0.5
+        ephemeralStorage: 2Gi
+        memory: 1Gi
+    initContainers: null
+    revisionSuffix: ''
+    scale:
+      maxReplicas: 10
+      minReplicas: null
+      rules: null
+    serviceBinds: null
+    terminationGracePeriodSeconds: null
+    volumes: null
+As you can see, the
+value of
+volumes
+is set to
+null
+.  If
+we want to define any volume mount, we need to add
+two things:
+Volume mount – Defining which volume and where it will
+be mounted.
+Volume – Informing Azure Container Apps what kind of mount we’d like
+to use.
+For replica-scoped mounts, we will use the
+following definition:
+volumes:
+  - name: <volume-name>
+    storageType: EmptyDir
+The important thing here is using
+EmptyDir
+for
+storageType
+. This informs Azure Container Apps that we want to use a replica-scoped mount instead of Azure Files. For an Azure Files mount, the definition will be similar – it requires one more
+field though:
+volumes:
+  - name: <volume-name>
+    storageType: AzureFile
+    storageName: <azure-storage-name>
+The next step is defining a volume for your service. This step is the same for both replica-scoped mounts and
+Azure Files:
+volumeMounts:
+  - volumeName: <volume-name>
+    mountPath: /<path>
+Remember
+that
+<path>
+defines where
+a volume will be mounted. It’s the location that will be accessed by your application so it’s important to have it aligned with your code base. As a reference, look at the following YAML definition, which presents where volume mounts
+are defined:
+template:
+    containers:
+    - image: afdch11cr.azurecr.io/app:2.0
+      imageType: ContainerImage
+      name: afd11
+      volumeMounts:
+        - volumeName: <volume-name>
+          mountPath: /<path>
+    volumes:
+    - name: afd11
+      storageType: EmptyDir
+Once you have your mounts defined (remember, you can have more than a single mount configured), save the YAML on your computer and use the following command to update your
+container app:
+az containerapp update \
+--name <container-app-name> \
+--resource-group <resource-group-name> \
+--yaml <filename>.yaml
+When the deployment is completed, the mount should be available for your application and visible as
+would any other file available inside the
+mounted filesystem.
+Note
+Adding a mount creates new revisions for your container app. If you have five active revisions and add a volume mount, you will see that they will become inactive, and Azure will create new revisions instead. This means that adding a volume mount isn’t treated as deploying a new revision but rather reconfiguring all the
+existing ones.
+Let’s discuss one more topic related to the management of Azure Container Apps, which is
+session management.
+Using session affinity in Azure Container Apps
+Session affinity is a feature
+used in stateful applications, which
+allows you to ensure that a user is always routed to the exact same instance of your service. To understand the problem, let’s take a look at the following diagram (
+Figure 11
+.11
+):
+Figure 11.11 – User accessing multiple instances of the same service when local state exists
+If each instance of your service has its own state, a user accessing different instances may experience issues when interacting with your application. For instance, let’s say you’re building an online shop and allow a user to stash multiple orders. If orders for a user are stored inside a local state (local cache), not being able to control which instance is accessed with each request would mean that one-time orders are visible and, with the next request, there are none. Session affinity solves that problem by routing a user to the same instance for the duration of the session (sometimes this feature is called
+sticky sessions).
+Note
+It’s important to remember that session affinity is available only in single-revision deployments with HTTP ingress enabled. Unfortunately, you cannot use it if your service uses multiple revisions. If you’re confused by that statement, remember that revisions aren’t equal to replicas. Each revision represents a different version of your service, while a replica is another instance of the
+same revision.
+To enable session
+affinity, use the
+following
+command:
+az containerapp ingress sticky-sessions set \
+    -n <container-app-name> \
+    -g <resource-group-name> \
+    --affinity sticky
+Once enabled, Azure Container Apps will ensure that ingress handles all the requests in the context of a user. Using session affinity isn’t a recommended approach as it limits the ability of Azure Container Apps to evenly distribute traffic. If you don’t need it, try to avoid
+enabling it.
+That’s all for the management of Azure Container Apps. Let’s now talk about use cases for
+this service.
+Learning about use cases
+As discussed at the beginning of this chapter, Azure Container Apps
+is a great service for building more complex systems without the complexity introduced by platforms such as Kubernetes. It abstracts away lots of difficult things such as cluster management, controllers, and resource management, and allows you to focus on application development. Of course, Azure Container Apps isn’t as simple as Azure App Service. Having an additional layer to work with (containers) requires additional steps to be able to deploy an application. On the other hand, for most production systems, you still need to introduce additional layers and infrastructure components to follow the best practices. For instance, if you work with web applications and need to inject secrets into them, you will need to incorporate some kind of secrets store to work with them in a secure manner. Another example would be storage mounts – if you’re unable to natively integrate with them using the API provided by your hosting platform, you will need to implement the whole logic on your own. This takes time and is error prone. Azure Container Apps provides that as part of
+its functionality.
+When it comes to actual use cases and scenarios, Azure Container Apps is a great choice for the
+following applications:
+Microservices
+Modular applications that need to be hosted as
+separate services
+Event-driven applications (when integrating
+with KEDA)
+Jobs
+One of the
+interesting topics is using Azure Container Apps as a hosting platform for microservices. While you can use that service without any additional layers and just start deploying multiple applicatio
+ns, there’s also a possibility to integ
+rate them with Dapr (
+https://docs.dapr.io/concepts/overview/
+). Dapr is a dedicated
+runtime for hosting distributed applications. It comes with a variety of useful features, such as the publish and subscribe mechanism, actors’ pattern, workflows, jobs, and many more. I strongly recommend you take a look at the provided link to have the full picture of the capabilities of that platform. With Dapr, you can easily transform your instance of Azure Container Apps into a microservices platform. You can read more about integration
+here:
+https://learn.microsoft.com/en-us/azure/container-apps/dapr-overview
+.
+In general, Azure Container Apps is quite a generic service. It allows you to host various applications sharing the same toolset without making many changes. This makes it quite an interesting choice for modern applications that focus on cloud integrations, need to be scaled individually and dynamically, and require portability thanks
+to containerization.
+That’s all for
+Chapter 11
+! Let’s summarize all the lessons and see what awaits in the
+next chapter.
+Summary
+In this chapter, we talked about Azure Container Apps – a modern and flexible platform for hosting containerized applications. We discussed the differences between this and other Azure services and saw how our applications can be deployed to a container app. One of the most important topics was revision management, which allows you to have multiple versions of your application hosted in the
+same environment.
+Another important topic was application management using Azure Container Apps features. Things such as volume mounts and session affinity are very often really important from the implementation perspective for proper state management and performance. With Azure Container Apps, having those things implemented is just a matter of a few changes to the configuration of a
+container app.
+In the next chapter, we’re going to cover the last topic related to containers in Azure, which is hosting containerized applications using Azure
+App Service.
+Join the CloudPro Newsletter with 44000+ Subscribers
+Want to know what’s happening in cloud computing, DevOps, IT administration, networking, and more? Scan the QR code to subscribe to
+CloudPro
+, our weekly newsletter for 44,000+ tech professionals who want to stay informed and ahead of
+the curve.
+https://packt.link/cloudpro
+
+12
+Hosting Containers with Azure App Service
+In
+Chapter 3
+, we discussed how you can host your application using Azure App Service. To run our application there, we needed to deploy a package containing the binaries of our service, choose one of the deployment methods, and prepare the correct configuration. Such a hosting model works best if you don’t need to worry about portability or vendor lock or just want to have an application up and running quickly. However, if you need to be prepared for changes such as a change of cloud vendor or hosting platform, it’s best if you containerize your
+application first.
+Fortunately, Azure App Service supports hosting containerized applications with minimal changes to the rest of the functionalities. If you have an existing application hosted as an Azure web app, you can migrate it to containers while keeping the rest of the
+infrastructure intact.
+In this chapter, we’re going to cover the following
+main topics:
+Integrating Azure App Service with
+container registries
+Deploying a containerized application to Azure
+App Service
+Solving common problems with
+containerized applications
+Learning about
+use cases
+Technical requirements
+To perform the exercises in this chapter, you will need the
+following tools:
+Azure CLI
+Container engine and CLI (such as Docker Desktop or Colima – you can also use Podman, but you will need to adjust the commands in
+the exercises)
+Integrating Azure App Service with container registries
+When
+working with containers in
+Azure App Service, the most important thing is integrating it with a container registry. It’s possible to use both Azure Container Registry and an external registry if needed (or even a public one, for instance, Docker Hub). The choice depends on the use case or scenario, but for most of the typical business scenarios, you will select a private registry over a public one (due to security, compliance,
+or regulations).
+In this section, we will configure Azure App Service with Azure Container Registry. In order to do that, we need both the container image and the infrastructure. Let’s start with a containerized application and a
+container registry.
+Preparing an application
+To keep things simple, let’s
+prepare an HTML-based application, which we will host using
+nginx
+. Here’s the code for it, which will be displayed to a user when they
+access it:
+<html>
+<head>
+    <title>Chapter 12</title>
+</head>
+<body>
+    <h1>Hello!</h1>
+    <h2>
+        This is containerized application for Azure App
+        Service!
+    </h2>
+</body>
+</html>
+Note
+Remember to save the HTML code as
+index.html
+in the same directory as the Dockerfile you will create in
+a moment.
+Now, we need to
+prepare a Dockerfile, which we will use to build a container image. As we only need to select a base image and copy the HTML file, we will need only two lines to have a
+working application:
+FROM nginx:latest
+COPY index.html /usr/share/nginx/html/index.html
+We have our application ready. Before we build the container image, let’s prepare the
+container registry.
+Creating a container registry
+As we will use Azure
+Container Registry to host our container image and Azure App Service integration, all we need now is to run the following Azure CLI command. It will create a resource group and
+a registry:
+az group create \
+-n <resource-group-name> \
+-l <location>
+az acr create \
+-g <resource-group-name> \
+-n <container-registry-name> \
+--sku Basic
+az acr show \
+-g <resource-group-name> \
+-n <container-registry-name> \
+--query loginServer
+The last command will display a login server (which is basically the prefix needed for a container image, so it’s pushed to the correct registry). It should be in the following format:
+<container-registry-name>.azurecr.io
+. Once the registry is created and you have the value of the login server, we can proceed to the next step, which is building a
+container image and pushing it to
+the registry.
+Building and pushing a container image
+To push a
+container image to
+Azure Container Registry, first, we need to build and name it. The most important thing here is naming the container image with a prefix (being the login server we got in the previous section), so that Docker (or any other container engine you have installed) knows where to push the image. Let’s use the following commands to build and push
+the image:
+docker build -t <login-server>/ch12/app:latest .
+docker push <login-server>/ch12/app:latest
+As the application is very simple, the whole process should only take a few seconds. Remember, though, that you may need to perform the login operation against the created container registry. If that’s the case, use the
+az acr login
+command we described in
+Chapter 9
+.
+Once the container image is available in the container registry, we can proceed with the next step, which is using the container image as the source for the application hosted in Azure
+App Service.
+Deploying Azure App Service
+To be able to host a containerized
+application in Azure, first, we need to deploy its infrastructure. We will start with the Azure App Service plan, as it’s a prerequisite for deploying any Azure
+web app.
+Let’s use the following command to proceed
+with deployment:
+az appservice plan create \
+-g <resource-group-name> \
+-n <app-service-plan-name> \
+--sku F1 \
+--is-linux
+The command we’re using will create a free Linux plan (as indicated by the
+F1
+value of the
+sku
+parameter and the
+--is-linux
+switch in the command). Once the plan is ready, we can proceed with creating the Azure web app. This is the command we will
+be using:
+az webapp create \
+-n <webapp-name> \
+-g <resource-group-name>  \
+-p <app-service-plan-name> \
+--container-image-name <image-name> \
+--container-registry-password <registry-password> \
+--container-registry-user <registry-user>
+As you can see, the command requires us to provide the username and password of a user with access to the registry. In the case of Azure Container Registry, we could obtain that once the admin user is enabled. You can do that using the
+following command:
+az acr update -n <registry-name> --admin-enabled true
+az acr credential show -n <registry-name>
+As the result of running that command, you should get the following
+JSON result:
+{
+  "passwords": [
+    {
+      "name": "password",
+      "value": "M9mq..."
+    },
+    {
+      "name": "password2",
+      "value": "85HPX..."
+    }
+  ],
+  "username": "<registry-name>"
+}
+Note
+Remember that, in your case, the values of secrets presented by the command will be different as they’re unique for each
+container registry.
+With both the
+username and passwords obtained, we can create an Azure web app, which will use the container image created in the previous step. Use the
+az webapp create
+command described previously and run the following one to get
+the URL:
+az webapp show \
+-n <webapp-name> \
+-g <resource-group-name> \
+--query defaultHostName
+The result of running the
+show
+command should look like mine, which is
+the following:
+afdch12.azurewebsites.net
+Try to access the
+website using your browser. Once the application starts (it may take a while in the very beginning as Azure needs to spin up the whole runtime and download the container image), you should be able to see the
+following result:
+Figure 12.1 – Working containerized application hosted using Azure App Service
+As you can see, there’s no additional configuration needed to be able to use containers to host a web application using Azure App Service. From now on, you can leverage the very same features (app settings, deployment slots, or even custom domains) as it was a traditional application hosted directly in
+the process.
+One important thing here, though, is the fact that we used admin credentials for authenticating against Azure Container Registry. There’s one more possibility to access the registry, which doesn’t require providing credentials during deployment. We could use a managed identity and proper RBAC configuration, so no secrets are needed there. Let’s see how we can
+configure that.
+Deploying Azure App Service with a managed identity
+Azure CLI
+has a dedicated parameter for deploying
+Azure web apps with proper access to Azure Container Registry. Here’s the full command needed to create another web application with the same container image
+used previously:
+az webapp create \
+-n <webapp-name> \
+-g <resource-group-name> \
+-p <app-service-plan-name> \
+--container-image-name \
+    <registry-name>.azurecr.io/ch12/app:latest \
+--acr-use-identity
+Note that we’re not
+using credentials for our registry
+here – instead, we’re instructing Azure CLI to configure our Azure web app with a system identity and assign an
+AcrPull
+role to it on the correct scope (which is Azure Container Registry hosting the
+container image).
+Alternatively, you could use the following command to configure and achieve the
+same result:
+az webapp create \
+-n <webapp-name> \
+-g <resource-group-name> \
+-p <app-service-plan-name> \
+--container-image-name \
+    <registry-name>.azurecr.io/ch12/app:latest \
+--scope <container-registry-resource-id> \
+--assign-identity [system] \
+--role AcrPull
+As you can see, we’re explicitly instructing Azure CLI with the selected role and scope where it should be assigned. We’re also providing
+[system]
+to indicate that we want to use the system-assigned
+identity here.
+Note
+If you want, you could use a user-assigned identity. Use
+az webapp create –h
+to see how to properly configure the command to use that kind of
+managed identity.
+The benefit of
+using a managed identity
+instead of admin credentials comes from the fact that a managed identity offers a much easier deployment model, improved security, and simpler maintenance. Using admin credentials requires you to find a secure way to store and then pass them. While they may seem like the easiest way of integrating with Azure Container Registry, you should avoid them if you can use a managed identity, which simplifies the operations and improves security.
+For other private registries though (which are hosted in other clouds or on-premises), you may not be able to use a managed identity. If that’s the case, sticking with standard credentials will be
+a must.
+Let’s see now how containerized applications can be deployed and how to deploy multi-container applications using Azure
+web apps.
+Deploying a containerized application to Azure App Service
+In the previous
+section, we saw how we
+can deploy and host a containerized application using Azure App Service. While the process itself should now be self-explanatory, having the ability to host containers using that Azure service introduces some additional interesting capabilities. In this section, we’re going to see how we can deploy a multi-container application using a single instance of Azure App Service. First, however, let’s discuss what a multi-container application is and the benefits of
+using those.
+Designing a multi-container application
+When designing a
+web application, you need to consider its architecture. There are
+multiple possibilities:
+Monoliths
+: Software
+architecture where an application is deployed as a single unit, meaning you have a single package to manage but you’re unable to granularly control how individual features are provisioned
+and scaled.
+Modular monoliths
+: An architecture similar to monoliths but providing more granular control over
+individual features of an application, thanks to placing them in separate packages. Even though modular monolith splits features into separate beings, the application as a whole is still mostly managed as a
+single unit.
+Microservices
+: A highly
+scalable and robust system architecture, which treats different modules of your application as separate services with dedicated deployment pipelines and their own infrastructure. It favors asynchronous communication using components such as queues instead of
+synchronous ones.
+There are various reasons why
+you’d need to split your application into
+multiple services:
+Easier separations
+of concerns
+Isolated deployments, providing enhanced flexibility when releasing
+new versions
+Having multiple teams working on
+individual services
+Individual scaling out/scaling in
+of services
+If you use containers, you can easily distribute your application across multiple environments. While containers themselves are not that useful in distributing monoliths (not because it’s not possible, but rather because monoliths are rarely portable due to their size and the internal complexity they bring), you could leverage them in modular monoliths or microservices. In fact, dividing your application into smaller pieces and containerizing them brings us to the concept of
+a
+multi-container application
+. A multi-container application could be considered as one of the following
+two concepts:
+An application consisting of multiple containers hosted across multiple environments. Each container is a separate service, which can be deployed individually or as part of a bigger package. In that definition, containers aren’t hosted within the same
+container environment.
+An application using multiple containers to isolate (separate) different concerns such as monitoring, logging, or
+routing requests.
+When talking about separation, there’s
+one more concept that is worth mentioning –
+sidecars
+. The best
+way to describe those is through a diagram (take a look at
+Figure 12
+.2
+).
+Figure 12.2 – Simple microservices architecture with sidecars
+Sidecars
+allow you to offload common features such as monitoring, logging, load balancing, and authorization to a dedicated container. Such a container is tied to a container running your service and acts as a proxy for all incoming and
+outgoing communication.
+Note
+Sidecars are one of the main concepts of service meshes. Take a look at the following link to read more about one of the most popular service mesh
+products (
+Istio):
+https://istio.io/latest/about/service-mesh/
+.
+Besides sidecars, container-based architectures have also a concept of an
+init
+container. Those containers are used most of the time to initialize the main container (service) and perform operations such as
+the following:
+Downloading files
+Migrating databases
+Bootstrapping
+an application
+When it comes to
+Azure App Service, you can use sidecars when deploying your application. While it won’t be a full-blown container orchestration such as Kubernetes (or even Azure Container Apps), being able to divide your application into multiple containers brings lots of flexibility and allows you to separate the main service containing business logic from
+the infrastructure.
+Before we dive deeper into the topic, let’s discuss how Azure App Service, Kubernetes, and Azure Container Apps differ and what one can do to select a proper service for their needs. First, let’s discuss the operations required for deploying and managing an instance of a service. While Azure App Service and Azure Container Apps offer a simple deployment model that abstracts away lots of complexity related to routing, configuration, and scalability, in Kubernetes, you need to deeply understand both the network and software stack used for a cluster. The same applies to security – Azure App Service and Azure Container Apps are simple enough to avoid the most common misconfiguration issues. With Kubernetes, you control various levels of the software stack and can deploy various applications onto the same cluster. This means you need to consider both inter- and
+intra-service communication.
+In fact, in many scenarios, having a Kubernetes cluster for a single application may be an overkill. A common approach is to have a single Kubernetes cluster to host several different applications. This simplifies and optimizes the deployment process but requires significant initial effort to set up everything
+from scratch.
+If your goal is only to deploy a single application, you will most likely benefit from the simplest setup, which is Azure App Service. If you are looking for more advanced patterns such as event-driven systems and microservices, Azure Container Apps will be a good starting point. For full control over your system and infrastructure, consider using Kubernetes (especially the managed ones such as Azure
+Kubernetes Service).
+Let’s now prepare a simple application consisting of a main service and a sidecar and deploy it to Azure using Azure
+App Service.
+Preparing a multi-container application
+To prepare an application
+consisting of a main service and a sidecar, we will need two separate Dockerfiles. The first Dockerfile will be a modified version of our HTML web page and will look
+like this:
+<html>
+<head>
+    <title>Chapter 12</title>
+</head>
+<body>
+    <h1>Hello!</h1>
+    <h2>
+        This is containerized application for Azure App
+        Service!
+    </h2>
+</body>
+<script>
+    var response = fetch('http://localhost:3000');
+    response.then(async _ => console.info(await _.text()));
+</script>
+</html>
+This web page contains a small JavaScript script, which makes an HTTP
+GET
+request to
+http://localhost:3000
+. The reason why we’re calling this specific endpoint will be clear in
+a moment.
+To simulate a sidecar, let’s use a simple API hosted as a separate container. To make it lightweight, we will use Express.js with Node.js as our
+web server:
+const express = require('express')
+const app = express()
+var cors = require('cors')
+const port = 3000
+app.use(cors())
+app.get('/', (req, res) => {
+  res.send('Hello World!')
+})
+app.listen(port, () => {
+  console.log(`Example app listening on port ${port}`)
+})
+As you can see, we’re defining
+a constant value,
+const port = 3000
+, which exposes our API using port
+3000
+. This is why the script from the HTML page is calling the localhost using this specific port – the sidecar is hosted within the same network, so all we need is to know which port
+it’s using.
+Now that we have the code for our application, we can build the container images. The easiest way to do that (and test the application) is using Docker Compose. To leverage it, we need to introduce additional configuration written
+in YAML:
+services:
+  main:
+    build:
+      context: .
+      dockerfile: main.Dockerfile
+    ports:
+      - "8080:80"
+  sidecar:
+    build:
+      context: .
+      dockerfile: sidecar.Dockerfile
+    ports:
+      - "3000:3000"
+The last step will be introducing
+two separate Dockerfiles. The one named
+main.Dockerfile
+is responsible for building our
+web page:
+FROM nginx:latest
+COPY index.html /usr/share/nginx/html/index.html
+The second one builds
+our API:
+FROM node:23
+WORKDIR /usr/src/app
+COPY package*.json ./
+RUN npm install
+COPY . .
+EXPOSE 3000
+CMD [ "node", "sidecar.js" ]
+Note that you should name the HTML file as
+index.html
+and the API (sidecar) file as
+sidecar.js
+. While it’s not required, making changes will force you to
+adjust Dockerfiles.
+Once everything is ready, run the following command to start
+both containers:
+docker compose up
+After a moment, both container images should be ready and the containers up and running. To validate the setup, open your browser and open
+http://localhost:8080
+. As a result, you should see the web page we used previously in this chapter (
+Figure 12
+.3
+):
+Figure 12.3 – Web page hosted inside a container locally
+To confirm that our
+web page communicates with our sidecar, open
+Developer Tools
+(
+F12
+in most browsers) and check the console. If everything works, you should see a
+Hello World!
+message (
+Figure 12
+.4
+).
+Figure 12.4 – Hello World! message returned from the sidecar
+Note
+If you don’t see the message in the console, make sure you’ve set the proper message level. Messages returned from the sidecar are logged
+as information.
+Great, it seems our multi-container application is running properly. Now we need to build and push container images to the
+container registry.
+Pushing container images to a container registry
+To use both images as sources for our
+application, we need to push them both to a container registry. To do that, simply run the
+docker build
+command twice:
+docker build -f main.Dockerfile -t <registry-name>.azurecr.io/ch12/main:latest .
+docker build -f sidecar.Dockerfile -t <registry-name>.azurecr.io/ch12/sidecar:latest .
+Now, all you need is to run the
+docker push
+command to push the images to the registry. Once they’re available in the registry, we can perform the last step, which is deploying Azure App Service using both
+container images.
+Deploying multi-container application
+Deployment of a
+multi-container application is similar to the deployments we performed previously in this chapter. The only difference is using additional parameters to indicate that we want to use additional configuration. Here’s the command you could use to deploy
+the application:
+az webapp create \
+-n <webapp-name> \
+-g <resource-group-name> \
+-p <appservice-plan-name> \
+--acr-use-identity \
+--multicontainer-config-type COMPOSE \
+--multicontainer-config-file docker-compose-deploy.yml
+Note
+The assumption here is that you will be using the same Azure App Service plan and Azure Container Registry as at the beginning of the chapter. If you’re using different instances, make sure you’re adjusting the commands and also that you created
+the resources.
+Before we
+complete the deployment, though, we need to make adjustments to the Docker Compose file as currently it builds the images and doesn’t reference them. To make the changes, create a new file, name it
+docker-compose-deploy.yml
+, and introduce the
+following amendments:
+services:
+  main:
+    image: afdch12.azurecr.io/ch12/main:latest
+    ports:
+      - "8080:80"
+  sidecar:
+    image: afdch12.azurecr.io/ch12/sidecar:latest
+    ports:
+      - "3000:3000"
+Once the application is deployed, you can make the same verification of the correctness of the setup by entering the website URL. Note here that deployment to Azure didn’t require making any changes to the code itself besides adjusting the Docker Compose file. From now on, a single Azure App Service instance will be hosting multiple containers, and you can leverage the fact that they will be using a single host (no need to handle DNS, routing, and other networking concepts). Let’s discuss now the use cases for using multiple containers with a single Azure App
+Service instance.
+Understanding use cases of multi-container deployments
+When designing an application, you
+will be applying business requirements atop a technical solution you will choose. The requirements themselves will instruct you on the proper design and architecture of the whole system. The capability of Azure App Service to host multiple containers inside the same host allows you to implement a subset of design, which would normally require choosing other services such as Kubernetes, Azure Container Apps, or
+similar platforms.
+You may wonder what’s the actual difference between Azure App Service hosting multiple containers and other services mentioned. To visualize the difference, let’s take a look at
+Figure 12
+.5
+.
+Figure 12.5 – High-level architecture of Azure App Service vs. Azure Container Apps
+When comparing Azure App Service with Azure Container Apps, the high-level architecture will be the same. Both services require additional components (plan/environment) to provide infrastructure, and both act as specialized layers, which enable you to configure them without much effort. There’s one key difference here, though – Azure App
+Service is a service focused more on typical web applications without a need to provide additional features such as load balancing, granular access to various features of an application, or sophisticated integrations with a modern stack including logging and monitoring. It is also much more common to use Azure App Service to host one big application when compared to Azure Container Apps, which was designed as a platform to handle workloads designed
+as microservices.
+Note
+It’s worth mentioning that lots of advanced features for load balancing, API integrations, and security for Azure App Services are delivered by additional Azure services such as Azure Traffic Manager, Azure Front Door, Azure Application Gateway, Azure Key Vault, Azure App Configuration, and Azure API Management. While they can also be integrated with Azure Container Apps, they were originally quite a standard services stack when working with web applications
+in Azure.
+We can find a much bigger difference when comparing Azure App Service to Kubernetes (see
+Figure 12
+.6
+).
+Figure 12.6 – High-level architecture of Azure App Service compared with Kubernetes
+As you can see, when
+using Kubernetes, we will have many more infrastructure-related concepts as we need to consider and configure load balancing between multiple nodes and decide how our services will be replicated and what happens if they crash. Kubernetes is also much more challenging when deploying services as there are multiple deployment strategies that you may need to take
+into account.
+The question now is whether multi-container (or even single-container deployments) are actually valid solutions when hosting an application in Azure. To better understand them, let’s separate those into two
+isolated scenarios.
+Single-container deployments
+Containerizing an application is always
+a good solution if you want to keep your application portable. By packing it as a container image, you can easily switch hosts and environments as long as there are no external dependencies, which also need to be configured. When an application is available as a container image, you can perform your first deployment using Azure App Service and then, when you refine the architecture and design, it will be possible to switch to another service without making many changes to the application itself (apart from extracting certain features as
+separate services).
+Multi-container deployments
+Deploying your application using Azure
+Container Apps or Kubernetes seems like a very modern solution that applies to all greenfield projects. This is only partially true as many applications struggle with leveraging all the features available thanks to those platforms (service discovery, advanced deployment strategies, automated rollbacks, and many more). To be able to fully utilize the features, you need to design your application to use them, which is not
+always possible.
+Using multi-container deployments in Azure App Service is a great idea if you want to gradually migrate from one big application to multiple services. Start with a single container, extract a part of business logic as a separate service, and simply deploy it as another container. As such a deployment doesn’t introduce much complexity (you don’t need to worry about DNS and service discovery, no network rules are in place and connectivity stays as your services would work on the same machine), making such a change should be swift. Then, if you’re satisfied with the results, you can think about introducing more changes and, finally, switching to
+another service.
+Personally, I also like multi-container deployments in Azure App Service for using the same tool that many developers already use to run an application locally, which is Docker Compose. This provides the benefit of keeping the same DevEx for both development and deployments. Even though you need to keep and maintain one more Compose file as the source for Azure App Service, it’s still a much simpler approach than YAML files used for
+Kubernetes-based deployments.
+For additional visualization of the concept of refining an application and moving from Azure App Service to other services, take a look at
+Figure 12
+.7
+.
+Figure 12.7 – Evolution of architecture when using containers with Azure App Service
+Let’s discuss now how to solve common problems with containerized applications when using Azure
+App Service.
+Solving common problems with containerized applications
+When you containerize an application, you need to remember that you are adding one more layer atop your code. This means that you may face additional challenges when running and hosting it. In this section, we will discuss common issues and problems that may arise when an application becomes containerized and how to solve them using Azure
+App Service.
+Let’s start with local
+environment preparations.
+Preparing and unifying a local environment
+If your application is
+containerized, it means it has become portable enough to run on any host that has a container engine installed. The truth here is that we’re exchanging one problem (installing all the dependencies in the same way across hosts) with another (ensuring the container engine is installed and developers are familiar with it). Personally, I see two problems now when it comes
+to containerization:
+Unifying a container engine
+and CLI
+Providing a unified way to run a containerized application locally with all
+its dependencies
+Some time ago, the golden standard for running containers locally was Docker Desktop. Unfortunately, as it requires a paid license after meeting certain criteria when it comes to the company’s headcount and revenue, many people started to look for alternatives. In macOS systems, one of t
+he best tools to run containers is
+Colima (
+https://github.com/abiosoft/colima
+). For Windows-based
+computers, you may be interested in
+Podman (
+https://podman-desktop.io/docs/intro
+). The main issue here is the difference in interfaces between Colima and Podman – for local development though, it may
+be acceptable.
+For running an application with all the dependencies, the best choice is still to use Docker Compose. It’s part of Docker installations and can be also installed separately if needed to be used with Colima
+and Podman.
+Note
+Podman requires you to install Docker Compose as an executable available on your computer. As Compose has become part of Docker installation, you may find it difficult to find proper instructions. Personally, I find it quite easy to satisfy that requirement by downloading the executable
+from
+https://github.com/docker/compose/releases
+.
+When working with
+Azure App Service, the tool used locally for starting a container won’t matter much. The most important thing is the tool used for local orchestration. Docker Compose seems like a great match, so it’s really worth it to try to integrate it with the toolset you’re using for
+your project.
+Let’s now discuss another challenge with containerized applications, which is integration with logging and
+monitoring tools.
+Logging and monitoring of a containerized application
+When working with
+containerized applications, it’s important to find a
+tool that allows you to easily log and monitor the behavior of your application. In the context of Azure App Service, learning how to check the logs will be even more important as you don’t have the same access level as you’d have when working with platforms such as Kubernetes or when hosting an application using IaaS (Azure Virtual Machine, for instance). Azure App Service offers limited features when it comes to accessing container logs (but it’s still possible). When talking about logging and monitoring in general, the easiest platform to implement and integrate with will be Azure Monitor (in most cases, via Azure
+Application Insights).
+Container logs for Azure App Service are easily accessible in the Azure portal. If you go to the deployed application, you will find the
+Deployment Center
+page in the menu on the left (see
+Figure 12
+.8
+).
+Figure 12.8 – Deployment Center in the Azure App Service menu
+When
+you go there, there’s a tab named
+Logs
+(
+Figure 12
+.9
+). Here, you
+will find all the information related to the application running inside
+the container.
+Figure 12.9 – The Logs tab in Deployment Center
+It’s important to remember that the logs presented here are related only to the provisioning phase of an application. It means that if your application sends logs in runtime, those won’t be
+presented there.
+Note
+Logs presented in
+Deployment Center
+are useful in troubleshooting issues when the application starts. Many times, invalid configuration causes the whole container to crash when starting. This makes debugging difficult as, even if you have Azure Application Insights or a similar tool implemented, it may not start before a
+container crashes.
+For most scenarios, though, the best approach for logging and monitoring is using a dedicated service. In the case of containerized applications, the fact that you’re using containers shouldn’t affect the technology stack that much. You can safely use Azure Application Insights as it offers quite a sophisticated set of features, simple configuration, and a
+cloud-native approach. The downside of that
+approach is that it may be difficult to extract logs from Azure Monitor and ingest them somewhere else (for instance, because you’re using other cloud vendors and built a generic platform for
+logs collection).
+When working with containers locally, you should be able to pretty easily collect and read all the logs as you have full access to the container engine running on
+your computer.
+Let’s now discuss the problem of cold starts in
+containerized applications.
+Working with cold starts in containerized applications
+As containerized applications introduce additional layers of abstraction over typical runtime, it becomes obvious that starting an application will be a longer process. Generally speaking, if performance is the key to your application, you should consider using containers unless you’re able to spin them up really quickly. In Azure App Service, running a containerized application introduces a significant delay when starting an application. The initial time needed to start it (before warming up) is called a
+cold start
+. Cold starts
+happen in both on-premises and cloud environments. The difference here is the frequency. As cloud providers want to optimize how much they spend on the infrastructure, they will try to deallocate your resources as often as possible. This means that
+you need some kind of health check to keep your application up
+and running.
+In Azure App Service you can leverage the
+Always On
+feature to have your application available, but you need to consider what happens when you deploy a new version. Deployments mean that your application needs to be restarted. If your application is containerized, it will cause a significant delay when the application restarts. This can be mitigated by deploying new versions outside of the core hours of your business, but it’s not always possible. In such a case, you could leverage deployment slots, which allow you to swap new versions without affecting users (or at least limiting the effect of new deployment on users who are
+currently active).
+Note
+Remember that the
+Always On
+feature is available only for paid tiers of the Azure App Service plan. You cannot use it when using the Free (
+F1) tier.
+Working with deployment
+slots and containers is technically the same as you would host your application in-process. You don’t need to make any changes to the deployment approach (besides deploying container image instead of code package) and the configuration, and your CI/CD pipelines will stay
+the same.
+In the last section of this chapter, let’s talk about use cases for using containers with Azure
+App Service.
+Learning about use cases
+In this chapter, we talked a lot
+about multiple scenarios where running containers with Azure App Service is an applicable use case. In this section, we will summarize all the findings and try to gather all the information in a single place for better reference. To get started, let’s remind you why one may want to containerize an application. Before containers became popular, the majority of systems were hosted
+in-process
+meaning they were tied to a specific platform. This approach, while it may seem old-fashioned and rather inflexible, brings
+several advantages:
+An application is designed for a dedicated environment, so the challenges are predictable and it’s easier to debug
+an issue.
+It’s almost guaranteed that you can move an application between environments sharing the same configuration without affecting the application’s performance
+and behavior.
+When an application is hosted in-process, most of the time, it offers a better performance when compared to a
+containerized application.
+There’s no need to install and maintain additional tools and platforms – you can run an application using its basic stack (web server
+and runtime).
+As you can see, those are quite serious and important aspects that everyone needs to consider when designing and building an application. So, the question now is why you would need containers for your application. Let’s
+find out.
+Modern applications
+are expected to work in dynamic environments, which may change quite frequently (automated updates, load balancing, serverless platforms, and so on). If that’s the case, it means an application needs to offer a way to quickly move it between hosts. If you need to move an application between hosts, you also need to find a way to quickly install and configure it. Of course, it’s achievable using in-process hosting, but the downside of that approach is that you will often need an additional tool to configure the host. Each application requires a certain set of dependencies that need to be installed prior to deployment. You may prepare your own installation scripts, but most of the time, such operations are offloaded to a dedicated tool such as Ansible, Chef, or Puppet. Containers, on the other hand, encapsulate most of such actions as part of a container image definition. When a developer works on an application that is then containerized, they can manage the majority of the software needed for it to work properly. This aligns with the “shift left” approach, where lots of operations (installing and managing dependencies, customization, and bootstrapping) related to an application are shifted toward developers. Such an approach enables much more robust development of an application as developers know an application the best. When an application is containerized, a developer can prepare a definition (Dockerfile) that describes all that’s needed for an application to start. Then, when a container image is built and pushed to a registry, any other engineer can pull such an image and host it anywhere where containers can
+be hosted.
+Note
+It’s important to remember that not all dependencies can be containerized or included as part of a container image. Databases, message brokers, and external services often need to be configured separately, and it doesn’t matter whether we’re using in-process hosting
+or containers.
+Now, let’s talk about Azure App Service and containers. The first thing to discuss is how the in-process hosting model and containers are linked with each other. I’d like to emphasize that containers shouldn’t be treated as the natural evolution of every application. There are still business cases that shouldn’t be resolved using containers (this includes all the scenarios where platform performance is a priority). Containers are also challenging when you need to run them on a different operating system from Linux-based. For example, people working with .NET are often tasked with building an application that will work with Windows-based tasks only. Running containers on Windows is rather challenging and isn’t considered the best practice. Migrating your application working in-process to containers in such a case will be difficult to justify unless there’s a specific feature of containers you need
+to utilize.
+When it comes to
+Azure App Service as a cloud service itself, you need to consider the scale and architecture of your application to see whether it’s the best choice as a hosting platform. We mentioned that there are alternatives such as Azure Container Apps or Kubernetes (such as Azure Kubernetes Service). Azure App Service will serve the best when your application is a monolith or a modular monolith. The reason why is quite simple to explain – Azure App Service doesn’t offer additional features for containers such as load balancing, quotas and limits for CPU and memory, RBAC, or advanced deployment strategies. Some of those features can be implemented using additional services and resources, and some can be implemented as part of your application. The advantage of native platforms is that they offer those features as their inbuilt functionalities. This means you don’t need to implement and manage them on
+your own.
+The advantage of hosting containerized applications using Azure App Service is the flexibility of such an approach. Once the application is containerized, you will have a subset of features needed for the alternative platforms as well. This simplifies the potential migration in the future and shortens the time needed to make the switch. While it may not be applicable to all the applications, the theoretical possibility for further evolution is important from both a business and architecture point
+of view.
+We’ve now reached the end of
+Chapter 12
+. Let’s summarize all the lessons and prepare for the
+next chapter.
+Summary
+In this chapter, we covered the concept of running containers using Azure App Service. You learned how to prepare your application to use that feature and the potential pros and cons when using that approach. We also discussed the possibility of running a multi-container deployment and
+its benefits.
+We also discussed the differences between Azure App Service, Azure Container Apps, and Kubernetes when it comes to building and deploying an application. We saw that the service we should select will depend on our application’s architecture. In the last part of the chapter, we talked about possible challenges with containerized applications and how to overcome those when using Azure App Service as your
+hosting environment.
+In the next chapter, we’re going to talk about how to use Azure Storage as your service for hosting data. It also marks the beginning of the next part of the book, which is titled
+Storage, Messaging,
+and Monitoring
+.
+
+Part 4:Storage, Messaging, and Monitoring
+In this part, you will explore essential Azure services for storing data, managing messaging between components, and monitoring application health. You’ll learn how to work with both structured and unstructured data using Azure Storage and relational databases. The part also covers implementing message queues to enable reliable communication between services and adding observability using Azure
+Application Insights.
+By the end of this part, you will be equipped to build applications that are not only data-driven but also maintainable, scalable,
+and performance-aware.
+This part contains the
+following chapters:
+Chapter 13
+,
+Storing Data with Azure Storage
+Chapter 14
+,
+Using Queues in Microsoft Azure
+Chapter 15
+,
+Using Relational Databases in Microsoft Azure
+Chapter 16
+,
+Adding Monitoring to Your Application

@@ -1,0 +1,1174 @@
+found on a *nix system depending on the distribution and the type of activity that has occurred in each incident. Craig Rowland of Sandfly Security (
+www.sandflysecurity.com
+) provides a good introduction to Linux forensics on YouTube at
+www.youtube.com/watch?v=yoe8guwauCY
+. He also provides a triage cheat sheet and additional information on Linux compromise assessment at
+www.sandflysecurity.com/blog/compromised-linux-cheat-sheet
+.
+Conclusion
+Analysis of data on disk can offer an immense amount of information to the incident responder. While you may not do a full disk image and analysis of every system impacted in the incident, targeted analysis of the forensic artifacts discussed in this chapter can uncover indicators of compromise and provide a much clearer understanding of what the attacker did on the compromised host. Using a combination of open‐source and commercial tools to maximize the efficiency of this type of analysis will increase your effectiveness as an incident responder.
+
+CHAPTER 12
+Lateral Movement Analysis
+Lateral movement is the act of the adversary moving from one system to another inside your environment to expand their influence and access throughout the network. This is an area where the adversary will often spend a lot of time and during which we have a good opportunity to detect and respond to their attack; however, doing so requires bringing together the various skills we have discussed up to this point. In this chapter, we will explore many of the most common ways attackers use to move laterally in your environment and highlight ways that we may be able to detect and respond to that activity.
+Server Message Block
+Good old Server Message Block (SMB), that ancient protocol used by Windows and *nix systems to enable easy file sharing (and so much more), is designed to allow users to have ready access to the data that they need to do their jobs, no matter where it may be located on the network. Unfortunately, with SMB traffic being extremely common and the tools easy to execute courtesy of Windows pass‐through‐authentication, SMB is also a key attack vector for adversaries. We will start with a broad discussion about SMB and then look at some specific attack vectors that rely on SMB under the hood, such as PsExec and scheduled task abuse, in later sections.
+SMB MITIGATIONS
+Back in the days of Windows NT and 2000, it was quite common to see environments where domains were deployed with built‐in local administrator accounts, with relative identifier (RID) 500, active on every client, each of which had the same password set during original installation. As a result, SMB was commonly used by attackers by simply compromising one local host, stealing the local admin credential, and reusing that credential to access all the machines in the environment remotely. As a countermeasure to this type of attack, Microsoft took several steps. They released the Local Administrator Password Solution (LAPS), which allows Active Directory to assign and manage complex passwords for local administrator accounts on clients and member servers. Microsoft also disabled the ability of local accounts that were members of the Local Administrator's group (except for the default RID 500 user) to remotely access the system with administrator permissions; however, this restriction does not apply to domain accounts. For Windows 10 clients, the default Administrator account (with RID 500) is usually disabled by default. This means that the remaining Local Administrator accounts cannot be used to remotely administer local systems, nor can they attach to the default administrative shares to access the data on the systems. If the RID 500 account is enabled, it can still access the local system remotely. Similarly, domain accounts with administrative permissions can be used to access systems remotely across the network by default. There are several registry and GPO settings that can impact this behavior within a Windows environment. Additional details can be found at
+www.harmj0y.net/blog/redteaming/pass-the-hash-is-dead-long-live-localaccounttokenfilterpolicy
+.
+One of the easiest ways for an attacker to leverage SMB to access a remote system is to use the
+net
+commands, such as
+net use
+, to access storage on a remote system. Fortunately, this type of communication uses standard Windows authentication and therefore will leave event log records showing the associated account logon and logon activity. Recall that when a domain controller authenticates access to a remote system, the account logon events will be located on one or more of the domain controllers. The logon events will occur on the system that was accessed as well as on the system being used by the intruder. Let's look at a few examples. Recall some of the key account logon and logon event IDs from
+Chapter 8
+, “Event Log Analysis,” summarized in
+Table 12.1
+and
+Table 12.2
+.
+Table 12.1
+:
+Account logon events
+EVENT ID
+DESCRIPTION
+4768
+TGT requested
+4769
+Service ticket requested
+4776
+NTLM authentication attempt
+Table 12.2
+:
+Logon events
+EVENT ID
+DESCRIPTION
+4624
+Logon to a system has occurred.
+4625
+Failed logon attempt.
+4634/4647
+Account logoff.
+4648
+Account logon attempted using explicit credentials.
+4672
+Elevated or administrator access granted to a logon.
+4778
+A session was reconnected (such as RDP or fast user switching).
+4779
+A session was disconnected.
+Let's start with a simple baseline example, where a user sits at Client1 and logs on, in a domain environment. The initial login to Client1 would generate the following series of event log records on the domain controllers and on Client1, as shown in
+Figure 12.1
+.
+Figure 12.1
+:
+Standard account logon and logon event IDs
+As you can see, several different events are logged on the domain controller, starting with the request for the ticket‐granting ticket (Event ID 4768). A service ticket is then requested for the client where the user is currently sitting (Event ID 4769 for the computer named Client1), since that system is to be accessed for the logon to complete. We then see a service ticket request (Event ID 4769) for the domain controller itself, since the client will need to log on and use the services of the domain controller in order to complete its request. We also see a service ticket request for the Kerberos ticket‐granting ticket (krbtgt) service, the service responsible for authentication and issuance of the associated tickets. Next, we see a remote logon (Event ID 4624 with a logon type of 3) to the domain controller itself, which is required for processing the authentication on the domain controller. Finally, we see Event ID 4634, recording the end of the remote
+logon session that started with Event ID 4624. You can correlate these two events by their identical logon ID number. On the client itself, we only see Event ID 4624 with a logon type of 2, indicating an interactive logon. When the user eventually logs off, an Event ID 4647 or 4634 should be generated, but depending on how the logoff occurs this may not always be recorded.
+Let's now assume that the same user, who is already interactively logged on to Client1, then requests access to a remote file hosted on Server1. In addition to the logs listed in
+Table 12.1
+and
+Table 12.2
+, you will find new entries as a result of the remote file access (
+Figure 12.2
+).
+Figure 12.2
+:
+Remote file access account logon and logon event records
+On the domain controller will be a new Event ID 4769 recording the request for a service ticket for the remote server (Server1). Since the domain controller will need to be accessed to provide this service, many of the event IDs recorded in
+Figure 12.1
+may also be repeated at the time of this request. The server being accessed (Server1 in this example) will record an Event ID 4624 with a logon type of 3, indicating a remote logon. There should also be an associated Event ID 4634, with the same logon ID, as the session is terminated. Note that access to a remote file share may cause multiple, short‐duration connections to the system hosting the share. This is normal and does not have any direct correlation to the number of files accessed or the length of time during which contents may have been viewed.
+Recall from
+Chapter 8
+that if object auditing is turned on and configured for the shares and/or files accessed, additional log entries may be made on Server1. For example, on the system being accessed, Event ID 5140 (a network share object was accessed) will appear when a shared folder or other shared object is accessed. The event entry provides the account name and source address of the account that accessed the object. The client system initiating the access may show evidence of the connections in the registry key
+NTUSER.DAT\Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2
+.
+Finally, on the client being used to initiate the access (Client1), we may find Event ID 4648 (use of explicit credentials), depending on the way the remote
+system was accessed. For example, if using the Windows Explorer GUI to input a universal naming convention (UNC) path to a remote resource, the
+svchost
+process hosting the Netlogon service makes the request on behalf of the user. Therefore, Event ID 4648 will be recorded showing that the SYSTEM Security ID explicitly used the user's credential, since the Netlogon service makes the request on behalf of the user and uses the user's credential (via an impersonation token), instead of the security token under which the Netlogon service is running, to make the request (shown in
+Figure 12.3
+). You will also see Event ID 4648 recorded (or possibly an Event ID 4624 with a logon type of 9) when a user accesses a program using the
+runas
+command or provides explicit credentials into a command such as
+net use
+. If a user issues a command such as
+net use * \\server1\IRShare
+to mount a remote share, that would not result in the generation of Event ID 4648 (since the user's current credential is used as part of pass‐through authentication). On the other hand, if the user explicitly provided an alternate credential with the command net use * \\server1\C$ /user:administrator, then that would result in an Event ID 4648. We will explore additional examples later in this
+chapter
+.
+Figure 12.3
+:
+Event ID 4648 showing explicit credential use
+Looking for unusually large numbers of systems that have been accessed remotely by a single account (indicated by Event ID 4624 with a logon type of 3) can be a good indicator that an account has been compromised and is being used maliciously for lateral movement. The LogonTracer tool mentioned in
+Chapter 8
+can help with this type of analysis by showing statistics related to activity of accounts and hosts, as well as by providing a graph representation of activity to help identify anomalies. Once an account has been identified as compromised, or at least suspicious, PowerShell's
+Get‐WinEvent
+cmdlet's
+‐FilterXML
+parameter (discussed in
+Chapter 8
+) can be used to help home in on event log records related to that account throughout the enterprise to better quantify the extent of malicious activity and to identify additional systems that may contain evidence of adversary actions.
+If workstations in your environment do not usually have administrator accounts logging into them (most of the time, users have only domain user accounts), scanning your workstations for Event ID 4672 (special privileges assigned to new logon) may help identify privileged accounts that are being used maliciously. Additionally, looking for Event ID 4776 (NTLM authentication requests) on clients and member servers may provide evidence of attempts to use local accounts to bypass domain authentication.
+In addition to evidence of lateral movement using authenticated SMB access that may be found in the event logs, network indicators can be very valuable here. Zeek, mentioned in
+Chapter 7
+, “Network Security Monitoring,” parses SMB communications from the wire and records details of the communications across several different Zeek log files. These include
+smb_cmd.log
+,
+smb_files.log
+, and
+smb_mapping.log
+. If event log data does not exist to track SMB activity, consider leveraging network security monitoring to help locate malicious use of SMB.
+Another valuable potential indicator of malicious activity is to look for logon attempts from systems that are not members of your domain. Such attempts may indicate that an attacker has gained access to your network (such as through a Wi‐Fi access point or lack of perimeter controls) and is using stolen credentials to move laterally throughout the environment.
+ADDITIONAL RESOURCES
+Detection of lateral movement is a critically important aspect of modern network defense, and several resources are available to you to help. This book's website,
+www.AppliedIncidentResponse.com
+, has a “Lateral Movement Analyst Reference” PDF that contains a great deal of material that you can keep handy for quickly locating the information that you need.
+In addition, Rob Lee and Mike Pilkington created an outstanding incident response and threat hunting poster that contains many of the artifacts discussed here and more. It is an essential reference for any incident responder or threat hunter and can be downloaded from:
+https://digital-forensics.sans.org/media/SANS_Poster_2018_Hunt_Evil_FINAL.pdf
+You can also find tons of useful information in the following guides:
+From the European Computer Emergency Response Team:
+https://cert.europa.eu/static/WhitePapers/CERT-EU_SWP_17-002_Lateral_Movements.pdf
+From the Japan Computer Emergency Response Team Coordination Center:
+www.jpcert.or.jp/english/pub/sr/20170612ac-ir_research_en.pdf
+From the U.S. National Security Agency:
+https://apps.nsa.gov/iaarchive/library/reports/spotting-the-adversary-with-windows-event-log-monitoring.cfm
+Pass‐the‐Hash Attacks
+There are some specific attack vectors that you may encounter when analyzing suspicious SMB activity. We have already mentioned pass‐the‐hash attacks, where an adversary steals the NT hash representation of an account's password and uses it to complete authentication to remote systems. The hash itself can be stolen from a local Security Account Manager (SAM) file, Active Directory, or memory when the user is interactively logged on to a system, or by sniffing a challenge‐response exchange from the wire and cracking it offline. Once in possession of the password hash, tools such as Mimikatz and Metasploit can use the hash to complete remote NTLMv2 authentication to other systems where the credential is valid. We also spoke briefly in
+Chapter 8
+, “Event Log Analysis,” about SMB relay attacks, where the attacker assumes a man‐in‐the‐middle position to capture a challenge‐response authentication attempt and redirect the attempt from the intended destination to a destination of the attacker's choosing. In each of these attacks, Windows authentication still takes place and the associated event log entries would still exist.
+Because a pass‐the‐hash attack uses credentials stolen from another user account, looking for event IDs showing use of explicit credentials (Event ID 4648 or Event ID 4624 with logon type 9) may help confirm suspicions that pass‐the‐hash attacks are in use. If you suspect a system is being used for these types of attacks, you can also look for forensic artifacts of tools that could be used to execute a pass‐the‐hash attack on the host. You can also use Sysmon logging (if you have it enabled) to detect the malicious access to the LSASS process that occurs when placing the stolen credential into memory of the host as a precursor to a pass‐the‐hash attack. Such access will register as a Sysmon Event ID 10, showing the attack tool accessing the LSASS process. Since pass‐the‐hash attacks
+use NTLM for authentication, looking for Event ID 4776 (NTLM authentication attempt) for the system being accessed (on the domain controller in the case of a domain account, or on the system being accessed in the case of a local user account) may help highlight suspicious activity. On the system being accessed, Event ID 4624 with an authentication package of NTLM may also help identify malicious activity. Keep in mind, however, that NTLM authentication does occur under normal circumstances in a domain (for example, whenever a system is accessed via IP address instead of by its computer name) so the presence of NTLM authentication alone is not evidence of a problem.
+EVIDENCE OF EXECUTION
+Throughout this chapter, remember that you can use the forensic indicators of program execution discussed in
+Chapter 11
+, “Disk Forensics,” to help identify lateral movement. Analysis of AmCache, BAM/DAM, ShimCache, prefetch, RecentApps, UserAssist, and more can be used to determine if, or even when, a program has been executed on a system. Use of attacker tools can be detected in this manner, but so can living‐off‐the‐land techniques. Many of your regular users might not use PowerShell, WMIC, the
+net
+command (
+net.exe
+), and similar built‐in tools on their workstations, so use of those programs on some systems could in and of itself be suspicious.
+If these tools are launched by 32‐bit malware, the 32‐bit versions of those tools (located in the %SystemRoot%\SysWOW64 folder) will be used, which may be another indicator of malicious activity.
+Other host or support executables that may be relevant to detecting lateral movement include:
+Wmiprvse.exe
+: WMI Provider Host used to run WMI commands
+Wsmprovhost.exe
+: The host process for PowerShell Remoting activity
+Winrshost.exe
+: The host process for Windows Remote Shell (present on the destination machine, with
+winrs.exe
+being used to launch the command on the originating machine)
+Rdpclip.exe
+and
+TSTheme.exe
+: Used to support clipboard and other functionality for Remote Desktop Protocol sessions on the accessed system
+wscript.exe
+: The Windows Script Host (WSH) process for scripts using a graphical user interface
+cscript.exe
+: The WSH process for scripts using a command‐line interface
+mshta.exe
+: The Microsoft HTML Application host used to run
+.hta
+files)
+Looking for the use of executables on systems, especially after identifying specific TTPs used by an adversary, can help identify systems to which attackers have laterally moved.
+Detecting pass‐the‐hash attacks can be challenging, and you will usually need multiple data points in order to confirm your suspicions. Often, unusual activity is detected from a specific account, and that account's activities are then scrutinized in more detail in order to detect these types of attacks. You can read
+additional information about detecting these types of attacks from Jeff Warren at
+https://blog.stealthbits.com/how-to-detect-pass-the-hash-attacks
+. Jeff provides an XML custom filter based on his testing that he uses to help detect pass‐the‐hash attacks. The following filter is taken from his blog post; you can modify it to meet your needs:
+<QueryList>
+<Query Id="0" Path="Security">
+<Select Path="Security">
+*[System[(EventID='4624')]
+and
+EventData[Data[@Name='LogonType']='9']
+and
+EventData[Data[@Name='LogonProcessName']='seclogo']
+and
+EventData[Data[@Name='AuthenticationPackageName']='Negotiate']
+]
+</Select>
+</Query>
+<Query Id="0" Path="Microsoft-Windows-Sysmon/Operational">
+<Select Path="Microsoft-Windows-Sysmon/Operational">
+*[System[(EventID=10)]]
+and
+*[EventData[Data[@Name='GrantedAccess'] and (Data='0x1010' or '
+Data='0x1038')]]
+</Select>
+</Query>
+</QueryList>
+Kerberos Attacks
+Many of the other attacks that we will examine later in this chapter also use SMB under the hood, but we will discuss them in separate sections for clarity. In this section, we will focus on the default authentication mechanism in a Windows domain: Kerberos. We'll explain enough about Kerberos for incident handlers to understand common attack vectors and be able to respond to them effectively. For additional information about Kerberos, Mike Pilkington's article is a good place to continue that journey from an incident response perspective. You can find it here:
+https://digital-forensics.sans.org/blog/2014/11/24/kerberos-in-the-crosshairs-golden-tickets-silver-tickets-mitm-more
+Alva Duckwall and Benjamin Delpy also demonstrate many of these attacks in their Blackhat talk available here:
+https://youtu.be/lJQn06QLwEw
+Pass‐the‐Ticket and Overpass‐the‐Hash Attacks
+Pass‐the‐hash attacks use a stolen NTLM hash to impersonate the user via NTLMv2 challenge response authentication. In a similar way, an attacker can steal a Kerberos ticket issued for another user and pass it to impersonate that user. Alternatively, a stolen password hash can also be used to complete an authentication request to a domain controller and obtain a Kerberos ticket issued to its associated user account. We will explore the details behind each of these attacks in this section.
+Just as NTLMv2 uses the NT hash representation of the user's password as a shared secret to authenticate a user account, Kerberos likewise relies on a shared secret (referred to as the
+long‐term key
+in Kerberos). By default, these long‐term keys are derived from each account's password. Kerberos supports several different algorithms to calculate these keys, so multiple password representations will be stored. Unlike NTLMv2, which relies on a simple challenge and response mechanism, Kerberos relies on a more complex system of TGTs and service tickets to manage user access to resources. In order to be authenticated to the network, a user's identity is verified using the account password or other multifactor authentication mechanism with the domain controller. The result of this successful authentication is the issuance of a TGT, which acts as proof of the user's identity for the duration of the ticket, which is 10 hours by default in a Windows environment.
+The TGT is encrypted and signed with the long‐term key (hashed representation of the account password) for the krbtgt service, which should only be known to the domain controllers. This password is very rarely changed in a Windows environment, but it serves as a central point of trust for all TGTs issued within the domain. Once a TGT is issued, it can be presented to any domain controller during its period of validity along with a request for a service ticket for any other system in the environment. The domain controller will use its knowledge of the krbtgt account's hashed password representation to decrypt the associated TGT and confirm its authenticity. Any valid TGT issued in the domain can request a service ticket for any service in the domain.
+A service ticket does not grant access to the remote system; it simply provides a description of the account requesting the service ticket, including its group memberships, profile and policy information, and additional security‐related information that is stored in a data structure known as a Privilege Attribute Certificate (PAC). The service ticket (with the PAC) is then encrypted and signed with the hashed representation of the password of the remote service account (which is known to both the domain controller and the remote system) so that the remote system is able to decrypt the service ticket, read the PAC for the requesting user, and make a determination as to what access should be granted to the remote service for that user in accordance with the system's security settings.
+As you can see, the ultimate determination as to whether an account is given access to a remote system is made by that remote system. Kerberos depends on the fact that the shared secrets (both the hashed password representation of the krbtgt account and the hashed representation of the remote service account's password) remain secret to ensure the integrity of both ticket‐granting tickets and service tickets. Once issued, a ticket is considered valid if it is encrypted with the appropriate long‐term key and the duration of its validity period has not yet expired.
+Similar to pass‐the‐hash attacks, attackers can steal a Kerberos TGT from the memory of a system where a user has an interactive logon and then inject that ticket into the attacker's current user session. This can be accomplished with various attack tools, including Mimikatz (
+https://github.com/gentilkiwi/mimikatz
+) and Rubeus (
+https://github.com/GhostPack/Rubeus
+), and allows the user to impersonate the owner of the stolen ticket. The stolen TGT can be presented to any domain controller along with a request for a service ticket for any remote service. The domain controller will verify that the TGT is valid (it was encrypted with the hashed representation of the krbtgt password and its validity period has not expired) and then issue a service ticket to the requester containing the PAC details of the owner of the stolen TGT. The attacker can then present this valid service ticket to the remote system in order to gain access in accordance with the credentials of the account from which the TGT was stolen.
+When a stolen TGT is injected into an existing user session, it creates an anomaly on that endpoint where there is a mismatch between the TGT being presented and the active logon session's associated user account name, since the TGT was simply injected into an existing session rather than creating a new session for that user. It is therefore possible to look for this anomaly by running the PowerShell cmdlet
+Get‐LoggedOnUsers
+and then using the
+klist
+command (a native Windows command used to list details of Kerberos tickets) to examine the Kerberos ticket associated with each session. This approach is detailed by Eyal Neemany and expanded on by Jeff Warren. You can find an article discussing this approach, with an associated PowerShell script, at
+https://blog.stealthbits.com/detect‐pass‐the‐ticket‐attacks
+.
+In addition to stealing an already issued TGT, if the attackers have obtained the NT hash of the user's password, they can request the issuance of a new TGT from the domain controller. Remember that Kerberos uses various hashed representations of the users' passwords as the shared secret (long‐term key) to prove the identity of the user during authentication attempts. One of the algorithms accepted by Kerberos during authentication (the RC4‐HMAC‐MD5 algorithm) uses the NT hash to represent the password. Therefore, if the attacker has stolen the NT hash, it can be used to request a TGT from a domain controller, since the NT hash can be used to complete the associated Kerberos preauthentication
+request (performed by encrypting the current time stamp with the account's long‐term key). This type of attack is referred to as an
+overpass‐the‐hash attack
+, and it results in a valid TGT being issued in the name of the user account from which the NT hash was stolen. The TGT will be issued with a session key that uses the RC4‐HMAC‐MD5 algorithm rather than one of the more secure AES‐based options, but as long as the RC4‐HMAC‐MD5 algorithm is valid on the domain (which it is by default), the resulting TGT will be valid.
+An example output from
+klist
+showing a TGT that was issued as the result of an overpass‐the‐hash attack is shown here:
+C:\>klist
+Current LogonId is 0:0x214adb
+Cached Tickets: (2)
+#0>   Client: administrator @ COMPANY.DEMO
+Server: krbtgt/COMPANY.DEMO @ COMPANY.DEMO
+KerbTicket Encryption Type: AES-256-CTS-HMAC-SHA1-96
+Ticket Flags 0x40e10000 -> forwardable renewable initial′
+pre_authent name_canonicalize
+Start Time: 4/18/2019 11:06:45 (local)
+End Time:  4/18/2019 21:06:45 (local)
+Renew Time: 4/25/2019 11:06:45 (local)
+Session Key Type: RSADSI RC4-HMAC(NT)
+Cache Flags: 0x1 -> PRIMARY
+Kdc Called: DC1
+<snip>
+Note that the Session Key Type is listed as RSADSI RC4‐HMAC(NT). The use of this weaker algorithm occurs because the client requested it to facilitate an overpass‐the‐hash attack using a stolen NTLM hash. The KerbTicket portion of the TGT is the portion that will not be understood by the requesting account. It will be passed back to a domain controller with future service ticket requests and be decrypted by the domain controller using the hashed password representation of the krbtgt account password. Notice that this portion uses the more secure AES‐256‐CTS‐HMAC‐SHA1‐96 algorithm. When possible, modern Windows systems will negotiate the use of the stronger AES‐based algorithms by default.
+If an attacker steals a TGT from memory, that ticket is valid for at most 10 hours by default. The ticket can usually be extended by requesting that the domain controller extend its validity period for up to about seven days, but after that point, it is no longer usable by the attacker. But the NT hash representation of the password never changes unless the password itself is changed. Therefore, using an overpass‐the‐hash attack provides a longer period of access for the attacker since new TGTs can be requested at will.
+Kerberos in a Windows domain can support several different encryption algorithms to secure communications between clients, remote services, and domain controllers. By default, both the RC4 and AES256 algorithms are supported in environments using Windows 10 and Server 2016/2019. For each supported algorithm, an associated hash is calculated based on the user's password and stored both in the Active Directory (the
+ntds.dit
+file on each domain controller) and in the client computer's memory during interactive logon to a system. Here we use Mimikatz to see the various hash representations of the user's password stored in memory of a Windows 10 client system for the
+bwallace@company.demo
+account:
+mimikatz # sekurlsa::ekeys
+Authentication Id : 0 ; 1585703 (00000000:00183227)
+Session           : Interactive from 2
+User Name         : bwallace
+Domain            : COMPANY
+Logon Server      : DC1
+Logon Time        : 4/19/2019 6:11:19 AM
+SID               : S-1-5-21-671738502-2064466678-3530451730-1104
+* Username : bwallace
+* Domain   : COMPANY.DEMO
+* Password : (null)
+* Key List :
+aes256_hmac       ed14d692261ba9d53ed44fba896a89214′
+e3c21e6c61099c60a5730a929163c12
+rc4_hmac_nt       513de5ffaba4c511876354d3a0c742b1
+rc4_hmac_old      513de5ffaba4c511876354d3a0c742b1
+rc4_md4           513de5ffaba4c511876354d3a0c742b1
+rc4_hmac_nt_exp   513de5ffaba4c511876354d3a0c742b1
+rc4_hmac_old_exp  513de5ffaba4c511876354d3a0c742b1
+Just as we can use the NTLM password representation (called the RC4_hmac_nt key in the previous Mimikatz output) to perform an overpass‐the‐hash attack, the same technique would work using the AES256_HMAC value, also provided by Mimikatz. In such a case, the session key generated would not rely on the weaker RC4 algorithm but would instead use the AES256 algorithm and better blend in with other tickets issued in the environment. As an example, assume that the jlemburg user (a regular domain user but with local administrator permissions on the workstation) used an overpass‐the‐hash attack to generate a TGT for the bwallace account (a member of Domain Admins) and used that ticket to gain access to the default C$ administrative share on the remote Server1 computer.
+Figure 12.4
+shows that the user account for the logon session remains jlemburg (as shown by the output of whoami) but the Kerberos tickets cached in memory for the session are issued in the name of the bwallace account.
+We also see that the session key types are AES‐256‐CTS‐HMAC‐SHA1‐96, the more secure and preferred option in the domain, since the attacker used the stolen AES256_HMAC retrieved by Mimikatz when launching the overpass‐the‐hash attack.
+Figure 12.4
+:
+An overpass‐the‐hash attack allowing the jlemburg account to impersonate the bwallace account to access a remote server
+As demonstrated in
+Figure 12.4
+, the end result of an overpass‐the‐hash attack is the same as for a pass‐the‐ticket attack: the Kerberos ticket of one user is used within the logon session of a different user. We can therefore use the same detection techniques to look for this anomaly as we did previously for pass‐the‐ticket attacks. Additionally, since we are using stolen hashes to launch this attack, many of the indicators we saw with pass‐the‐hash attacks will also be present (but of course, in this case, the authentication attempts will use Kerberos rather than NTLM). Event ID 4648 will still appear showing the use of explicit credentials, as will Event ID 4624 with a logon type of 9.
+As an example, we have used the
+Get‐WinEvent
+cmdlet as described in
+Chapter 8
+with a version of Jeff Warren's XML query filter provided in the pass‐the‐hash
+section of this chapter. This approach located the event log record associated with the previously described overpass‐the‐hash attack. The jlemburg account assumes the identity of the bwallace account, as shown in
+Figure 12.4
+.
+PS C:\Tools> Get-WinEvent -FilterXml ([xml](Get-Content .\query.xml))↵
+| Format-List
+TimeCreated  : 4/19/2019 6:29:11 AM
+ProviderName : Microsoft-Windows-Security-Auditing
+Id           : 4624
+Message      : An account was successfully logged on.
+Subject:
+Security ID:    S-1-5-21-671738502-2064466678-3530451730-1113
+Account Name:   jlemburg
+Account Domain: COMPANY
+Logon ID:       0x25A0F2
+Logon Information:
+Logon Type:            9
+Restricted Admin Mode: -
+Virtual Account:            No
+Elevated Token:        Yes
+Impersonation Level:        Impersonation
+New Logon:
+Security ID: S-1-5-21-671738502-2064466678-3530451730-1113
+Account Name:           jlemburg
+Account Domain:         COMPANY
+Logon ID:               0x2F3733
+Linked Logon ID:               0x0
+Network Account Name:   bwallace
+Network Account Domain: COMPANY
+Logon GUID:           {00000000-0000-0000-0000-000000000000}
+Process Information:
+Process ID:       0x17c
+Process Name:      C:\Windows\System32\svchost.exe
+Network Information:
+Workstation Name:       -
+Source Network Address: ::1
+Source Port:            0
+Detailed Authentication Information:
+Logon Process:     seclogo
+Authentication Package: Negotiate
+Transited Services:   -
+Package Name (NTLM only):    -
+Key Length:       0
+Note that in the New Logon section, the original account name appears in the Account Name field but the Network Account Name shows the name of the account that was impersonated through the overpass‐the‐hash attack. This same anomaly is present in Event ID 4648, shown in
+Figure 12.5
+.
+Figure 12.5
+:
+Event ID 4648 showing both the original and the stolen credential
+You can read more about using Mimikatz to launch these types of attacks at
+https://blog.stealthbits.com/how-to-detect-overpass-the-hash-attacks
+. Attempting these attacks yourself on a test system and then reviewing the associated logs on that system is a great way to get comfortable with these concepts.
+Rather than extracting individual user credentials from the memory of client systems during interactive logon, attackers may instead try to steal all the long‐term keys used throughout the environment directly from the domain controllers. Once a domain controller is compromised at the administrator level, there are numerous techniques that can be used to steal the data directly from Active Directory. Of course, once the attacker has achieved that level of access, they are also able to steal the password representation of the krbtgt service and
+any other service accounts in the domain. Having access to that information opens the possibility of the attacker creating their own tickets independent of the domain controllers. These so‐called golden and silver tickets are the subject of our next section.
+THANKS, TIM!
+Tim Medin is the founder of Red Siege (
+www.redsiege.com
+), the man who discovered Kerberoasting, and the lead author of the SANS “SEC560: Network Penetration Testing and Ethical Hacking” course. Tim graciously reviewed this chapter to help ensure that it contained the most current and relevant information, and we are very thankful for his help.
+Golden and Silver Tickets
+The TGT is effectively just a special case of a service ticket that is issued by and for the krbtgt service on the domain controller. It grants access to the krbtgt service to make requests for new service tickets. Like any service ticket, it contains a PAC section describing the user account for which the ticket is valid, including details such as the security identifier, account name, group memberships, and permissions for the account. The security of the TGT is ensured by encrypting and signing it using the long‐term key (the hashed representation of the krbtgt account's password). Since only the krbtgt service should have access to that password representation, only the krbtgt service should be able to encrypt or decrypt the TGT details. However, if the domain controller itself is compromised and the krbtgt account's password representation is stolen, then the security on which the domain depends for authentication and authorization is broken.
+Once that occurs, an attacker can simply use the long‐term key for the krbtgt account to forge TGTs at will, containing any information they desire in the associated PAC. They can impersonate any legitimate user, providing accurate group membership for that user and the accurate security identifier in the PAC. But they could also generate completely fictitious users, or provide fictitious group membership for existing users, within the TGT PAC entries. By default, a TGT that is properly encrypted is considered valid, and no additional checking is done when the TGT is presented unless the TGT is 20 minutes old or older (after 20 minutes, the account is checked again to ensure that it has not been disabled since the TGT was issued). As long as the attacker continues to create new TGTs every 20 minutes, those tickets will be implicitly trusted throughout the domain and can be used to request any service ticket that is desired. The TGT is simply passed to a domain controller, which verifies that the TGT was correctly encrypted with the correct krbtgt long‐term key, copies the PAC details from the TGT, and puts them into a service ticket (encrypted and signed with
+the long‐term key of the destination service). These forged TGTs are referred to as golden tickets, because they can be used to gain access to any system by constructing a correctly encrypted PAC inside of a TGT and requesting a service ticket to gain access to any system desired.
+Similarly, once a domain controller is compromised, the long‐term keys for every service in the domain are also compromised. When a service ticket is requested, the PAC associated with that service ticket is encrypted and signed with the long‐term key for the service for which the service ticket is intended. Once these hashed password representations are owned by the attacker, the attacker can construct a service ticket for any service in the domain, create a PAC containing information about an account that is allowed access to that service (whether or not that account exists or its group membership is correctly reported), encrypt the PAC with the appropriate long‐term key for the service, and access any service desired.
+Detection of golden and silver tickets can be challenging. Remember that these tickets are completely forged by the attacker, so in the case of a golden ticket, there will not be a corresponding Event ID 4768 (a TGT was requested) on the domain controllers. Silver tickets will likewise not have an associated Event ID 4769 (a service ticket was requested) located on the domain controllers. The tickets themselves may also have abnormalities, such as abnormally long validity periods (Mimikatz, for example, defaults golden tickets to a 10‐year validity). Savvy attackers will, however, construct these tickets so that they blend in with normal domain behavior. If the tickets contain fictitious security identifiers or fictitious account names, you may be able to detect log event entries of the nonexistent accounts being used. This may provide additional evidence that forged tickets are in use. User behavior analytics can also be useful here, as access to new systems by an account can help detect when a credential is being used in an unusual way.
+If you suspect that golden or silver tickets are being forged, you should reset the password for the krbtgt and the impacted service accounts. Resetting the krbtgt password must be done not once, but twice, because the previous password is retained in Active Directory as a fallback. Additional details about performing this procedure can be found here:
+https://docs.microsoft.com/en-us/windows-server/identity/ad-ds/manage/ad-forest-recovery-resetting-the-krbtgt-password
+However, if someone has compromised your domain to that level, mitigation and recovery efforts will need to assume that your entire environment is compromised.
+It is worth noting at this point that Kerberos is a largely stateless authentication and authorization protocol. Tickets are, for the most part, considered valid as long as they are properly encrypted and signed with the correct long‐term key and are still within their validity period. The PAC details contained within the
+tickets describe the user account involved along with all its associated group memberships and permissions. As long as the TGT is less than 20 minutes old, or the service ticket is within its validity period, no further verification of the information presented within the ticket is done by default. This is why pass‐the‐ticket attacks work so effectively and why golden and silver tickets can be forged and used at will. Systems receiving a service ticket merely accept the details provided in the associated PAC, compare the details of the user account described in the PAC to the permissions configured on that system, and give the appropriate level of access. Keep in mind that the appropriate level of access may be no access at all. The domain controller does not verify whether a user account has rights to a service before issuing a service ticket. It is the responsibility of the service on the other end to decrypt the PAC and make its own authorization determination based on its configured security policies. This lack of any authorization checking by the domain controller before issuing a service ticket leads us to our next section, “Kerberoasting.”
+DCSYNC AND DCSHADOW
+Another category of attacks against Kerberos could be described as directory replication attacks. In these attacks, an adversary with domain administrator credentials initiates directory replication to a computer that is not a domain controller to steal (DCSync) or alter (DCShadow) information from Active Directory. Monitoring for Microsoft Directory Replication Service Remote Protocol traffic to non–domain controllers is an effective way to detect these types of attacks. Additionally, looking for Event ID 5137 (directory service object created) followed closely by an Event ID 5141 (directory service object was deleted) can help identify when a system is temporarily added as a domain controller to launch a DCShadow attack. Event ID 4742 (a computer account was changed) and Event ID 4929 (Active Directory replica source naming context was removed) can also be used to help identify these types of attacks. Further information can be found at these two links:
+https://attack.stealthbits.com/how-dcshadow-persistence-attack-works
+https://blog.stealthbits.com/extracting-user-password-data-with-mimikatz-dcsync
+Kerberoasting
+Service tickets are encrypted and signed with the long‐term key of the associated service, usually the password representation for the associated service account. Since each ticket is signed, when it is correctly decrypted, the hash stored in the signature can be used to verify that everything in the ticket was received and decrypted accurately. By receiving a service ticket, we therefore have the ciphertext of the ticket and the hash value associated with the correctly
+decrypted version of the ticket's data. This opens the possibility of offline password cracking against service tickets. By iterating through possible passwords, if one of those passwords can be used to decrypt the ciphertext so that the hash in the signature matches the hash of the decrypted data, we have successfully identified the plaintext password of the associated service account.
+Many default services use the associated system's computer account for their security context, and computer accounts are managed directly by Active Directory. These accounts have extremely long, randomized passwords that are rotated by default every 30 days and would therefore be computationally infeasible to crack through offline password cracking. Service accounts that are manually created, such as those often used to run an Microsoft SQL Server, for example, may have been created with a password that lacked adequate length or complexity to defeat offline password cracking. These accounts often are left with the passwords unchanged for long periods of time as well.
+Kerberoasting was first described by Tim Medin in a talk titled “Attacking Kerberos: Kicking the Guard Dog of Hades,” which can be found at
+https://youtu.be/HHJWfG9b0-E
+. By requesting service tickets for services running under the context of a user‐created account (as opposed to a computer account), service tickets can be harvested and processed offline for password cracking. Once the service account password is cracked, this opens the option (as we saw with silver tickets) to modify or forge service tickets for that system. Keep in mind that this can be done by any authenticated user in the domain, since any user may request a service ticket for any service. There is no need to compromise the domain controller or the system hosting the service in advance to steal a credential. An attacker may also be able to use the service account itself to log on to systems where it has permissions.
+Detection of Kerberoasting can be done in a few ways. Abnormal use of service accounts may indicate that the account has been compromised and is being used for malicious activity, so look for unusual account logon and logon events involving service accounts. Similarly, many Event ID 4769 (service ticket request) records from a single‐user account for different services may indicate harvesting of service tickets for potential Kerberoasting attacks. This is especially the case when the requests are specifically made for service tickets using the weaker RC4 algorithm (the Ticket Encryption field in the Event ID 4769 record will be set to 0x17 or 0x18). Requests for service tickets to services that an account has never accessed before also make the Event ID 4769 entries more suspicious.
+KERBEROS ENCRYPTION TYPE
+Kerberos supports multiple different encryption types, such AES256‐CTS‐HMAC‐SHA1‐96, AES128‐CTS‐HMAC‐SHA1‐96, and RC4‐HMAC. As long as both the client and the server support the stronger AES variants, they will use those by default. The RC4‐HMAC encryption type uses the NT hash of the password, rather than the more
+secure AES variants, during Kerberos pre‐authentication and to encrypt and sign tickets. Many attacks against Kerberos downgrade the encryption type to 0x17 (RC4‐HMAC) or 0x18 (RC4‐HMAC‐EXP) to take advantage of the weaker NT hash algorithm. Although many legacy systems may also use these encryption types, watching for the use of these encryption types within your environment, particularly by accounts that usually use the AES variants, can help detect attacks against Kerberos. You can find the encryption type listed in Event ID 4769 (service ticket request) and Event ID 4770 (service ticket renewal). You can also view the encryption type for a ticket using the
+klist
+command, as discussed earlier in this chapter.
+To help combat Kerberoasting, use Group Managed Service Accounts to allow Active Directory to assign and automatically rotate long, complex passwords for your service accounts. You can find additional information about this built‐in Windows feature here:
+https://docs.microsoft.com/en-us/windows-server/security/group-managed-service-accounts/group-managed-service-accounts-overview
+Also, ensure that any unused service accounts that had been previously created are completely deleted from Active Directory, as the services that they originally supported do not need to be online still for Kerberoasting attacks to occur.
+Regardless of the mechanism used to compromise an account, from passing hashes or tickets, to forging tickets, or compromising service account passwords, the result for the defender is the same. Credentials are then available to the attacker to be used to access systems, laterally move in the environment, and increase their influence. Scrutinizing the event logs, network indicators, and host forensic artifacts for evidence of attacker behavior will help you detect and respond to any attack that relies on compromised credentials.
+PsExec
+PsExec is an administration tool that leverages SMB to remotely execute commands on other systems. PsExec is provided by Sysinternals, which is owned by Microsoft, and many administrators use it within their environment, so finding it running inside a network may not be unusual. The command allows remote execution of programs over an encrypted network connection when provided with an administrator credential that is valid on the remote system. If the executable to be run is not already on the target system, it can be copied by PsExec to the target and then executed. The Sysinternals version of the tool runs at the command line with the following syntax:
+psexec \\<targetIP> [-c] [-d] [-e] [-s] [-u domain\user] [–p password] ↵
+<command>
+where
+<targetIP>
+is the remote system and
+<command>
+is any executable on the system. A common technique is to use
+cmd.exe
+as the remote command to grant a remote shell to the attacker. The
+‐c
+switch can be added to copy the executable to the target first if the desired executable is not already on the target or is not in a location found in the system path on the target. The
+‐d
+switch is used to execute the specified command in a non‐interactive manner and detach without waiting for the created process to terminate. The
+‐e
+switch can optionally be used to disable creation of a user profile on the remote system. The
+‐s
+switch can be used to run the remote process in the context of the System account.
+The
+‐u
+switch allows a different user account to be provided for the associated logon to the remote system, rather than using the credentials of the currently logged‐in user. Note that the use of the
+‐u
+switch causes the remote system to treat the logon as interactive (logon type 2), which results in caching of the logon credential in RAM of the remote system. When using this tool for legitimate administrative tasks, if the remote system is already compromised, this can expose the credential to an attacker. A better approach would be to open a local
+cmd.exe
+with an alternate credential (Shift and right‐click
+cmd.exe
+and select Run As Different User from the menu) and then use that
+cmd.exe
+terminal to run PsExec without the
+‐u
+switch. Doing so will log an Event ID 4648 (logon attempted with explicit credentials) on the local system showing
+cmd.exe
+opening with an explicit credential, but PsExec will then make a standard network logon (type 3) to the remote system and not expose the credential in RAM on the remote system.
+The
+‐p
+switch provides an option to specify the password for the account specified by the
+‐u
+switch on the command line in clear text. If command‐line auditing is enabled for process creation events (as discussed in
+Chapter 8
+), the password could be logged in plaintext as a result. This, of course, should never be done if the tool is being used for legitimate administrative purposes but may be done by an attacker. If
+‐p
+is omitted, Windows will prompt for the associated password during the authentication process and the password will not be displayed in clear text.
+Metasploit also has a version of PsExec as an exploit module in the Metasploit Framework. The PsExec module also requires a valid administrator credential (or an exploit to elevate privileges to administrator) to access the remote system. The PsExec module can use either a clear‐text password or an NT hash password representation to facilitate pass‐the‐hash attacks. In the absence of a valid credential, the module will attempt to log on as Guest.
+The Metasploit PsExec exploit module uses valid administrator credentials to copy an executable to the target system, create a service to load the desired payload, delete the service it created, and then delete the uploaded executable. By default, both the executable and the service are given a random string of characters as a name; however, arbitrary names can be specified by the attacker.
+The creation of the service generates an Event ID 7045 in the System event log, complete with the name of the service created (Service Name field) and the executable that was used to create it (Service File Name field). The executable may be uploaded with a random or explicitly provided name, or the Service File Name may be PowerShell run with a long, Base64‐encoded command. If enabled (as described in
+Chapter 8
+), Event ID 4697 will also be logged in the Security event log recording the service being installed on the system.
+By default, the Sysinternals version of PsExec will also install itself as a service with a service name of PSEXESVC and an associated executable of
+psexesvc.exe
+written to disk, making it easy to spot in the Event ID 7045 System event log records (and possibly Event ID 4697 in the Security event log if enabled as described in
+Chapter 8
+). However, the name of the service and its associated executable can be changed to any arbitrary name using the
+‐r
+switch when PsExec is run. Unlike the Metasploit version, the Sysinternals version of PsExec does not automatically delete the service upon completion. By default, the Sysinternals PsExec will also cause a user profile to be created on the remote system if one does not already exist for the associated user credential. This can be avoided if the attacker uses the
+‐e
+switch when initiating the connection, but since the attacker may omit that switch, checking for the presence of unusual user profiles can be a useful indicator of unauthorized activity. When the session ends, you may see an Event ID 7036 in the System event log showing the
+PSEXESVC
+service entering a stopped state.
+Since valid credentials are used, the account logon and logon events discussed previously also apply to this attack vector. If the attacker uses the currently logged‐on user's credentials, Windows will record the access on the remote system with Event ID 4624, type 3 (Network logon). However, if the attacker explicitly provides a different credential to PsExec with the
+‐u
+switch, Windows treats this as an interactive logon (Event ID 4624, type 2) on the remote system and will also log an Event ID 4648 showing the
+PSEXESVC.exe
+process using an explicit credential for the user specified in the
+‐u
+switch.
+On the system initiating the connection, when the
+‐u
+switch is used, an Event ID 4648 is recorded, showing the account initiating the use of the credential in the Subject section, the credential provided with the
+‐u
+switch in the Account Whose Credentials Were Used section, and the remote system targeted in the Target Server section. If the Sysinternals version of PsExec was used, you may find evidence of it being used in the registry. In addition to the standard forensic artifacts showing program execution, this utility also writes to a registry key in NTUSER.DAT\Software\Sysinternals\PsExec where it sets the EulaAccepted value to 1. This key is named PsExec even if the attacker named the tool something else in an attempt to conceal its execution.
+Other tools implementing variations on the PsExec idea exist, such as CSExec (
+https://github.com/malcomvetter/CSExec
+), PAExec (
+www.poweradmin.com/paexec
+),
+and RemCom (
+https://github.com/kavika13/RemCom
+). You can look for Event ID 7045 (new service was installed) and Event ID 7036 (service was started/stopped) in the System event log and Event ID 4697 in the Security event log to try to identify the malicious services associated with these types of attacks.
+Scheduled Tasks
+Malicious attackers can leverage the built‐in Windows
+at
+and
+schtasks
+commands to both expand their influence and maintain persistence within a victim environment. The
+at
+command, though deprecated in the latest versions of Windows, is still in use on older Windows versions. The command allows for a process to be executed on regular intervals in the future on either a local or a remote machine. The syntax is:
+at [\\<
+targetIP
+>] [HH:MM][A|P] <command>
+where
+<targetIP>
+specifies a remote system, the time with AM or PM is designated, and the command to be executed is provided.
+Similarly, newer Windows systems support the
+schtasks
+command, albeit it with a slightly more involved syntax:
+schtasks /create /tn <taskname> /s <targetIP> /u <user> /p <password> ↵
+/sc <frequency> /st <starttime>   /sd <startdate> /tr <command>
+Once again, this command allows for the execution of a process on a local or a remote system at a designated time and frequency (remote access relies on SMB). Additionally, if run with administrator credentials, the
+/ru SYSTEM
+option allows for the specified program to be executed with System‐level permissions. Attackers with valid credentials are therefore able to schedule commands to run on systems as a means of exfiltrating data, maintaining persistent access, expanding control, or other tasks as they see fit.
+Administrators should routinely use the
+schtasks
+command to check for processes that are scheduled to run. The
+schtasks
+command will list items scheduled both with
+schtasks
+and with
+at
+, whereas the
+at
+command will not show jobs scheduled with
+schtasks
+. You can output the list of jobs to a comma‐separated value file with the following syntax:
+schtasks /query /fo csv> scheduled_tasks.csv
+You can optionally include the
+/v
+switch to enable verbose output if you need additional detail.
+PowerShell can also be leveraged to query remote systems in an automated fashion. The PowerShell cmdlet
+Get‐ScheduledTask
+will show the path, name, and state of scheduled tasks when run.
+On the system where the task is scheduled, additional details can be found in the
+%SystemRoot%\System32\Tasks
+folder. Each task created with
+schtasks
+creates an XML file with the same name as the task in this location. Within these XML files, several fields are useful. Under the RegistrationInfo section, the Author field shows the account used to schedule the task, and the Date field shows the local system date and time when the task was registered. In the Principals section, the UserID field shows the user context under which the task will execute. The Triggers section provides details on when the task will run, and the Exec field under the Actions section details what will be run.
+Any use of authenticated credentials to schedule tasks on remote systems will leave the associated account logon and logon events as previously discussed. Remember that event logs, as detailed in
+Chapter 8
+, may also exist for scheduled tasks in the Security event log as well as the
+%SystemRoot%\System32\winevt\Logs\Microsoft‐Windows‐TaskScheduler%4Operational
+log.
+OSQUERY
+Detecting lateral movement throughout the enterprise can require querying lots of logs and other sources of data. Kollide Fleet (discussed in
+Chapter 4
+, “Remote Triage Tools”) and similar agents that can leverage osquery can be an effective force multiplier when trying to identify adversary activity. Using a SQL‐like syntax, specific searches can quickly be conducted to look for the indicators of compromise discussed in this chapter as well as a wide array of other searches.
+Service Controller
+The Service Controller command,
+sc
+, can create, stop, and start services. Services are processes that run outside of the context of a logged‐on user, allowing them to start automatically at system boot time. By running a process as a service, the malicious actor can ensure persistence of the process on the system, including allowing for automatic restarting or other corrective actions should the service stop execution. Once again, the
+sc
+command allows for these actions to be taken on the local system or on remote systems (leveraging SMB) with appropriate credentials. The syntax to establish an initial, authenticated connection to a remote system is
+net use \\<
+targetIP
+> <
+password
+> /u:<
+Admin_User
+>
+where
+<targetIP>
+identifies the remote system and
+<Admin_User>
+is the username of an account with administrator privileges on the target system. To create a service on the remote system, use the following syntax, noting that the space after
+binpath=
+is required:
+sc \\<
+targetIP
+> create <svcname> binpath= <executable>
+Note that the executable must be packaged in a way that provides for the necessary service control options, including acknowledging to the operating system when it has successfully started. Without this acknowledgment, Windows will kill the service after about 30 seconds. Any arbitrary executable can be packaged for use as a service with the free
+ServifyThis
+tool made available on GitHub by InGuardians (
+https://github.com/inguardians/ServifyThis
+). The service can then be started with
+sc \\<targetIP> start <svcname>
+As with the
+schtasks
+command, administrators should establish a baseline of what services are running on each of their systems. They can accomplish this task using WMIC or PowerShell either as a local script that runs at set intervals or as a centralized script that queries remote systems and stores this type of data in a central location. Having historical records of ports, processes, services, and so forth that are in use on each system (or at least on critical systems) gathered by such scripts provides a great investigative reference once an incident is declared or when threat hunting.
+Event 7045 records the creation of a new service on the system, including the path to the executable service filename. This event, recorded in the System event log, can be useful for identifying the creation of malicious services on victim systems. Event ID 7036, also in the System event log, records the starting and stopping of services. If enabled as described in
+Chapter 8
+, the Security event log will also record Event ID 4697 when a service is installed on the system.
+When a service is created, the path to its associated executable is stored in the registry. Examining the entries in the registry under
+HKLM\SYSTEM\CurrentControlSet\Services
+for unusual entries can help locate malicious services. The
+ImagePath
+value will specify the location of the associated executable on disk for each service.
+Any use of authenticated credentials to modify services on remote systems will also leave the associated account logon and logon events.
+Remote Desktop Protocol
+Long a mainstay of administrative access to remote systems, the venerable Remote Desktop Protocol (RDP) is still used by a large number of administrators despite Microsoft's efforts to encourage the use of PowerShell for administrative tasks. Accordingly, Remote Desktop and Terminal Services provide an attractive attack vector for adversaries who are trying to blend in with standard network activity. Once on a client system, the attacker can use the built‐in Microsoft tools to allow for remote access to other systems using RDP and valid credentials.
+An attacker can use the Microsoft Remote Desktop Connection tool (
+mstsc.exe
+), the Remote Desktop Connection Manager (RDCMan) or the Microsoft Remote Desktop universal app to access a victim system over RDP. Although you hopefully are not exposing the default port 3389 to the Internet, port forwarding set up as a pivot on other, Internet‐accessible systems does make this possible from either external or internal hosts. Depending on the bandwidth available, this GUI‐based approach may be less than ideal to the attacker, but if this is a method commonly used in your environment, attackers are likely to use it to blend in with normal network traffic.
+Remember that RDP leverages standard Microsoft authentication to control access to resources; therefore, the logs associated with account logon and logon events outlined in this chapter and
+Chapter 8
+will apply to RDP connections, with some RDP‐specific indicators as listed in
+Table 12.3
+.
+Table 12.3
+:
+RDP‐specific indicators in the Security event log
+EVENT ID
+DESCRIPTION
+4624
+The logon event will show either a Type 10 or Type 3 when RDP is used, depending on the versions of Windows used and their specific configuration.
+4778
+Records when a session is reconnected. The Client Address in the event‐specific data area shows the IP used to make the connection, which could be a proxy or pivot system. However, the Client Name is normally passed from the software being used to make the connection and may show the name of the attacker's system.
+4779
+Records when a session is disconnected. As with many logoff events, this may fail to be recorded even during normal activity. This event is also recorded when a user who was using the system when an RDP session is initiated to the same system is disconnected due to the new session being started.
+On the machine receiving the connection, additional RDP‐specific logs may be found. The
+%SystemRoot%\System32\winevt\Logs\Microsoft‐Windows‐TerminalServices‐LocalSessionManager%4Operational
+log may contain the IP address and logon user name of the originating computer in Event ID 21, 22, or 25. Event ID 41 may also contain the logon user name. The
+%SystemRoot%\System32\winevt\Logs\Microsoft‐Windows‐TerminalServices‐RemoteConnectionManager%4Operational
+log may record Event ID 1149 that contains the initiating IP address and logon user name. Finally, the
+%SystemRoot%\System32\winevt\Logs\Microsoft‐Windows‐RemoteDesktopServices‐RdpCoreTS%4Operational
+log may record Event ID 131 containing the initiating IP address and logon user name.
+On the system that initiates an RDP session, additional evidence may be available. This can be important when a compromised host is used as a jump‐off point for the attacker to connect to other systems. The
+%SystemRoot%\System32\winevt\Logs\Microsoft‐Windows‐TerminalServices‐RDPClient%4Operational
+log records the systems to which the host initiated connections using Event IDs 1024 and 1102. You may also find evidence of connections on the initiating system in the
+NTUSER.DAT\Software\Microsoft\Terminal Server Client\Server
+registry key.
+If those are not enough ways to detect lateral movement with RDP, you can also configure network security monitoring solutions to watch for activity on port 3389, the default RDP port, or check the Zeek RDP protocol log (discussed in
+Chapter 7
+). There are additional artifacts including jump lists from
+mstsc.exe
+and Security event log Event ID 4648 that may be of use in some cases. For more details, consult the SANS Hunt Evil poster at
+https://digital-forensics.sans.org/media/SANS_Poster_2018_Hunt_Evil_FINAL.pdf
+Windows Management Instrumentation
+Windows Management Instrumentation (WMI) is a Microsoft‐provided platform for simplifying administrative tasks, and we looked at ways in which network defenders can leverage WMI in
+Chapter 4
+. Windows Management Instrumentation Command‐line utility (WMIC) is a command‐line tool that can execute WMI commands on local or remote systems. WMIC uses Distributed Component Object Model (DCOM) to connect to remote systems to execute commands, meaning that in environments with WinRM and/or PowerShell Remoting disabled, WMIC provides an attractive option to attackers. PowerShell is likewise able to access and manipulate systems using WMI. The older
+Get‐WmiObject
+cmdlet uses DCOM to access remote systems and the newer
+Get‐CimInstance
+cmdlet uses PowerShell Remoting, providing flexibility for accessing WMI on remote systems for both attackers and defenders.
+The scope of WMI is truly massive, allowing attackers to perform a variety of actions on remote systems, including listing files, enabling/unlocking user accounts, gathering system information, starting and stopping services, creating or stopping processes, and many other tasks. Once again, use of WMI requires that authenticated access be made to the target system, so account logon and logon events may provide a useful indicator of suspicious activity. WMIC does not encrypt its network traffic when run against a remote system, making network security monitoring a viable approach to detect malicious use of WMIC. As discussed in
+Chapter 8
+, use of command‐line auditing through process creation auditing (Event ID 4688) and or Sysmon (Event ID 1) provides important details to detect malicious use of WMIC.
+In addition to running single commands, WMI can be used as a persistence mechanism using WMI subscriptions. WMI subscriptions allow for an event to be triggered when a specific condition is met. This is a common persistence technique used by PowerShell‐based, post‐exploitation frameworks. The action that will occur is referred to as an
+event consumer
+. The event that triggers the action is called an
+event filter
+. An event filter is connected to its associated event consumer through a
+filter to consumer binding
+. When the event described by the filter is triggered (its condition is true), the filter sends certain events (those that matched its filter) to the event consumer to take its defined action on those events. WMI subscriptions can be created using PowerShell or through Managed Object Format (MOF) files using
+mofcomp.exe
+. Once created, a WMI subscription is stored in the WMI database, located in the
+%SystemRoot%\wbem\Repository
+folder, which can be parsed using the open‐source
+python‐cim
+tool (
+https://github.com/fireeye/flare-wmi/tree/master/python-cim
+). You can read more about WMI subscription use by attackers at
+https://in.security/an-intro-into-abusing-and-identifying-wmi-event-subscriptions-for-persistence
+.
+Sysmon can be configured to monitor
+WMIEventFilter
+activity (Event ID 19),
+WMIEventConsumer
+activity (Event ID 20), and
+WMIEventConsumerToFilter
+activity (Event ID 21). In addition to Sysmon logs, the
+%SystemRoot%\System32\winevt\Logs\Microsoft‐Windows‐WMI‐Activity%4Operational
+log also records information about use of WMI. Event IDs 5860 and 5861 record details of event consumers. Searching through these for encoded PowerShell commands or other unusual entries may help identify malicious use of WMI. Tools like Autoruns (discussed in
+Chapter 3
+) can also help identify the use of WMI subscriptions as a persistence mechanism.
+You can query a live system for information regarding WMI subscriptions using PowerShell. The Kansa framework (discussed in
+Chapter 4
+) does this very effectively, providing the capability to stack results from different systems for comparison. In addition, PowerShell scripts can help generate notifications of WMI activity that can be fed into a SIEM solution for enhanced detection. Matt Graeber has written some scripts that serve as a good starting point for such endeavors, and these were expanded upon by Timothy Parisi and Evan Pena. You can read more about these options at
+https://www.fireeye.com/blog/threat-research/2016/08/wmi_vs_wmi_monitor.html
+.
+Windows Remote Management
+Windows Remote Management (WinRM) allows for commands to be sent to remote Windows computers over HTTP or HTTPS by leveraging the Web Services for Management protocol. WinRM runs as a service under the Network Service account, and as native Microsoft components, use of these tools will bypass
+many whitelisting solutions, providing another attractive option for attackers. Use of the Windows Remote Services command,
+winrs
+, allows for execution of arbitrary commands on remote systems. A command shell can be returned with the following syntax:
+winrs -r:http://
+<target_host>
+"cmd"
+where
+<target_host>
+is the remote system on which the
+cmd.exe
+should execute. An interactive shell is returned to the user running this command.
+WinRM uses TCP port 5985 for HTTP traffic and TCP port 5986 for HTTPS by default, but the communication sent is additionally encrypted in either case. Configuring network security monitoring tools to look for unusual connections on these ports is advisable. In addition, specific event IDs can be of use when trying to identify malicious use of WinRM. These events will be logged in the
+%SystemRoot%\System32\winevt\Logs\Microsoft‐Windows‐WinRM%4Operational
+log file. When a connection is initiated using WinRM, Event ID 6 will be generated. This event will include the remote destination to which the connection was attempted. Therefore, the appearance of Event ID 6 on local workstations or other computers where administrative tasks are not frequently done may be suspicious. Additionally, Event ID 91 will be logged on the system where the connection is received. This log will include the user field, which shows the account used to authenticate the connection. Once again, the standard account logon and logon events can also be leveraged to help fill in additional gaps regarding the systems, accounts, and times involved in such activity.
+PowerShell Remoting
+PowerShell is a tool that provides a great deal of capability, but whether that capability is used for good or evil is at the discretion of the user. PowerShell's Remoting feature makes it the ideal mechanism to move throughout a network. Any action that can be taken on a Windows system can be taken through PowerShell, without the need for additional malware to be installed. Empire (
+www.powershellempire.com
+) and similar projects leverage this fact into complete post‐exploitation kits that allow an attacker to maintain almost unparalleled control over a victim network, all using PowerShell scripts. PowerShell has become a favorite attack mechanism for adversaries of all flavors. Although Empire is no longer officially supported, it is still available for download, and many similar projects continue to advance the use of PowerShell and the underlying .NET Framework for post‐exploitation command and control. Covenant (
+https://github.com/cobbr/Covenant
+) and the Faction C2 Framework (
+www.factionc2.com
+) are examples of projects that continue to be actively developed.
+In addition to PowerShell Remoting, many older PowerShell cmdlets support the
+‐ComputerName
+parameter to execute the cmdlet on a remote system. These cmdlets generally use DCOM to accomplish this (though the mechanism may vary) rather than use PowerShell Remoting.
+PowerShell Remoting is enabled by default for members of the Administrators group and Remote Management Users group on Windows Server 2012 and later. Disabling PowerShell Remoting might discourage its use by attackers, but it also disables one of the most useful tools in the administrator's arsenal for daily administrative tasks as well as baselining and incident handling. Just as attackers have scripts like Empire to help do their jobs, defenders have frameworks like Kansa to help do theirs. Kansa (as shown in
+Chapter 4
+) allows defenders to gather data from collections of systems, stack the results, and look for deviations from the norm. Kansa can be a powerful tool in preparing for and responding to incidents. An update to the Kansa framework, ARTHIR (
+https://github.com/MalwareArchaeology/ARTHIR
+), is also an outstanding option for incident response.
+We covered the event logs and associated event IDs related to PowerShell in detail in
+Chapter 8
+, so we won't repeat them here. You may also find a PowerShell history file per user, located at
+%HOMEPATH%\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt
+. You can confirm the location on a system by running the
+Get‐PSReadLineOption
+cmdlet and checking the HistorySavePath. The MaximumHistoryCount will show the number of lines that will be stored in the
+ConsoleHost_history.txt
+file before it starts overwriting older entries (the default is 4096). This can provide a great source of information regarding PowerShell use.
+PowerShell Remoting uses WinRM to establish connections to remote machines, so the same detection methods used for WinRM also apply to PowerShell Remoting. Note that regardless of whether HTTP or HTTPS is used in the WinRM transfer, PowerShell encrypts all remoting commands with AES‐256 after the initial authentication.
+Network defenders can help secure PowerShell in their environment by creating constrained endpoints with restricted PowerShell session configurations, which allows more granular control over which users can use PowerShell Remoting and which cmdlets they can run (additional information can be found at
+https://devblogs.microsoft.com/powershell/powershell-constrained-language-mode
+). Similarly, the Just Enough Administration PowerShell security controls can be used to provide necessary access while minimizing the risk of abuse. See
+https://docs.microsoft.com/en-us/powershell/scripting/learn/remoting/jea/overview?view=powershell-6
+for additional details. Consider applying host‐based firewall rules to allow inbound PowerShell Remoting sessions only from trusted administration workstations rather than from all
+arbitrary systems. Finally, implement outbound restrictions to keep systems that don't need to initiate outbound PowerShell Remoting sessions from initiating outbound connections on TCP ports 5985 and 5986. Doing so can greatly reduce the malicious use of PowerShell for lateral movement while still allowing network administrators and incident handlers to leverage PowerShell in their daily operations.
+SSH Tunnels and Other Pivots
+In *nix environments, Secure Shell (SSH) is a common remote access mechanism that can be leveraged by attackers for lateral movement. Issuing a command such as
+ssh <
+user
+>@<
+target
+>
+—where
+<
+user
+>
+is a valid user account and
+<
+target
+>
+is the hostname or IP address of a target where that user account exists—gives an attacker who has compromised valid credentials the ability to remotely log in and control a system across the network (assuming that permissions to access the system remotely via SSH are configured for the compromised account). Access of this type is usually logged in the authentication log on a *nix system (such as
+/var/log/auth.log
+), but this depends on the specific configuration of the syslog service on the target system. As with most *nix logs, this log is a plaintext file, and the meaning of each column is listed at the beginning of the log file. Incident handlers should examine the syslog configuration to determine the location of local and remote logs relevant to the system being examined. The exact location and format of the syslog configuration file will depend on the version of syslog being run on the system.
+In addition to directly logging in from one system to another to gain remote access, SSH provides the ability to create tunnels that allow one system to be used as an intermediary for connections between two different systems. The ability to use one box as an intermediary to connect two other systems, sometimes referred to as a
+pivot
+, is useful for allowing attackers to navigate around network segmentation devices such as firewalls.
+A canonical example of such a pivot might be a compromised system in a demilitarized zone (DMZ) being set up as a pivot or relay point. The compromised DMZ system would be used to relay communications from an external attacker system to an internal victim system, deeper within the victim environment. This assumes that the external attacker system could not directly contact the internal system due to firewall rules, but the attacker system can directly contact the system in the DMZ. The firewall rules would also need to allow communication from the compromised system in the DMZ to pass through to the internal system in question. In this common scenario, the DMZ system could be set up to accept communication from the external attacker box and relay that communication internally to the internal system.
+For example, this command might be executed on the attacker system to open a local listener on port 1111 that redirects traffic sent to it through the DMZ pivot system and on to the internal target system:
+ssh -L1111:<internal_target>:445 <dmz_pivot>
+An SSH tunnel is established between the attacker system and the SSH server running on the DMZ system (called
+<dmz_pivot>
+in this example). From that point, any traffic sent to the attacker's local port 1111 would be redirected through the SSH connection to
+<dmz_pivot>
+over SSH, and the compromised system in the DMZ would then forward that traffic into the network to the
+<internal_target>
+system on port 445. Setting up this pivot requires authenticated access to the compromised DMZ server, so logs of that access might be present. SSH tunnels can be initiated as outbound connections or inbound connections, and the tunnels can be chained together to allow an attacker to send traffic across multiple pivot points to an intended target. Use of network security monitoring to detect the unusual connections either to the pivot system(s) or the ultimate internal target can help detect this type of attack.
+In addition to encrypted pivots using SSH, *nix systems can be configured to open a listening port and redirect any arbitrary traffic received on that port to a different system at a designated port. This can easily be accomplished with services such as
+rinetd
+,
+iptables
+,
+proxychains
+, or other built‐in *nix utilities. The exact artifacts used to detect this type of activity on the host will depend on the distribution of the *nix system as well as which utility was used to implement the port forwarding. External scanning for unusual ports being open on the systems and comparing the results to known good baselines is a good way to try to detect this behavior. Use of the
+netstat
+command or the
+ss
+command is another way to detect these anomalies on the local host, and network security monitoring to detect the unusual connections helps with detection of such relays from the network side.
+Similar pivots can be executed on a Windows system using the built‐in
+netsh portproxy
+command. For example, the following command listens on the local IP address 10.10.0.9 on port 5555 and redirects any traffic it receives to a remote IP address 192.168.7.8 on port 80:
+netsh interface portproxy add v4tov4 listenport=5555 ↵
+listenaddress=10.10.0.9 connectport=80 connectaddress=192.168.7.8
+Detection of this type of pivot can again be accomplished by identifying the unusual listening port, either locally with commands like
+netstat
+or remotely with port scanners. You can also directly query Windows systems for the presence of port proxies by using the command
+netsh interface portproxy show all
+. This command will display any configured port proxy showing both the listening port as well as the IP address and port to which the communication will be redirected.
+Conclusion
+Modern attackers' tendency to use existing tools and protocols to embed themselves in and expand their influence throughout victim networks makes detection and response to lateral movement a critical skill for any incident handler. By identifying systems that have been impacted by an adversary, we are better able to scope the incident, develop containment and response strategies, and execute recovery of the environment. Leveraging all the techniques discussed in this book and applying them not only to lateral movement detection but to all aspects of the cyber kill chain will greatly improve your ability to respond to an adversary who has gained a foothold in your environment.
+
+Part III
+Refine
+In This Part
+Chapter 13:
+Continuous Improvement
+Chapter 14:
+Proactive Activities
+
+CHAPTER 13
+Continuous Improvement
+Most international management standards stress the importance of continuous improvement. This involves constantly examining your operation for opportunities to enhance your efficiency and effectiveness. As we mentioned in
+Chapter 2
+, “Incident Readiness,” incident response is not a stand‐alone process but an integral part of a cycle of prevention, detection, and response. The desired output from incident handling should not simply be mitigating a specific incident, but also providing valuable information to network defenders to improve preventive and detective controls. This chapter will explore ways to ensure that your incident response process feeds back into your overall network defense.
+Document, Document, Document
+One of your most important jobs as an incident handler is to accurately document your actions. Throughout your career, you may work hundreds of incidents or more. Recalling specific technical details from each of these, particularly when asked to do so months after the incident has concluded, is impossible without detailed notes made at the time of the incident. As an incident is unfolding, you do not know in advance if it will resolve quickly or evolve into a massive, public data breach, placing you in the center of legal proceedings. You must therefore take accurate notes for every incident, including dates and times for
+your actions, to ensure that you are ready to respond correctly to any questions that may arise.
+Each incident should culminate in a final report that examines:
+How the attacker gained access
+The tools, techniques, and processes the attacker used
+Any information about the motivations or objectives of the attacker based on observations or threat intelligence
+A quantifiable description of the impact to the organization and its information systems
+A detailed timeline of detections made and response actions taken by incident handlers
+An overview of preventive and detective controls that worked, those that did not work, and recommendations for improving controls in the future
+Of course, your ability to make these determinations is heavily dependent on the logs and other data available within the environment, once again emphasizing the importance of proper incident readiness and preparation. Additionally, attributing the attack to a specific threat actor or detailing the attacker motivation is often not possible without external intelligence sources, which is often beyond the capabilities or purview of the victim organization.
+The final report should be reviewed by each member of the team that handled the incident to ensure that all relevant facts are included. Individual incident handlers should also submit their notes, documenting specific actions taken, including the time of the action, relevant command lines used, affected systems, storage locations for the resulting evidence files, tools and versions of the tools used, and other relevant technical details depending on the nature of the incident. These records can be maintained electronically or on paper according to your incident response procedures, as discussed in
+Chapter 2
+.
+Under the pressure of handling an incident, you may find it easy to feel like documentation is less important than your other assigned tasks. It is not. Taking good notes and documenting your actions not only helps record the details of what you have done, but also helps you gather your thoughts and ensure that each step is the most logical one to take. Incident handlers can get caught up in the moment and lose sight of the big picture. Pausing to document what you are doing and the reasons you are doing it is a good way to check your approach and ensure that it is the most reasonable one. There is a saying among law enforcement SWAT team operators that “Fast isn't fast. Smooth is fast.” This same concept applies to incident response. Documentation forces you to think about your actions and can ultimately lead to a more efficient and effective response.
+Validate Mitigation Efforts
+As discussed in
+Chapter 2
+, after you have identified the adversary's activities, understood the scope of the incident, cataloged the impacted systems, implemented any initial containment that may be necessary to limit the damage, and potentially monitored the adversary to collect threat intelligence, it is then time to remediate. You need to undo any changes made by the adversary and restore normal operations. This will require coordination with operations teams in accordance with your business continuity and disaster recovery plans.
+This part of the incident response process is often not within the direct control of the incident response team, since many different business units will likely have been impacted by the incident and are ultimately responsible for the restoration of their individual systems. It is not reasonable to expect the incident response team to be able to restore all systems, perform acceptance testing to ensure that the restoration is complete, and return the network to a fully functioning state. It is, however, important that the incident response team be a part of the recovery process to facilitate additional monitoring and threat hunting for adversary activity. We often hear of breaches where, after a remediation, the adversary “gets back in” to the environment. Often, the reality is that the adversary was never forced out of the environment in the first place due to an incomplete remediation.
+During the incident response, dwell time (how long the adversary has been operating within the environment) is one of the things you need to attempt to determine. If you miscalculate the dwell time, you may restore from backups that were made when the adversary already had a foothold on the system. Your restoration could reinstall adversary backdoors. To help guard against this, it is best practice to reinstall the operating system from original manufacturer media, apply all patches, and then restore only the data from backups. Although this process could still reinfect the system, it reduces the chance of malware being reintroduced to the environment.
+It is entirely possible that your recovery efforts will either miss an affected system, fail to adequately patch a vulnerable system, or leave a compromised account enabled. If any piece of the attacker's presence in your environment is left unchecked, the attacker is likely to resume the attack campaign, often with different tactics, techniques, and procedures (TTPs) to avoid detection. For these reasons, the remediation phase of the incident response process must be one of heightened readiness for the incident response team. All available network telemetry should be monitored in detail for indicators of the adversary's reaction to the remediation efforts. You should be prepared to implement containment at the network level and quickly isolate segments as necessary should the adversary
+begin taking destructive actions. Remediation efforts should be automated, such as by writing PowerShell or other scripts, so that once the remediation begins, it happens rapidly throughout your environment to minimize the adversary's opportunity to react.
+During this period, the incident response team should enter a threat hunting mode and scrutinize network activity for any signs of potential compromise. This heightened state of awareness should continue for several weeks after the remediation, monitoring not only for indicators of compromise that were identified during the incident, but also for other indicators of compromise that may suggest new TTPs by the adversary. We will discuss ways to approach threat hunting, as well as its value in the incident response process, in the next chapter.
+Building On Your Successes, and Learning from Your Mistakes
+In addition to compiling written documentation for each incident, all relevant stakeholders should gather for an after‐action meeting within a week or so of the incident being resolved. The meeting should include all members of the incident response team, relevant members of management, as well as other impacted groups, including development, operations, legal, public relations, and others as may be appropriate. The meeting should focus on things that went well but also highlight areas where potential improvements could be made. During an incident is not the time for finger‐pointing or blaming, but those approaches are likewise counterproductive even in an after‐action meeting. Instead, shortcomings should be noted in a professional manner and approached from the position of how improvements to the organizational process can be made in the future.
+Too often, people blame an individual or generalized training shortcomings rather than digging deeper to identify the underlying issues. A more thorough evaluation of the network architecture, internal procedures, and other controls is usually warranted. For example, if a user clicked on malware from a phishing email, don't simply say that the solution for future improvement is better user‐awareness training. Instead, identify additional controls that could have helped mitigate the damage after the malware was clicked or would have blocked execution despite the user's actions. If you had a flat network architecture without security segmentation, the user's account had local administrator permissions, and a domain administrator account left a cached credential on that workstation, the underlying issues are much more significant than one user falling for a phishing attack.
+This meeting is also a good time to review your incident response process. We discussed the incident response process during
+Chapter 2
+, and you will find that this chapter continuously calls back to key tenets from
+Chapter 2
+because this is
+where the cycle is completed. The preparation undertaken before the incident should be reviewed and assessed through the lens of its adequacy to address each incident as it occurs. Note the areas of your incident response process that performed as expected, facilitating a smooth response. Similarly, note the areas of the process that could be improved and make specific recommendations for those improvements. This is also an ideal time to assess the technical skills of the incident response team and identify opportunities for additional training, tools, or technologies to address any deficiencies that may have been encountered. An honest assessment of the time required to perform each step of the incident response process is also beneficial. Since many incidents are time‐critical, ensuring that your team can respond in an acceptable amount of time, and defining what “acceptable” means in your organization, can improve your process and set expectations among all stakeholders.
+In an ideal world, your preventive defenses would block all attacker activity and your need to respond to incidents would be greatly diminished. We do not, however, live in an ideal world. The concept of cyber resiliency is predicated on the fact that preventive controls fail. This does not mean that you should drop your shields and allow attackers to move unhindered throughout your environment; rather, you should assess the success, or lack thereof, of your preventive controls and identify ways in which they can be improved to harden the environment against future attacks. We will look at several examples of ways to improve your preventive defenses in the next section.
+THANKS, ERIK!
+Erik Van Buggenhout is the lead author of the SANS “SEC599 ‐ Defeating Advanced Adversaries” course. Erik reviewed this chapter and suggested topics discussed in other chapters as well. This book has benefited from his experience and advice, and we sincerely thank him for his assistance.
+In addition to your preventive controls, you must assess the adequacy of your detective controls in light of the most recent incident.
+Did you have adequate visibility into the impacted areas of the network?
+Would additional logging or alerting have reduced the attacker's dwell time?
+Was endpoint visibility sufficient to reconstruct attacker activity on impacted systems?
+Did your network security monitoring provide the expected information about network traffic?
+Each of the detective controls relied on by your incident response team should be evaluated based on its adequacy for the recent incident. Assess options to modify configurations, increase logging levels, update retention policies, or other opportunities for improvement.
+Threat intelligence can provide valuable information to help prepare the environment for potential attacks by helping you understand threat actors that may target your sector or geographic region and the TTPs used by different adversaries. The after‐action meeting is a good time to assess your threat intelligence program or the need to develop such a program. Specific indicators of compromise may suggest the involvement of specific threat actors. Understanding the motivations, tools, techniques, and processes of that threat actor can be valuable to help prepare your network for future attacks. An effective threat intelligence program can provide insight into the threats you face and allow you to implement appropriate mitigations for the associated risks.
+Since each incident will have its own set of technical details, it is often helpful to map the details of each incident to a standard reference model in order to help quantify the activities of the adversary and assess your ability to prevent or detect these different activities. MITRE ATT&CK (Adversary Tactics, Techniques, and Common Knowledge) is a model and knowledge base of tactics, techniques, and tools used by threat actors. MITRE Corporation is a nonprofit entity that operates U.S. government–funded research and development centers. ATT&CK aggregates and shares information about the activities of actual threat actors and serves as a model for adversary activity. You can use this information to learn about tactics and techniques known to be used against organizations similar to yours and evaluate your preventive and detective controls against specific tactics and techniques to identify areas for improvement.
+You can find MITRE ATT&CK at
+https://attack.mitre.org
+. MITRE represents its data across a series of matrices focusing on post‐exploitation activities (the ATT&CK matrix, which is also subdivided by operating system if desired) as well as pre‐exploitation activities (the PRE‐ATT&CK matrix). Each matrix represents specific adversary tactics across the column headings. For example, the ATT&CK matrix currently lists 12 categories of tactics used by adversaries, including gaining initial access, achieving persistence, escalating privileges, evading defenses, obtaining valid credentials, performing lateral movement, maintaining command‐and‐control, exfiltrating data, and more. Within each of these tactics, specific techniques used to accomplish that tactic are listed. For example, under the tactic of Lateral Movement, specific techniques such as pass‐the‐hash, pass‐the‐ticket, Remote Desktop Protocol, remote file copy, and many others are listed.
+Figure 13.1
+shows a portion of the MITRE ATT&CK matrix.
+Figure 13.1
+:
+The MITRE ATT&CK matrix
+MITRE ATT&CK provides a useful reference model to quantify and prioritize preventive and detective controls within your environment. By mapping adversary behavior from each incident to the MITRE ATT&CK matrix, you are better able to understand the techniques being used against you. You can use the matrix as a baseline to assess your abilities to prevent and detect specific attacker techniques. You can also use this matrix to help gauge the value of a specific technology by showing which of the techniques could be prevented or detected by the implementation of the technology. MITRE ATT&CK tracks specific tactics and techniques across a wide range of known, advanced persistent threat actors. If threat intelligence indicates that a specific threat actor may target your region or sector, you can use MITRE ATT&CK to identify which techniques are associated with that adversary and prioritize preventive and detective controls for those techniques. The interactive MITRE ATT&CK Navigator, located at
+https://mitre-attack.github.io/attack-navigator/enterprise
+, can help you home in on specific aspects of this robust data set, maintain scoring charts indicating your proficiency in preventing or detecting each technique, and provide basic threat intelligence about various threat actors and their known techniques.
+Improving Your Defenses
+Aside from mitigating the potential damage of each incident, the goal of the incident response process should be to feed valuable information back into the organization to help support cyber resiliency. As with the preparation phase discussed in
+Chapter 2
+, this is your opportunity to enhance the network security posture before the next incident occurs. Observations made in the incident response report and associated after‐action meeting should be prioritized and presented to management for enhancing staff, process, and technology.
+In addition to specific items uncovered during the incident response, there are several controls that all organizations should consider when preparing and improving their cyber defenses. The Center for Internet Security (CIS) publishes a list of 20 critical controls that all organizations should seek to provide. This prioritized set of controls serves as a good baseline for improving security within any network. The first six controls are referred to as the Basic CIS Controls. They include inventory and control of hardware assets, inventory and control of software assets, continuous vulnerability management, controlled use of administrator privileges, secure configuration for hardware and software on devices, and proper configuration and use of audit logs. You can learn more about the CIS Controls here:
+www.cisecurity.org/controls/cis-controls-list
+The Australian Signals Directorate (ASD) has similarly identified the Essential Eight security controls that all organizations should prioritize and implement
+as quickly as possible to maximize security. The recommendations include implementing application whitelisting, patching applications, blocking untrusted Microsoft Office macros, hardening user applications, restricting administrative privileges, patching operating systems, implementing multifactor authentication, and performing daily backups. You can read more about the ASD Essential Eight here:
+www.cyber.gov.au/advice/how-to-mitigate-cyber-security-incidents
+Note that basic IT hygiene, including knowing what systems the environment includes and keeping those systems properly patched, appears in the top recommendations of both CIS and ASD. A lot of incident response time is spent trying to identify abnormal from normal. Without good baselines and a controlled IT environment, that task becomes increasingly difficult. Before investing in targeted technologies to address specific attacker techniques, first ensure that your network is orderly and well maintained. Doing so will provide the most return on investment in the initial stages.
+The remainder of this chapter focuses on preventive controls that you should evaluate for implementation within your environment. At the conclusion of each incident, consider whether any of these controls might have prevented or hindered the adversary at any step of the attack. Weigh the value gained by the control against the cost of implementing it within your environment. Consider not only the initial purchase cost but also the total cost of ownership, including proper configuration and maintenance. Keep in mind that some of these controls may cause services within your network to not function correctly, particularly legacy systems, so be sure to test any new control before implementing it in production.
+Privileged Accounts
+By this point, the importance of privileged credentials to attackers, and the need for network defenders to protect those credentials, should be obvious. The age‐old concept of least privilege, where each account is granted only the minimal level of access necessary to perform its assigned tasks, is still a vitally important control. Administrators of systems should have more than one account, each account containing only the necessary permissions to accomplish a defined set of tasks. For routine tasks such as checking email and browsing the web, a nonprivileged user account should be used (Microsoft's User Access Control [UAC] is not an acceptable substitute, as many effective bypasses exist for UAC). Procedures, training, and discipline should be in place to ensure that credentials with domain administrator permissions, for example, are not used for routine administrative tasks on workstations. Each use of a credential represents a potential exposure of that credential, and it is each user's responsibility to use privileged credentials with care. Individual users should not have
+local administrator privileges on their workstations, and the built‐in (RID 500) administrator account on local workstations should be disabled. If disabling those accounts is not feasible, the passwords should be managed with the Local Administrator Password Solution (LAPS). You can find out more about LAPS at
+https://blogs.msdn.microsoft.com/laps
+.
+In addition to creating separate user accounts for administrative and routine tasks, protection can be extended by having dedicated machines (hardware or virtual) for administrative tasks as well. Microsoft calls these secure admin workstations (SAWs) or privileged access workstations (PAWs). All dedicated admin workstations should be hardened with the latest operating system patches and security features such as Credential Guard, application whitelisting, and Exploit Guard (we discuss these controls later in this chapter) and be heavily monitored for unusual activity. Ideally, administrators should each have a dedicated SAW, which has access only to the machines that they administer, and that they can use to access those machines over the Windows Management Instrumentation Command‐line utility (WMIC) or PowerShell Remoting. It is these SAWs that should be used to run scripts to collect baseline data, as discussed in
+Chapter 4
+, “Remote Triage Tools.”
+A domain administrator credential may be used to interactively log on to domain controllers (DCs), since an adversary running as administrator on a DC to be able to capture the credentials from RAM already owns that domain. This only applies if the account is not also an administrator on other domains within the organization where such an exposure could lead to increased access for the attacker. At no other point should extremely privileged credentials like domain administrator or enterprise administrator be used to interactively log on to any member server or client other than a SAW. Any task requiring interactive logon to systems other than SAWs should be done with accounts possessing the least amount of privilege necessary for the specific task. The goal is to make it difficult for an attacker to be able to steal and reuse credentials even if we assume that the network is compromised. By limiting the use of privileged credentials and segmenting your network, you make it difficult for the adversary to steal credentials and move laterally within your environment post‐exploitation. Microsoft provides different architectures, examples, and use cases for implementing SAWs/PAWs to varying degrees within your network here:
+https://docs.microsoft.com/en-us/windows-server/identity/securing-privileged-access/privileged-access-workstations
+Microsoft also suggests using a tiered administrative model for privileged accounts, with a separate tier for administration of Active Directory (AD) assets including DCs, another tier for server administrators, and another for workstation administrators. For example, administrative accounts used to administer workstations should only have permissions on workstations, not servers or DCs, thereby mitigating the damage if one of them is used to log on to a compromised
+host and is stolen by an adversary. Similarly, no credential with privileges to administer a DC or a server should ever be used to log on to a workstation, since workstations are most likely to have been subject to client‐side attacks and be under the control of an adversary who would steal the administrative credential. If help desk staff need to access client machines using Remote Desktop Protocol (RDP), each account they use should be configured to have permissions only on a subset of the client workstations (no one account should have access to all workstations in the environment), and they should use RDP's Restricted Admin mode or Remote Credential Guard to help safeguard that credential. This separation of responsibilities is a critical component of protecting privileged credentials from credential theft and reuse such as pass‐the‐ticket and pass‐the‐hash attacks. You can read more about the administrative tier model here:
+https://docs.microsoft.com/en-us/windows-server/identity/securing-privileged-access/securing-privileged-access-reference-material
+Privileged accounts should also be placed in the Protected Users global security group. Placing accounts in this group implements changes to the way Windows handles their credentials during authenticated logon. These changes prohibit the use of NT LAN Manager (NTLM) authentication for the protected accounts (to guard against pass‐the‐hash attacks), reduce the ticket‐granting ticket (TGT) default validity from 10 hours to 4 hours, prohibit renewal of TGTs past their initial validity period, prevent caching of the account's credentials, and stop Kerberos from creating the weaker DES or RC4 keys for these accounts. Additional details can be found here:
+https://docs.microsoft.com/en-us/windows-server/identity/ad-ds/manage/how-to-configure-protected-accounts
+Similarly, as discussed in
+Chapter 12
+, “Lateral Movement Analysis,” any service accounts in the environment should be group Managed Service Accounts (gMSAs).
+Microsoft introduced Credential Guard to further protect systems from theft of credentials from the LSASS process memory with tools like Mimikatz. Credential Guard has certain hardware requirements, but if those requirements are met and Credential Guard is enabled, Windows uses virtualization‐based security (based on the Hyper‐V hypervisor) to virtualize the host operating system, placing the hypervisor between the operating system and the system hardware. It also creates a separate virtual environment, outside of the host operating system itself, referred to as Virtual Secure Mode (VSM). A separate, isolated instance of LSASS (called LSAIso) is instantiated within this virtual container and is where interactive logon credentials are stored. Malicious attempts to directly access LSASS memory from the operating system to steal credentials are blocked by the hypervisor in the same way that two separate virtual machine instances can be kept isolated from each other. Although this is an effective security control, it does have several prerequisites to enable and prohibits the
+use of other local virtualization technologies such as VMware Workstation. Additional information about Credential Guard can be found here:
+https://blogs.technet.microsoft.com/ash/2016/03/02/windows-10-device-guard-and-credential-guard-demystified
+Building upon this virtualization‐based security, Windows Defender Application Guard seeks to containerize commonly attacked endpoint applications in separate virtual environments. Just as with Exploit Guard, these virtual containers are isolated from the main operating system by a Hyper‐V hypervisor. When enabled, Application Guard opens a virtual instance of the Microsoft Edge browser whenever an untrusted website is visited by the user or when the user explicitly chooses to open a new tab running in a virtualized instance of Edge. As of this writing, Microsoft has announced its plans to expand this to Microsoft Office applications, opening untrusted documents in a virtual container rather than just Protected View. Similar virtualization‐based security controls such as Core Isolation and Memory Integrity can further isolate parts of the operating system itself to help prevent attacks against them. These hardware‐based security features can help prevent attacks against your endpoints, but as newer security features with prerequisite hardware requirements, their adoption for now is rather low. Moving forward, we expect this type of virtualization‐based security to become an important control to protect your endpoints.
+Execution Controls
+In order to get an initial foothold within your environment, most attackers use a client‐side attack to trick the user into executing malicious code. It is therefore imperative that you restrict the types of code nonprivileged users may execute. By implementing basic controls to restrict code execution, you can prevent many attacker attempts to gain an initial foothold into the environment. Although we continue to assume that compromise can occur, you should still implement preventive controls to make it as difficult as possible for the adversary.
+Application control solutions, also called application whitelisting solutions, enforce restrictions on which code users can or cannot run. When a rule‐based approach is used, rather than trying to explicitly allow every executable needed in your environment, these tools can be effective and manageable. One common example of such a solution is Microsoft's AppLocker, the default rules of which restrict code execution by nonprivileged users to only the
+C:\Programs
+and
+C:\Windows
+directories. This simple control blocks many attempts where an adversary social‐engineers a user into downloading and executing malicious code. Since most users would download the code to their
+Downloads
+or
+Desktop
+directories, the attempt to execute that code would be blocked by the application control solution. AppLocker can help you gain control over applications, scripts, Windows installers, and even dynamic‐link libraries (DLLs). To provide better
+protection, more fine‐grained rules can be set to take account of the fact that some folders under
+C:\Programs
+and
+C:\Windows
+can be written to by regular users and therefore used to execute unapproved programs, but even the basic control outlined earlier would go a long way to stopping client‐side attacks such as phishing. Windows Defender Application Control (WDAC) is another Microsoft‐provided solution that restricts code execution from applications and scripts in order to better secure your environment. Additional information is available from:
+https://docs.microsoft.com/en-us/windows/security/threat-protection/windows-defender-application-control/windows-defender-application-control
+You can also consider blocking some categories of executable code entirely. For example, HTML applications (HTA files) are frequently used as payloads by malicious actors; however, many enterprise environments have no legitimate business purpose for these files, so blocking them entirely from your environment using an application control solution may be appropriate. If blocking an entire category of file type is not feasible, perhaps changing the default application association for its extension might be an option. Associating common script extensions (such as
+.bat
+,
+.cmd
+,
+.js
+,
+.vbs
+, and
+.vbe
+) away from their default executable to a text editor reduces the risk of users unknowingly launching malicious scripts by double‐clicking a file. Administrators or others who need to use such scripts can still do so from the command line or other mechanisms. PowerShell implements this type of safeguard by default, so when a PS1 file is double‐clicked, it opens in a text editor rather than executing the script.
+Windows Defender Exploit Guard is another control that focuses on restricting execution of malicious code, this time by trying to prevent activities frequently associated with attackers exploiting systems. This includes controls to guard against DLL injection, stop trusted binaries from executing untrusted code, block Microsoft Office documents from running executable code, protect the contents of designated folders from unauthorized modification, and much more. You can see the Exploit Guard configuration on a Windows 10 system in
+Figure 13.2
+, showing just a small portion of the options available. Additional information is available here:
+www.microsoft.com/security/blog/2017/10/23/windows-defender-exploit-guard-reduce-the-attack-surface-against-next-generation-malware
+As with any type of control, application control solutions can be bypassed by dedicated attackers. No one control is enough to defend your network, but by layering defense‐in‐depth throughout the environment, you will frustrate many of the attacker's attempts, cause them to expend more resources, and force them to launch more attacks in order to compromise your environment. Each time the adversary takes an action, it is another opportunity to detect and respond to their attack. By making execution of code difficult, the adversary
+might be forced to use less stealthy techniques to achieve an initial foothold, thus increasing the chance for detection.
+Figure 13.2
+:
+The Windows Defender Exploit Guard configuration screen
+PowerShell
+We discussed control of malicious scripts earlier in this chapter, but the prevalence of PowerShell‐based attacks warrants giving this topic its own section. We've already discussed many of the enhancements to PowerShell logging in
+Chapter 8
+, “Event Log Analysis,” so here we will focus on ways to secure PowerShell within your environment to help prevent malicious actions.
+Modern versions of Windows and PowerShell have additional security controls including transcription logging, the Antimalware Scan Interface (AMSI), and constrained language mode to decrease the malicious use of PowerShell. PowerShell version 2, however, does not support many of these security features. Since PowerShell version 2 may still be enabled on Windows systems, attackers can bypass many of these newer security features by explicitly using PowerShell version 2 to run their scripts, which can be done by starting PowerShell with the
+–version 2
+parameter, such as
+powershell ‐version 2
+. You can determine whether PowerShell version 2
+is installed on a client by running
+Get‐WindowsOptionalFeature ‐Online ‐FeatureName MicrosoftWindowsPowerShellV2
+from an administrator PowerShell prompt. On a Server OS, you can use the command
+Get‐WindowsFeature PowerShell‐V2
+instead. PowerShell 2.0 should be uninstalled on modern Windows systems, which can be accomplished through the Windows Features GUI or through PowerShell commands such as
+Disable‐WindowsOptionalFeature ‐Online ‐FeatureName MicrosoftWindowsPowerShellV2Root
+. For additional information, see:
+https://devblogs.microsoft.com/powershell/windows-powershell-2-0-deprecation
+Once you have plugged the gaping security hole that is PowerShell 2.0, you can get back to the business of securing your modern PowerShell deployments. People occasionally ask us if they should remove PowerShell from their environment to prevent its malicious use. The simple answer is “No,” since this is effectively like removing the keyboard from a laptop to keep it from being used maliciously. PowerShell is an integral part of the Windows operating system, and PowerShell 7 is an increasingly viable alternative for managing *nix systems as well. PowerShell represents an amazing administrative and incident response tool, so removing it from the environment is counterproductive. Even if you were to remove
+powershell.exe
+, the underlying .NET system automation components can still be accessed, and adversaries can still leverage the capabilities of PowerShell against you. It is much more effective to lock down PowerShell usage in order to secure your system rather than try to remove this core Windows component.
+One of the first options to consider is requiring the use of PowerShell Constrained Language Mode on all Windows systems in the environment. This can be accomplished with enterprise application control solutions such as AppGuard and WDAC. Once enabled, PowerShell reverts from its default of Full Language Mode to Constrained Language Mode, which drastically reduces the access that PowerShell has to the underlying Windows components. Examples of these restrictions include blocking access to COM objects, restricting access to .NET types, and disallowing use of PowerShell classes. The result of these restrictions is that malicious actors have much less access to the system and their ability to use PowerShell maliciously is greatly reduced. To ensure that scripts needed by administrators are still able to access full functionality, add your code‐signing authority as trusted within your application control solution and sign trusted PowerShell scripts accordingly. Unlike the built‐in PowerShell execution policy, these code‐signing controls are enforced by the application control solution and cannot be bypassed simply using
+powershell –ExecutionPolicy Bypass
+. Additional information can be found here:
+https://devblogs.microsoft.com/powershell/powershell-constrained-language-mode
+Unfortunately, as we alluded to when we discussed reasons not to remove PowerShell from your environment, if the adversary brings their own PowerShell code to the party (an executable that directly accesses the underlying .NET components on which PowerShell relies), their code will not be limited to Constrained Language Mode. However, the same application control solution that you use to enforce Constrained Language Mode may block the unknown executable from running. Again, this is an example of the need for defense‐in‐depth so that your security does not rely on any single control.
+Finally, the Just Enough Administration (JEA) technology available from Microsoft provides granular, role‐based access to a system using PowerShell. Permissions can be assigned to allow specific PowerShell cmdlets, functions, and external commands while denying any other access to the system, even if the allowed features would normally require administrator access. It provides “just enough” access to administrator permissions to accomplish the required tasks without requiring unfettered access to all permissions normally granted to administrator accounts. This provides an even more granular way to assign the least privilege necessary for a user to accomplish a specific task, as we discussed in the “Privileged Accounts” section of this chapter, without risking the loss of a privilege credential in the process. You can learn more about JEA at:
+https://blogs.technet.microsoft.com/miriamxyra/2018/05/10/securing-your-infrastructure-with-just-enough-administration
+Segmentation and Isolation
+We discussed the importance of network segmentation in the context of detective controls in
+Chapter 2
+; however, now that we have explored lateral movement in
+Chapter 12
+, let's look at its importance for preventive controls as well. A primary attack technique used by adversaries to achieve lateral movement is credential theft and reuse. Consider a scenario where an attacker uses social engineering and tricks a user into running executable code, compromising the workstation and providing a foothold for the attacker within the network. The next logical step for the attacker would be to attempt credential reuse, move laterally to other systems, and try to find credentials on those systems that they can use to escalate privileges. For lateral movement to occur, the attacker must have IP connectivity to a remote system, and this is where segmentation can be a valuable preventive control.
+If the adversary in our example enumerates information about other hosts on the network, they may then attempt to move to those hosts with their current credential—the credential for the user who clicked the malicious payload. If the workstation is isolated to communicate only with a small number of hardened servers for which the current user's credential is not valid, then the ability of
+the adversary to move laterally and escalate privileges is significantly impaired. This level of isolation can be achieved through network devices, such as private VLANs configured on network switches, or through host‐based firewalls, where firewall rules on each host block inbound connections to commonly used ports like SMB, RDP, WinRM (and therefore PowerShell Remoting) from all systems except a small number of designated SAWs. You can read more about using the built‐in Windows firewall to isolate clients here:
+https://medium.com/@cryps1s/endpoint-isolation-with-the-windows-firewall-462a795f4cfb
+Even if you do not achieve complete client isolation of the type we just described, you should still segment your network at Layer 2 and/or Layer 3 in order to hinder lateral movement by an adversary. Just as ships are built with a series of flood doors and segmentation to control flooding in the event of a hull breach, so should your network be segmented to contain the spread of an adversary who gains an initial foothold. Segments used by untrusted devices, such as contractor, guest, and bring‐your‐own‐device (BYOD) access networks, should be restricted heavily and treated in the same way as untrusted Internet connections when authorizing access to internal resources. Systems that contain sensitive information should likewise be isolated with additional security controls in place for inbound and outbound traffic on their segment. Where possible, workstation‐to‐workstation communication should be inhibited by network or host‐based isolation mechanisms.
+All devices connecting to the Internet from any segment should be required to go through a proxy or similar network control. All inbound mail should be scanned for executables, macro‐enabled Microsoft Office documents, and similar malicious payloads. Inline network defense technologies, including intrusion prevention systems, malware sandboxing devices, and other routine perimeter controls, should be in place at any Internet perimeter boundary. By layering your defenses and making your environment inhospitable to attackers, you increase your chance of preventing or detecting an attack and maximize your ability to launch an effective incident response.
+Conclusion
+Incident response should be thought of as a continuous cycle rather than a process to be pulled out when an emergency occurs. Each incident provides valuable information that should feed back into the overall security posture of the environment to provide cyber resiliency. Each incident provides an opportunity to evaluate preventive and detective controls, improve the response process, and
+identify technologies and training that will benefit the organization and improve its overall security posture. When not actively engaged in handling an ongoing incident, incident response teams should undertake proactive activities with the goal of detecting unknown adversaries within the environment as well as identifying potential gaps in security or visibility within the network. These proactive activities, including threat hunting and adversary emulation, are the subject of our next chapter.
+
+CHAPTER 14
+Proactive Activities
+Incident response is, by its very nature, a reactive activity. We respond to incidents as they are detected to understand and mitigate their impact. The defense of your network, however, is an active, not passive, activity. Incident response provides a critical role in the prevent‐detect‐respond cycle of active network defense. When not engaged in an incident, your team should be enhancing your defenses through proactive activities such as hunting for adversaries who may already be in your environment and emulating adversary behavior to test and improve your preventive and detective controls.
+Threat Hunting
+Those tasked with finding and defeating evil cannot go about their mission passively. Police officers do not simply sit around a police station waiting for calls reporting an emergency. Instead, they actively patrol their area of responsibility and seek out crimes that may be in progress. Similarly, those tasked with defending a network cannot wait for a detective control to trigger an alert; they must actively hunt for evidence of malicious behavior within their environment on an ongoing basis. This process is known as
+threat hunting
+.
+Proactively searching for evidence of adversary activity provides several benefits to the organization. Most obviously, if an adversary is detected, appropriate steps can be taken to respond to and mitigate that threat. In addition,
+the act of hunting through evidence sources such as log data, system memory, and other records of events provides valuable experience and practice for incident handlers, improving their ability to rapidly triage and detect adversary behavior during an incident. Similarly, when you are conducting a hunt, you may identify gaps in preventive and detective controls that can be remediated before an actual incident occurs.
+Many network defense teams conduct threat hunts in an ad hoc manner. Unfortunately, this approach often leads to random flailing through log files, duplication of effort, and inefficient use of analyst time. Instead, a threat‐hunting program should provide a structured approach to seeking out potential adversary activity, such as that represented in
+Figure 14.1
+.
+Figure 14.1
+:
+The threat‐hunting process
+As illustrated in
+Figure 14.1
+, the first step in the threat‐hunting process is to formulate a hypothesis describing specific activities that may have been taken by an adversary. This can be as simple as “An adversary has created an unauthorized domain administrator account in our environment,” to more complex hypotheses such as “This specific APT is using phishing emails from a known malicious domain to send attachments with malicious Word macros to senior members of our organization.” Formulation of a good hypothesis requires human understanding of the environment, the technologies deployed in the environment, and the TTPs used by likely threats to the environment. Each hypothesis used as the basis for a hunt will consume resources to explore. It is therefore important that each hypothesis be carefully crafted, represent a valid threat to the organization, and have potential sources of evidence to prove the hypothesis should it turn out to be accurate.
+FOR ADDITIONAL REFERENCE
+Many of the topics presented in this section are discussed in detail in the paper “The Who, What, Where, When, Why and How of Effective Threat Hunting,” by Robert M. Lee and Rob Lee. This paper provides additional information about building a successful threat‐hunting program and can be downloaded from
+www.sans.org/reading-room/whitepapers/analyst/who-what-where-when-effective-threat-hunting-36785
+.
+While identifying possible hunt hypotheses, you may conclude that your environment would not have adequate telemetry to prove or disprove the hypothesis. This process by itself offers opportunity for improvement by identifying gaps within your security posture that should be addressed. By exploring the hypothesis and identifying the inability of your preventive or detective controls to address a specific attack vector, you can modify your controls to better address that threat in the future. If the hypothesis includes evidence that could be used to prove it, conducting a hunt based on the available evidence may uncover a previously undetected threat actor within your environment. At least it may help identify areas where your controls need to be adjusted.
+Once you have settled on a hypothesis that represents a valid threat and identified potential sources of evidence, you can begin the hunt. Examine the evidence sources you identified and determine whether the hypothetical activity occurred within your environment at some point in the past. The sources of evidence may include the following:
+Log data from network security devices
+Individual host logs
+Current configuration data
+Active Directory objects
+Artifacts in memory
+Modifications to registry keys
+The presence of particular network connections
+Unusual processes or services
+Any other potential indicators of compromise
+Scrutinize each potential source of evidence that may indicate that the hypothetical activity is occurring or has occurred within your environment.
+If the hypothesis is confirmed and malicious activity is detected, initiate your incident response process to remediate the risk posed by the current adversary. Even if no evidence is found to support the hypothesis, the process of performing a careful hunt provides incident handlers with valuable experience in querying remote systems and examining the network for potential malicious activity. Practice helps reinforce the skills necessary to efficiently and effectively respond to future incidents and may identify areas where incident responders need to improve the time taken to access or analyze evidence sources to ensure that a response can be made in a timely manner.
+While hunting, you will likely identify additional sources of evidence that were not available in your environment but that could have helped confirm or refute specific aspects of the hypothesis. You may determine that log retention periods were inadequate, that logging was not configured in sufficient detail, or that network sensors were not configured to provide adequate visibility over specific network segments. Or you may identify other gaps in the preventive and detective controls in the environment. Threat hunting provides a real‐world application of the skills used during incident response to not only provide practice to the people involved, but also to test and tune the technologies employed in your environment.
+Threat hunting is, by its very nature, a human resource–intensive activity. From the formulation of the initial hypothesis to the logic necessary to understand the hypothetical attack and the potential sources of evidence that it might generate, a human's intuition is required to guide the process. However, once this process is identified and the potential attack path understood, automation can be leveraged to detect or prevent the execution of this attack path in the future. The human analyst should identify specific indicators of compromise, intrusion detection signatures, paths of process execution, or other methods of identifying this type of attack in the future. These indicators can then be integrated into automated preventive and detective controls. Ideally, a threat hunt for a specific type of threat should be required only one time. After that, the knowledge gained through the process of performing the hunt should be used as the basis for the development of automated prevention and detection alerts. You should continue to test these controls to ensure their ongoing effectiveness, but doing so in the future should be a much simpler process than the initial hunt.
+All activity in the hunt is derived from the formation of the initial hypothesis. Don't underestimate the importance of generating a hypothesis that provides value to the organization. A hypothesis is typically derived from these three sources:
+Your knowledge of specific technologies and how they could be attacked
+Your knowledge of the environment and how it could be attacked
+Your knowledge of adversary tactics, techniques, and procedures (TTPs)
+The first of these sources is unique to each individual and recognizes that each person has a unique set of technical skills that should be used in defense of the network. If an analyst has a deep understanding of a product used within your environment, it is highly likely that the analyst also understands specific attack vectors that may succeed against that technology. Leveraging this understanding can generate useful hunting hypotheses that other members of your organization may not consider.
+The second source recognizes your team's thorough understanding of your own network environment. You know where the most valuable information resources (often referred to as an organization's crown jewels) are stored and the possible attack vectors that could lead to their compromise. You likely previously identified preventive or detective controls that are lacking but for which budget or time has not been allocated to address the deficiencies identified. You understand delays related to the application of critical patches and the potential risks those delays have introduced to the environment. By leveraging this institutional knowledge, you can identify possible attack vectors that may have been exploited by an adversary without being detected based on your knowledge of your current defensive posture. These types of hypotheses make for excellent threat‐hunting exercises as they represent a genuine risk to the organization that may have been executed without previous detection. For example, if you are aware that a critical patch was not applied in a timely manner, you may start with the hypothesis that an adversary exploited the known vulnerability before the patch was applied, identify data sources that would show such activity, and conduct a hunt to verify if the vulnerability was indeed exploited.
+To develop a hypothesis based on individual or institutional knowledge, consider how you could attack your own systems given the appropriate means, motive, and opportunity. Use your insider knowledge of your environment and its associated technologies to map a path that an attacker might be able to use to gain or maintain unauthorized access to your environment, access sensitive information assets, or exfiltrate data. From that path, identify specific areas where your existing preventive or detective controls might be able to detect such activity. It is possible that some previous malicious activity associated with the attack path you have identified may have been blocked or detected, but other aspects of the attack path could have been successfully executed with no prevention or detection. Consider which controls may have evidence of any aspect of the attack path and how they may prove or disprove a hypothesis that an attacker used this attack path to exploit your environment and then hunt through those evidence sources. As you do so, consider additional preventive or detective controls that would aid in stopping this type of attack in the future. Include any ways that can be automated to generate alerts and avoid the need for human resources to repeat a full hunt of this nature in the future.
+Aside from individual and institutional knowledge, you can leverage external sources of intelligence about threat actors and their behavior to generate a
+hypothesis for a hunt. We previously mentioned the MITRE ATT&CK matrix as a good source of information relating to the techniques and tactics used by real‐world threat actors. ATT&CK provides the ingredients to develop many threat‐hunting hypotheses. An effective way to use ATT&CK for this purpose is to leverage the ATT&CK Navigator, located at
+https://mitre-attack.github.io/attack-navigator/enterprise
+. As we briefly mentioned in the last chapter, the ATT&CK Navigator provides an interactive way to explore the tactics and techniques cataloged by MITRE ATT&CK. Since the matrix is based on observations of actual threat actors, it provides an exceptional starting point for developing threat‐hunting hypothesis based on threat intelligence.
+Figure 14.2
+shows the ATT&CK Navigator interface.
+Figure 14.2
+:
+The ATT&CK Navigator interface
+As shown in
+Figure 14.2
+, the various adversary tactics identified by MITRE are listed across the top of each column, with the associated attack techniques listed in rows beneath each column. A specific technique may be applicable to more than one tactic. For example,
+Figure 14.2
+shows that the technique named CMSTP (for the Microsoft Connection Manager Profiler Installer command‐line program used in this attack technique) is applicable to both the Execution and Defense Evasion tactics. If you hover your mouse over the technique, it highlights anywhere else that technique appears in the matrix and provides the associated technique ID assigned by MITRE (T1191 in the case of CMSTP). If you want additional information about a specific technique, right‐click that technique and choose View Technique from the menu to open a new tab with additional details, as shown in
+Figure 14.3
+.
+Figure 14.3
+:
+The CMSTP technique explanation
+As shown in
+Figure 14.3
+, MITRE catalogs a good deal of useful information about each of the techniques in the matrix, including information about the user permission required to execute the technique, the platform(s) on which it is viable, the tactics to which it applies, potential data sources to detect the technique, and more. As you scroll down farther in the description, you also receive specific examples of threat actors or known hacking tools that use or execute each technique, as well as specific recommendations for preventive and detective controls to address the technique. Finally, external references to additional open‐source information about each technique are provided. For purposes of threat hunting, the detection section (shown in
+Figure 14.4
+) is of particular use.
+Based on this information, you may formulate a hypothesis that an unknown adversary has successfully used the
+CMSTP.exe
+executable with a malicious INF (installation information) file to bypass application whitelisting and run malicious code on systems in your environment, as described in MITRE ATT&CK technique ID T1191 (mentioned earlier). You might then analyze Sysmon logs as described in the detection section shown in
+Figure 14.4
+to attempt to identify malicious use of
+CMSTP.exe
+. You would then use your knowledge of the environment to select systems where this technique may be most effective in order to prioritize the data sources that you query during your hunt. During the process of hunting, you should note any additional preventive or detective controls that would help mitigate the risk posed by this technique and identify any opportunity to automate detection.
+Figure 14.4
+:
+Additional details about preventing and detecting the CMSTP technique
+Another useful aspect of the MITRE ATT&CK Navigator is that it tracks threat actor groups and the tactics and techniques that they are known to use. The Groups category at the top of the MITRE ATT&CK Navigator interface takes you to the description of all the groups being tracked (
+Figure 14.5
+).
+Figure 14.5
+:
+MITRE ATT&CK also tracks known techniques of threat actor groups.
+If you receive threat intelligence, such as from a threat intelligence service or open source media reporting, that a specific threat actor is targeting your region or sector, you can query the MITRE ATT&CK Navigator for information about the techniques used by that threat actor. This approach can be useful in prioritizing your defensive controls and for formulating threat‐hunting hypotheses. The MITRE ATT&CK Navigator allows you to highlight each technique known to be used by a specific threat actor or actors. Under Selection Controls, choose the multiselect icon (the hamburger menu button with the plus sign) to bring up a list of threat groups and software packages. By clicking the Select button, shown in
+Figure 14.6
+, you can highlight the various techniques used by threat actor groups (the FIN6 cybercrime group is shown in the example in
+Figure 14.6
+).
+Figure 14.6
+:
+Using MITRE ATT&CK Navigator to highlight the techniques used by a specific threat actor
+If threat intelligence leads you to believe that you are at increased risk of being targeted by a specific threat actor, the information in the MITRE ATT&CK Navigator can help you formulate a threat‐hunting hypothesis based on the techniques known to be used by that adversary. Even without knowledge of a specific threat, using the MITRE ATT&CK Navigator to learn how threat actors target organizations of your type provides valuable insight into how to best prepare your defenses and develop threat‐hunting hypotheses to search for similar attacks within your organization.
+Once you have a valid hypothesis, derived from your knowledge of your technology, your environment, external threat intelligence, or a combination of all three, you must identify the likely data sources where evidence might be contained and begin hunting within those data sources. The hunt itself will follow the same process we have been discussing in the rest of this book related to incident response. You will need to be able to access logs in a centralized manner, ideally from a tactical SIEM where these high‐value logs are stored. In some cases, the data sources may be more obscure and require querying SIEMs maintained for compliance purposes or logs stored directly on individual systems. These are prime opportunities to identify sources of evidence that should be prioritized for collection by the incident response team and for creating alerts that can automatically detect this type of malicious activity if it occurs within the environment.
+You may also need to directly query individual systems for information regarding specific registry values, accounts, processes, open ports, or other specific indicators related to your hunt. The tools and techniques we have discussed throughout this book for remote triage apply equally to threat hunting. By leveraging PowerShell Remoting, WMIC, and tools such as osquery, TheHive, Velociraptor, and the others we have discussed, you should be able to effectively query your network systems to determine whether this type of malicious activity has occurred within your environment.
+TIP  PSHunt is a PowerShell‐based threat‐hunting platform made publicly available by Infocyte. Although updates to the platform have been less frequent than may be desired, PSHunt still contains many PowerShell scripts from which you can draw to improve your visibility over specific aspects of your network from a threat‐hunting and incident response perspective. You can find PSHunt at
+https://github.com/Infocyte/PSHunt
+.
+If you find that you are not able to make the queries needed to investigate your hunt efficiently, or at all, these are prime opportunities for improvement within your organization. You should document the gaps identified and work with the appropriate teams to improve the situation moving forward.
+As seen in the previous section, threat hunting can be a powerful tool for improving network defenses; however, in order to detect the presence of an adversary, one must already be present within your environment. This is obviously not a desirable state, and you do not want to have it as a prerequisite for finding opportunities to improve your defenses. If an adversary is not already in your environment, you could instead emulate the actions of an adversary yourself in order to test your preventive and detective controls, as well as assess the ability of your team to detect and respond to malicious behavior.
+Adversary Emulation
+In the physical world, units tasked with security of an organization or area routinely engage in training exercises in order to hone their skills, identify potential deficiencies, and seek continuous improvement. For an incident response team, these opportunities take the form of adversary emulation, where techniques used by adversaries are deployed within the environment in a controlled manner in order to test preventive controls, detective controls, and human responders. There are several different ways in which adversary emulation can be used to improve your network defenses.
+A red team exercise consists of a separate group, usually specialized in penetration testing or other offensive operations, that attempts controlled adversarial activity against your organization. The red team can be composed of in‐house resources or external consultants. This is not the same as a penetration test, where tools such as vulnerability scanners or other very noisy assessment methods may be used. Members of a red team should instead attempt to evade detection in the same manner that a real‐world adversary would. The members of the red team should choose and use tactics and techniques that mimic those of identified threats to the organization in order to most effectively simulate the types of activity a real‐world attacker might deploy. Red teams should thoroughly document their actions so that a detailed debrief can be provided to network defenders at the conclusion of the exercise. The point to the red team exercise is to understand what a dedicated adversary would be able to accomplish if they targeted the organization and evaluated the effectiveness of security and incident response measures. Based on this information, the organization can modify existing preventive and detective controls, modify incident response procedures, and gain many of the same benefits of working through an actual incident without the associated damages.
+Red team exercises can result in an adversarial dynamic between the members of the red team and the blue team (the network defenders and incident responders who seek to protect your network each day). Some blue team members may feel offended or threatened by this type of activity, and morale can sometimes be negatively affected. In some organizations, a more blended approach, referred to as
+purple teaming
+, is used to achieve similar goals. In a purple team exercise, as the name suggests, the blue team and the red team work together rather than in an adversarial manner. The red team continues to act as an adversary and use techniques to evade detection, but rather than waiting until the exercise is over to discuss their actions with the blue team, the red team instead works in parallel with the blue team by launching an adversarial action, discussing what preventive or detective controls should have been able to impede their action,
+and identifying improvements to network defenses as they go. Since the red team is not operating in secret, this also provides the opportunity to test various iterations and variations of attack techniques in order to further refine network defense technologies. This cooperative approach can lead to significant improvements in network defense. It does, however, lack the element of assessing the incident responders' ability to independently detect and deter a full adversarial campaign launched by the red team. In many organizations, a combination of the two approaches is used by honing network defenses through purple team exercises and periodically testing those defenses with a red team exercise.
+The cost of hiring an external consulting company to provide a red team exercise can be high, and the overall cost to the organization of a purple team exercise, using offensive and defensive resources, is too high to do with regularity in many organizations. It is critical, however, to test network defenses against common adversarial techniques on a regular and recurring basis. Adversary emulation tools provide a low‐cost solution that can be used frequently to augment more expensive red team and purple team exercises. These tools can be used by network defenders to simulate the activities of a red team independently, without the need for additional resources. One of the most useful frameworks for simulating red team activity is the Atomic Red Team project, made freely available by the folks at Red Canary, which we explore in the next section.
+Atomic Red Team
+The goal of the Atomic Red Team project is to provide a series of atomic, or discrete, tests that can be used by defenders to emulate specific attacker techniques in a safe and controlled manner. The key concept of the project is that each test be simple to execute, with minimal dependencies. Each test takes only a few minutes to set up and execute, which allows even the busiest team the opportunity to benefit from adversary emulation. As they say on their GitHub project page (
+https://github.com/redcanaryco/atomic-red-team
+), “The best test is the one you actually run.” Each test in the Atomic Red Team project is mapped to a technique number assigned by MITRE ATT&CK. You can clone the GitHub repository to your local system or simply download the zip file, which is less than 5 MB in size, from the Atomic Red Team project URL provided. The various atomic tests are located in the
+Atomics
+folder. Each test is given its own subfolder, named after the technique number assigned by MITRE, as shown in
+Figure 14.7
+.
+As shown in
+Figure 14.8
+, instead of viewing each atomic test within the folder structure of the GitHub repository, you can view all the atomic tests, grouped by the associated ATT&CK tactic and annotated with a brief description of the test online at:
+https://github.com/redcanaryco/atomic-red-team/blob/master/atomics/index.md
+Figure 14.7
+:
+Each atomic test is grouped by the associated MITRE technique number.
+Figure 14.8
+:
+Categorized list of all atomic tests
+Atomic Red Team is supported by an active community and is frequently updated with new techniques. One goal of the project is that each test, including any associated files necessary to execute the test, is conveniently located in a
+single folder named for the associated MITRE ATT&CK technique number. To illustrate this point, let's examine the Atomic Red Team tests for MITRE ATT&CK technique T1191, the CMSTP technique that we looked at earlier in this chapter. The files contained within the T1191 folder are shown in
+Figure 14.9
+.
+Figure 14.9
+:
+The files needed for the CMSTP tests
+As shown in
+Figure 14.9
+, only five small files are necessary to document and execute the atomic tests for MITRE ATT&CK technique T1191. Each technique is described in a YAML (known both by YAML Ain't Markup Language and Yet Another Markup Language) file. YAML (
+https://yaml.org
+) is a human‐readable syntax for representing data in a structured way that can also be easily parsed by scripts or other automated processes. The Atomic Red Team project seeks to describe each technique in a manner that both people and systems can use. This facilitates the original goal of the project: to allow network teams to quickly and easily execute adversary emulation testing. It also allows automated ingestion into third‐party products that may be able to leverage the data about these various tests that has been curated by the project for use in recurring, automated testing activities. The YAML file for the T1191 technique reads as follows:
+---
+attack_technique: T1191
+display_name: CMSTP
+atomic_tests:
+- name: CMSTP Executing Remote Scriptlet
+description: |
+Adversaries may supply CMSTP.exe with INF files infected with malicious commands
+supported_platforms:
+- windows
+input_arguments:
+inf_file_path:
+description: Path to the INF file
+type: path
+default: T1191.inf
+executor:
+name: command_prompt
+command: |
+cmstp.exe /s #{inf_file_path}
+- name: CMSTP Executing UAC Bypass
+description: |
+Adversaries may invoke cmd.exe (or other malicious commands) by embedding them in the RunPreSetupCommandsSection of an INF file
+supported_platforms:
+- windows
+input_arguments:
+inf_file_uac:
+description: Path to the INF file
+type: path
+default: T1191_uacbypass.inf
+executor:
+name: command_prompt
+command: |
+cmstp.exe /s #{inf_file_uac} /au
+The file begins with the MITRE ATT&CK technique number and display name for the technique. Next comes the
+atomic_tests
+section, which describes the two different tests provided by Atomic Red Team for this technique. The first test is named CMSTP Executing Remote Scriptlet. For this test, you are given a description, a list of supported platforms, the arguments necessary to execute the test, the executor (the tool to be used to perform the test), and the specific command needed to execute the test. Similar information is provided for the second test for this technique, the CMSTP Executing UAC Bypass. For the CMSTP Executing Remote Scriptlet test, the test is executed simply by opening
+CMD.EXE
+and executing the command
+cmstp.exe /s
+#{inf_file_path}
+, where the variable
+#{inf_file_path}
+is replaced by the path to a simulated malicious INF file. A default INF file used to execute this test, named
+T1191.inf
+, is also found in the same
+T1191
+directory as the associated YAML file. To execute this test, you only need to download the contents of the
+T1191
+folder, open
+cmd.exe
+, navigate to the
+T1191
+folder, and execute the command
+cmstp.exe /s T1191.inf
+from the command line. Obviously, before doing so, you should first understand what the command will do, so let's examine the
+T1191.inf
+file.
+; Author: @NickTyrer - https://twitter.com/NickTyrer/status/958450014111633408
+[version]
+Signature=$chicago$
+AdvancedINF=2.5
+[DefaultInstall_SingleUser]
+UnRegisterOCXs=UnRegisterOCXSection
+[UnRegisterOCXSection]
+%11%\scrobj.dll,NI,https://raw.githubusercontent.com/redcanaryco/atomic-
+red-team/master/atomics/T1191/T1191.sct
+[Strings]
+AppAct = "SOFTWARE\Microsoft\Connection Manager"
+ServiceName="Yay"
+ShortSvcName="Yay"
+To understand this INF file, let's first explore what the
+cmstp.exe
+executable is used for on a Windows system. The Connection Manager is a remote access client built into Windows that allows the development of remote access configuration profiles that can be distributed to users to connect to remote resources. You can read more about the Connection Manager here:
+https://docs.microsoft.com/en-us/windows/desktop/rras/connection-manager
+The
+cmstp.exe
+executable is used to install or remove a Connection Manager service profile. As outlined in
+Figure 14.3
+, this utility can be maliciously used to load and execute COM scriptlets and install them as a service on the system. As you shown in the
+T1191.inf
+file, the malicious COM scriptlet is called
+T1191.sct
+and is located in the same folder as the other items related to this technique on the Atomic Red Team GitHub repository, which you would also want to examine to understand what it will do. (In this case, it will cause an instance of
+calc.exe
+to open to illustrate that code can be executed through this technique.)
+Once you understand the technique, it is a simple matter to use the provided files to execute the technique on a test system and determine whether any of your preventive or detective controls impede the execution of the remote COM scriptlet. If no detection or prevention is in place, refer to the MITRE ATT&CK entry for the technique to better understand the prevention and detection mechanisms that you can implement to guard against it (shown in
+Figure 14.4
+). In this case, using an application whitelisting solution to block the execution of
+cmstp.exe
+might be appropriate if you are not using Connection Manager service profiles to provide remote VPN access for any clients. Automating an alert to generate when an attempt to execute
+cmstp.exe
+is made may also be appropriate.
+In case you would rather not have to read YAML files in order to understand each Atomic Red Team test, the project repository also contains an automatically generated markdown file that parses the information in the YAML file and enriches it by pulling additional information from MITRE ATT&CK. Each technique therefore has an easily digestible description that you can browse
+to in the GitHub repository. For example, in
+Figure 14.10
+the description of the CMSTP technique is shown. You can also access the description here:
+https://github.com/redcanaryco/atomic-red-team/blob/master/atomics/T1191/T1191.md
+Figure 14.10
+:
+The markdown document describing technique T1191
+Because each technique within the Atomic Red Team repository is described in an associated YAML file, you can automate scripts or third‐party tools to ingest the various tests and execute them on a scheduled basis. You could also string multiple different techniques together to more realistically emulate an attack chain that may be used by an adversary. If you do not have a product that can ingest the YAML files to automate adversary emulation, another option would be to use a tool such as Caldera.
+Caldera
+The open‐source Caldera project was started and is maintained by MITRE and is therefore closely aligned to the MITRE ATT&CK framework. You can find the Caldera project on GitHub at
+https://github.com/mitre/caldera
+. Caldera is an ambitious project, intended to provide automated adversary emulation that relies on machine learning to create a semiautonomous, automated adversary configured to use specific techniques (called
+abilities
+) to emulate the post‐exploitation behavior of a specific threat.
+At a high level, Caldera works by configuring and installing an agent on an initial system in your environment. The agent is configured with knowledge of how to perform specific techniques. A set of abilities to be used to emulate a specific threat actor is referred to as an
+adversary
+. Configuring Caldera requires creating a new adversary and assigning it various abilities, or steps that the adversary can perform. The framework contains many different abilities, each based on specific MITRE ATT&CK techniques, much in the same way as Atomic Red Team. However, Caldera can be configured with many of these abilities at once, and the agent will independently determine which ability applies to each situation and the order in which abilities should be used. Caldera therefore creates a much more advanced adversary emulation than the individual tests from Atomic Red Team. Caldera can also perform exfiltration methods to test your preventive and detective controls by sending data to an IP address and port of your choosing.
+Once an adversary is configured, you can set it loose within the environment by creating an operation. An operation begins with a starting host where the configured adversary agent is intentionally installed. This simulates an initial foothold position from which the post‐exploitation activity will begin. When you begin the operation, the starting host will begin to propagate throughout the network using the abilities configured for the adversary. In most cases, Caldera can clean up all remnants of the techniques that it uses, but some may leave benign artifacts behind.
+Caldera propagates through your environment, simulating an adversary's lateral movement, and performs controlled exfiltration of data in order to test network defenses and defenders. The setup to get Caldera operating correctly is not trivial and can be a time‐consuming task. Although Caldera puts many constraints in place to restrict the spread of its agent according to specific rules, turning it loose in a production environment may not be desirable. However, when set up in a test environment, it provides an excellent training ground for incident responders and network defenders to observe malicious activity, tune preventive and detective controls, and understand adversary behavior. In most cases, this is the best way to leverage Caldera.
+Whether using a human red team, basic adversary emulation tests such as Atomic Red Team, or a robust adversary emulation tool such as Caldera, an incident response team should actively test their capabilities and tools in order to ensure that they maintain the proper readiness level to respond to future adversaries.
+Conclusion
+Incident response is a critical component of the prevent‐detect‐respond cycle of active defense. Network defenders should not consider incident response to be a process that collects dust on the shelf until catastrophe strikes, but rather
+as an integrated and critical component of daily network operations. During periods where no incident is actively being investigated, responders should take proactive steps to improve not only their response process but also the overall defensive posture of the network. By hunting for threats in accordance with a well‐reasoned hypothesis, adversaries that were unknown may become uncovered within the network so that the incident response process can begin to remediate the threat. When no adversary is known to be within the network, emulating the activities of an adversary in order to test detective and preventive controls is an effective way to improve network defenses. Although the best way to emulate adversary behavior is through the use of a human red team, adversary emulation tools such as Atomic Red Team provide a low‐cost solution to enable recurring testing on an ongoing basis. Even in a small organization, periodic testing of incident response capability is an important step for identifying and addressing gaps in your security posture.
+In this book, we provided you with many of the skills necessary to be an effective and efficient incident responder. Understand that no book could possibly cover all the tools, techniques, and skills that may be needed in this dynamic field. We have provided many external resources throughout the book to enable you to easily continue your learning journey. In addition, the book's website,
+www.AppliedIncidentResponse.com
+, offers many free resources for additional learning opportunities. We encourage you to continue studying each of the topics discussed in this book and to gravitate toward those that are of the most interest or value to you. The incident response community relies on skilled individuals to continuously solve complex problems and share those solutions with others. Speaking at or attending information security conferences, posting interesting findings to blogs or other online sources, sharing your thoughts on social media, or training other members of your team are all valuable contributions that each incident responder can make to the ongoing development and improvement of the incident response community.

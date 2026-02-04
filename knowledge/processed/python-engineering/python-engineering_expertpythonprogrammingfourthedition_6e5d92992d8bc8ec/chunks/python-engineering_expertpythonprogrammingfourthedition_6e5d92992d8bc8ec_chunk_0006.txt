@@ -1,0 +1,3857 @@
+chniques for common problems and how to provide useful metadata to your project.
+On our way, we've learned about the importance of the packaging ecosystem and details of publishing Python package distributions on package indexes. We've seen that standard distribution scripts (the
+setup.py
+files) can be useful even when not publishing code directly to PyPI.
+The real fun begins when your code is made available to its users. No matter how well it is tested and how well it is designed, you will find that your application does not always behave as expected. People will report problems. You will have performance issues. Some things will inevitably go wrong.
+To solve those issues, you will need a lot of information to replicate user errors and understand what has really happened. Wise developers are always prepared for the unexpected and know how to actively collect data that helps in diagnosing problems and allows you to anticipate future failures. That will be the topic of the next chapter.
+
+12
+Observing Application Behavior and Performance
+With every new version of our software, we feel that
+release thrill
+. Did we manage to finally fix all those pesky problems we've been working on lately? Will it work or will it break? Will users be satisfied, or will they complain about new bugs or performance issues?
+We usually employ various quality assurance techniques and automated testing methodologies to increase our confidence in software quality and validity. But these techniques and methodologies just increase our expectation that things will run smoothly with each new release. But how can you make sure that an application is running smoothly for your users? Or conversely, how can you know if something is going wrong?
+In this chapter we will discuss the topic of
+application observability
+. Observability is a property of a software system that allows you to explain and understand the application's state based on its outputs. If you know the state of the system and understand how it got there, you will know if the state is correct. By employing various observability techniques, we will learn about:
+Capturing errors and logs
+Instrumenting code with custom metrics
+Distributed application tracing
+Most observability techniques can be applied to both desktop applications installed on users' own computers and distributed systems running on remote servers or cloud services. However, in the case of desktop applications, observability options are often limited due to privacy concerns. That's why we will focus mainly on observing the behavior and performance of code running on your own infrastructure.
+Great observability cannot be achieved without proper tools, so let's first consider the technical requirements for this chapter.
+Technical requirements
+The following are the Python packages that are mentioned in this chapter that you can download from PyPI:
+freezegun
+sentry-sdk
+prometheus-client
+jaeger-client
+Flask-OpenTracing
+redis_opentracing
+Information on how to install packages is included in
+Chapter 2
+,
+Modern Python Development Environments
+.
+The code files for this chapter can be found at
+https://github.com/PacktPublishing/Expert-Python-Programming-Fourth-Edition/tree/main/Chapter%2012
+.
+Capturing errors and logs
+Standard output is the cornerstone of observability. That's because one of the simplest things every application can do is to read information from standard input and print information
+to standard output. That's why the first thing every programmer learns is usually how to print "Hello world!"
+Despite the fact
+that standard input and output are so important, users of modern software rarely know anything about their existence. Desktop applications usually aren't invoked from the terminal and users often interact with them using graphical interfaces instead.
+Web-based software usually runs on remote servers and users interact with it using web browsers or custom client software. In both cases, standard input and output are hidden from the user.
+But although users don't see standard output, that doesn't mean it does not exist. Standard output is often used for logging detailed information about internal application state, warnings, and errors that happen during program execution. Moreover, standard output can be easily directed to a filesystem for easy storage and later processing. The simplicity and versatility of standard output make it one of the most flexible observability enablers. It also provides the most basic way to capture and inspect information about error details.
+Although you could handle application output using bare
+print()
+function calls, good logging requires
+some consistent structure and formatting. Python comes with
+a built-in
+logging
+module that provides a basic yet powerful logging system. Before we dive deeper into good practices for capturing logs and errors, let's get to grips with some of the basics of the Python logging system.
+Python logging essentials
+The usage
+of the
+logging
+module is pretty straightforward. The first thing to do is to create a named
+logger
+instance and configure the logging system:
+import
+logging
+logger = logging.getLogger(
+"my_logger"
+)
+logging.basicConfig()
+A common idiom when defining loggers is to use module name as the logger's name:
+logger = logging.getLogger(__name__)
+This pattern helps in managing logger configuration in a hierarchical way. See the
+Logging configuration
+section for more details on configuring loggers.
+Every logger is named. If you don't provide the name argument,
+logging.getLogger()
+will return a special "root" logger that serves as a basis for other loggers.
+logging.basicConfig()
+allows the specification of additional logging options like logging capture level, message formatters, and log handlers.
+Using your
+logger
+instance, you can now record log messages at a specified log level using either the
+log()
+method:
+logger.log(logging.CRITICAL,
+"this is critical message"
+)
+Or various convenience methods associated with specific log levels:
+logger.error(
+"This is info message"
+)
+logger.warning(
+"This is warning message"
+)
+The log level is a positive integer value where greater values correspond to messages of higher importance. If
+logger
+is configured with a specific level, it will ignore messages of lower value. Python logging
+provides the following preconfigured levels with their respective integer values:
+CRITICAL
+and
+FATAL
+(50): Reserved for messages indicating errors due to which the program is unlikely to be able to continue its operation. A practical example would be exhaustion of resources (like disk space) or an inability to connect with a crucial backing service (a database, for instance).
+ERROR
+(40): Reserved for messages indicating serious errors that make the program unable to perform a specific task or function. A practical example would be an inability to parse user input or an intermediary network timeout.
+WARNING
+or
+WARN
+(30): Reserved for messages indicating abnormal situations that the program has recovered from or situations that may lead to more serious problems in the near future. A practical example would be fixing malformed user input using a fallback value or an indication of low disk space.
+INFO
+(20): Reserved for messages confirming that the program works as expected. It can be used, for instance, to output details about successful operations performed during program execution.
+DEBUG
+(10): Reserved for very detailed debugging messages, allowing us to trace application behavior during debugging sessions.
+NOTSET
+(0): A pseudo-level that captures all possible log levels.
+As you can see, the default logging level values are defined in intervals of 10. This allows you to define custom levels in between existing levels if you need finer granularity.
+Every predefined log level except
+NOTSET
+has a dedicated convenience method in the
+logger
+instance:
+critical()
+for the
+CRITICAL
+and
+FATAL
+levels
+error()
+or
+exception()
+for the
+ERROR
+level (the latter automatically prints a traceback of the currently captured exception)
+warning()
+for the
+WARNING
+and
+WARN
+levels
+info()
+for the
+INFO
+level
+debug()
+for the
+DEBUG
+level
+The default configuration captures messages up to the
+logging.WARNING
+level and outputs them to standard output. The default format includes a textual representation of the error level, the logger name, and a message, as in the following example:
+ERROR:my_logger:This is error message
+WARNING:my_logger:This is warning message
+CRITICAL:my_logger:This is critical message
+The format
+and output of loggers can be modified by specifying two types of logging components: log handlers and formatters.
+Logging system components
+The Python logging
+system consists of four main components:
+Loggers
+: These are
+the entry points of the logging system. Application code uses loggers to produce messages for the logging system.
+Handlers
+: These
+are the receivers of the logging system. Handlers are attached to loggers and are supposed to emit information to the desired destination (usually outside of the application). One logger can have multiple handlers.
+Filters
+: These
+allow loggers or handlers to reject specific messages based on their contents. Filters can be attached to either loggers or handlers.
+Formatters
+: These transform raw logging messages into the desired format. Formatters
+can produce either human- or machine-readable messages. Formatters are attached to message handlers.
+In essence, Python log messages go in one direction—from the application to the desired destination through loggers and handlers (see
+Figure 12.1
+). Both loggers and filters can terminate message propagation either through the mechanism of filters or by specifying the
+enabled=False
+flag.
+Figure 12.1: Topology of the Python logging system
+The basic
+configuration of the logging system enabled with an empty
+logging.basicConfig()
+sets up the following hierarchy of components:
+A root logger with the
+logging.WARNING
+level
+: All messages with a severity level lower than
+logging.WARNING
+will be ignored by default.
+A single console handler attached to the root logger
+: This emits log messages to the standard error stream.
+A simple formatter with
+"%(levelname)s:%(name)s:%(message)s"
+style
+: Every message emitted to the given output will contain the severity level name, the name of the logger, and some plain message text separated by a colon.
+These default settings are a good starting point. The simple format allows for easy parsing and the standard console handler will work well with every console application. However, some applications require more structured message representation and/or the handling of custom message destinations. Such customization can be achieved by overriding the log handlers and formatters.
+The standard
+logging library comes with three built-in logging handlers:
+NullHandler
+: This handler does nothing. It can be used similarly as a
+/dev/null
+device on POSIX systems to discard all messages from the logger. It is often used as a default handler in libraries that use the Python logging system. In such a case, the library user is responsible for overriding the default
+NullHandler
+using their own logging configuration.
+StreamHandler
+: This handler emits messages to a given stream (a file-like object). If no stream is provided,
+StreamHandler
+will by default emit messages to the
+sys.stderr
+stream. After every message, the stream object will be flushed if it supports the
+flush()
+method.
+FileHandler
+: This handler is a subclass of
+StreamHandler
+that emits messages to the file specified by the
+filename
+argument. It will take care of opening and closing the file. By default, it uses the
+append
+mode of a file and default system encoding.
+This is a very
+modest set of log handlers, but there's a
+logging.handlers
+module that offers over a dozen more advanced handlers. The following are the most important ones:
+RotatingFileHandler
+: This is a file handler that can rotate the logfiles whenever the current logfile exceeds a certain size limit. This is a good extension of the basic
+FileHandler
+that is especially useful for verbose applications that can produce a lot of log messages in a short period of time.
+RotatingFileHandler
+can be configured to keep only a specified number of past log backup files and thus reduces the risk of logfiles overflowing the disk.
+TimedRotatingFileHandler
+: This is similar to
+RotatingFileHandler
+but performs logfile rollovers at specified time intervals instead of monitoring the logfile size. It can be used to avoid disk overflow for applications that produce log messages at a rather constant and predictable pace. The advantage of
+TimedRotatingFileHandler
+is that past logfiles can be easily browsed by the date of their creation. The default interval of
+TimedRotatingFileHandler
+is one hour.
+SysLogHandler
+: This handler emits logs to the syslog server. Syslog is a popular logging standard and many Linux distributions come with a syslog server running locally by default. Many applications and services support logging to the syslog server, so
+SysLogHandler
+can be used to unify log collections across many programs running on the same host. Also, using syslog allows you to offload the responsibility of logfile rotation and compaction to a single system logging facility.
+SMTPHandler
+: This log handler emits a single SMTP email for every log message. It is commonly used together with the
+logging.ERROR
+severity level to deliver information about errors and exceptions to a specified email address. Such errors can be later reviewed at any time in the recipient's inbox. Using
+SMTPHandler
+is one of the simplest methods of error monitoring and allows programmers to be notified about issues even if they don't have direct access to the application runtime environment.
+SocketHandler
+,
+DatagramHandler
+, and
+HTTPHandler
+: These are simple network handlers that allow you to deliver log messages over the network.
+SocketHandler
+emits log messages over a socket connection,
+DatagramHandler
+emits logs messages as UDP datagrams, and
+HTTPHandler
+emits logs messages as HTTP requests. These handlers can be used to build your own custom distributed log delivery mechanism, although it will work well only for low volumes of logs that do not require good delivery guarantees. For larger log volumes, it is advised to use a specialized log delivery mechanism such as syslog or another modern distributed log system.
+We will discuss an example of a modern distributed log system in the
+Distributed logging
+section.
+To see how
+one of those specialized log handlers works, let's assume we are building a small desktop application. Let's pretend our program runs with a graphical user interface and the user usually does not run it from the shell. We will be logging information about warnings and errors discovered during program execution. If there is a problem, the user will be able to find the logfile and send us a reference to it.
+We don't know how many messages our application will produce. In order to avoid disk overflow, we will provide a rotating file handler. Files will be rotated daily, and we will keep a history of the last 30 days. Our logging handler configuration can be as simple as this:
+import
+logging.handlers
+from
+datetime
+import
+timedelta, datetime
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.addHandler(
+    logging.handlers.TimedRotatingFileHandler(
+        filename=
+"application.log"
+,
+        when=
+"D"
+,
+        backupCount=
+30
+,
+    )
+)
+The
+logging.getLogger()
+call (without a specific logger name) allows us to obtain a special root logger. The purpose of this logger is to provide default configuration and handlers for other loggers that do not have specific handlers attached. If the logger does not have its own handlers, its messages will be automatically propagated to the parent logger.
+We will learn more about logger hierarchy and log message propagation in the
+Logging configuration
+section.
+Once we have access to the root logger, we are able to provide the default configuration. The
+root_logger.setLevel(logging.INFO)
+call makes sure that the logger will
+emit only messages with a severity level greater than or equal to
+logging.INFO
+. That's quite a verbose setting. If you don't use custom log levels, the only more verbose setting would be
+logging.DEBUG
+.
+We didn't configure the logging system using the
+logging.basicConfig()
+function so our root logger doesn't have a default handler. We add a
+TimedRotatingFileHandler()
+instance to the root logger using the
+addHandler()
+method. The
+when="D"
+argument specifies a daily rollover strategy and
+backupCount
+specifies the number of logfile backup files we want to keep on disk.
+You probably don't have a full month of time to run the application just to see how rotated logfiles pile up on the disk. To speed up the process, we will use a neat trick and employ the
+freezegun
+package to trick Python into thinking that time is passing at an increased pace.
+We used the
+freezegun
+package previously to test time-dependent code in
+Chapter 10
+,
+Testing and Quality Automation
+.
+The following code simulates an application that produces one message every hour but speeds up the process by 36,000:
+from
+datetime
+import
+timedelta, datetime
+import
+time
+import
+logging
+import
+freezegun
+logger = logging.getLogger()
+def
+main
+():
+with
+freezegun.freeze_time()
+as
+frozen:
+while
+True
+:
+            frozen.tick(timedelta(hours=
+1
+))
+            time.sleep(
+0.1
+)
+            logger.info(
+f"Something has happened at
+{datetime.now()}
+"
+)
+if
+__name__ ==
+"__main__"
+:
+    main()
+If you run the application in your shell, you won't see any output. But if you list all the files in
+the current directory, you will see that after few seconds, new logfiles start appearing:
+$ ls -al
+total 264
+drwxr-xr-x  35 swistakm  staff  1120  8 kwi 00:22 .
+drwxr-xr-x   4 swistakm  staff   128  7 kwi 23:00 ..
+-rw-r--r--   1 swistakm  staff   583  8 kwi 00:22 application.log
+-rw-r--r--   1 swistakm  staff  2491  8 kwi 00:21 application.log.2021-04-07
+-rw-r--r--   1 swistakm  staff  1272  7 kwi 23:59 application.log.2021-04-08
+The
+application.log
+file is the current logfile and files ending with a date are historical backup files. If you let your program spin for a little longer, you will see that the number of historical backup files never exceeds 30. After some time,
+TimedRotatingFileHandler
+will start replacing old backups with new ones.
+In our example, we have configured the log without any formatters. In such cases, the handler will emit messages as is and without any extra information. Here's a sample taken from the most recent logfile:
+Something has happened at 2021-04-08 17:31:54.085117
+Something has happened at 2021-04-07 23:32:04.347385
+Something has happened at 2021-04-08 00:32:04.347385
+Something has happened at 2021-04-08 01:32:04.347385
+It is missing some important context. We see the date of the message only because we included it in the log message, but we are missing information about the logger from which messages are originating and information about message severity. We can customize the output from a specific log handler by attaching a custom message formatter.
+Formatters
+are attached to log handlers using the
+setFormatter()
+method of the
+handler
+object. The formatter should be a
+logging.Formatter()
+instance that accepts four initialization arguments:
+fmt
+: This is a string formatting pattern for the output message. A string formatting pattern can reference any of the attributes of the
+logging.LogRecord
+class. It defaults to
+None
+, which is a plain text log message without any formatting.
+datefmt
+: This is a date formatting pattern for representing the message timestamp. It accepts the same formatting directives as the
+time.strftime()
+function. It defaults to
+None
+, which translates to an ISO8601-like format.
+style
+: This specifies the string formatting style used for the
+fmt
+argument. It can be either
+'%'
+(percent formatting),
+'{'
+(
+str.format()
+formatting), or
+'$'
+(
+string.Template
+formatting). It defaults to
+'%'
+.
+validate
+: This specifies whether to validate the
+fmt
+formatting argument against the
+style
+argument. It defaults to
+True
+.
+We can, for instance, provide a custom formatter that includes the severity message time, level name, logger name, and exact line of the log call along with the emitted message. Our logging setup would then look as follows:
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+formatter = logging.Formatter(
+    fmt=(
+"%(asctime)s | %(levelname)s | "
+"%(name)s | %(filename)s:%(lineno)d | "
+"%(message)s"
+)
+)
+handler = logging.handlers.TimedRotatingFileHandler(
+    filename=
+"application.log"
+,
+    when=
+"D"
+,
+    backupCount=
+30
+,
+)
+handler.setFormatter(formatter)
+root_logger.addHandler(handler)
+You can
+learn more about the available
+LogRecord
+attributes that can be referenced with custom formatters at
+https://docs.python.org/3/library/logging.html#logrecord-attributes
+.
+With such a configuration, a message in our logfile would look as follows:
+2021-04-08 02:03:50,780 | INFO | __main__ | logging_handlers.py:34 | Something has happened at 2021-04-08 00:03:50.780432
+The choice
+of whether to use a specialized log handler usually depends on multiple factors, like the target operating system, the existing system logging infrastructure in your organization, the expected volume of logs, and the deployment methodology. Standalone applications, system services, or Docker containers usually log differently, and you need to take that into account. For instance, having historical logfiles easily accessible is definitely a practical thing, but managing a collection of thousands of logfiles in a large distributed system consisting of tens or hundreds of hosts can be a real hurdle. On the other hand, you can't expect end users of standalone applications to run a distributed logging system on their own personal computer just to use your application.
+The same applies to log message formatting. Some log collection and processing systems can take advantage of structured message formats such as JSON, msgpack, or avro. Others will be able to parse and extract semantic elements of the message using customized parsing rules. Plaintext messages are easier to inspect and understand for humans but are harder to process using specialized log analysis software. Structured log messages are easier to process by machines but are harder to read with the naked eye.
+Regardless of your current needs, you can be sure that your logging choices and preferences will change over time. That's why providing a logging setup by manually creating handlers and formatters is rarely a convenient method.
+We've already learned about the
+logging.basicConfig()
+function. It sets up a reasonable
+logging default but also allows you to provide some shortcuts for defining the message format or the default handler selection. Unfortunately, it works only at the root logger level and doesn't allow you to target other loggers. In the next section we will learn about alternative logging configuration methods that allow you to define complex logging rules for applications of any size.
+Logging configuration
+Using the root logger is a convenient method of defining the top-level configuration of your application logging system. Unfortunately, you will quickly learn that some libraries often use
+the Python
+logging
+module to emit information about important events happening inside them. At some point, you may find it necessary to fine-tune the logging behavior of those libraries as well.
+Usually, libraries use their own logger names. The common pattern for naming loggers is to use a special
+__name__
+attribute that contains the fully qualified name of a module:
+import
+logging
+logger = logging.getLogger(__name__)
+For instance, the
+__name__
+attribute inside the
+utils
+sub-module of the package
+acme
+will be
+acme.utils
+. If
+acme.utils
+defines its logger as
+logging.getLogger(__name__)
+then the name of that logger will be
+'acme.utils'
+.
+When you know the name of the logger, you can obtain it at any time and provide a custom configuration. Common use cases are:
+Silencing the logger
+: Sometimes you are not interested in messages coming from a library at all. In your main application file, you can find a logger and silence it with the
+disabled
+attribute as in the following example:
+acme_logger = logging.getLogger(
+"acme.utils"
+)
+acme_logger.disabled =
+True
+Overriding handlers
+: Libraries should not define their own handlers; that should be the responsibility of the library user. Anyway, not every programmer is aware of good logging practices and it happens sometimes that a useful third-party package comes with a logger that has an attached handler. It will effectively ignore your root logger configuration.
+You can use such logger and override handlers as in the following example:
+acme_logger = logging.getLogger(
+"acme.utils"
+)
+acme_logger.handlers.clear()
+Changing logger verbosity
+: It may happen that some loggers are too verbose. Sometimes warnings inside a library are not severe enough to be included in the main application log. You can find a logger and override its severity level:
+acme_logger = logging.getLogger(
+"acme.utils"
+)
+acme_logger.setLevel(logging.CRITICAL)
+Using per-module loggers is also useful in non-library code. It is good practice to use per-module loggers in larger applications consisting of multiple sub-packages or sub-modules. This will allow you to easily fine-tune the verbosity and manage the handlers of multiple loggers. And the key in consistently managing Python logging configuration is understanding the parent-child relationship of loggers.
+Whenever
+you create a logger with a name that contains periods, the
+logging
+module will actually build a hierarchy of loggers. If you, for instance, try to obtain a logger using
+logging.getLogger("acme.lib.utils")
+, the
+logging
+module will perform the following steps:
+It will first search for a logger registered under
+"acme.lib.utils"
+in a thread-safe manner. If it does not exist, it will create a fresh logger and register it under
+"acme.lib.utils"
+.
+If a new logger has been created, it will iteratively remove the last segments from the logger name and search for a new name until it finds a registered logger. If the name doesn't have a logger registered under it, the
+logging
+module will register special placeholder object. For
+"acme.lib.utils"
+, it will search first for
+"acme.lib"
+and then for
+"acme"
+. The first non-placeholder logger will become the parent of
+"acme.lib.utils"
+.
+If there are no non-placeholder loggers above the newly created logger, the root logger becomes the parent of this logger.
+Moreover, the
+logging
+module ensures that existing placeholders are actively replaced with proper loggers the first time they are explicitly accessed with the
+logging.getLogger()
+function. In such a case, the parent-child relationships are retroactively updated. Thanks to this, concrete loggers can be configured in any order and regardless of their hierarchy.
+This parent-child relationship plays a role in the evaluation of logger handlers. Whenever you log a new message through a specific logger, handlers are invoked according to the following rules:
+If a logger has its own handlers, a message is passed to every handler:
+If the logger has the
+propagate
+attribute set to
+True
+(default value), the message is propagated to the parent logger.
+If the logger has the
+propagate
+attribute set to
+False
+, processing stops.
+If a logger does not have its own handlers, a message is passed to the parent logger
+Best practice is to define log handlers only at the top-level root logger. Otherwise, it will be hard to track all propagation rules and make sure that every message is logged only once. But sometimes specifying handlers on lower-level (per-module) loggers can be useful for applying special treatment to a very specific category of errors. For instance, your application may generally log using the default console handler, but if there is a business-critical module, you may want to attach
+SMTPHandler
+. That way you will be sure that all log messages coming from that module will be additionally delivered to you as SMTP emails.
+The logging
+hierarchy is also useful for controlling the verbosity of whole logger groups. For example, if the
+acme
+package contains multiple sub-loggers and none of them has handlers attached, you can disable the whole
+"acme"
+logger to silence every sub-logger.
+Complex hierarchies can be intimidating, especially if you need to perform fine-tuning of loggers living in multiple modules. Creating individual loggers, handlers, and formatters using Python may sometimes require a substantial amount of boilerplate. That's why the
+logging.config
+module offers two functions that allow you to configure the whole Python logging system in a more declarative way:
+fileConfig()
+: This takes the path of an INI-like configuration file. The syntax of that file is the same as the syntax of configuration files handled with the built-in
+configparser
+module.
+dictConfig():
+This takes a dictionary of configuration values.
+You can find more information about Python logging configuration options at
+https://docs.python.org/3/library/logging.config.html
+.
+Both configuration ways assume similar configuration sections and options. The only difference is the format. The following is an example of the configuration file for logging with time-based file rotation:
+[formatters]
+keys=default
+[loggers]
+keys=root
+[handlers]
+keys=logfile
+[logger_root]
+handlers=logfile
+level=INFO
+[formatter_default]
+format
+=%(asctime)s | %(levelname)s | %(name)s | %(filename)s:%(lineno)d | %(message)s
+[handler_logfile]
+class
+=
+logging
+.
+handlers
+.
+TimedRotatingFileHandler
+formatter
+=
+default
+kwargs
+={"
+filename
+":
+"application.log"
+,
+"when"
+:
+"D"
+,
+"backupCount"
+:
+30
+}
+And the
+following is the same configuration defined with use of the
+dictConfig()
+function:
+logging.config.dictConfig({
+"version"
+:
+1
+,
+"formatters"
+: {
+"default"
+: {
+"format"
+: (
+"%(asctime)s | %(levelname)s | "
+"%(name)s | %(filename)s:%(lineno)d | "
+"%(message)s"
+)
+        },
+    },
+"handlers"
+: {
+"logfile"
+: {
+"class"
+:
+"logging.handlers.TimedRotatingFileHandler"
+,
+"formatter"
+:
+"default"
+,
+"filename"
+:
+"application.log"
+,
+"when"
+:
+"D"
+,
+"backupCount"
+:
+30
+,
+        }
+    },
+"root"
+: {
+"handlers"
+: [
+"logfile"
+],
+"level"
+:
+"INFO"
+,
+    }
+})
+With so many
+formatting options and a hierarchical logger structure, logging in Python can be quite complex. But it rarely has to be complex. You can reduce the complexity of logging by following some good practices explained in the next section.
+Good logging practices
+Python provides a flexible and powerful logging system. With so many configuration options, it is
+really easy to get tangled in unnecessary complexity. But in fact, logging should be as simple as possible. It is, in the end, the first and foremost tool to use to understand how your application works. You won't be able to understand how your code works if you're spending countless hours trying to understand what's wrong with your logging.
+The key to
+good logging is to follow good practices. The following are common rules for efficient and simple logging in Python:
+Use per-module loggers
+: By using
+logging.getLogger(__name__)
+to create new loggers, you make it simple to control the logging behavior of whole module trees. This practice is especially useful for libraries because it allows developers to tune library logging from within the main application logging configuration.
+Use one event per line
+: If you use text-based outputs (stdout/stderr streams, files), a single log message should preferably fit a single line of text. This allows you to avoid most text buffering issues and the mixing of messages coming from multiple threads or processes logging to the same output. If you really need to fit multiline text into a message (for instance, for an error stack trace), you can still do that by leveraging structured log formats like JSON.
+Offload work to system logging facilities or a distributed logging system
+: Log compaction, forwarding, or logfile rotation can all be done in Python code using custom log handlers, but that is rarely a wise choice. It is usually better to use a system logging facility like syslog or a dedicated log processing tool like logstash or fluentd. Dedicated tools will usually do these things better and more consistently.
+They will also remove a lot of log processing complexity from your own code and will reduce problems with logging in concurrent applications.
+If possible, log directly to standard output or error streams
+: Writing to stdout or stderr is one of the most basic things every application can do. This is true for writing to
+files, but not every environment will have a writable or persistent filesystem. If you need logs stored in files, you can simply use shell output redirection. If you need your logs delivered over the network, you can use dedicated log forwarders like logstash or fluentd.
+Keep log handlers at the root logger level
+: Defining handlers and formatters for specific loggers other than the root logger makes a logging configuration unnecessarily complex. It is usually better to define a single console handler at the root level and leave the rest of the log processing logic to external logging utilities.
+Avoid the urge to write a custom distributed logging system
+: Reliably delivering logs over a network in a large distributed system isn't a simple thing. It is usually better to leave this task to dedicated tools like syslog, fluentd, or logstash.
+Use structured log messages
+: As the volume of logs grows, it becomes harder and harder to extract meaningful information from them. Dedicated log processing systems allow you to search through large volumes of textual information using various queries and even do sophisticated analytics of historical log events. Most of these systems can perform efficient parsing of plain textual log messages, but they always work better if they have access to structured log messages from the very beginning. Common structured message formats for logs are JSON and msgpack.
+Python's
+logging
+and
+logging.handlers
+modules lack a dedicated handler for structured log messages.
+python-json-logger
+is a popular package from PyPI that provides a formatter capable of emitting messages in JSON format. You can learn more about
+python-json-logger
+at
+https://github.com/madzak/python-json-logger
+.
+Another popular package is
+structlog
+. It extends the Python logging system with various utilities for capturing log context, processing messages, and outputting them in various structured formats. You can learn
+more about the
+structlog
+package at
+https://www.structlog.org/en/stable/index.html
+.
+Configure logging in only one place
+: Logging configuration (understood as a collection of handlers and formatters) should be defined only in one part of your application. Preferably, that's the main application entrypoint script, like the
+__main__.py
+file or a WSGI/ASGI application module (for web-based applications).
+Use
+basicConfig()
+whenever possible
+: If you follow most of the previous rules, the
+basicConfig()
+function is all that you need to perform a complete logging configuration. It works at the root logger level and by default defines the
+StreamHandler
+class attached to the stderr stream. It also allows for the convenient
+configuration of date and log message format strings and usually, you won't need anything more beyond that. If you want to use structured log messages you can easily use your own handler with a custom message formatter.
+Prefer
+dictConfig()
+over
+fileConfig()
+: The syntax of logging configuration files supported by
+fileConfig()
+is a bit clunky and way less flexible than
+dictConfig()
+. It is, for instance, a common pattern to control the verbosity of application logging through command-line arguments or environment variables. Such functionality is definitely easier to implement through a dictionary-based logging configuration than through a file-based configuration.
+It may seem like a lot of rules, but generally, they are all about keeping things simple and not overengineering your logging system. If you keep the configuration simple, log to standard output, and use reasonable log formatting, you are usually set for success.
+Good logging hygiene will prepare you for handling and processing arbitrarily large volumes of logs. Not every application will generate a lot of logs, but those that do generally need the support of dedicated log forwarding and processing systems. These systems are usually capable of handling distributed logs coming from hundreds or even thousands of independent hosts.
+Distributed logging
+With a single
+service or program running on a single host, you can easily go with a simple logging setup based on rotated logfiles. Almost every process supervision tool (like systemd or supervisord) allows for the redirection of stdout and stderr output to a specified logfile, so you don't have to open any files in your application. You also can easily offload the responsibility of compacting and rotating historical logfiles to a system utility like
+logrotate
+.
+Simple things will work well only for small applications. If you run multiple services on the same host, you will eventually want to handle logs of various programs in a similar way. The first step to organize logging chaos is to use a dedicated system logging facility like syslog. It will not only digest logs in a consistent format but will also provide command-line utilities to browse and filter past logs.
+Things become
+more complex once you scale your application to run in
+a distributed manner across many hosts. The main challenges of distributed logging are the following:
+Large volumes of logs
+: Distributed systems can produce enormous amounts of logs. The volume of logs grows with the number of processing nodes (hosts). If you want to store historical logs, you will need a dedicated infrastructure to keep all this data.
+The need for centralized log access
+: It is really impractical to store logs only on the hosts that produce them. When you know that something is going wrong with your application, the last thing you want to do is to jump from host to host to find a logfile that has crucial information about the issue you're experiencing. What you need is a single place where you can access all logs available in your system.
+Unreliable networks
+: Networks are unreliable by nature, and if you are sending data over one, you need to be prepared for temporary connection failures, network congestion, or unexpected communication delays, which may happen in any distributed system. With centralized log access, you will need to deliver logs from each individual host to a dedicated logging infrastructure. To avoid any data loss, you will need specialized software that can buffer log messages and retry delivery in the case of network failures.
+Information discoverability and correlation
+: With large volumes of logs, it will be hard to find useful information in the sea of log messages of various severity. You will eventually need a way to perform custom queries against your log dataset that allows you to filter messages by their sources, logger names, severity levels, and textual content. Also, issues occurring in distributed systems are often very intricate. In order to understand what is really going on in your system, you will need tools that allow you to aggregate information from various log streams and perform statistical data analysis.
+The complexity of the logging infrastructure depends mainly on the scale of your application and the observability needs you have. Depending on the capabilities of the logging infrastructure, we can define the following logging maturity model:
+Level 0 (snowflake)
+: Every application is a unique "snowflake." Each handles all extra logging
+activities, like storage, compaction, archiving, and retention, on its own. Level 0 offers almost no extra observability capabilities beyond the ability to open historical logs in a text editor or shell utility.
+Level 1 (unified logging)
+: Every service on the same host logs messages in a similar
+way to a system daemon, known destination, or disk. Basic log processing tasks like compaction or retention are delegated to system logging facilities or common utilities like logrotate. To view logs from a particular host, the developer needs to "shell into" the host or communicate with the dedicated service daemon running on that host.
+Level 2 (centralized logging)
+: Logs from every host are delivered to a dedicated host or a
+cluster of hosts to prevent data loss and for archival storage. Services may need to deliver logs to a specific destination (a logging daemon or a location on disk). It is possible to view a slice of all logs in a given time frame, sometimes with advanced filtering, aggregation, and analytics capabilities.
+Level 3 (logging mesh)
+: Services are completely unaware of the logging infrastructure
+and can log directly to their stdout or stderr streams. A logging mesh working on every host is capable of automatically discovering new log streams and/or logfiles from every running service. Upon the deployment of a new application, its output streams will be automatically included in the logging infrastructure. A centralized log access infrastructure is capable of performing sophisticated queries over arbitrarily large time spans. It is possible to run log aggregation and analytics on stored messages. Logging information is available in near real time.
+Centralized
+logging and logging mesh infrastructures can offer similar capabilities with regards to log filtering, aggregation, and analytics. The key differentiator here is the ubiquity of logging in logging mesh infrastructures. In Level 3 logging architectures, everything that runs your infrastructure and outputs information on standard output or error streams is automatically a source of logging information and will be automatically available in a centralized log access system.
+There are many companies offering Level 2 or Level 3 logging infrastructures as a service. A popular example is AWS CloudWatch, which is well integrated with other AWS services. Other
+cloud providers also offer alternative solutions. If you have enough time and determination, you can also build a full-fledged Level 2 or Level 3 logging infrastructure from scratch using open-source tools.
+A popular open-source choice for building full-fledged logging infrastructures is the Elastic Stack. This is a software ecosystem composed of multiple components: Logstash/Beats (log and metric ingestors/collectors), Elasticsearch (document store and search system), and Kibana (frontend application and dashboard for the Elastic Stack). You
+can learn more about the Elastic Stack at
+https://www.elastic.co/
+.
+Capturing errors for later review
+Logging is the most popular choice for storing and discovering information about errors and issues happening in the system. Mature logging infrastructures offer advanced correlation
+capabilities that allow you to have more insight into what is happening in the whole system at any given time. They can often be configured to alert on error message occurrence, which enables fast response times in situations of unexpected failure.
+But the main problem of tracking errors using ordinary logging infrastructures is that they provide only a limited overview of the full context of the error occurrence. Simply put, you will only have access to the information that was included in a logging call.
+In order to fully understand why a particular problem has occurred, you will need more information than was initially included in the logging call. With a traditional logging infrastructure, you would have to modify the code with additional logging, release the new version of the application, and wait for the error to occur again. If you missed something, you would have to repeat the process over and over again.
+Another problem is the filtering of meaningful errors. It is not uncommon for large distributed systems to log tens of thousands of error messages or warnings daily. But not every error message has to be acted upon immediately. Teams doing maintenance often perform a bug triaging process to estimate the impact of an error. Usually, you concentrate on issues that occur very often or those that happen in a critical part of your application. For efficient triaging, you will need a system that is at least capable of deduplicating (merging) error events and assessing their frequency. Not every logging infrastructure will be able to do that efficiently.
+That's why for tracking errors in your application, you should usually use a dedicated error tracking system that can work independently from your logging infrastructure.
+One of the popular tools that gives a great error tracking experience is Sentry. It is a battle-tested service for tracking exceptions and collecting crash reports. It is available as open source, written in Python, and originated as a tool for backend Python developers. Now, it has outgrown its initial ambitions and has support for many more languages, including PHP, Ruby, and JavaScript, Go, Java, C, C++, and Kotlin. It still remains one of the most popular error tracking tools for many Python web developers.
+You can
+learn more about Sentry at
+https://sentry.io/
+.
+Sentry is available as a paid software-as-a-service model, but it is also an open-source project, so it can be hosted for free on your own infrastructure. The library that provides integration with Sentry is
+sentry-sdk
+(available on PyPI). If you haven't worked with it yet and want to test it without having to run your own Sentry server, then you can easily sign up for
+a free trial at the Sentry service site. Once you have access to a Sentry server and have created a new project, you will obtain a string called a
+Data Source Name
+(
+DSN
+) string. This DSN string is the minimal configuration
+setting needed to integrate your application with Sentry. It contains the protocol, credentials, server location, and your organization/project identifier in the following format:
+'{PROTOCOL}://{PUBLIC_KEY}:{SECRET_KEY}@{HOST}/{PATH}{PROJECT_ID}'
+Once you have your DSN, the integration is pretty straightforward, as shown in the following code:
+import
+sentry_sdk
+sentry_sdk.init(
+    dsn=
+'https://<key>:<secret>@app.getsentry.com/<project>'
+)
+From now on, every unhandled exception in your code will be automatically delivered to the Sentry server using the Sentry API. The Sentry SDK uses the HTTP protocol and delivers errors as compressed JSON messages over a secure HTTP connection (HTTPS). By default, messages are sent asynchronously from a separate thread to limit the impact on application performance. Error messages can then be later reviewed in the Sentry portal.
+Error capture happens automatically on every unhandled exception, but you can also explicitly capture exceptions as in the following example:
+try
+:
+1
+/
+0
+except
+Exception
+as
+e:
+    sentry_sdk.capture_exception(e)
+The Sentry SDK has numerous integrations with the most popular Python frameworks, such as Django, Flask, Celery, and Pyramid. These integrations will automatically provide additional context that is specific to the given framework. If your web framework of choice does
+not have dedicated support, the
+sentry-sdk
+package provides generic WSGI middleware that makes it compatible with any WSGI-based web server, as shown in the following code:
+from
+sentry_sdk.integrations.wsgi
+import
+SentryWsgiMiddleware
+sentry_sdk.init(
+    dsn=
+'https://<key>:<secret>@app.getsentry.com/<project>'
+)
+# ...
+application = SentryWsgiMiddleware(application)
+Exceptions in Python web applications
+Commonly, web applications do not exit on unhandled exceptions because HTTP servers are obliged to return an error response with a status code from the 5XX group if any server error occurs. Most Python web frameworks do such things by default. In such cases, the exception is, in fact, handled either on the internal web framework level or by the WSGI server middleware. Anyway, this will usually still result in the exception stack trace being printed (usually on standard output). The Sentry SDK is aware of the WSGI conventions and will automatically capture such exceptions as well.
+The other notable integration is the ability to track messages logged through Python's built-in
+logging
+module. Enabling such support requires only the following few additional lines of code:
+import
+logging
+import
+sentry_sdk
+from
+sentry_sdk.integrations.logging
+import
+LoggingIntegration
+sentry_logging = LoggingIntegration( 
+    level=logging.INFO,
+    event_level=logging.ERROR,
+)
+sentry_sdk.init(
+    dsn=
+'https://<key>:<secret>@app.getsentry.com/<project>'
+,
+    integrations=[sentry_logging],
+)
+The capturing of logging messages may have caveats, so make sure to read the official documentation on the topic if you are interested in such a feature. This should save you from unpleasant surprises.
+If you decide to use Sentry or any other similar service, carefully consider the "build versus buy" decision. As you may already heard, "there ain't no such thing as a free lunch." If you decide to run an error tracking service (or any utility system) on your own infrastructure, you will eventually pay additional infrastructure costs. Such an additional system will also
+be just another service to maintain and update. Maintenance = additional work = costs!
+As your application grows, the number of exceptions grows, so you will be forced to scale Sentry (or any other system) as you scale your product. Fortunately, Sentry is a very robust project, but it will not give you any value if it's overwhelmed with too much load. Also, keeping Sentry prepared for a catastrophic failure scenario, where thousands of crash reports can be sent per second, is a real challenge. So, you must decide which option is really cheaper for you and whether you have enough resources to do all of this by yourself.
+There is, of course, no "build versus buy" dilemma if security policies in your organization deny sending any data to third parties. If so, just host Sentry or similar software on your own infrastructure. There are costs, of course, but they are ones that are definitely worth paying.
+Capturing errors allows for later review, eases debugging, and allows you to respond quickly in situations when errors suddenly start to accumulate. But this is a reactive approach in situations when users have likely been exposed to buggy software.
+Mindful developers want to observe their applications all the time and be able to react before actual
+failures occur. This type of application observability can be implemented by instrumenting your code with custom metrics. Let's learn about various types of custom metrics and systems used for metrics collection.
+Instrumenting code with custom metrics
+If we want to keep our application running smoothly, we need to be proactive. Observability isn't only about being able to do post-mortem analysis of logs and error reports. It is also
+about collecting various metrics that provide insights about service load, performance, and resource usage. If you
+monitor how your application behaves during normal operation, you will be able to spot anomalies and anticipate failures before they happen.
+The key in monitoring software is defining metrics that will be useful in determining the general service health. Typical metrics can be divided into a few categories:
+Resource usage metrics
+: Typical metrics are memory, disk, network, and CPU time usage. You should always monitor these metrics because every infrastructure
+has limited resources. That's true even for cloud services, which provide seemingly unlimited resource pools. If one service has abnormal resource usage, it can starve other services and even induce cascading failures in your infrastructure. This is especially important when running code on cloud infrastructure where you often pay for the resources that you use. A resource-hungry service that goes rogue can cost you a lot of money.
+Load metrics
+: Typical metrics are the number of connections and the number of requests in a
+given time frame. Most services can accept a limited number of parallel connections and their performance degrades after reaching a specific threshold. The usual pattern for overloaded services is a gradual performance drop followed by sudden unavailability after reaching the critical load point. Monitoring load metrics allows deciding whether you need to scale out or not. Low load periods can also be an opportunity to scale your infrastructure in to reduce operating costs.
+Performance metrics
+: Typical metrics are request or task processing times. Performance
+metrics are often correlated with load metrics but can also highlight performance hotspots in code that needs optimization. Good application performance improves user experience and allows you to save money on infrastructure costs because performant code will likely need fewer resources to run. The continuous monitoring of performance allows
+discovering performance regressions that can happen when introducing new changes in an application.
+Business metrics
+: These are the key performance metrics of your business. Typical examples
+might be the number of signups or sold items in a given time frame. Anomalies in these metrics allow you to discover functional regressions that slipped through the testing process (a defective cart checkout process, for instance) or evaluate dubious changes in the application interface that may confuse frequent users.
+Some of those metrics can sometimes be derived from application logs, and many mature logging infrastructures can perform rolling aggregations on log event streams. This practice works best for load metrics and performance metrics, which often can be reliably derived from the access logs of web servers, proxies, or load balancers. The same approach can be used also for business metrics, although that requires careful consideration of log formats for key business events and can be very brittle.
+Log processing
+has the least utility in the case of resource usage metrics. That's because resource metrics are based on regular
+probing of resource usage, and log processing is concerned with streams of discrete events that often happen on a rather irregular basis. Also, centralized log infrastructures are not well suited for storing time series data.
+Usually, to monitor application metrics, we use dedicated infrastructure that is independent of logging infrastructure. Advanced metric monitoring systems offer complex metric aggregation and correlation capabilities and are focused on dealing with time series data. Metric infrastructure systems also offer faster access to the most recent data because they are more concerned with observing live systems than logging infrastructures. With logging infrastructures, it is more common to observe noticeable lag in data propagation.
+There are generally two architectures of metric monitoring systems:
+Push architectures
+: In this architecture, the application is responsible for pushing data
+to the system. It is
+usually a remote metrics server or local metric daemon (metric forwarder) responsible for pushing metrics to a higher-level daemon on a different server (layered architecture). The configuration is usually distributed: each service needs to know the location of the destination daemon or server.
+Pull architectures
+: In this architecture, the application is responsible for exposing a
+metrics endpoint (usually an HTTP endpoint) and the metric daemon or server pulls information from known services. The
+configuration can be either centralized (where the main metric server knows the locations of monitored services) or semi-distributed (the main server knows the location of metric forwarders that pull metrics from lower layers).
+Both types of architectures can have mesh-like capabilities by utilizing a service discovery
+mechanism. For instance, in push architectures, metric forwarders can advertise themselves as services capable of forwarding
+metrics to other services. In pull architectures, monitored services usually advertise themselves in the service discovery catalog as services that provide metrics to be collected.
+One of the popular choices for monitoring applications is
+Prometheus
+.
+Using Prometheus
+Prometheus is a prime example of pull-based metrics infrastructure. It is a complete system capable
+of collecting metrics, defining forwarding topologies (through so-called metric exporters), data visualization, and alerting. It comes with an SDK for multiple programming languages, including Python.
+The architecture of Prometheus (presented in
+Figure 12.2
+) consists of the following components:
+Prometheus server
+: This is a standalone metrics server that is capable of storing time series
+data, responding to metrics queries, and retrieving metrics (pulling) from metrics exporters, monitored services (jobs), and other Prometheus servers. A Prometheus server provides an HTTP API for querying data and includes a simple interface that allows us to create various metrics visualizations.
+Alert manager
+: This is
+an optional service that is able to store the definition of alerting rules and trigger notifications when specific alerting conditions are met.
+Metric exporters
+: These are the processes that the Prometheus server can pull data from. An exporter
+can be any service that uses the Prometheus SDK to expose a metrics endpoint. There are also standalone exporters that can probe information directly from hosts (like general host usage information), expose metrics for services without Prometheus SDK integration (like databases), or act as a push gateway for short-lived processes (like cron jobs). Every Prometheus server can act as a metrics exporter for other Prometheus servers.
+The above three components are the bare minimum for having a fully functional metrics infrastructure
+with data visualizations and reliable alerting. Moreover, many Prometheus deployments extend this architecture with the following extra components:
+Service discovery catalog
+: A Prometheus server is capable of reading information
+from various service discovery solutions to locate available metrics exporters. The usage of service discovery mechanisms simplifies configuration and allows for a mesh-like developer experience. Popular choices for service discovery catalogs are Consul, ZooKeeper, and etcd. Container orchestration systems (like Kubernetes) often have built-in service discovery mechanisms.
+Dashboarding solution
+: Prometheus servers have a simple web interface capable
+of performing simple data visualizations. These basic capabilities are often not enough for operations teams. Thanks to its open API, Prometheus can easily be extended with a custom dashboarding solution. The most popular choice is Grafana, which can also be easily integrated with other metrics systems and data sources.
+Figure 12.2: Architecture of a typical Prometheus deployment
+To see how applications can be easily extended with Prometheus monitoring, we will take one of the applications written in previous chapters and try to furnish it with the Prometheus SDK. We will also define a small Docker Compose setup that will allow us to evaluate the whole solution locally.
+For evaluating metrics systems, it is essential to have an application that actually does something useful. One practical example that served us well in various parts of the book was the pixel tracking service from
+Chapter 5
+,
+Interfaces, Patterns, and Modularity
+. You should be familiar with how it works, so we will use it as the basis of our experiment.
+The heart of
+our application is the
+tracking.py
+file. It includes module imports, definitions of views, HTTP route bindings, and an instance of a Flask application object. If we skip the view functions, it looks roughly as follows:
+from
+flask
+import
+Flask, request, Response
+from
+flask_injector
+import
+FlaskInjector
+from
+interfaces
+import
+ViewsStorageBackend
+import
+di
+app = Flask(__name__)
+@app.route(
+"/track"
+)
+def
+track
+(
+storage: ViewsStorageBackend
+):
+...
+@app.route(
+"/stats"
+)
+def
+stats
+(
+storage: ViewsStorageBackend
+):
+...
+@app.route(
+"/test"
+)
+def
+test
+():
+...
+if
+__name__ ==
+"__main__"
+:
+    FlaskInjector(app=app, modules=[di.RedisModule()])
+    app.run(host=
+"0.0.0.0"
+, port=
+8000
+)
+For the sake of brevity, we are omitting parts of the application code that won't deal directly with metrics. Full code examples of the pixel tracking service can be found in
+Chapter 5
+,
+Interfaces, Patterns, and Modularity
+. You can also find all the source code for this section (including the configuration,
+Dockerfile
+, and
+docker-compose.yml
+) in the
+Chapter 12/05 - Using Prometheus
+directory of the code repository for this book (see the
+Technical requirements
+section).
+In order to make our application observable by the Prometheus server, we need to embed it with
+a Prometheus metrics exporter. We will do that using the official
+prometheus-client
+package available on PyPI. We start by defining some metric objects using classes from the
+prometheus_client
+module:
+from
+prometheus_client
+import
+Summary, Gauge, Info
+REQUEST_TIME = Summary(
+"request_processing_seconds"
+,
+"Time spent processing requests"
+)
+AVERAGE_TOP_HITS = Gauge(
+"average_top_hits"
+,
+"Average number of top-10 page counts "
+)
+TOP_PAGE = Info(
+"top_page"
+,
+"Most popular referrer"
+)
+REQUEST_TIME
+is a
+Summary
+metric that can be used to track the size and number of events. We will use it to track the time and number of processed requests.
+AVERAGE_TOP_HITS
+is a
+Gauge
+metric that can be used to track how a single value changes over time. We will use it to track the average number of hit counts of the 10 most popular pages.
+TOP_PAGE
+is an
+Info
+metric that can be used to expose any textual information. We will use it to track the most popular pixel-tracked page at any given time.
+Individual metric values can be updated using various code patterns. One of the more popular ways is to use specific metric methods as decorators. This is the most convenient way to measure time spent in a function. We will use this method to track the
+REQUEST_TIME
+metric as in the following example:
+@app.route(
+"/track"
+)
+@REQUEST_TIME.time()
+def
+track
+(
+storage: ViewsStorageBackend
+):
+...
+@app.route(
+"/stats"
+)
+@REQUEST_TIME.time()
+def
+stats
+(
+storage: ViewsStorageBackend
+):
+...
+@app.route(
+"/test"
+)
+@REQUEST_TIME.time()
+def
+test
+():
+...
+Another way is to use specific metric object methods as normal function calls. This is a common technique
+for counters, gauges, and info metrics. We will use this pattern to track the values of the
+AVERAGE_TOP_HITS
+and
+TOP_PAGE
+metrics. We can get a quite good estimate by inspecting the values of the
+stats()
+view function:
+@app.route(
+"/stats"
+)
+@REQUEST_TIME.time()
+def
+stats
+(
+storage: ViewsStorageBackend
+):
+counts:
+dict
+[
+str
+,
+int
+] = storage.most_common(
+10
+)
+    AVERAGE_TOP_HITS.
+set
+(
+sum
+(counts.values()) /
+len
+(counts)
+if
+counts
+else
+0
+)
+    TOP_PAGE.info({
+"top"
+:
+max
+(counts, default=
+"n/a"
+, key=
+lambda
+x: counts[x])
+    })
+return
+counts
+When the metrics are defined, we can finally embed the metric exporter. This can be done either by starting a separate metrics thread using the
+prometheus_client.start_http_server()
+function or using specific integration handlers.
+prometheus-client
+comes with nice Flask support through Werkzeug's
+DispatcherMiddleware
+class.
+Werkzeug is a toolkit for creating web applications based on the WSGI interface. Flask is built using Werkzeug, so it is compatible with Werkzeug middlewares. You can
+learn more about Werkzeug at
+https://palletsprojects.com/p/werkzeug/
+.
+We will use exactly this solution:
+from
+prometheus_client
+import
+make_wsgi_app
+from
+werkzeug.middleware.dispatcher
+import
+DispatcherMiddleware
+app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {
+'/metrics'
+: make_wsgi_app()
+})
+if
+__name__ ==
+"__main__"
+:
+    app.run(host=
+"0.0.0.0"
+, port=
+8000
+)
+prometheus-client
+uses thread-safe in-memory storage for metric objects. That's why it works best with a threaded concurrency model (see
+Chapter 6
+,
+Concurrency
+). Due to CPython threading implementation details (mainly Global Interpreter Lock), multiprocessing is definitely a more popular concurrency model for web applications. It is possible to use
+prometheus-client
+in multiprocessing applications, although it requires slightly more setup. For details, see the official client documentation at
+https://github.com/prometheus/client_python
+.
+When we
+start our application and visit
+http://localhost:8000/test
+and
+http://localhost:8000/stats
+in a web browser, we will automatically populate metric values. If you the visit the metrics endpoint at
+http://localhost:8000/metrics
+, you will see output that may look as follows:
+# HELP python_gc_objects_collected_total Objects collected during gc
+# TYPE python_gc_objects_collected_total counter
+python_gc_objects_collected_total{generation="0"} 595.0
+python_gc_objects_collected_total{generation="1"} 0.0
+python_gc_objects_collected_total{generation="2"} 0.0
+# HELP python_info Python platform information
+# TYPE python_info gauge
+python_info{implementation="CPython",major="3",minor="9",patchlevel="0",version="3.9.0"} 1.0
+# HELP process_virtual_memory_bytes Virtual memory size in bytes.
+# TYPE process_virtual_memory_bytes gauge
+process_virtual_memory_bytes 1.88428288e+08
+# HELP process_cpu_seconds_total Total user and system CPU time spent in seconds.
+# TYPE process_cpu_seconds_total counter
+process_cpu_seconds_total 0.13999999999999999
+# HELP process_open_fds Number of open file descriptors.
+# TYPE process_open_fds gauge
+process_open_fds 7.0
+# HELP request_processing_seconds Time spent processing requests
+# TYPE request_processing_seconds summary
+request_processing_seconds_count 1.0
+request_processing_seconds_sum 0.0015633490111213177
+# HELP request_processing_seconds_created Time spent processing requests
+# TYPE request_processing_seconds_created gauge
+request_processing_seconds_created 1.6180166638851087e+09
+# HELP average_top_hits Average number of top-10 page counts
+# TYPE average_top_hits gauge
+average_top_hits 6.0
+# HELP top_page_info Most popular referrer
+# TYPE top_page_info gauge
+top_page_info{top="http://localhost:8000/test"} 1.0
+As you can see, the output is a human- and machine-readable representation of the current metric values. Besides our custom metrics, it also includes useful default metrics regarding garbage
+collection and resource usage. These are exactly the same metrics that the Prometheus server will pull from our service.
+Now it's time to set up the Prometheus server. We will use Docker Compose so you won't have to install it manually on your own development host. Our
+docker-compose.yml
+file will include the definition of three services:
+version:
+"3.7"
+services:
+  app:
+    build:
+      context: .
+    ports:
+      -
+8000
+:
+8000
+volumes:
+      -
+".:/app/"
+redis:
+    image: redis
+  prometheus:
+    image: prom/prometheus:v2
+.15.2
+volumes:
+      - ./prometheus/:/etc/prometheus/
+    command:
+      -
+'--config.file=/etc/prometheus/prometheus.yml'
+-
+'--storage.tsdb.path=/prometheus'
+-
+'--web.console.libraries=/usr/share/prometheus/console_libraries'
+-
+'--web.console.templates=/usr/share/prometheus/consoles'
+ports:
+      -
+9090
+:
+9090
+restart: always
+The
+app
+service is our
+main application container. We will build it from a local
+Dockerfile
+containing the following code:
+FROM python:
+3.9
+-slim
+WORKDIR app
+RUN pip install \
+ Flask==
+1.1.2
+\
+ redis==
+3.5.3
+\
+ Flask_Injector==
+0.12.3
+\
+ prometheus-client==
+0.10.1
+ADD *.py ./
+CMD python3 tracking.py –reload
+The
+redis
+service is a container running the Redis data store. It is used by our pixel-tracking application to store information about visited page counts.
+Last but not least is the
+prometheus
+service with our Prometheus server container. We override the default
+prometheus
+image command to provide custom configuration locations. We need a custom configuration file mounted as a Docker volume to tell Prometheus about
+our metrics exporter location. Without configuration, the Prometheus server won't know where to pull metrics from. We don't have a service discovery catalog, so we will use a simple static configuration:
+global
+:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  external_labels:
+      monitor:
+'compose'
+scrape_configs:
+  - job_name:
+'prometheus'
+scrape_interval: 5s
+    static_configs:
+      - targets: [
+'localhost:9090'
+]
+  - job_name:
+'app'
+scrape_interval: 5s
+    static_configs:
+      - targets: [
+"app:8000"
+]
+We can start the whole solution using the
+docker-compose
+command as follows:
+$
+docker-compose up
+The initial
+docker-compose
+run may take a little longer because Docker will have to download or build images that do not exist on your filesystem yet.
+When all services are running, you will notice in the
+docker-compose
+output that the Prometheus server is asking the
+app
+service for metrics every few seconds:
+app_1 | 172.21.0.3 - - [10/Apr/2021 01:49:09] "GET /metrics HTTP/1.1" 200 -
+app_1 | 172.21.0.3 - - [10/Apr/2021 01:49:14] "GET /metrics HTTP/1.1" 200 -
+app_1 | 172.21.0.3 - - [10/Apr/2021 01:49:19] "GET /metrics HTTP/1.1" 200 -
+app_1 | 172.21.0.3 - - [10/Apr/2021 01:49:24] "GET /metrics HTTP/1.1" 200 -
+You can access
+the Prometheus server web interface at
+http://localhost:9090
+. It allows you to browse registered services and perform simple metrics visualization (as in
+Figure 12.3
+). The following is an example query that will give you an average response time per request over a 5-minute window:
+rate(request_processing_seconds_sum[5m])
+/ rate(request_processing_seconds_count[5m])
+The results, displayed in Prometheus, will look similar to the following:
+Figure 12.3: Example of visualizations in the Prometheus server web interface
+As you can see, the Prometheus UI can present plots of your custom metrics. It can give an overview of
+how your application behavior changes over time. It can be a useful tool in spotting anomalies or ensuring that your application meets the desired performance levels. Give it a try and test a few queries. Try to use application endpoints and see how the data is reflected in your queries.
+Using metrics allows you to have better knowledge of how your application works in production environments. It can also provide you with insight into how well it fulfills its purpose by tracking business metrics. Advanced queries allow you to correlate metrics of various types and from various services. This is especially useful in distributed systems, which can have many moving parts.
+But using a metrics
+infrastructure isn't the only way to have better visibility into a distributed system. A completely different approach is to measure each individual transaction and the relationships between related transactions happening in
+various system components. This methodology is called
+distributed tracing
+and
+it tries to connect elements of logging and traditional metrics infrastructures.
+Distributed application tracing
+Distributed and networked systems are inevitable in any large-scale infrastructure. That's because you can put only a limited amount of hardware in a single server rack. If you have to
+serve a large number of users concurrently, you will have to scale out eventually. Also, having all of your software running on a single host will be risky from a reliability and availability standpoint. If one machine fails, the whole system goes down. And it isn't that uncommon to see even whole datacenters being brought down due to natural disasters or other unpredictable events. This means that highly available systems are often forced to be spread over multiple datacenters located in different regions or even managed by different providers, just to ensure enough redundancy.
+Another reason for distributed systems is splitting infrastructures into independent domain services in order to split large codebases and enable multiple teams to work efficiently without stepping on each others' toes. That allows you to reduce elaborate change management processes, simplify deployments of large systems, and limit the amount of orchestration between independent development teams.
+But distributed systems are hard. Networks are unreliable and introduce delays. Unnecessary communication roundtrips add up with every service-to-service hop and can have a noticeable impact on application performance. Also, every new host increases operational costs and the failure surface. Organizations with large and distributed architectures usually have dedicated teams responsible for keeping them healthy.
+This is also true for clients of cloud services like AWS, Azure, or Google Cloud Platform, as the complexity of these cloud environments requires skilled and trained professionals that know how to harness the configuration in an auditable and maintainable way.
+But the real nightmare of distributed systems (from a developer's perspective) is observability and debugging. If you have many applications and services running on multiple hosts, it is really hard to get a good overview of what's actually happening inside of your system. A single web transaction can, for instance, go through several layers of a distributed architecture (web balancers, caching proxies, backend APIs, queues, databases) and
+involve a dozen independent services in the process (see
+Figure 12.4
+):
+Figure 12.4: Example of an elaborate distributed application architecture with many inter-service connections
+With architectures that complex, it is hard to know what the real source of the user's problems is. Logging and error tracking via dedicated systems can help to discover unhandled exceptions but doesn't help that much if erroneous behavior does not produce any observable notifications. Also, errors in a single service can cascade into errors in dependent services. Classic error tracking and logging solutions may produce a lot of noise when such a cascade happens. It will then be harder to track the real root cause of a problem.
+When it comes to understanding performance issues, classic metrics systems can highlight obvious performance hotspots but usually do so on a single service level. Common reasons for performance problems in distributed systems are inefficient service usage patterns and not the isolated performance characteristics of a single service. Consider for instance the following example of a distributed transaction from an imaginary eCommerce website:
+The user requests data about an order summary from Checkout Service.
+Checkout Service retrieves the user session identifier from the request headers and asks Authentication Service to verify if it is valid:
+Authentication Service verifies the session identifier against a list of active sessions in the relational database acting as a session store.
+If the session is valid, Authentication Service returns a successful response.
+If the session is valid, Checkout Service retrieves the list of items in the user's cart that is stored in another relational database.
+For every
+entry in the cart, Checkout Service asks Inventory Service if there are enough items in the warehouse to fulfill the order. To ensure authorized access, it forwards the user's session identifier in the request header:
+For every request, Inventory Service asks Authentication Service to validate the session identifier.
+If the session is valid, Inventory Service checks the warehouse inventory state for the requested item type in its own database and returns the result.
+If the order can be fulfilled, Checkout Service makes a series of requests to Pricing Service to obtain the current item prices and tax charges for every entry in the cart:
+For every request, Checkout Service asks Authentication Service to validate the session identifier.
+If the session is valid, Pricing Service checks the warehouse inventory state for the requested item type in its own database and returns the result.
+Checkout Service then returns a complete order summary for the user's cart contents.
+Do you see the pattern there? There is a lot of redundancy, network hopping, and potential sources of problems. And there is definitely a lot of room for improvement, like reducing unnecessary requests to Authentication Service or batching queries to dependent services.
+It is debatable whether distributed applications should be designed in such a granular way. Distributed architecture has its merits, like scalability on an individual service level, distributed code ownership, and (usually) faster release processes, but introduces a whole new class of problems to deal with. Unfortunately, with the advent of microservice architectures, inter-service communication usually gets out of hand quickly. Moreover, with independent teams working on separate services it is not uncommon to see sudden performance regressions due to additional communication links.
+Traditional observability techniques like collecting logs and per-service metrics may not be good enough
+to provide complete insight into a distributed system's operation. What we usually need instead is the ability to track whole user interactions as atomic distributed transactions that span across many services and
+many hosts within the whole system. This technique is called
+distributed tracing
+and often combines the features of traditional logging and metrics solutions.
+As with logging and metric collection, there are good paid SaaS solutions for providing whole-stack distributed tracing capabilities for architectures of virtually any size. These may be pricy, but there are also good open-source solutions for building distributed tracing infrastructures on your own. One of the more popular open-source implementations of distributed tracing is Jaeger.
+As with every other observability solution, you need to carefully evaluate the "build versus buy" factors when deciding to use such a system. There are high-quality, open-source distributed tracing solutions available, but they all require some expertise and maintaining your own infrastructure. Hiring skilled professionals costs money and hardware doesn't come for free either. Depending on your scale and needs, it may actually be cheaper to pay some other company to run and maintain the whole distributed tracing infrastructure for you.
+Distributed tracing with Jaeger
+Many distributed tracing
+solutions are based on the
+OpenTracing
+standard. OpenTracing is an open
+protocol and a set of libraries for various programming
+languages that can be used to instrument code with the ability to send transaction traces to an OpenTracing compatible server. Jaeger is one of the most popular implementations of such servers.
+OpenTelemetry
+is a new
+standard that is supposed to supersede the
+OpenTracing
+(an open protocol for tracing collection) and
+OpenCensus
+(an open protocol for metrics and traces collection) standards. OpenTelementry is
+a protocol that is backward-compatible with former ones and future versions of Jaeger are expected to support the OpenTelemetry standard as well.
+The key concept of the OpenTracing standard is the
+span
+. A span is a building block of a distributed
+transaction trace that represents a logical operation within the transaction. Every trace consists of one or more spans, and spans can reference other spans in a nested fashion. Every span contains the following information:
+The name of the operation that the span represents
+A pair of timestamps that define the start and end of a span
+A set of span tags that allow you to query, filter, and analyze traces
+A set of span logs that are specific to the operation within the span
+A span context that is a container for cross-process information carried over between spans
+In distributed systems, spans usually represent complete request-response cycles within a single service. OpenTracing libraries allow you also to easily define smaller spans that can be used to track smaller logical blocks of processing like database queries, file access requests, or individual function calls.
+OpenTracing provides the
+opentracing-python
+package on PyPI, but we can't use it to interact with the Jaeger server. It is a reference implementation that is just an empty shell to be extended by actual implementations of OpenTracing. For instance, for Jaeger users, we will use the official
+jaeger-client
+package. Instrumenting code with
+jaeger-client
+is really simple.
+Despite the need to use implementation-specific libraries like
+jaeger-client
+, the OpenTracing architecture is designed in a way that makes it very easy to migrate between various implementations.
+It would be great if we had some distributed service to evaluate distributed tracing with Jaeger, but our simple pixel-tracking application will do the job too. It maintains connections to the Redis server and is complex enough to give us the opportunity to create our own custom spans.
+The integration with
+jaeger-client
+starts with initializing the
+tracer
+object:
+from
+jaeger_client
+import
+Config
+tracer = Config(
+    config={
+'sampler'
+: {
+'type'
+:
+'const'
+,
+'param'
+:
+1
+,
+        },
+    },
+    service_name=
+"pixel-tracking"
+,
+).initialize_tracer()
+The
+'sampler'
+section in the tracer config defines the event sampling strategy. Our setting uses
+a constant sampling strategy with a value of
+1
+. This means
+that all transactions will be reported to the Jaeger server.
+Jaeger provides multiple event sampling strategies. The correct sampling strategy depends on the expected service load and the scale of the Jaeger deployment. You can
+read more about Jaeger sampling at
+https://www.jaegertracing.io/docs/1.22/sampling/
+.
+Every configuration should be created with the
+service_name
+argument. This allows Jaeger to tag and identify spans coming from the same service and allows for better traces. In our case, we've set
+service_name
+to
+"pixel-tracking"
+.
+Once we have an instance of
+tracer
+, we can start defining spans. The most convenient way to do this is through the context manager syntax as in the following example:
+@app.route(
+"/stats"
+)
+def
+stats
+(
+storage: ViewsStorageBackend
+):
+with
+tracer.start_span(
+"storage-query"
+):
+return
+storage.most_common(
+10
+)
+Applications created with the use of web frameworks usually have multiple request handlers, and you usually want to track all of them. Instrumenting every request handler manually would be unproductive and error prone. That's why it is generally better to use a framework-specific OpenTracing integration that will automate this process. For Flask we
+can use the
+Flask-Opentracing
+package from PyPI. You can
+enable this integration by simply creating a
+FlaskTracing
+class instance in your main application module:
+from
+flask
+import
+Flask
+from
+flask_opentracing
+import
+FlaskTracing
+from
+jaeger_client
+import
+Config
+app = Flask(__name__)
+tracer = Config(
+    config={
+'sampler'
+: {
+'type'
+:
+'const'
+,
+'param'
+:
+1
+}},
+    service_name=
+"pixel-tracking"
+,
+).initialize_tracer()
+FlaskTracing(tracer, app=app)
+Another useful technique is to enable automatic integration for libraries that we use to communicate with external services, databases, and storage engines. That way, we will be able to track outgoing transactions and OpenTracing will build a relationship between spans coming from various services.
+In our example, we have only one service, so there is no opportunity to correlate distributed spans. But we use Redis as a datastore, so we could at least instrument queries made to Redis. There's a dedicated package on PyPI for that purpose named
+redis_opentracing
+. To enable this integration, you need to perform only a single function call:
+import
+redis_opentracing
+redis_opentracing.init_tracing(tracer)
+You can find all the source code for this section (including the configuration,
+Dockerfile
+, and
+docker-compose.yml
+) in the
+Chapter 12/ Distributed tracing with Jaeger
+directory of code repository for this book (see the
+Technical requirements
+section).
+redis_opentracing
+is a
+new package, so we will have to modify
+our Dockerfile as follows:
+FROM python:
+3.9
+-slim
+WORKDIR app
+RUN pip install \
+ Flask==
+1.1.2
+\
+ redis==
+3.5.3
+\
+ Flask_Injector==
+0.12.3
+\
+ prometheus-client==
+0.10.1
+\
+ jaeger-client==
+4.4.0
+\
+ opentracing==
+2.4.0
+\
+ Flask-OpenTracing==
+1.1.0
+RUN pip install --no-deps redis_opentracing==
+1.0.0
+ADD *.py ./
+CMD python3 tracking.py --reload
+Note that we've installed
+redis_opentracing
+with
+pip install --no-deps
+. This tells
+pip
+to ignore package dependencies. Unfortunately, at the time of writing,
+install_requires
+of
+redis_opentracing
+does not list
+opentracing=2.4.0
+as a supported package version, although it works with it pretty well. Our approach is a trick to ignore this dependency conflict. Hopefully, the new release of
+redis_opentracing
+will resolve this issue.
+Last but not least, we need to start the Jaeger server. We can do that locally using Docker Compose. We will use the following
+docker-compose.yml
+file to start our pixel-tracking application, Redis server, and Jaeger server:
+version:
+"3.7"
+services:
+  app:
+    build:
+      context: .
+    ports:
+      -
+8000
+:
+8000
+environment:
+      - JAEGER_AGENT_HOST=jaeger
+    volumes:
+      -
+".:/app/"
+redis:
+    image: redis
+  jaeger:
+    image: jaegertracing/
+all
+-
+in
+-one:latest
+    ports:
+      -
+"6831:6831/udp"
+-
+"16686:16686"
+The Jaeger server (similarly to the Prometheus server) consists of a few components. The
+jaegertracing/all-in-one:latest
+Docker image is a convenient packaging of all those components
+for simple deployments or for local experimentation. Note that we used the
+JAEGER_AGENT_HOST
+environment variable to tell the Jaeger
+client about the location of our Jaeger server. This is a pretty common pattern among observability SDKs that allows for the easy swapping of solutions without affecting the configuration of the monitored application.
+Once we have everything set up, we can start the whole solution using Docker Compose:
+$
+docker-compose up
+The initial
+docker-compose
+run may take a little longer because Docker will have to download or build non-existent images.
+When all services are running, you can visit
+http://localhost:8000/test
+and
+http://localhost:8000/stats
+in your browser to generate some traces. You can visit
+http://localhost:16686/
+to access the web interface of the Jaeger server and browse the collected traces.
+The example
+trace, displayed in Jaeger, may look similar to
+the following:
+Figure 12.5: Example visualization of a distributed trace in the Jaeger web interface with multiple nested spans visible
+As you can see, the
+pixel-tracing: stats
+transaction consists of three spans:
+stats
+: This is the topmost span of the
+stats()
+endpoint, added automatically by the FlaskTracing middleware.
+storage-query
+: This is the middle span, added manually using the
+tracer.start_span
+("storage-query")
+context manager.
+ZVREVRANGE
+: This is the span added automatically by the
+redis_opentracing
+integration.
+Every trace
+comes with a precise time measurement and additional
+tags like IP address, library version, or span-specific information (database statement, HTTP response code, and so on). These elements are indispensable in pinpointing performance issues and understanding communication patterns between components of distributed systems.
+Summary
+We've discussed the three main observability techniques of modern applications: logging, metrics collection, and distributed tracing. All of them have their advantages, but logging is definitely the most important way of collecting information from your application. That's because it is simple, does not require any special infrastructure (although it is good to have one), and is least likely to fail you.
+But logging has some limitations. Unstructured logging messages make it harder to extract insights from logs. Logging is also not suitable for the periodic probing of information about resource usage and performance. It is good for auditing purposes and post-mortem analysis after major failures but is rarely helpful in tracking current information and reacting to sudden events.
+That's why metrics collection systems are a natural and valuable extension of logging infrastructures. They allow you to collect information in real time, create custom metrics, and create powerful operational dashboards that can be actively monitored by operations teams. They can also be used to some extent to provide an overview of business metrics, although larger organizations usually prefer dedicated analytic software. Metrics systems are indispensable in monitoring application performance.
+Last but not least, there are distributed tracing infrastructures, which are great in complex systems with many moving pieces. These are indispensable in situations where issues arise at the meeting points between multiple communicating services. They give a great overview of the information flow within the system and make it easy to spot communication anomalies.
+Each type of observability solution provides a useful view of what's going on within your system but no single one solves all of your problems. It would be best if we could have all of them, but unfortunately, not every organization can afford to build or buy all of these solutions. If you have constrained resources and need to pick only one, you should definitely consider logging first, because it will usually have the greatest return on your investment.
+When you have an efficient observability solution in place, you will start discovering intricate problems and performance issues. Some of them will really surprise you. In the end, the best way to evaluate software is to run it in the desired environment and under real-life load. You will usually notice that most of your performance issues are concentrated in isolated hotspots. Once you have identified them, it's time for detailed performance analysis and optimization—the topic of our next chapter.
+
+13
+Code Optimization
+Code optimization is the process of making an application work more efficiently, usually without modifying its functionality and accuracy. Code optimization is usually concerned with the speed of processing (CPU time optimization), but can also be used to minimize the usage of different resources, such as memory, disk space, or network bandwidth.
+In the previous chapter, we learned about various observability techniques that can be used to identify performance hotspots in applications. Logging, metric monitoring, and tracing can be used to create a general performance overview and prioritize optimization efforts. Moreover, operations teams often use custom alerts of performance and resource usage metrics or log messages related to operation timeouts to determine components that require immediate action.
+But even the best logging, metrics, and tracing systems will give you only a rough overview of the performance problem. If you decide to fix it, you will have to perform a careful profiling process that will uncover detailed resource usage patterns.
+There are plenty of optimization techniques. Some concentrate on algorithmic complexity and the use of optimized data structures. Others can trade the accuracy or consistency of results for quick and easy performance gains. Only when you know how your application works and how it uses resources will you be able to apply the proper optimization technique.
+In this chapter, we will discuss the following topics:
+Common culprits for bad performance
+Code profiling
+Reducing complexity by choosing appropriate data structures
+Leveraging architectural trade-offs
+Python comes with built-in profiling capabilities and useful optimization utilities, so theoretically, we could use nothing other than Python and its standard library. But extra tools are like meta-optimization—they increase your own efficiency in finding and solving performance issues. That's why we will rely heavily on some extra utilities. Let's consider them.
+Technical requirements
+The following are the Python packages that are mentioned in this chapter that you can download from PyPI:
+gprof2dot
+objgraph
+pymemcache
+Information on how to install packages is included in
+Chapter 2
+,
+Modern Python Development Environments
+.
+The following are some extra applications that you may need to install:
+Graphviz
+: An open source diagram visualization solution available at
+https://graphviz.org
+Memcached
+: An open source caching service available at
+https://memcached.org
+The code files for this chapter can be found at
+https://github.com/PacktPublishing/Expert-Python-Programming-Fourth-Edition/tree/main/Chapter%2013
+.
+Common culprits for bad performance
+Before we
+go into the details of profiling, let's first discuss the typical reasons for bad performance in applications.
+In practice, many performance problems are pretty common and reoccurring. Knowledge of potential culprits is essential in choosing the right profiling strategy. Also, some specific culprits may manifest in recognizable patterns. If you know what to look for, you will be able to fix obvious performance issues without a detailed analysis and save a lot of time on further optimization attempts.
+The most common
+reasons for experiencing bad application performance are the following:
+Excessive complexity
+Excessive resource allocation and resource leaks
+Excessive I/O and blocking operations
+The most dreaded culprit of application inefficiency is excessive complexity, so we will discuss this first.
+Code complexity
+The first and most
+obvious thing to look for when trying to improve application performance is complexity. There are many definitions of what makes a program complex, and there are many ways to express it. Some measurable complexity metrics can provide objective information about how code behaves, and such information can often be extrapolated into performance expectations. An experienced programmer can even reliably guess how two different implementations will perform in practice, as long as they're aware of their complexities and the execution context.
+The two most popular ways to define application complexity are as follows:
+Cyclomatic complexity
+, which is very often correlated with application performance.
+The
+Landau notation
+, also known as
+big O notation
+, is an algorithm classification method that is useful in objectively judging code performance.
+The optimization process may therefore be sometimes understood as a process of reducing complexity. In the following sections, we will take a closer look at the definitions of these two types of code complexity.
+Cyclomatic complexity
+Cyclomatic complexity
+is a metric
+that was developed by Thomas J. McCabe in 1976; because of its author, it's also known as
+McCabe's complexity
+. Cyclomatic complexity
+measures the number of linear paths through a piece of code. In short, all branching points (
+if
+statements) and loops (
+for
+and
+while
+statements) increase code complexity.
+Depending on the value of measured cyclomatic complexity, code can be classified into various complexity classes. The following is a table of commonly used McCabe complexity classes:
+Cyclomatic complexity value
+Complexity class
+1 to 10
+Not complex
+11 to 20
+Moderately complex
+21 to 50
+Really complex
+Above 50
+Too complex
+Cyclomatic complexity usually
+correlates inversely with application performance (higher complexity = lower performance). Still, it is more of a code quality
+score than a performance metric. It does not replace the need for code profiling when looking at performance bottlenecks. Code that has high cyclomatic complexity often tends to utilize rather complex algorithms that may not perform well with larger inputs.
+Although cyclomatic complexity is not a reliable way to judge application performance, it has an important advantage: it is a source code metric that can be measured with proper tools. This cannot be said of other canonical ways of expressing complexity, including big O notation. Thanks to its measurability, cyclomatic complexity may be a useful addition to profiling, as it gives you more information about problematic parts of your software. Complex parts of code are the first things you should review when considering radical code architecture redesigns.
+Measuring McCabe's
+complexity is relatively simple in Python because it can be deduced from its abstract syntax tree. Of course, you don't need to do that by yourself.
+mccabe
+is a popular Python package from PyPI that can perform automated complexity analysis over Python sources. It is also available as a Pytest plugin named
+pytest-mccabe
+, so it is easy to include in your automated quality and testing processes (see
+Chapter 10
+,
+Testing and Quality Automation
+).
+You can learn more about the
+mccabe
+package at
+https://pypi.org/project/mccabe/
+.
+The
+pytest-mccabe
+package is available at
+https://pypi.org/project/pytest-mccabe/
+.
+The big O notation
+The canonical method of defining
+function complexity is the
+big O notation
+. This
+metric defines how an algorithm is affected by the size of the input. For instance, does an algorithm's complexity scale linearly with the size of the input, or quadratically?
+Manually assessing the big O notation for an algorithm is the best approach when trying to achieve an overview of how its performance is related to the size of the input. Knowing the complexity of your application's components gives you the ability to detect and focus on aspects that will significantly slow down the code.
+To measure the big O notation, all
+constants and low-order terms are removed in order to focus on the portion that really matters when the size of the input data grows very large. The idea is to categorize the algorithm in one of the known complexity categories (even if it is an approximation). The following are the most common complexity classes, where
+n
+is equal to the number of input elements of a problem:
+Notation
+Type
+O(1)
+Constant; does not depend on the input size
+O(n)
+Linear; will grow at a constant rate as n grows
+O(n log n)
+Quasi-Linear
+O(n
+2
+)
+Quadratic
+O(n
+3
+)
+Cubic
+O(n!)
+Factorial
+We can easily
+understand complexity classes by comparing basic lookup operations in some Python standard data types:
+Python list lookup by index has a complexity of O(1)
+: Python lists are pre-allocated resizable arrays akin to a
+Vector
+container from the C++ standard library. The in-memory position of the
+list
+item of a given index is known in advance, so accessing it is a constant-time operation.
+Finding the element index in a list by value has a complexity of O(
+n
+)
+: If you use the
+list.index(value)
+method, Python will have to iterate over items until it finds the element that matches the
+value
+expression. In the worst case, it will have to iterate over all the elements of the
+list
+, so it will perform
+n
+operations, where
+n
+is the
+list
+length. On average, however, finding random elements will take
+n
+/2 operations, so the complexity is O(
+n
+).
+Key lookup in a dictionary has a complexity of O(1)
+: In Python, you can use any immutable value as keys in a dictionary. Key values do not translate directly into exact positions in memory, but Python uses an advanced hashing technique that ensures that the average complexity of the key lookup operation is constant.
+To understand how function complexity can be determined, let's take a look at the following example:
+def
+function
+(
+n
+):
+for
+i
+in
+range
+(n):
+print
+(i)
+In the preceding function, the
+print()
+function will be executed
+n
+times. Loop length depends linearly on
+n
+, so the complexity of the whole function is O(
+n
+).
+If the function has conditions, the correct notation is that of the worst-case scenario. Consider the following example:
+def
+function
+(
+n, print_count=
+False
+):
+if
+print_count:
+print
+(
+f'count:
+{n}
+'
+)
+else
+:
+for
+i
+in
+range
+(n):
+print
+(i)
+In this example, the function could be O(1)
+or O(
+n
+), depending on the value of the
+print_count
+argument. The worst case is O(
+n
+), so the whole function complexity is
+O(n)
+.
+We don't always have to
+consider the worst-case scenario when determining complexity. Many algorithms change runtime performance, depending on the statistical
+characteristic of input data, or amortize the cost of worst-case operations by performing clever tricks. This is why, in many cases, it may be better to review your implementation in terms of average complexity or amortized complexity.
+For example, take a look at the operation of appending a single element to Python's
+list
+type instance. We know that a
+list
+in CPython uses an array with overallocation for the internal storage instead of linked lists. If an array is already full, appending a new element requires the allocation of a new array and copying all existing elements (references) to a new area in the memory. If we look at this from the point of view of worst-case complexity, it is clear that the
+list.append()
+method has O(
+n
+)
+complexity, which is a bit expensive compared to a typical implementation of the linked list structure. We also know, however, that the CPython
+list
+type implementation uses the mechanism of overallocation (it allocates more space than is required at a given time) to mitigate the complexity of occasional reallocation. If we evaluate the complexity over a sequence of operations, we will notice that the average complexity of
+list.append()
+is O(1), and this is actually a great result.
+Always be mindful of big O notation, but don't be too dogmatic about it. Big O notation is asymptotic notation, meaning it is intended to analyze the limiting behavior of a function when the size of the input trends toward infinity. It therefore may not offer a reliable performance approximation for real-life data. Asymptotic notation is a great tool for defining the growth rate of a function, but it won't give a direct answer to the simple question of "Which implementation will take the least time?" Worst-case complexity ignores all the details about timings of individual operations to show you how your program will behave asymptotically. It works for arbitrarily large inputs that you may not always have considered.
+For instance, let's assume that
+you have a problem that requires the processing of
+n
+independent elements. Let's say we have
+Program A
+and
+Program B
+. You know that
+Program A
+requires 100
+n
+2
+operations to complete the task, while
+Program B
+requires 5
+n
+3
+operations to provide a solution. Which one would you choose?
+When speaking about very large inputs,
+Program A
+is the better choice because it behaves better asymptotically. It has O(
+n
+2
+) complexity compared to
+Program B
+'s O(
+n
+3
+) complexity. However, by solving a simple 100
+n
+2
+> 5
+n
+3
+inequality, we can find that
+Program B
+will take fewer
+operations when
+n
+is less than 20. Therefore, if we know a bit more about our input bounds, we can make slightly better decisions. Moreover, we can't assume that individual operations in both programs take the same amount of time. If we want to know which one runs faster for a given input size, we will have to profile both applications.
+Excessive resource allocation and leaks
+With increased complexity often comes the problem of excessive resource allocation. Code that is complex (either algorithmically or asymptotically) is more likely to include inefficient data structures or allocate too many resources without freeing them afterward.
+Although resource
+usage inefficiency often goes hand in hand with complexity, excessive resource usage needs to be treated as a separate performance issue. And this is for two reasons:
+Allocating (and freeing) resources takes time
+: This includes RAM, which is supposed to be fast memory (when compared to disks). Sometimes, it is better to maintain a pool of resources instead of allocating and freeing them constantly.
+Your application is unlikely to run alone on the same host
+: If it allocates too many resources, it may starve other programs. In extreme cases, excessive usage of resources by a single application may render the whole system unavailable or lead to abrupt program termination.
+Whether it is network bandwidth, disk space, memory, or any other resource, if an application appropriates all available resources to itself, this will have a detrimental impact on other programs running in the same environment.
+Moreover, many operating systems or environments allow more resources to be requested than are technically available. A common case is memory overcommitting, which allows an operating system to assign processes more memory than hosts physically have available. It works by assigning processes virtual memory. In the event of a physical memory shortage, an operating system will usually temporarily swap unused memory pages to disk to create more free space.
+This swapping may go unnoticed at healthy usage levels. However, if virtual memory is overused, normal swapping can transform into 'thrashing,' where the operating system is constantly
+swapping pages in and out of the disk. This can lead to a dramatic performance collapse.
+Excessive resource usage may stem from ineffective data structures, overly large resource pool allocations, or be caused by
+unintentional
+resource leaks
+. Resource leaks happen when an application is allocated some specific resources but never frees them, even after it is no longer necessary. Resource leaks are most common for memory allocations, but can happen for other resources (such as file descriptors or open connections) too.
+Excessive I/O and blocking operations
+When writing
+applications, we often forget that every operation requires writing to and reading from a disk or via a network connection, which takes time. These Input/Output (I/O) operations always have a noticeable performance impact on applications, and this is what many software architects ignore when designing elaborate networked systems.
+With the advent of fast
+SSDs
+(
+Solid State Drives
+), disk I/O is faster than
+ever but is still not as fast as RAM (and RAM is not as fast as a CPU cache). Also, some drives have fast throughput for big files, but perform surprisingly poorly in random access mode.
+The same goes for network connections. It cannot go faster than the speed of light. If processes are running on two hosts separated by a great distance, every communication exchange will add a noticeable round-trip overhead. This is a great concern in distributed systems that are often characterized by the fine granulation of many networked services.
+Excessive I/O operations will also have an impact on the ability to serve multiple users concurrently. We've already learned about various concurrency models in
+Chapter 6
+,
+Concurrency
+. Even with the asynchronous concurrency model, which should theoretically deal
+best with I/O, it is possible to accidentally include synchronous I/O operations that can potentially ruin the benefits of concurrency. In such a situation, a performance drop may be observed as a drop in application maximum processing throughput.
+As you can see, there are many possible reasons for performance problems. In order to fix them, you will need to identify their culprit. We usually do that through a process known as
+profiling
+.
+Code profiling
+Knowing what can potentially go
+wrong allows you to make hypotheses and bets on what are the performance issue culprits and how can you fix them. But profiling is the only way to verify these hypotheses. You should usually avoid optimization attempts without profiling your application first.
+Experience helps, so there is of course nothing wrong with doing a small code overview and experiments before profiling. Also, some profiling techniques require the incorporation of additional code instrumentation or the writing of performance tests. It means that often you will have to read it thoroughly anyway. If you perform some small experiments along the way (for instance, in the form of debugging sessions), you may spot something obvious.
+Low-hanging fruit
+happens, but don't rely on it. A good ratio between freeform experiments and classic profiling is around 1:9. My favorite way of organizing the profiling and optimization process is as follows:
+Decide how much time you can spend
+: Not every optimization is possible, and you will not always be able to fix it. Accept the possibility that you won't succeed on your first attempt. Decide when you will stop in advance. It is better to withdraw and successfully retry later than lose a long-standing battle.
+Split that time into sessions
+: Optimization is like debugging. It requires focus, organization, and a clear mind. Pick a length of the session that will allow you to run a whole cycle, consisting of putting forward a hypothesis, profiling, and experimentation. This should be no more than a few hours.
+Make a schedule
+: Implement your sessions when you are least likely to be interrupted and will be most effective. It is often better to plan a few days ahead if the problem is big so you can start every day with fresh ideas.
+Don't make other development plans
+: If you don't succeed in your first session, you will probably be constantly thinking about your problem. It will be hard to focus on other bigger tasks. If you work in a team, make it transparent because you won't contribute fully until you close the topic. Have a handful of small bite-sized tasks to keep you distracted between sessions.
+Optimization will likely require code changes in your application. To reduce the risk of breaking things, it is a good practice to ensure that code is well covered in tests. We discussed common testing techniques in
+Chapter 10
+,
+Testing and Quality Automation
+.
+The key to every
+profiling session is a hypothesis in terms of what could be wrong. It allows you to decide what profiling technique to use and what tools will work best. A great source of hypotheses are metrics collection and distributed tracing systems, which we discussed in detail in
+Chapter 12
+,
+Observing Application Behavior and Performance
+.
+If you have no clue as to what could be wrong, the best way is to start traditional CPU profiling because this has the best chance of leading you to the next viable hypothesis. That's because many common resource and network usage anti-patterns can manifest themselves in CPU profiles as well.
+Profiling CPU usage
+Typically, performance problems arise in a narrow part of code that has a
+significant impact on application performance as a whole. We call such places
+bottlenecks
+. Optimization is a
+process of identifying and fixing those bottlenecks.
+The first source of bottlenecks is
+your code. The standard library provides all the tools that are required to perform code profiling. They are based on a deterministic approach. A
+deterministic profiler
+measures the time spent in each function by adding a timer at the lowest level. This introduces a noticeable overhead but provides a good idea of where the time is
+consumed. A
+statistical profiler
+, on the other hand, samples instruction pointer usage and does not instrument the code. The latter is less accurate, but allows you to run the target program at full speed.
+There are two ways to profile the code:
+Macro-profiling
+: This profiles
+the whole program while it is being used and generates statistics.
+Micro-profiling
+: This
+measures a precise part of the program by instrumenting it manually.
+Where we don't know the exact fragment of the code that runs slowly, we usually start with macro-profiling of the whole application to get a general performance profile and determine components that act as performance bottlenecks.
+Macro-profiling
+Macro-profiling is done by
+running the application in a special mode, where the interpreter is instrumented to collect statistics regarding code usage. The Python standard library provides several tools for this, including the following:
+profile
+: This is a pure Python implementation.
+cProfile
+: This is a C implementation that provides the same interface as that of the profile tool, but has less overhead.
+The recommended choice for most Python programmers is
+cProfile
+due to its reduced overhead. In any case, if you need to extend the profiler in some way, then
+profile
+will be a better choice because it doesn't use C extensions and so is easier to extend.
+Both tools have the same interface and usage, so we will use only one of them here. The following is a
+myapp.py
+module with a
+main
+function that we are going to profile with the
+cProfile
+module:
+import
+time
+def
+medium
+():
+time.sleep(
+0.01
+)
+def
+light
+():
+time.sleep(
+0.001
+)
+def
+heavy
+():
+for
+i
+in
+range
+(
+100
+): 
+        light() 
+        medium() 
+        medium() 
+    time.sleep(
+2
+)
+def
+main
+():
+for
+i
+in
+range
+(
+2
+): 
+        heavy()
+if
+__name__ ==
+'__main__'
+: 
+    main()
+This module can be called directly from the prompt, and the results are summarized here:
+$
+python3 -m cProfile myapp.py
+Example profiling output for our
+myapp.py
+script can be as follows:
+1208 function calls in 8.243 seconds
+   Ordered by: standard name
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        2    0.001    0.000    8.243    4.121 myapp.py:13(heavy)
+        1    0.000    0.000    8.243    8.243 myapp.py:2(<module>)
+        1    0.000    0.000    8.243    8.243 myapp.py:21(main)
+      400    0.001    0.000    4.026    0.010 myapp.py:5(medium)
+      200    0.000    0.000    0.212    0.001 myapp.py:9(light)
+        1    0.000    0.000    8.243    8.243 {built-in method exec}
+      602    8.241    0.014    8.241    0.014 {built-in method sleep}
+The meaning of each
+column is as follows:
+ncalls
+: The total number of calls
+tottime
+: The total time spent in the function, excluding time spent in the calls of sub-functions
+cumtime
+: The total time spent in the function, including time spent in the calls of sub-functions
+The
+percall
+column to the left of
+tottime
+equals
+tottime / ncalls
+, and the
+percall
+column to the left of
+cumtime
+equals the
+cumtime / ncalls
+.
+These statistics are a print view of the statistic object that was created by the profiler. You can also create and review this object within the interactive Python session, as follows:
+>>>
+import
+cProfile
+>>>
+from
+myapp
+import
+main
+>>>
+profiler = cProfile.Profile()
+>>>
+profiler.runcall(main)
+>>>
+profiler.print_stats()
+         1206 function calls in 8.243 seconds
+   Ordered by: standard name
+   ncalls  tottime  percall  cumtime  percall file:lineno(function)
+        2    0.001    0.000    8.243    4.121 myapp.py:13(heavy)
+        1    0.000    0.000    8.243    8.243 myapp.py:21(main)
+      400    0.001    0.000    4.026    0.010 myapp.py:5(medium)
+      200    0.000    0.000    0.212    0.001 myapp.py:9(light)
+      602    8.241    0.014    8.241    0.014 {built-in method sleep}
+The statistics can also be
+saved in a file and then read by the
+pstats
+module. This module provides a class that knows how to handle profile files, and gives a few helpers to more easily review the profiling results. The following transcript shows how to access the total number of calls and how to display the first three calls, sorted by the
+time
+metric:
+>>>
+import
+pstats
+>>>
+import
+cProfile
+>>>
+from
+myapp
+import
+main
+>>>
+cProfile.run(
+'main()'
+,
+'myapp.stats'
+)
+>>>
+stats = pstats.Stats(
+'myapp.stats'
+)
+>>>
+stats.total_calls
+1208
+>>>
+stats.sort_stats(
+'time'
+).print_stats(3)
+Mon Apr  4 21:44:36 2016    myapp.stats
+         1208 function calls in 8.243 seconds
+ 
+   Ordered by: internal time
+   List reduced from 8 to 3 due to restriction <3>
+   ncalls  tottime  percall  cumtime  percall file:lineno(function)
+      602    8.241    0.014    8.241    0.014 {built-in method sleep}
+      400    0.001    0.000    4.025    0.010 myapp.py:5(medium)
+        2    0.001    0.000    8.243    4.121 myapp.py:13(heavy)
+From there, you can
+browse the code by printing out the callers and callees for each function, as follows:
+>>>
+stats.print_callees(
+'medium'
+)
+   Ordered by: internal time
+   List reduced from 8 to 1 due to restriction <'medium'>
+Function           called...
+                   ncalls  tottime  cumtime
+myapp.py:5(medium) ->  400    4.025    4.025  {built-in method sleep}
+>
+>> stats.print_callees(
+'light'
+)
+   Ordered by: internal time
+   List reduced from 8 to 1 due to restriction <'light'>
+Function           called...
+                    ncalls  tottime  cumtime
+myapp.py:9(light)  ->  200    0.212    0.212  {built-in method sleep}
+Being able to sort the output allows you to work on different views to find the bottlenecks. For instance, consider the following scenarios:
+When the number of small calls (a low value of
+percall
+for the
+tottime
+column) is really high (high value of
+ncalls
+) and takes up most of the global time, the function or method is probably running in a very long loop. Often, optimization can be done by moving this call to a different scope to reduce the number of operations.
+When a single function call is taking a very long time, a cache might be a good option, if possible.
+Another great way to visualize bottlenecks from profiling data is to transform them into diagrams (see
+Figure 13.1
+). The
+gprof2dot.py
+script can be used to turn profiler data into a dot graph:
+$
+gprof2dot.py -f pstats myapp.stats | dot -Tpng -o output.png
+The
+gprof2dot.py
+script is part of the
+gprof2dot
+package available on PyPI. You can download it using
+pip
+. Working with it requires the installation of Graphviz software. You can
+download this for free from
+http://www.graphviz.org/
+.
+The following is an
+example output of the preceding
+gprof2dot.py
+invocation in a Linux shell that turns the
+myapp.stats
+profile file into a PNG diagram:
+Figure 13.1: An example of a profiling overview diagram that was generated with gprof2dot
+The example diagram shows different code paths that were executed by the program and the relative time spent in each path. Each box represents a single function. Linking the functions, you have the number of times a given code path was executed and the percentage of total execution time spent on those paths. Using diagrams is a great way to explore the
+performance patterns of large applications.
+The advantage of
+gprof2dot
+is that it tries to be language-agnostic. It is not limited to a Python profile or cProfile output and can read from multiple other profiles, such as Linux
+perf
+,
+xperf
+,
+gprof
+, Java HPROF, and many others.
+Macro-profiling is a good way to detect the function that has a problem, or at least its neighborhood. When you have found it, you can proceed to micro-profiling.
+Micro-profiling
+When the slow
+function is found, we usually proceed with micro-profiling to generate a profile focused on the smallest possible amount of code. This is done by manually instrumenting a part of the code in a specifically created speed test.
+For instance, the
+cProfile
+module can be used in the form of a decorator, as in the following example:
+import
+time
+import
+tempfile
+import
+cProfile
+import
+pstats
+def
+profile
+(
+column=
+'time'
+,
+list
+=
+3
+):
+def
+parametrized_decorator
+(
+function
+):
+def
+decorated
+(
+*args, **kw
+):
+s = tempfile.mktemp()
+            profiler = cProfile.Profile()
+            profiler.runcall(function, *args, **kw)
+            profiler.dump_stats(s)
+            p = pstats.Stats(s)
+print
+(
+"="
+*
+5
+,
+f"
+{function.__name__}
+() profile"
+,
+"="
+*
+5
+)
+            p.sort_stats(column).print_stats(
+list
+)
+return
+decorated
+return
+parametrized_decorator
+def
+medium
+():
+time.sleep(
+0.01
+)
+@profile(
+'time'
+)
+def
+heavy
+():
+for
+i
+in
+range
+(
+100
+):
+        medium()
+        medium()
+    time.sleep(
+2
+)
+def
+main
+():
+for
+i
+in
+range
+(
+2
+):
+        heavy()
+if
+__name__ ==
+'__main__'
+:
+    main()
+This approach allows for
+testing only selected parts of the application (here, the
+heavy()
+function) and sharpens the statistics' output. This way, you can collect many isolated and precisely targeted profiles on a single application run, as follows. The following is example output of running the preceding code in a Python interpreter:
+===== heavy() profile =====
+Wed Apr 10 03:11:53 2019 /var/folders/jy/wy13kx0s7sb1dx2rfsqdvzdw0000gq/T/tmpyi2wejm5
+         403 function calls in 4.330 seconds
+ Ordered by: internal time
+ List reduced from 4 to 3 due to restriction <3>
+ ncalls tottime percall cumtime percall filename:lineno(function)
+    201 4.327   0.022   4.327   0.022   {built-in method time.sleep}
+    200 0.002   0.000   2.326   0.012   cprofile_decorator.py:24(medium)
+      1 0.001   0.001   4.330   4.330   cprofile_decorator.py:28(heavy)
+===== heavy() profile =====
+Wed Apr 10 03:11:57 2019 /var/folders/jy/wy13kx0s7sb1dx2rfsqdvzdw0000gq/T/tmp8mubgwjw
+         403 function calls in 4.328 seconds
+ Ordered by: internal time
+ List reduced from 4 to 3 due to restriction <3>
+ ncalls tottime percall cumtime percall filename:lineno(function)
+    201 4.324   0.022   4.324   0.022   {built-in method time.sleep}
+    200 0.002   0.000   2.325   0.012   cprofile_decorator.py:24(medium)
+      1 0.001   0.001   4.328   4.328.  cprofile_decorator.py:28(heavy)
+In the preceding output, we see that the
+heavy()
+function was called exactly twice and both times the profile was very similar. In the list of calls, we made 201 calls to the
+time.sleep()
+function, which cumulatively takes around 4.3 seconds to execute.
+Sometimes at this stage, having just a profile with a list of callees is not enough to understand the problem. A common practice is to create alternative implementations of specific parts of the
+code and measure how long it takes to execute them. If the
+heavy()
+function was to do anything useful, we could try, for instance, to solve the same problem with code of lower complexity.
+timeit
+is a useful module that provides a simple way to measure the execution time of a small code snippet, with the best underlying timer the host system provides (the
+time.perf_counter()
+object), as shown in the following example:
+>
+>>
+from
+myapp
+import
+medium
+>>>
+import
+timeit
+>>>
+timeit.timeit(light, number=
+1000
+)
+1.2880568829999675
+The
+timeit.timeit()
+function will run the specified function 1,000 times (specified by the
+number
+parameter) and return the total amount of time spent during all executions. If you expect a larger variance in terms of results, you can use
+timeit.repeat()
+to repeat the whole test a specified number of times:
+>>>
+timeit.repeat(light, repeat=5, number=
+1000
+)
+[1.283251813999982, 1.2764048459999913, 1.2787090969999326, 1.279601415000002, 1.2796783549999873]
+The
+timeit
+module allows you to repeat the call multiple times, and can be easily used to try out isolated code snippets. This is very useful outside the application context, in a prompt, for instance, but is not really ideal for use within an existing application.
+The
+timeit
+module can be used to create speed tests in your automated testing framework, but that approach should be used with caution. Timing results may vary each time. Repeating the same test multiple times and taking the average provides more accurate results. Furthermore, some computers have special CPU features, which might change the processor clock time depending on the load or temperature. So you can see different time results when the computer is idling and when it is really busy. Other programs running concurrently will also very likely affect overall timings. So, continually repeating the test is good practice for small code snippets. That's why, when measuring time in automated testing flows, we usually try to observe patterns rather than put concrete timing thresholds as assertions.
+When doing CPU
+profiling, we often spot various patterns related to acquiring and releasing resources as these often happen through function calls. Traditional Python profiling with
+profile
+and
+cProfile
+modules can provide a general overview of resource usage patterns, but when it comes to memory usage, we prefer dedicated memory profiling solutions.
+Profiling memory usage
+Before we start to hunt down memory issues in Python, you should know that the nature of memory leaks in Python is quite special. In some compiled languages such as C and C++, the memory leaks are almost exclusively caused by allocated memory blocks that are
+no longer referenced by any pointer. If you don't have a reference to memory, you cannot release it. This very
+situation is called a
+memory leak
+.
+In Python, there is no low-level memory management available for the user, so we instead deal with leaking references—references to objects that are no longer needed but were not removed. This stops the interpreter from releasing resources, but is not the same situation as a classic memory leak in C.
+There is always the exceptional case of memory leaking through pointers in Python C extensions, but they are a different kind of beast that needs completely different tools to diagnose. These cannot be easily inspected from Python code. A common tool for inspecting memory leaks in C is Valgrind. You can learn more
+about Valgrind at
+https://valgrind.org/
+.
+So, memory issues in Python are mostly caused by unexpected or unplanned resource acquisition patterns. It happens very rarely that this is the effect of real bugs caused by the mishandling of memory allocation and deallocation routines. Such routines are available to the developer only in CPython when writing C extensions with Python/C APIs. You will deal with these very rarely, if ever. Thus, most memory leaks in Python are mainly caused by the overblown complexity of the software and subtle interactions between its components that are really hard to track. To spot and locate such deficiencies in your software, you need to know how actual memory usage looks in the program.
+Getting information about how many objects are controlled by the Python interpreter and inspecting their real size is a bit tricky. For instance, knowing how much memory a given object takes in bytes would involve crawling down all its attributes, dealing with cross-references, and then summing up everything. This is a pretty complex problem if you consider the way objects tend to refer to each other. The built-in
+gc
+module, which is the interface of Python's garbage collector, does not provide high-level functions for this, and it would require Python to be compiled in debug mode to have a full set of information.
+Often, programmers just
+ask the system about the memory usage of their application before and after a given operation has been performed. But this measure is an approximation and depends a lot on how the memory is managed at the system level. Using the
+top
+command under Linux, or the task manager under Windows, for instance, makes it possible to detect memory problems when they are obvious. However, this approach is laborious and makes it really hard to track down the faulty code block.
+Fortunately, there are a few tools available to make memory snapshots and calculate the number and size of loaded objects. But let's keep in mind that Python does not release memory easily and prefers to hold on to it in case it is needed again.
+For some time, one of the most popular tools to use when debugging memory issues and usage in Python was Guppy-PE and its Heapy component. Unfortunately, it no longer appears to be maintained and it lacks Python 3 support. Luckily, the following are some of the other alternatives that are Python 3-compatible to some extent:
+Memprof
+(
+http://jmdana.github.io/memprof/
+): This is declared to work on some POSIX-compliant
+systems (macOS and Linux). Last updated in December 2019.
+memory_profiler
+(
+https://pypi.org/project/memory-profiler
+): Declared to be
+OS-independent. Actively maintained.
+Pympler
+(
+https://pypi.org/project/Pympler/
+): Declared to
+be OS-independent. Actively maintained.
+objgraph
+(
+https://mg.pov.lt/objgraph/
+): Declared to
+be OS-independent. Actively maintained.
+Note that the preceding information regarding compatibility is based purely on trove classifiers that are used by the latest distributions of featured packages, declarations from the documentation, and the inspection of projects' build pipeline definitions at the time of writing the book. These values may be different at the time you read this.
+As you can see, there
+are a lot of memory profiling tools available to Python developers. Each one has some constraints and limitations. In this chapter, we will focus on one profiler that is known to work well with the latest release of Python (that is, Python 3.9) on different operating systems. This tool is
+objgraph
+.
+The API of
+objgraph
+may seem a bit clumsy, and it has a very limited set of functionalities. But it works, does what it needs to do very well, and is really simple to use. Memory instrumentation is not a thing that is added to the production code permanently, so this tool does not need to be pretty.
+Using the objgraph module
+objgraph
+is a simple
+module for creating diagrams of object references within applications. These are extremely useful when hunting memory leaks in Python.
+objgraph
+is available on PyPI, but it is not a completely standalone tool and requires Graphviz, which was installed in the
+Macro-profiling
+section, in order to create memory usage diagrams.
+objgraph
+provides multiple utilities that allow you to list and print various statistics regarding memory usage and object counts. An example of such utilities in use is shown in the following transcript of interpreter sessions:
+>>>
+import
+objgraph
+>>>
+objgraph.show_most_common_types()
+function                   1910
+dict                       1003
+wrapper_descriptor         989
+tuple                      837
+weakref                    742
+method_descriptor          683
+builtin_function_or_method 666
+getset_descriptor          338
+set                        323
+member_descriptor          305
+>
+>>
+objgraph.count(
+'list'
+)
+266
+>>>
+objgraph.typestats(objgraph.get_leaking_objects())
+{'Gt': 1, 'AugLoad': 1, 'GtE': 1, 'Pow': 1, 'tuple': 2, 'AugStore': 1, 'Store': 1, 'Or': 1, 'IsNot': 1, 'RecursionError': 1, 'Div': 1, 'LShift': 1, 'Mod': 1, 'Add': 1, 'Invert': 1, 'weakref': 1, 'Not': 1, 'Sub': 1, 'In': 1, 'NotIn': 1, 'Load': 1, 'NotEq': 1, 'BitAnd': 1, 'FloorDiv': 1, 'Is': 1, 'RShift': 1, 'MatMult': 1, 'Eq': 1, 'Lt': 1, 'dict': 341, 'list': 7, 'Param': 1, 'USub': 1, 'BitOr': 1, 'BitXor': 1, 'And': 1, 'Del': 1, 'UAdd': 1, 'Mult': 1, 'LtE': 1}
+Note that the preceding
+numbers of allocated objects displayed by
+objgraph
+are already high due to the fact that a lot of Python built-in functions and types are ordinary Python objects that live in the same process memory. Also,
+objgraph
+itself creates some objects that are included in this summary.
+As mentioned earlier,
+objgraph
+allows you to create diagrams of memory usage patterns and cross-references that link all the objects in the given namespace. The most useful functions of the
+objgraph
+module are
+objgraph.show_refs()
+and
+objgraph.show_backrefs()
+. They both accept a reference to the object being inspected and save a diagram image to file using the Graphviz package. Examples of such graphs are presented in
+Figure 13.2
+and
+Figure 13.3
+. Here is the code that was used to create these diagrams:
+from
+collections
+import
+Counter
+import
+objgraph
+def
+graph_references
+(
+*objects
+):
+objgraph.show_refs(
+        objects,
+        filename=
+'show_refs.png'
+,
+        refcounts=
+True
+,
+# additional filtering for the sake of brevity
+too_many=
+5
+,
+filter
+=
+lambda
+x:
+not
+isinstance
+(x,
+dict
+),
+    )
+    objgraph.show_backrefs(
+        objects,
+        filename=
+'show_backrefs.png'
+,
+        refcounts=
+True
+)
+if
+__name__ ==
+"__main__"
+:
+    quote =
+"""
+People who think they know everything are a
+great annoyance to those of us who do.
+"""
+words = quote.lower().strip().split()
+    counts = Counter(words)
+    graph_references(words, quote, counts)
+Without Graphviz installed,
+objgraph
+will output diagrams in DOT format, which is a special graph description language.
+The following
+diagram shows the diagram of all references held by
+words
+,
+quote
+, and
+counts
+objects:
+Figure 13.2: An example result of the show_refs() diagram from the graph_references() function
+As you can see, the
+words
+object (denoted as
+list [3]
+) holds references to 16 objects. The
+counts
+object (denoted as
+Counter [3]
+) holds
+references to 15 objects. It is one object less than the
+words
+object because the word "who" appears twice. The
+quote
+object (denoted as
+str [5]
+) is a plain string, so it doesn't hold any extra references.
+The following diagram shows the back references leading to
+words
+,
+quote
+, and
+counts
+objects:
+Figure 13.3: An example result of the show_backrefs() diagram from the graph_references() function
+In the preceding diagram, we see that the
+quote
+,
+words
+, and
+counts
+objects are references in a dictionary (denoted as
+dict[6]
+) of global variables of the
+__main__
+module named
+__globals__
+. Moreover, the
+quote
+object is referenced in a special list object (denoted as
+list [1]
+) due to CPython's string interning mechanism.
+String interning is the memory optimization mechanism of CPython. Most of the string literals are pre-allocated by CPython when a module is loaded. Strings in Python are immutable, so duplicate occurrences of the same string literal will refer to the same address in memory.
+To show how
+objgraph
+may be used in practice, let's review a code example that may create memory issues under certain versions of Python. As we already noted in
+Chapter 9
+,
+Bridging Python with C and C++
+, CPython has its own garbage collector that exists independently from its reference counting mechanism. It is not used for general-purpose memory
+management, and its sole purpose is to solve the problem of cyclic references. In many situations, objects may reference each other in a way that would make it impossible to remove them using simple techniques based on reference counting. Here is the simplest example:
+x = [] 
+y = [x] 
+x.append(y)
+Such a situation is presented visually in
+Figure 13.4
+:
+Figure 13.4: An example diagram generated by objgraph of cyclic references between two objects
+In the preceding case, even if all external references to
+x
+and
+y
+objects are removed (for instance, by returning from the local scope of a function), these two objects cannot be removed through reference counting because there will always be two cross-references owned by these two objects. This is a situation where the Python garbage collector steps in. It can detect cyclic references to objects and trigger their deallocation if there are no other valid references to these objects outside of the cycle.
+The real problem starts when at least one of the objects in such a cycle has the custom
+__del__()
+method defined. This is a custom deallocation handler that will be called when the object's reference count finally goes to zero. It can execute any arbitrary Python code and thus can also create new references to featured objects. This is the reason why the garbage
+collector prior to Python 3.4 could not break reference cycles if at least one of the objects provided the custom
+__del__()
+method implementation. PEP 442 introduced safe object finalization to Python and became part of the language standard, starting from Python 3.4. Anyway, this may still be a problem for packages that worry about backward compatibility and target a wide spectrum of Python interpreter versions. The following snippet of code allows you to show the difference in behavior between the cyclic garbage collector in different Python versions:
+import
+gc
+import
+platform
+import
+objgraph
+class
+WithDel
+(
+list
+):
+""" list subclass with custom __del__ implementation """
+def
+__del__
+(
+self
+):
+pass
+def
+main
+():
+x = WithDel() 
+    y = [] 
+    z = [] 
+ 
+    x.append(y) 
+    y.append(z) 
+    z.append(x)
+del
+x, y, z
+print
+(
+"unreachable prior collection: %s"
+% gc.collect())
+print
+(
+"unreachable after collection: %s"
+%
+len
+(gc.garbage))
+print
+(
+"WithDel objects count:        %s"
+% 
+          objgraph.count(
+'WithDel'
+))
+if
+__name__ ==
+"__main__"
+:
+print
+(
+"Python version: %s"
+% platform.python_version())
+print
+() 
+    main()
+The following output of the preceding code, when executed under Python 3.3, shows that the cyclic garbage collector in the older versions of Python cannot collect objects that have the
+__del__()
+method defined:
+$
+python3.3 with_del.py 
+Python version: 3.3.5
+    
+unreachable prior collection: 3
+unreachable after collection: 1
+WithDel objects count:        1
+With a newer version
+of Python, the garbage collector can safely deal with the finalization of objects, even if they have the
+__del__()
+method defined, as follows:
+$
+python3.5 with_del.py 
+Python version: 3.5.1
+unreachable prior collection: 3
+unreachable after collection: 0
+WithDel objects count:        0
+Although custom finalization is no longer a memory threat in the latest Python releases, it still poses a problem for applications that need to work in different environments. As we mentioned earlier, the
+objgraph.show_refs()
+and
+objgraph.show_backrefs()
+functions allow you to easily spot problematic objects that take part in unbreakable reference cycles. For instance, we can easily modify the
+main()
+function to show all back references to the
+WithDel
+instances to see whether we have leaking resources, as follows:
+def
+main
+():
+x = WithDel() 
+    y = [] 
+    z = [] 
+ 
+    x.append(y) 
+    y.append(z) 
+    z.append(x)
+del
+x, y, z
+print
+(
+"unreachable prior collection: %s"
+% gc.collect())
+print
+(
+"unreachable after collection: %s"
+%
+len
+(gc.garbage))
+print
+(
+"WithDel objects count:        %s"
+% 
+          objgraph.count(
+'WithDel'
+)) 
+ 
+    objgraph.show_backrefs( 
+        objgraph.by_type(
+'WithDel'
+), 
+        filename=
+'
+after-gc.png'
+)
+Running the preceding
+example under Python 3.3 will result in the diagram presented in
+Figure 13.5
+. It shows that
+gc.collect()
+could not succeed in removing
+x
+,
+y
+, and
+z
+object instances. Additionally,
+objgraph
+highlights all the objects that have the custom
+__del__()
+method in red to make spotting such issues easier:
+Figure 13.5: A diagram showing an example of cyclic references that can't be picked by the Python garbage collector prior to Python 3.4
+When memory leaks happen in the
+C extensions (for instance, in Python/C extensions), it is usually much harder to diagnose and profile them. However, harder does not mean impossible, as we will discover in the next section.
+C code memory leaks
+If the Python code seems perfectly
+fine and memory still increases when you loop through the isolated function, the leak might be located on the C side. This happens, for instance, when a
+Py_DECREF
+macro is missing in the critical part of an imported C extension.
+The C code of CPython interpreter is pretty robust and tested for the existence of memory leaks, so it is the last place to look for memory problems. But if you use packages that have custom C extensions, they might be a good place to look first. Because you will be dealing with code operating on a much lower level of abstraction than Python, you need to use completely different tools to resolve such memory issues.
+Memory debugging is not easy in C, so before diving into extension internals, make sure that you properly diagnose the source of your problem. It is a very popular approach to isolate a suspicious package with code similar in nature to unit tests. To diagnose the source of your problem, you should consider the following actions:
+Write a separate test for each API unit or functionality of an extension you suspect of leaking memory.
+Perform the test in a loop for an arbitrarily long time in isolation (one test function per run).
+Observe from outside which of the tested functionalities increases memory usage over time.
+By using such an
+approach, you will eventually isolate the faulty part of the extension and this will reduce the time required later to inspect and fix its code. This process may seem burdensome because it requires a lot of additional time and coding, but it does pay off in the long run. You can always make your work easier by reusing some of the testing tools that were introduced in
+Chapter 10
+,
+Testing and Quality Automation
+. Utilities such as Pytest were perhaps not designed specifically for this case, but can at least reduce the time required to run multiple tests in isolated environments.
+If you have successfully isolated the part of the extension that is leaking the memory, you can finally start actual debugging. If you're lucky, a simple manual inspection of the isolated source code section may provide the desired results. In many cases, the problem is as simple as adding the missing
+Py_DECREF
+call. Nevertheless, in most cases, your work won't be that simple. In such situations, you need to bring out some bigger guns. One of the notable generic tools for combating memory leaks in compiled code that should be in every programmer's toolbelt is Valgrind. This is a whole instrumentation framework for building dynamic analysis tools. Because of this, it may not be easy to learn and master, but you should definitely acquaint yourself with the basics of its usage.
+You can learn more
+about Valgrind at
+https://valgrind.org
+.
+After profiling, when you know what's wrong with your code performance, it's time to apply actual code optimizations. The most common reason for bad performance is code complexity. Very often, code
+complexity can be reduced just by applying appropriate data structures. Let's now look at some examples of optimizations with built-in Python data types.
+Reducing complexity by choosing appropriate data structures
+To reduce code complexity, it's important to
+consider how data is stored. You should pick your data structure carefully. The following section will provide you with a few examples of how the performance of simple code snippets can be improved by the correct data types.
+Searching in a list
+Due to the implementation
+details of the
+list
+type in Python, searching for a specific value in a
+list
+isn't a cheap operation. The complexity of the
+list.index()
+method is O(
+n
+), where
+n
+is the number of list elements. Such linear complexity won't be an issue if you only need to perform a few element index lookups, but it can have a negative performance impact in some critical code sections, especially if done over very large lists.
+If you need to search through a
+list
+quickly and often, you can try the
+bisect
+module from Python's standard library. The functions in this module are mainly designed for inserting or finding insertion indexes for given values in a way that will preserve the order of the already sorted sequence. This module is used to efficiently find an element index using a bisection algorithm. The following recipe, from the official documentation of the function, finds an element index using a binary search:
+def
+index
+(
+a, x
+):
+'Locate the leftmost value exactly equal to x'
+i = bisect_left(a, x)
+if
+i !=
+len
+(a)
+and
+a[i] == x:
+return
+i
+raise
+ValueError
+Note that every function from the
+bisect
+module requires a sorted sequence in order to work. If your
+list
+is not in the correct order, then sorting it is a task with a worst-case complexity of O(
+n log n
+). This is a worse class than O(
+n
+), so sorting the whole
+list
+to then perform only a single search will not pay off. However, if you need to perform a number of index searches across a large
+list
+that rarely changes, using a single
+sort()
+operation for
+bisect
+may prove to be the best trade-off.
+If you already have a sorted
+list
+, you can also insert new items into that
+list
+using
+bisect
+without needing to re-sort it. The
+bisect_left()
+and
+bisect_right()
+functions already return insertion points in the left-to-right or right-to-left sorted lists accordingly. The following is an example of inserting a new value in a left-to-right sorted
+list
+using the
+bisect_left()
+function:
+>>>
+from
+bisect
+import
+bisect_left
+>>>
+items = [
+1
+,
+5
+,
+6
+,
+19
+,
+20
+]
+>>>
+items.insert(bisect_left(items,
+15
+),
+15
+)
+>
+>>
+items
+[1, 5, 6, 15, 19, 20]
+There are also
+insort_left()
+and
+insort_right()
+functions that are shorthand for inserting elements in
+sorted lists:
+>>>
+from
+bisect
+import
+insort_left
+>>>
+items = [
+1
+,
+5
+,
+6
+,
+19
+,
+20
+]
+>>>
+insort_left(items,
+15
+)
+>>>
+items
+[1, 5, 6, 15, 19, 20]
+In the next section, we will see how to use a set instead of a
+list
+when element uniqueness is required.
+Using sets
+When you need to build a sequence
+of distinct values from a given sequence, the first algorithm that might come to mind is as follows:
+>>>
+sequence = [
+'a'
+,
+'a'
+,
+'b'
+,
+'c'
+,
+'c'
+,
+'d'
+]
+>>>
+result = []
+>>>
+for
+element
+in
+sequence:
+...
+if
+element
+not
+in
+result:
+...         result.append(element)
+...
+>>>
+result
+['a', 'b', 'c', 'd']
+In the preceding example, the complexity is introduced by the lookup in the
+result
+list
+. The
+in
+operator has a time complexity of O(
+n
+). It is then used in the loop, which costs O(
+n
+). So, the overall complexity is quadratic, that is, O(
+n
+2
+).
+Using a set type for the same work will be faster because the stored values are looked up using hashes (the same as in the
+dict
+type). The
+set
+type also ensures the uniqueness of elements, so we don't need to do anything more than create a new set from the sequence object. In other words, for each value in sequence, the time taken to see whether it is already in the set will be constant, as follows:
+>>>
+sequence = [
+'a'
+,
+'a'
+,
+'b'
+,
+'c'
+,
+'c'
+,
+'d'
+]
+>>>
+unique =
+set
+(sequence)
+>>>
+unique
+set(['a', 'c', 'b', 'd'])
+This lowers
+the complexity to O(
+n
+), which is the complexity of the set object creation. The additional advantage of using the
+set
+type for element uniqueness is shorter and more explicit code.
+Sometimes the built-in data types are not enough to handle your data structures efficiently. Python comes with a great set of additional performant data types in the
+collections
+module.
+Using the collections module
+The
+collections
+module provides
+specialized alternatives to general-purpose, built-in container types. The main types from this module that
+we will focus on in this chapter are as follows:
+deque
+: A
+list
+-like type with extra features
+defaultdict
+: A
+dict
+-like type with a built-in default factory feature
+namedtuple
+: A
+tuple
+-like type that assigns keys for members
+We've already discussed other types from the
+collections
+module in other chapters:
+ChainMap
+in
+Chapter 3
+,
+New Things in Python
+;
+UserList
+and
+UserDict
+in
+Chapter 4
+,
+Python in Comparison with Other Languages
+; and
+Counter
+in
+Chapter 5
+,
+Interfaces, Patterns, and Modularity
+.
+We'll discuss these types in the following sections.
+deque
+A
+deque
+is an alternative
+implementation for lists. While the built-in
+list
+type is based on ordinary arrays, a
+deque
+is based on a
+doubly-linked list
+. Hence, a
+deque
+is much faster when you need to insert something into its tail or head, but much slower when you need to access an arbitrary index.
+Of course, thanks to the overallocation of an internal array in the Python
+list
+type, not every
+list.append()
+call requires memory reallocation, and the average complexity of this method is O(1). The situation changes dramatically when the element needs to be added at the first index of the
+list
+. Because all elements to the right of the new one need to be shifted in an array, the complexity of
+list.insert()
+is O(
+n
+). If you need to perform a lot of pops, appends, and inserts, a
+deque
+in place of a
+list
+may provide a substantial performance improvement.
+Remember to always profile your code before switching from a
+list
+to a
+deque
+because a few things that are fast in arrays (such as accessing an arbitrary index) are extremely inefficient in linked lists.
+For example, if we measure the time it takes to append one element and remove it from the sequence with
+timeit
+, the difference between a
+list
+and a
+deque
+may not even be noticeable.
+The following is a sample
+timeit
+run for the
+list
+type:
+$
+python3 -m timeit \
+  -s
+'sequence=list(range(10))'
+\
+'sequence.append(0); sequence.pop();'
+1000000 loops, best of 3: 0.168 usec per loop
+And the following is a sample
+timeit
+run for the
+deque
+type:
+$
+python3 -m timeit \ 
+  -s 'from collections import deque; sequence=deque(range(10))' \
+  'sequence.append(0); sequence.pop();'
+1000000 loops, best of 3: 0.168 usec per loop
+However, if we perform a similar comparison for situations where we want to add and remove the first element of the sequence, the performance difference is impressive.
+The following is a sample
+timeit
+run for the
+list
+type:
+$
+python3 -m timeit \
+  -s
+'sequence=list(range(10))'
+\
+'sequence.insert(0, 0); sequence.pop(0)'
+1000000 loops, best of 3: 0.392 usec per loop
+And the following is a similar
+timeit
+run for the
+deque
+type:
+$
+python3 -m timeit \
+  -s
+'from collections import deque; sequence=deque(range(10))'
+\
+'sequence.appendleft(0); sequence.popleft()'
+10000000 loops, best of 3: 0.172 usec per loop
+As you may expect, the
+difference gets bigger as the size of the sequence grows. The following is an example of running the same test with
+timeit
+for a
+list
+that contains 10,000 elements:
+$
+python3 -m timeit \
+  -s
+'sequence=list(range(10000))'
+\
+'sequence.insert(0, 0); sequence.pop(0)'
+100000 loops, best of 3: 14 usec per loop
+If we do the same for
+deque
+, we will see that the timing of the operation does not change:
+$
+python3 -m timeit \
+  -s
+'from collections import deque; sequence=deque(range(10000))'
+\ 
+  'sequence.appendleft(0); sequence.popleft()'
+10000000 loops, best of 3: 0.168 usec per loop
+Thanks to the efficient
+append()
+and
+pop()
+methods, which work at the same speed from both ends of the sequence,
+deque
+makes a perfect example of implementing queues. For example, a
+First-In First-Out
+(
+FIFO
+) queue will be
+much more efficient if implemented with
+deque
+instead of
+list
+.
+deque
+works well when implementing queues, but there is also a separate
+queue
+module in Python's standard library that provides a basic implementation
+for FIFO,
+Last-In First-Out
+(
+LIFO
+), and priority queues. If you want to utilize queues as a mechanism of inter-thread communication, you should use classes from the
+queue
+module instead of
+collections.deque
+. This is because these classes provide all the necessary locking semantics. If you don't use threading and choose not to utilize queues as a communication mechanism,
+deque
+should be enough to provide queue implementation basics.
+defaultdict
+The
+defaultdict
+type is similar to the
+dict
+type, except it adds a default factory for new keys. This avoids the
+need to write an extra test to initialize the mapping entry and is also a bit more efficient than the
+dict.setdefault
+method.
+defaultdict
+may seem like simple syntactic sugar over
+dict
+that allows us to write shorter code. However, the fallback to a pre-defined value on a failed key lookup is slightly faster than the
+dict.setdefault()
+method.
+The following is a
+timeit
+run for the
+dict.setdefault()
+method:
+$
+python3 -m timeit \
+  -s
+'d = {}'
+\
+'d.setdefault("x", None)'
+10000000 loops, best of 3: 0.153 usec per loop
+And the following is a
+timeit
+run for the equivalent
+defaultdict
+usage:
+$
+python3 -m timeit \
+-s
+'
+from collections import defaultdict; d = defaultdict(lambda: None)'
+\
+'d["x"]'
+10000000 loops, best of 3: 0.0447 usec per loop
+The difference in the preceding example may seem more substantial, but the computational complexity hasn't changed. The
+dict.setdefault()
+method consists of two steps (key lookup and key set), both of which have a complexity of O(1). There is no way to have a complexity class lower than O(1), but sometimes it is worth looking for faster alternatives in the same O(1) class. Every small speed improvement counts when optimizing critical code sections.
+The
+defaultdict
+type takes a factory as a parameter and can therefore be used with built-in types or classes whose constructors do not take arguments. The following code snippet is an example from the official documentation that demonstrates how to use
+defaultdict
+for counting:
+>>>
+from
+collections
+import
+defaultdict
+>>>
+s =
+'mississippi'
+>>>
+d = defaultdict(
+int
+)
+>>>
+for
+k
+in
+s:
+...     d[k] += 1
+...
+>>>
+list
+(d.items())
+[('i', 4), ('p', 2), ('s', 4), ('m', 1)]
+For this particular example (counting unique elements), the
+collections
+module also offers a special
+Counter
+class. It can be used to query efficiently for a number of top elements.
+namedtuple
+namedtuple
+is a class factory that takes a name of a type with a
+list
+of attributes and creates a class out of it. The new class can then be used to instantiate tuple-like objects and also provides accessors for their elements, as follows:
+>>>
+from
+collections
+import
+namedtuple
+>>>
+Customer = namedtuple(
+...
+'Customer'
+,
+...
+'firstname lastname'
+... )
+>>>
+c = Customer(
+'Tarek'
+,
+'Ziadé'
+)
+>>>
+c.firstname
+'Tarek'
+As shown in the preceding example, it can be used to create records that are easier to write compared to a custom class that may require boilerplate code to initialize values. On the other hand, it is based on a tuple, so gaining access to its elements by means of an index is a quick process. The generated class can also be sub-classed to add more operations.
+The advantage of using
+namedtuple
+over
+other data types may not be obvious at first glance. The main advantage is that it is easier to use, understand, and interpret than ordinary tuples. Tuple indexes don't carry any semantics, so it is great to be able to access tuple elements by attributes. Note that you could also get the same benefits from dictionaries that have an O(1) average complexity of
+get
+and
+set
+operations.
+The main advantage in terms of performance is that
+namedtuple
+is still a flavor of tuple. This means that it is immutable, so the underlying array storage is allocated for the necessary size. Dictionaries, on the other hand, need to use overallocation in the internal hash table to ensure the low-average complexity of get/set operations. So,
+namedtuple
+wins over
+dict
+in terms of memory efficiency.
+Similar micro memory optimization can be done on user-defined classes using slots. Slots were discussed in
+Chapter 4
+,
+Python in Comparison with Other Languages
+.
+The fact that
+namedtuple
+is based on a tuple may also be beneficial for performance. Its elements may be accessed by an integer index, as in other simple sequence objects—lists and tuples. This operation is both simple and fast. In the case of
+dict
+or custom class instances (that use dictionaries for storing attributes), the element access requires a hash table lookup. Dictionaries are highly optimized to ensure good performance independently from collection size, but as mentioned, O(1) complexity is actually only regarded as average
+complexity. The actual, amortized worst-case complexity for set/get operations in
+dict
+is O(
+n
+). The real amount of work required to perform such an operation is dependent on both collection size and history. In sections of code that are critical for performance, it may be wise to use lists or tuples over dictionaries, as they are more predictable. In such a situation,
+namedtuple
+is a great type that combines the following advantages of dictionaries and tuples:
+In sections where readability is more important, the attribute access may be preferred.
+In performance-critical sections, elements may be accessed by their indexes.
+Named tuples can be a useful optimization tool, but when readability matters, usually, data classes are a better choice for storing struct-like data. We've discussed data classes and their advantages in
+Chapter 4
+,
+Python in Comparison with Other Languages
+.
+Reduced complexity can be achieved by storing data in an efficient data structure that works well with the way the algorithm will use it. That said, when the solution is not obvious, you should consider dropping and rewriting the incriminating part of the code instead of sacrificing the readability for the sake of performance. Often, Python code can be both readable and fast, so try to find a good way to perform the work instead of trying to work around a flawed design.
+But sometimes, the problem we are trying to solve doesn't have an efficient solution or we don't have a good and performant structure at hand. In such situations, it is worth considering some architectural trade-offs. We will discuss examples of such trade-offs in the next section.
+Leveraging architectural trade-offs
+When your code can no longer be improved by reducing the complexity or choosing a proper data structure, a good approach may be to consider a trade-off. If we review users' problems and define what is really important to them, we can often relax some of the application's requirements. Performance
+can often be improved by doing the following:
+Replacing exact solution algorithms with heuristics and approximation algorithms
+Deferring some work to delayed task queues
+Using probabilistic data structures
+Let's move on and take a look at these improvement methods.
+Using heuristics and approximation algorithms
+Some algorithmic problems simply
+don't have good state-of-the-art solutions that could run within a time span that would be acceptable to the user.
+For example, consider a program that deals
+with complex optimization problems, such as the
+Traveling Salesman Problem
+(
+TSP
+) or the
+Vehicle Routing Problem
+(
+VRP
+). Both
+problems are
+NP-hard problems
+in combinatorial
+optimization. Exact low-complexity algorithms for
+these problems are not known; this means that the size of a problem that can be solved practically is greatly limited. For larger inputs, it is unlikely that you'll be able to provide the correct solution in time.
+Fortunately, a user will likely not be interested in the best possible solution, but one that is good enough and can be obtained in a timely manner. In these cases, it makes sense to use heuristics or approximation algorithms whenever they provide acceptable results:
+Heuristics
+solve given problems by
+trading optimality, completeness, accuracy, or precision for speed. Thus, it may be hard to prove the quality of their solutions compared to the result of exact algorithms.
+Approximation algorithms
+are similar in idea to
+heuristics, but, unlike heuristics, have provable solution quality and runtime bounds.
+There are many known good heuristics and approximation algorithms that can solve extremely large TSP or VRP problems within a reasonable amount of time. They also have a high probability of producing good results, just 2-5% from the optimal solution.
+Another good thing about heuristics is that they don't always need to be constructed from scratch for every new problem that arises. Their higher-level versions, called
+metaheuristics
+, provide strategies for
+solving mathematical optimization problems that are not problem-specific and can thus be applied in many situations. Popular metaheuristic algorithms include the following:
+Simulated annealing
+, which imitates the
+physical processes happening during annealing in metallurgy (controlled heating and cooling of materials)
+Evolutionary computation
+, which is
+inspired by biological evolutions and uses evolutionary mechanisms, such as mutation, reproduction, recombination, and selection, to efficiently search a large area of solutions in complex problems
+Genetic algorithms
+, which are a
+specialized form of evolutionary computation that represent possible problem solutions as sets of genotypes and perform genetic transformations, such as crossover and mutations, to produce better results
+Tabu search
+, which is a
+general problem search technique that introduces prohibited search paths (taboos) to reduce the probability of algorithm settling in local optimums
+Ant colony optimization
+, which
+imitates the behavior of ants in a colony when searching through the possible space of problem solutions
+Heuristic and
+approximation algorithms are viable
+optimization techniques when the majority of the performance happens in a single algorithmic task of the application. But often, performance issues are caused by general system architecture and communication links between different system components.
+A common architectural trade-off that improves the perceived performance of complex applications involves the use of task queues and delayed processing.
+Using task queues and delayed processing
+Sometimes, it's not about doing too
+much, but about doing things at the right time. A common example that's often mentioned in literature is
+sending emails within a web application. In this case, increased response times for HTTP requests may not necessarily translate to your code implementation. The response time may instead be dominated by a third-party service, such as a remote email server. So, can you ever successfully optimize your application if it spends most of its time waiting on other services to reply?
+The answer is both yes and no. If you don't have any control over a service that is the main contributor to your processing time, and there is no faster solution you can use, you cannot speed up the service any further. A simple example of processing an HTTP request that results in sending an email is presented in
+Figure 13.6
+:
+Figure 13.6: An example of synchronous email delivery in a web application
+If your code
+relies on third-party services, you often cannot reduce the waiting time. But you can change the way users will perceive it.
+The usual solution to
+this is kind of problem is to use message or task queues (see
+Figure 13.7
+). When you need to do something that could take an indefinite amount of time, add it to the queue of work that needs to be done and immediately tell the user that their request was accepted. This is why sending emails is such a great example: emails are already task queues! If you submit a new message to an email server using the SMTP protocol, a successful response does not mean your email was delivered to the addressee—it means that the email was delivered to the email server. If a response from the server does not guarantee that an email was delivered, you don't need to wait for it in order to generate an HTTP response for the user:
+Figure 13.7: An example of asynchronous email delivery in a web application
+Even if your email server is responding at blazing speed, you may need some more time to generate the message that needs to be sent. Are you generating yearly reports in an XLS format? Or are you delivering invoices via PDF files? If you use an email transport system that is already asynchronous, then you can put the whole message generation task to the message processing system. If you cannot guarantee the exact time of delivery, then you should not bother generating your deliverables synchronously.
+The correct usage of task
+and message queues in critical
+sections of an application can also give you other benefits, including the following:
+Web workers that serve HTTP requests will be relieved from additional work and will be able to process requests faster. This means that you will be able to process more requests with the same resources and thereby handle greater loads.
+Message queues are generally more immune to transient failures of external services. For instance, if your database or email server times out from time to time, you can always re-queue the currently processed task and retry it later.
+With a good message queue implementation, you can easily distribute work on multiple machines. This approach may improve the scalability of some of your application components.
+As you can see in
+Figure 13.7
+, adding an asynchronous task process to your application inevitably increases the complexity of the whole system's architecture. You will need to set up some new backing services (a message queue such as RabbitMQ) and create workers that will be able to process asynchronous jobs. Fortunately, there are some popular tools available for building distributed task queues.
+A popular Python tool for asynchronous
+job handling is
+Celery
+. Celery is a fully fledged task queue framework with the support of multiple message brokers that also allows for the scheduled execution of tasks. It can even replace your cron jobs. You can read more about Celery at
+http://www.celeryproject.org/
+.
+If you need
+something simpler, then
+RQ
+might be a good alternative. RQ is a lot simpler than Celery and uses Redis key-value storage as its message broker
+Redis Queue
+(
+RQ
+). You can read more about RQ at
+http://python-rq.org/
+.
+Although there are some
+good and battle-hardened tools available, you should always carefully consider your approach to task queues. Not every kind of task
+should be processed in queues. While queues are good at solving a number of issues, they can also introduce the following problems:
+The increased complexity of system architecture
+The possibility of processing a single message more than once
+More services to maintain and monitor
+Larger processing delays
+More difficult logging
+A completely
+different approach to architectural
+tradeoffs involves the use of non-deterministic/probabilistic data structures.
+Using probabilistic data structures
+Probabilistic data
+structures are structures that are designed to store collections of values in a way that allows you to answer specific questions within time or resource constraints that would otherwise be impossible. A common example would be efficiently storing unique view counts in a large video streaming platform such as YouTube that has billions of videos and billions of users. Having naïve implementation that stores exact information on who watched what would take a tremendous amount of memory and would probably be hard to operate efficiently. When the problem is that big, it may be necessary to consider the use of probabilistic data structures.
+The most important feature of probabilistic data structures is that the answers they give are only probable to be true; in other words, they are just approximations of real values. The probability of a correct answer can be easily estimated, however. Despite not always giving the correct answer, probabilistic data structures can still be useful if there is some room for potential error.
+There are a lot of data structures with such probabilistic properties. Each one of them solves specific problems, but due to their stochastic nature, they cannot be used in every situation. As a practical example, we'll talk about one of the more popular structures,
+HLL
+(
+HyperLogLog
+).
+HLL
+is an algorithm that approximates
+the number of distinct elements in a multiset. With ordinary sets, if you want to know the number of unique elements, you need to store all of them. This is obviously impractical for very large datasets. HLL is distinct from the classical way of implementing sets as programming data structures.
+Without digging into implementation details, let's say that it only concentrates on providing an approximation of set cardinality; real values are never stored. They cannot be retrieved, iterated, or tested for membership. HLL trades accuracy and correctness for time complexity and size in memory. For instance, the Redis implementation of HLL takes only 12k bytes with a standard error of 0.81%, with no practical limit on collection size.
+Using probabilistic data structures is an interesting way of solving performance problems. In most cases, it is about trading off some accuracy for faster processing or more efficient resource usage. It does not always need to do so, however. Probabilistic data structures are often used in key/value storage systems to speed up key lookups. One of the most popular techniques that's used in such systems is called an
+Approximate Member Query
+(
+AMQ
+). An
+interesting probabilistic data structure that is often used for this purpose is
+the Bloom filter.
+In the next section, we'll take a look at caching.
+Caching
+When some of your
+application functions take too long to compute, a useful technique to consider is caching. Caching saves the return values of function calls, database queries, HTTP requests, and so on for future reference. The result of a
+function or method that is expensive to run can be cached as long as one of the following conditions is met:
+The function is deterministic and the results have the same value every time, given the same input.
+The return value of the function is non-deterministic, but continues to be useful and valid for certain periods of time.
+In other words, a deterministic function always returns the same result for the same set of arguments, whereas a non-deterministic function returns results that may vary in time. The caching of both types of results usually greatly reduces the time of computation and allows you to save a lot of computing resources.
+The most important requirement for any caching solution is a storage system that allows you to retrieve saved values significantly faster than it takes to calculate them. Good candidates for caching are
+usually the following:
+Results from callables that query databases
+Results from callables that render static values, such as file content, web requests, or PDF rendering
+Results from deterministic callables that perform complex calculations
+Global mappings that keep track of values with expiration times, such as web session objects
+Results that need to be accessed often and quickly
+Another important use case
+for caching is when saving results from third-party APIs served over the web. This may greatly improve application performance by cutting off network latencies, but it also allows you to save money if you are billed for every request to an API.
+Depending on your application architecture, the cache
+can be implemented in many ways and with various levels of complexity. There are many ways of providing a cache, and complex applications can use different approaches on different levels of the application architecture stack. Sometimes, a cache may be as simple as a single global data structure (usually a dictionary) that is kept in the process memory. In
+other situations, you may want to set up a dedicated caching service that will run on carefully tailored hardware. The following sections will provide you with basic information on the most popular caching approaches, guiding you through some common use cases as well as the common pitfalls.
+So, let's move on and see what deterministic caching is.
+Deterministic caching
+Deterministic functions are the
+easiest and safest use case for caching. Deterministic functions always return the same value if given the same input, so caching
+can generally store their results indefinitely. The only limitation to this approach is storage capacity. The simplest way to cache results is to put them into process memory, as this is
+usually the fastest place to retrieve data from. Such a technique is often called
+memoization
+.
+Memoization is very useful when optimizing recursive functions that may need to evaluate the same input multiple times. We already discussed recursive implementations for the Fibonacci sequence in
+Chapter 9
+,
+Bridging Python with C and C++
+. Earlier on in this book, we tried to improve the performance of our program with C and Cython. Now, we will try to achieve the same goal by simpler means—through caching. Before we do that, let's first recall the code for the
+fibonacci()
+function, as follows:
+def
+fibonacci
+(
+n
+):
+if
+n <
+2
+:
+return
+1
+else
+:
+return
+fibonacci(n -
+1
+) + fibonacci(n -
+2
+)
+As we can see,
+fibonacci()
+is a recursive function that calls itself twice if the input value is more than two. This makes it highly inefficient. The runtime complexity is O(2
+n
+) and its execution creates a very deep and vast call tree. For a large input value, this function will take a long time to execute. There is also is a high chance that it will exceed the maximum recursion limit of the Python interpreter.
+If you take a closer look at the following
+Figure 13.8
+, which presents an example call tree of the
+fibonacci()
+function, you will see that it evaluates many of the intermediate results multiple times. A lot of time and resources can be saved if we reuse some of these values:
+Figure 13.8: A call tree for the fibonacci(5) execution
+An example of a simple
+memoization attempt would be to store the results of previous runs in a dictionary and to retrieve them if they are available.
+Both the
+recursive calls in the
+fibonacci()
+function are contained in a single line of code, as follows:
+return
+fibonacci(n -
+1
+) + fibonacci(n -
+2
+)
+We know that Python evaluates instructions from left to right. This means that, in this situation, the call to the function with a higher argument value will be executed before the call to the function with a lower argument value. Thanks to this, we can provide memoization by constructing a very simple decorator, as follows:
+def
+memoize
+(
+function
+):
+call_cache = {}
+def
+memoized
+(
+argument
+):
+try
+:
+return
+call_cache[argument]
+except
+KeyError:
+return
+call_cache.setdefault(
+                argument, function(argument)
+            )
+return
+memoized
+We can then apply it to the
+fibonacci()
+function as follows:
+@memoize
+def
+fibonacci
+(
+n
+):
+if
+n <
+2
+:
+return
+1
+else
+:
+return
+fibonacci(n -
+1
+) + fibonacci(n -
+2
+)
+We've used the dictionary on the closure of the
+memoize()
+decorator as a simple storage solution from
+cached values. Saving and retrieving values in the preceding data structure has an average complexity of O(1). This should greatly reduce the overall complexity of the memoized function. Every unique function call will be evaluated only once. The call tree
+of such an updated function is presented in
+Figure 13.9
+. Even without mathematical proof, we can visually deduce that we have reduced the complexity of the
+fibonacci()
+function from the very expensive O(2
+n
+) to the linear O(
+n
+):
+Figure 13.9: A call tree for the fibonacci(5) execution with memorization
+The implementation of our
+memoize()
+decorator is, of course, not perfect. It worked well for the preceding example, but it isn't a reusable piece of software. If you need to memoize functions with multiple arguments, or want to control the size of your cache, you will require something more generic.
+Luckily, the Python standard library provides a very simple and reusable utility that can be used in most cases of deterministic caching. This utility is the
+lru_cache()
+decorator from the
+functools
+module. The
+name comes from the
+LRU (Last Recently Used) algorithm
+. The following additional parameters allow for finer control of memoization behavior:
+maxsize
+: This sets the maximum size of the cache. The
+None
+value means no limit at all.
+typed
+: This defines whether values of different types that compare as equal should be mapped to the same result.
+The usage of
+lru_cache()
+in our
+Fibonacci sequence example would be as follows:
+from
+functools
+import
+lru_cache
+@lru_cache(
+None
+)
+def
+fibonacci
+(
+n
+):
+if
+n <
+2
+:
+return
+1
+else
+:
+return
+fibonacci(n -
+1
+) + fibonacci(n -
+2
+)
+In the next section, we
+will take a look at non-deterministic caching.
+Non-deterministic caching
+Caching non-deterministic
+functions is trickier than memoization. Since every execution of such a function may provide different results, it is usually impossible to use
+previous values for an arbitrarily long amount of time. What you need to do instead is to decide for how long a cached value can be considered valid. After a defined period of time passes, the stored results are considered stale, and the cache will need to be refreshed with a new value.
+So, in other words, non-deterministic caching is performed in any situation where pre-computed results are used temporarily. Cached non-deterministic functions often depend on some external state that is hard to track inside your application code. Typical examples of components include the following:
+Relational databases, or generally any type of structured data storage engine
+Third-party services accessible through a network connection (web APIs)
+Filesystems
+Note that such an implementation is a trade-off. If you resign from running part of your code whenever necessary and instead use historical results, you are risking using data that is stale or represents an inconsistent state of your system. In this case, you are trading accuracy and/or completeness for speed and performance.
+Of course, such caching is only efficient as long as the time taken to interact with the cache is less than the time the cached function takes to execute. If it's faster to simply recalculate the value, by all means do so! That's why setting up a cache has to be done only if it's worth it; setting it up properly has a cost.
+Things that can actually be cached are usually the results of interactions with other components of your system. For instance, if you want to save time and resources when communicating with the database, it is worth caching frequent and expensive queries. If you want to reduce the number of I/O operations, you may want to cache the content of files that are most frequently accessed or responses from external APIs.
+Techniques for
+caching non-deterministic functions are actually very similar to those used in caching deterministic ones. The most notable difference is that they usually require the option of invalidating cached values by their age. This means that the
+lru_cache()
+decorator from the
+functools
+module has limited use; however, it should not be too difficult to extend this function to provide the expiration feature. As this is a very common problem that has been solved numerous times by many developers, you should be able to find multiple libraries on PyPI that have been designed for caching non-deterministic values.
+Using local process memory is a fast way to cache values, but every process maintains its own cache. If you have a lot of processes, independent caches can take a substantial amount of your memory. In distributed systems, it is common to use dedicated cache services.
+Cache services
+Although non-deterministic
+caching can be implemented using local process memory, it is actually rarely done that way in a distributed system. That's because a cache needs to be duplicated for every service and this is often a waste of resources. Moreover, multiple process instances can have different cache values, and this may lead to data inconsistencies.
+If you run into a situation where non-deterministic caching is your preferred solution to performance problems, you may well need something more. Usually, non-deterministic caching is your must-have solution when you need to serve data or a service to multiple users at the same time.
+Sooner or later, you may also need to ensure that users can be served concurrently. While local memory provides a way of sharing data between multiple threads, threading may not be the best concurrency model for every application. It does not scale well, so you will eventually need to run your application as multiple processes.
+If you are lucky enough, you may be able to run your application on hundreds or thousands of machines. If you would like to store cached values in local memory in this scenario, your cache will need to be duplicated on every process that requires it. This is not just a total waste of resources—if every process has its own cache, which is already a trade-off between speed and consistency, how can you guarantee that all caches are consistent with each other?
+Consistency across
+subsequent requests is a serious concern, especially for web applications with distributed backends. In complex distributed systems, it is extremely hard to ensure that the user will always be served by the same process hosted on the same machine. It is, of course, doable to some extent, but once you solve that problem, 10 others will pop up.
+If you are making an application that needs to serve multiple concurrent users, the best way to handle a non-deterministic cache is to use a dedicated service. With tools such as Redis or Memcached, you allow all of your application processes to share the same cached results. This both reduces the use of precious computing resources and saves you from any problems caused by having too many independent and inconsistent caches.
+Caching services such as Memcached are useful for implementing memoization-like caches with states that can be easily shared across multiple processes, and even multiple servers. There is also another way of caching that can be implemented on a system architecture-level, and such an approach is extremely common in applications working over the HTTP protocol. Many elements of a typical HTTP application stack provide elastic caching capabilities that often use mechanisms that are well standardized by the HTTP protocol. This kind of caching can, for instance, take the form of the following:
+Caching reverse-proxy (for example, nginx or Apache): Where a proxy caches full responses from multiple web workers working on the same host
+Caching load balancer (for example, HAProxy): Where a load balancer not only distributes the load over multiple hosts, but also caches their responses
+Content distribution network: Where resources from your servers are cached by a system that also tries to keep them in close geographical proximity to users, thus reducing network roundtrip times
+In the next section, we will take a look at Memcached.
+Using Memcached
+If you want to be serious about caching, Memcached is a very popular and battle-hardened solution. This cache
+server is used by big applications, including Facebook and Wikipedia, to scale their websites. Among simple caching features, it has clustering capabilities that make it possible for you to set up an efficiently distributed cache system in no time.
+Memcached is a multi-platform service, and there are a handful of libraries for communicating with it available in multiple programming languages. Many Python clients differ slightly from one another, but the basic usage is usually the same. The simplest interaction with Memcached almost always consists of the following three methods:
+set(key, value)
+: This saves the value for the given key.
+get(key)
+: This gets the value for the given key if it exists.
+delete(key)
+: This deletes the value under the given key if it exists.
+The following code snippet is an example of integration with Memcached using one popular Python package available on PyPI,
+pymemcache
+:
+from
+pymemcache.client.base
+import
+Client
+# setup Memcached client running under 11211 port on localhost
+client = Client((
+'localhost'
+,
+11211
+))
+# cache some value under some key and expire it after 10 seconds
+client.
+set
+(
+'some_key'
+,
+'some_value'
+, expire=
+10
+)
+# retrieve value for the same key
+result = client.get(
+'some_key'
+)
+One of the downsides of Memcached is that it is designed to store values as binary blobs. This means that more complex types need to be serialized in order to be successfully stored in Memcached. A common serialization choice for simple data structures is JSON. An example of how to use JSON serialization with
+pymemcached
+is as follows:
+import
+json
+from
+pymemcache.client.base
+import
+Client
+def
+json_serializer
+(
+key, value
+):
+if
+type
+(value) ==
+str
+:
+return
+value,
+1
+return
+json.dumps(value),
+2
+def
+json_deserializer
+(
+key, value, flags
+):
+if
+flags ==
+1
+:
+return
+value
+if
+flags ==
+2
+:
+return
+json.loads(value)
+raise
+Exception(
+"Unknown serialization format"
+) 
+client = Client((
+'localhost'
+,
+11211
+), serializer=json_serializer, 
+                deserializer=json_deserializer) 
+client.
+set
+(
+'key'
+, {
+'a'
+:
+'b'
+,
+'
+c'
+:
+'d'
+}) 
+result = client.get(
+'key'
+)
+Another problem that is very common when working with a caching service that works on the key/value storage principle is how to choose key names.
+For cases when you are caching simple function invocations that have basic parameters, the solution is usually simple. Here, you can convert the function name and its arguments into strings and then concatenate them together. The only thing you need to worry about is making sure that there are no collisions between keys that have been created for different functions if you are caching in different places within an application.
+A more problematic case is when cached functions have complex arguments that consist of dictionaries or
+custom classes. In that case, you will need to find a way to convert invocation signatures into cache keys in a consistent manner.
+Many caching services (including Memcached) store their cache in RAM to provide the best cache lookup performance. Often, old cache keys can be removed when the working dataset gets too large. The whole cache can be also cleared when the service gets restarted. It is important to take this into account and use caching services to store data that should remain persistent. Sometimes, it may also be necessary to provide a proper cache warmup procedure that will populate the cache with the most common cache entries (for instance, in the case of a service upgrade or new application release).
+The last problem is that Memcached, like many other caching services, does not respond well to very long key strings, which may either reduce performance or will simply not fit the hardcoded service limits. For instance, if you cache whole SQL queries, the query strings themselves are generally suitable unique identifiers that can be used as keys. On the other hand, complex queries are generally too long to be stored in a caching service such as Memcached. A common practice is to instead calculate the MD5, SHA, or any other hash function and use that as a cache key instead. The Python standard library has a
+hashlib
+module that provides implementation for a few popular hash algorithms. One
+important thing to note when using hashing functions is hash collisions. No hash function guarantees that collisions will never occur, so always be sure to know and mitigate any potential risks.
+Summary
+In this chapter, we've learned about the optimization process, from identifying possible bottlenecks, through common profiling techniques, to useful optimization techniques that can be applied to a wide variety of performance problems.
+This chapter concludes the book, the same way that optimization usually concludes application development cycles. We perform an optimization process on applications that are known to work well. That's why it is important to have proper methodologies and processes set in place that will ensure that our application continues to work properly.
+While optimization often concentrates on reducing algorithmic and computational complexity, it can increase different kinds of complexity. Optimized applications are often harder to read and understand, and so are more complex in terms of readability and maintainability. Architectural trade-offs often rely on introducing dedicated services or using solutions that sacrifice part of application correctness or accuracy. Applications that leverage such architectural trade-offs almost always have more complex architectures.
+Code optimization, like every other development practice, requires skill and expertise. Part of that expertise is knowing what the balance between various development processes and activities is. Sometimes, minor optimizations are not worth doing at all. Sometimes, it is worth breaking a few rules to satisfy business needs. That is why, in this book, we tried to capture a holistic view of the entire development process of the application. You may not always be doing everything on your own, but knowing how applications are built, maintained, tested, released, observed, and optimized will allow you to know the right balance between each of those activities.
+Share your experience
+Thank you for taking the time to read this book. If you enjoyed this book, help others to find it. Leave a review at
+https://www.amazon.com/dp/1801071101
+
+packt.com
+Subscribe to our online digital library for full access to over 7,000 books and videos, as well as industry leading tools to help you plan your personal development and advance your career. For more information, please visit our website.
+Why subscribe?
+Spend less time learning and more time coding with practical eBooks and Videos from over 4,000 industry professionals
+Learn better with Skill Plans built especially for you
+Get a free eBook or video every month
+Fully searchable for easy access to vital information
+Copy and paste, print, and bookmark content
+At
+www.Packt.com
+, you can also read a collection of free technical articles, sign up for a range of free newsletters, and receive exclusive discounts and offers on Packt books and eBooks.
+
+Other Books You May Enjoy
+If you enjoyed this book, you may be interested in these other books by Packt:
+Clean Code in Python - 2nd edition
+Mariano Anaya
+ISBN:
+978-1-80056-021-5
+Set up a productive development environment by leveraging automatic tools
+Leverage the magic methods in Python to write better code, abstracting complexity away and encapsulating details
+Create advanced object-oriented designs using unique features of Python, such as descriptors
+Eliminate duplicated code by creating powerful abstractions using software engineering principles of object-oriented design
+Create Python-specific solutions using decorators and descriptors
+Refactor code effectively with the help of unit tests
+Build the foundations for solid architecture with a clean code base as its cornerstone
+Modern Python Cookbook – Second Edition
+Steven F. Lott
+ISBN:
+978-1-80020-745-5
+See the intricate details of the Python syntax and how to use it to your advantage
+Improve your coding with Python readability through functions
+Manipulate data effectively using built-in data structures
+Get acquainted with advanced programming techniques in Python
+Equip yourself with functional and statistical programming features
+Write proper tests to be sure a program works as advertised
+Integrate application software using Python

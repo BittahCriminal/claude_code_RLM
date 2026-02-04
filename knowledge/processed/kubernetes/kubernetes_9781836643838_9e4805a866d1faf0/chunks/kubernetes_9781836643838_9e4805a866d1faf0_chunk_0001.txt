@@ -1,0 +1,1712 @@
+KEDA CRDs, and particularly how to use
+ScaledObjects
+to manage scaling deployments by extending HPA capabilities. KEDA is still giving you a lot of control over things such as cooldown periods and how many replicas you want running. Moreover, you saw
+ScaledJobs
+in action for those batch jobs or tasks that need to run until they’re done, without getting cut off mid-process.
+Keep in mind that while KEDA gives you a better way for scaling workloads, you still need to think carefully about how to properly configure scaling rules based on what your application needs. It’s all about finding the right balance for each specific app and situation. Head over to the next chapter to learn more about some advanced KEDA features.
+Get This Book’s PDF Version and Exclusive Extras
+Scan the QR code (or go to
+packtpub.com/unlock
+). Search for this book by name, confirm the edition, and then follow the steps on the page.
+Note
+: Keep your invoice handy. Purchases made directly from Packt don’t require one.
+
+5
+Kubernetes Event-Driven Autoscaling – Part 2
+In the previous chapter, I covered the basics of KEDA and why it has become so popular, and you were able to play around with its basic functionality. Now, I’ll go a little bit deeper into some of KEDA’s advanced features, accompanied by hands-on labs.
+To be more precise, in this chapter, I’ll continue exploring a few other KEDA scalers, introducing additional patterns and use cases that showcase KEDA’s versatility by showing you very useful implementations I’ve seen among different companies. For instance, we’ll explore how to implement time-based scaling to turn down replicas outside of your working hours to reduce waste by not having idle resources when you’re not using them.
+Moreover, we’ll also spend some time exploring KEDA’s HTTP add-on. For situations where a specific scaler isn’t available, we’ll discuss fallback strategies, including pausing autoscaling and caching metrics. As we progress, we’ll dive into advanced autoscaling techniques, such as utilizing complex triggers with scaling modifiers and extending KEDA’s capabilities through external scalers. We’ll then shift our focus to KEDA’s implementation on cloud providers such as AWS, Azure, and Google Cloud. Moreover, you’ll learn about the best practices for configuring KEDA in a secure manner.
+By the end of this chapter, you’ll have a much better understanding of KEDA’s advanced features and be prepared to implement more sophisticated autoscaling strategies in your Kubernetes environments. Learning these techniques will help you optimize resource usage, improve application responsiveness, and maintain a more cost-effective, resilient infrastructure. Remember, our ultimate goal is to maintain an efficient Kubernetes cluster as much as possible.
+We will be covering the following main topics:
+Autoscaling in KEDA continued
+Scaling based on schedule
+KEDA’s HTTP add-on
+What if a KEDA scaler is not available?
+Advanced autoscaling features
+KEDA with cloud providers
+Technical requirements
+For this chapter, you’ll continue using the Kubernetes cluster you created in
+Chapter 1
+. You can continue working with the local Kubernetes cluster for the first half of the chapter. If you turned down the cluster, make sure you bring it up for every hands-on lab in this chapter. You don’t need to install any additional tools, as most of the commands are going to be run using
+kubectl
+and
+helm
+. You can find the YAML manifests for all resources you’re going to create in this chapter in the
+chapter05
+folder from the book’s GitHub repository you already cloned in
+Chapter 1
+.
+The second part of this chapter is going to be hands-on with EKS, so you’ll need to create an EKS cluster. The hands-on lab will tell you when you need to use it, but it’s basically for the ones where we use the AWS scalers. You’ll need to go back to
+Chapter 1
+for the instructions on how to create an EKS cluster using Terraform. You’ll simply need to reuse the template I created for the book and run one single command. So, make sure you have access to an AWS account you could use to practice before you proceed.
+Autoscaling in KEDA continued
+In the previous
+chapter, we
+began to see KEDA in action by using the
+ScaledObject
+and
+ScaledJob
+CRDs. You also learned that there are multiple scalers available, and we could dedicate considerable time to discussing each of them. However, the purpose of this book is to help you build a solid knowledge base and enable you to explore and adapt KEDA’s features to your various application needs. That’s why, in this chapter, I want to start by exploring a few other common scenarios where KEDA can help you be more efficient with your infrastructure resources, which, in turn, will help you reduce some infrastructure costs.
+By now, you might have an idea of KEDA’s capabilities, but there are many other features we didn’t have time to discuss in the previous chapter. Because I believe these features are important and I don’t want you to miss them, I’ve decided to dedicate some pages to more advanced features, patterns, practices, and integrations that you might need in the near future.
+So, let’s dive in and start learning how to save money by deactivating workloads at certain times of the day.
+Scaling based on schedule
+You have already
+learned that KEDA can scale your workloads down to zero replicas. A frequent question I get from customers is, “How do I turn down the dev environment while the team is not using it?” This becomes very important when your applications are running in the cloud, where you pay for what you use.
+KEDA has the
+cron
+scaler, which you can use to define a start and end time to set a certain number of replicas to the target object. It’s possible to define a time zone (the IANA Time Zone Database) and configure the schedule using the Linux format cron. In case you don’t know or don’t remember this format, it’s basically like this:
+* * * * *
+| | | | |
+| | | | +-- Day of the Week (0 - 6) (Sunday = 0)
+| | | +---- Month (1 - 12)
+| | +------ Day of the Month (1 - 31)
+| +-------- Hour (0 - 23)
++---------- Minute (0 - 59)
+In this bit of code, essentially, each field can contain the following:
+An asterisk (
+*
+) representing “every” unit (e.g., every minute, every hour)
+A number to specify an exact value
+A range (two numbers separated by a hyphen (
+-
+)) to specify a range of values
+A list (comma-separated values) to specify multiple values
+For instance, you
+can use
+0 8 * * *
+to say 8 AM or
+0 18 * * *
+to say 6 PM.
+To use the
+cron
+scaler, you’d define the following trigger:
+triggers:
+  - type: cron
+    metadata:
+      timezone: US/Pacific
+      start: 0 8 * * 1-5    # Start at 8:00 AM from Mon/Fri
+      end: 0 18 * * 1-5     # End at 6:00 PM from Mon/Fri
+      desiredReplicas: “1”
+Effectively, this means that KEDA will scale the target to one replica from 8 AM to 6 PM from Monday to Friday using the Pacific time zone of the United States. Outside of this schedule, KEDA will scale the target to the
+minReplicaCount
+value (0 by default). However, it’s worth mentioning that a limitation of this scaler is that it doesn’t behave like traditional cron jobs with recurring executions, but rather defines time windows for scaling. You’ll learn in the next hands-on lab how to use this cron trigger in combination with another scaler to scale based on demand.
+Note
+There’s a GitHub issue (#3566) discussing the possibilities of adding a new time-window trigger to improve scaling using time windows, as the Cron scaler could cause confusion in some scenarios where users expect it to behave like traditional cron jobs. At the time of writing, no decision has been made, but if you need to deactivate workloads during non-working hours, using the cron scaler is the only way to go, at least for now.
+Hands-on lab: Scaling to zero during non-working hours
+A very common scenario to optimize costs is to turn down environments during non-working hours; this, of course, applies
+to any pre-production environment. So, imagine that your workload is being used only from 8:00 AM to 6:00 PM from Monday to Friday. Additionally, within that schedule, you might want to continue using a CPU utilization trigger to spin up replicas for when to keep a CPU threshold. To do so, you need to do the following.
+You have to use both the
+cron
+and the
+cpu
+trigger within the
+ScaledJob
+rule; it should look like this:
+...
+spec:
+  scaleTargetRef:
+    name: montecarlo-pi
+  minReplicaCount: 0
+  maxReplicaCount: 10
+  triggers:
+  - type: cron
+    metadata:
+      timezone: US/Pacific
+      start: 0 8 * * 1-5
+      end: 0 18 * * 1-5
+      desiredReplicas: “1”
+  - type: cpu
+    metricType: Utilization
+    metadata:
+      value: “70”
+Notice that the previous
+ScaledObject
+is defining a
+minReplicaCount
+of zero. This means that outside of the schedule configured in the
+cron
+trigger, KEDA will set the target to zero replicas, which is what we wanted to achieve in the first place.
+To see this in action, let’s deploy the Monte Carlo application and the
+ScaledObject
+rule. Go to the
+chapter05
+folder
+from the GitHub repository, and run the following commands:
+$ kubectl apply -f montecarlopi.yaml
+$ kubectl apply -f cron
+If you’re running this lab during the schedule configuration, you should see one pod for the application running.
+Note
+You might need to adjust the schedule configuration to see it working, depending on when you’re running this lab.
+To confirm that the other trigger is working, let’s send, for a very short period of time, some load to the application to make it use more CPU by running the following command:
+$ kubectl apply -f ab-k8s
+Then, to watch how pods are being created and how the triggers are making KEDA scale the workload to use more replicas, run the following command:
+$ watch kubectl get scaledobject,hpa,pods
+Notice that the
+cpu
+trigger started to work together with the
+cron
+trigger, and the replicas might grow to something around three replicas. When the load test finishes and the stabilization window from HPA has passed, KEDA will bring the replicas to 1 as per the schedule from the
+cron
+trigger.
+If you’d like to see how KEDA sets the replicas to zero, change the
+timezone
+configuration from
+ScaledObject
+to a different one, such as
+Europe/London
+. The idea is that you force KEDA to apply the
+configuration you might have outside of the schedule configured. The trigger should look like this:
+- type: cron
+  metadata:
+    timezone: Europe/London
+Apply the changes by running this command:
+$ kubectl apply -f cron
+Wait for the cooldown period to finish, which by default is 300 seconds, and you’ll see that KEDA removes the HPA rule.
+To clean up all the resources for this lab, run this command:
+$ kubectl delete -f cron, montecarlopi.yaml, ab-k8s
+In this lab, you learned how to combine a cron-based trigger with a CPU utilization trigger to create a cost-efficient autoscaling pattern as it optimizes costs by scaling to zero during non-working hours, while still being responsive to real-time CPU load during active periods.
+Next, let’s explore a
+different approach to autoscaling based on incoming HTTP traffic using KEDA.
+KEDA’s HTTP add-on
+Previously in the book, I mentioned
+that KEDA’s
+HTTP add-on
+is used to let your HTTP-based
+workloads scale to/from zero replicas. KEDA’s HTTP add-on is an extension that provides a way to scale HTTP workloads based on incoming traffic, including the ability to scale to zero when there’s no demand.
+The HTTP add-on introduces a custom resource called
+HTTPScaledObject
+, where you can specify the application details, and the add-on takes care of creating the necessary Kubernetes resources to scale the application. With
+HTTPScaledObject
+, you basically tell KEDA how to interact with an HTTP-based application and scale it based on how much traffic it should be able to handle. For instance, you can configure how to scale based on the request rate or concurrency. You can also set up hostname-based routing to manage multiple applications within the same cluster, each responding to its own domain name.
+Note
+While alternatives
+such as
+Knative
+and
+OpenFaaS
+exist, KEDA’s HTTP add-on focuses solely on HTTP
+autoscaling within the Kubernetes ecosystem. It integrates with the KEDA core and HPA. However, it’s important to note that KEDA’s HTTP add-on is currently in beta status. This means that it may still undergo changes and improvements. Therefore, we’ve decided not to explore this add-on in depth for now, but we think it’s an important add-on that might shape KEDA’s future. Notice that
+Kedify
+, a commercial offering for KEDA, offers a production-ready version of the HTTP add-on.
+In this section, you learned how KEDA’s HTTP add-on provides native support for autoscaling HTTP workloads based on traffic, and how it can help reduce resource usage by scaling to zero during idle times. This is particularly valuable for workloads that receive sporadic traffic or are based on a schedule such as a development environment.
+Now, let’s shift focus
+to
+explore what to do when KEDA can’t scale your workloads, either because a scaler is unavailable, misconfigured, or needs to be paused for operational reasons.
+What if a KEDA scaler is not available?
+There might be times
+when KEDA is not scaling applications because either there’s an error with the scaler configuration, the scaler is not available, or maybe you need to momentarily pause any scaling action because you’re in a maintenance window (e.g., performing an important deployment or upgrading the Kubernetes cluster). KEDA offers solutions for each of these cases.
+Let’s explore each of them in more detail.
+Caching metrics
+The KEDA Metrics
+Server receives requests from HPA, which by default queries every 15 seconds. When
+useCachedMetrics
+is disabled (the default), each HPA request results in a query to the external service. KEDA also polls scalers during the polling interval (default 30 seconds) for activation decisions. When you have multiple
+ScaledObjects
+making queries every 15 seconds to the same scaler, the scaler might get throttled or be unresponsive due to the high demand. For this reason, KEDA has a property called
+useCachedMetrics
+, within a trigger section, to enable or disable (default) a cache for metric values from the scaler during the polling interval. This means that you could reduce to 50% (in the default scenario) the number of calls you make to the scaler, or even more if you extend the polling interval configuration.
+When you enable the metrics cache, a request to the KEDA Metrics Server reads the value from the cache every time instead of making a direct query to the external service.
+Let’s continue using one example from previous labs and enable the cache for the RabbitMQ trigger. The configuration will now look like this:
+triggers:
+  - type: rabbitmq
+    useCachedMetrics: true
+    metadata:
+      queueName: autoscaling
+      queueLength: “5”
+    authenticationRef:
+      name: rabbitmq-auth
+Consider enabling the cache for commonly used scalers for applications that can wait for some time to get a fresh value from the scaler. However, if your application needs to scale as soon as possible, caching the metric value might not be suitable. In this case, it’s better not to use caching to ensure that KEDA
+retrieves the most up-to-date metrics directly from the source.
+Note
+You can’t cache metrics for
+cpu
+,
+memory
+, the
+cron
+scaler, or cron scalers. The
+useCachedMetrics
+feature is also not supported for
+ScaledJobs
+.
+Pausing autoscaling
+Imagine that a KEDA
+scaler is not available, is not working properly, or you simply need to run a maintenance operation where any scaling action might actually cause a problem. KEDA has the ability to pause autoscaling, so instead of removing any
+ScaledObject
+resource, modifying its scaling behavior, or even making a change within the application, you simply need to add (or change) a special set of annotations in the
+ScaledObject
+resource.
+To pause a
+ScaledObject
+, you can add the following annotation(s):
+metadata:
+  annotations:
+    autoscaling.keda.sh/paused-replicas: “0”
+    autoscaling.keda.sh/paused: “true”
+You don’t need to specify both annotations; with either one or the other, you can pause autoscaling. However, in some scenarios, using both annotations together can be beneficial. This combination is useful during maintenance windows or operational tasks where you need to guarantee a stable replica count and prevent any scaling changes.
+Let me explain what each of these annotations does so that you can choose properly:
+autoscaling.keda.sh/paused-replicas
+will set the desired number of replicas to the configured value in this annotation and will pause autoscaling. Use this annotation if you need to override the existing number of replicas for your workload. The existing number of replicas might be too low or too high, and you’d like to set the number of replicas that can offer service continuity for your application.
+autoscaling.keda.sh/paused
+will pause autoscaling, but it will keep the existing number of replicas for your workload. This approach is simpler, and it might be the option that works most of the time, especially if the pausing period is short or scaling up or down is too costly (and not worth it).
+To resume autoscaling, you need to remove the paused annotations from the
+ScaledObject
+. Note that simply
+changing
+autoscaling.keda.sh/paused
+to
+false
+will not work. The annotation must be complete
+.
+Fallback scaling actions
+Imagine that you might
+have no idea that a scaler is not working, or something goes wrong with the scaler during non-working hours. You might have your monitoring systems configured to let you know about it, but as a safety mechanism, you might want to configure a
+ScaledObject
+to fall back to a certain number of replicas if KEDA fails to collect metrics from a target a certain number of times.
+To configure fallback, you need to use the following section:
+fallback:
+    failureThreshold: 3
+    replicas: 6
+In this code,
+failureThreshold
+is the number of consecutive times KEDA fails to get metrics from the source, and
+replicas
+is the desired number of replicas you want to have if the failure threshold is met.
+Note
+You can’t configure fallback for
+ScaledJob
+objects, for
+cpu
+and
+memory
+scalers, or any scaler whose metric type is
+AverageValue
+rather than a target value.
+So far, you’ve learned how to handle scenarios when KEDA can’t scale using tools such as pausing and fallback configuration. These mechanisms ensure that your applications remain stable and available even if they can’t scale.
+Now, let’s dive deeper
+and look at how KEDA can support
+complex autoscaling logic
+with advanced features such as
+scaling modifiers
+and
+external scalers
+, which let you set up auto scaling rules to use very specific scaling requirements.
+Advanced autoscaling features
+After all the KEDA
+features we’ve explored so far, along with the vast number of scalers available, you might find yourself in a scenario where something is still missing to meet your scaling configuration needs. To try to cover complex autoscaling rules, KEDA offers advanced features that you might find useful, such as scaling modifiers or using external scalers. Let’s explore each of these options in more detail.
+Note
+We have tried to cover the most common and stable KEDA features in this book, but KEDA might have added additional features that we didn’t cover, or we didn’t include them for different reasons. So, before you decide to use any of the upcoming advanced features, make sure you’re not adding unnecessary
+complexity and understand very well what your autoscaling needs are.
+Scaling modifiers
+There might be times
+when, even
+with the ability to configure multiple triggers for complex autoscaling rules for your workloads, you might need to configure custom conditions to scale. Why? Consider that when you have multiple triggers, HPA calculates how many replicas are needed for each metric and uses the maximum one. If you have three cron triggers, the maximum desired number of replicas will be used. But maybe you’d like to sum all of them, particularly in scenarios where each trigger represents an independent source of expected load. Summing them can ensure that your application scales appropriately to handle combined demand across all those dimensions.
+Let me give you another example. Let’s say you have an application that processes messages from a RabbitMQ queue and then persists some aggregated data into a MySQL database. Scaling only based on the number of messages in the queue might, at some point, cause problems for the database. You might have no problems processing tons of messages, but you might need to be careful not to bring the database down. Therefore, you need to consider metrics such as write latency or replica lag time to decide whether you want to scale based on the RabbitMQ trigger or stop adding replicas until the database is stable.
+To solve this problem, KEDA offers a feature called
+scalingModifiers
+(which went GA in KEDA 2.15) that can help you take autoscaling to the next level. When you opt in for this option, KEDA will use this configuration to decide how to scale. You define a formula where you can reference metrics obtained from scalers and use mathematical and/or conditional statements. This formula returns a value, a composed metric, that joins all the metrics from the scalers that support
+scalingModifiers
+(i.e., CPU and memory are ignored) into only one, and the calculated value will be the one used to scale. In other words,
+the new composed metric takes precedence over what each scaler would have scaled independently
+.
+Let’s continue using the previous example to help you understand how it works and how to use it. If the database write latency is below 100 ms, it means the database is working fine. Therefore, you can continue using the number of messages in the queue to decide how to scale. If not, you need to pause autoscaling by matching the formula value to the target value. It’s like saying to KEDA, “Hey, we’re good, no need to scale up or down.”
+Here’s what the configuration will look like:
+...
+advanced:
+  scalingModifiers:
+    target: “5”
+    activationTarget: “1”
+    metricType: “AverageValue”
+    formula: “db_write_latency < 100 ? queue : 5”
+...
+Let’s break down
+each of these
+parameters:
+target
+is the new value you define to scale; it’s the target the autoscaling rule needs to maintain. It will add or remove replicas to keep the target.
+formula
+is where you manipulate the new metric that needs to be a single value (not
+boolean
+). You can use metrics from other scalers (in this example, the
+db_write_latency
+and
+queue
+scalers), use mathematical operations, and use conditional statements. KEDA uses the
+Expr
+expression language. You can learn more about what expressions you can use at
+expr-lang.org
+or
+github.com/expr-lang/expr
+. If
+fallback
+is configured,
+formula
+won’t modify any metric.
+activationTarget
+is optional, and it’s the target value you define to activate scaling – in other words, to go from the
+0
+to
+1
+replica. By default, it is
+0
+.
+metricType
+is optional, and it’s the metric type to use for the composed metric from
+formula
+. By
+default, it is
+AverageValue
+, but it
+can be
+Value
+too.
+Note
+You can’t configure
+scalingModifiers
+for
+ScaledJob
+objects or for
+cpu
+and
+memory
+scalers. Additionally, when using
+scalingModifiers
+, only the composite metric from the formula is sent to HPA. All other triggers that aren’t included in the formula will be ignored.
+Important considerations with scalingModifiers
+Before we finish
+exploring this
+KEDA feature, let me guide you through a few considerations that you might want to keep in mind:
+First, each trigger used in your formula must have a unique name field defined, as the formula references triggers by their names rather than their types. This is different from regular
+ScaledObjects
+where naming triggers is optional.
+Another critical aspect to understand is that when scaling modifiers are enabled, KEDA creates a composite metric that completely replaces all individual trigger metrics. This means only the result of your formula is sent to HPA, and any triggers not referenced in the formula are effectively ignored for scaling decisions. This behavior can be surprising if you expect other triggers to continue working independently alongside your scaling modifiers.
+The Expr language itself is designed to be memory-safe and deterministic, making it suitable for production scaling decisions. However, complex formulas may impact the performance of your scaling decisions, so it’s recommended to keep expressions as simple as possible while still meeting your requirements. Remember, this formula gets evaluated every time KEDA needs to make a scaling decision.
+Debugging scaling behavior becomes more complex when using scaling modifiers since you’re working with a single composite metric instead of multiple individual metrics. Consider implementing logging or monitoring for the individual metric values and formula
+results to
+help with troubleshooting when things don’t scale as expected.
+Let’s see scaling modifiers in action with the following hands-on lab.
+Hands-on lab: Pausing autoscaling when resources are constrained
+In
+Chapter 4
+, you already practiced
+scaling a Kubernetes deployment using a RabbitMQ trigger. I’m going to continue using that lab with the additional complexity I’ve been discussing to help you explore scaling modifiers. Imagine the application is persisting some processed data to a MySQL database. You want to avoid bringing down the database if too many messages end up arriving in the queue, and you need to scale up accordingly. To prevent that, we’ll use an external metrics API to get the database write latency in milliseconds. If the write latency is 100 ms or higher, you need to pause autoscaling and resume it when the database is stable.
+Start by creating a RabbitMQ queue by running this command:
+$ helm install rabbitmq --set auth.username=user --set auth.password=autoscaling bitnami/rabbitmq –wait
+Next, deploy the consumer application that processes one message from the queue at a time. We won’t explore the YAML manifest as it’s the same as in the previous chapter. Run this command to deploy the consumer:
+$ kubectl apply -f formula/consumer.yaml
+For now, the consumer will have only one replica consuming messages.
+To make this lab easier to configure, I’ve created a dummy API that returns a static number representing the database write latency. It returns JSON like this:
+{
+  “database”: {
+    “metrics”: {
+      “write_latency”: 150
+    }
+  }
+}
+Deploy the dummy API by running this command:
+$ kubectl apply -f formula/dummyapi.yaml
+Confirm that the API is working by running this command:
+$ kubectl port-forward svc/dummyapi 8080:80
+Then, open
+http://localhost:8080/
+in a new browser window. Notice that the write latency is 150, which
+means the database is not stable, and the consumer shouldn’t scale up with new messages in the queue.
+To configure that autoscaling rule, let’s deploy a
+ScaledObject
+with two triggers – one for the RabbitMQ queue and one to query the dummy API – like this:
+...
+  triggers:
+    - type: rabbitmq
+      name: queue
+      metadata:
+        queueName: autoscaling
+        mode: QueueLength
+        value: “5”
+      authenticationRef:
+        name: rabbitmq-auth
+    - type: metrics-api
+      name: db_write_latency
+      metadata:
+        targetValue: “100”
+        url: “http://dummyapi.default.svc.cluster.local/”
+        valueLocation: ‘database.metrics.write_latency’
+...
+Notice that each trigger now has a
+name
+setup, which is required when using
+scalingModifiers
+as you need a way to reference them. Also, we’re using the
+metrics-api
+scaler, which is used to scale based on a metric provided by an API you might own, like in this lab.
+Then, notice how these
+two triggers are used in the
+formula
+field to configure the autoscaling rule we saw previously. It should look like this:
+...
+  advanced:
+    scalingModifiers:
+      target: “5”
+      formula: “db_write_latency < 100 ? queue : 5”
+...
+Remember, the formula is saying that when the database write latency is 100 ms or higher, pause autoscaling to avoid creating new replicas. You don’t need to write this autoscaling rule from scratch; to deploy it, simply run the following command:
+$ kubectl apply -f formula/scalingmodifiers.yaml
+Before you start testing this scenario, let’s run a command to see that no new replicas are being created when you send messages to the queue, as the database isn’t stable for now. Run this command in a new terminal:
+$ watch kubectl get pods,scaledobject,hpa
+Ignore any
+CrashLoopBackOff
+error you might have; the pod will be restarted, and it will work again as we discussed in
+Chapter 4
+. Notice that HPA only has one target and not two because even if you have two triggers, KEDA created the HPA object using the one you provided in the
+formula
+field. The output should look similar to this:
+NAME  REFERENCE      TARGETS   MINPODS MAXPODS REPLICAS AGE
+...   queue-consumer 5/5 (avg) 1       15      1        2m
+Let’s send a few messages to the queue by running the following command:
+$ kubectl apply -f formula/producer.yaml
+You might want to see how many messages you have in the queue, so run the following command to expose the RabbitMQ UI:
+$ kubectl port-forward svc/rabbitmq 15672:15672
+Then open
+http://localhost:15672/#/queues/%2F/autoscaling
+in a new browser window. When
+prompted for login, type
+user
+as the user, and type
+autoscaling
+for the password. You should see that messages are being consumed slowly, as you only have one replica running. If the consumer pod is in
+CrashLoopBackOff
+, simply delete it and let Kubernetes recreate it.
+Let’s simulate that the database is stable now by changing the static value configuration from the dummy API deployment. You need to change the following environment variable:
+env:
+          - name: DUMMY_VALUE
+            value: “150”
+To make this change, run the following command:
+$ kubectl set env deployment/dummyapi DUMMY_VALUE=85
+This is when scaling modifiers shine. Notice that as soon as HPA is able to get the new value from the dummy API, new pods will be created, as the database is stable now. Messages from the queue will be consumed very rapidly now.
+To clean up the resources created by this lab, run these commands:
+$ kubectl delete -f formula
+$ helm uninstall rabbitmq
+In this hands-on lab, you learned how to use scaling modifiers to build conditional autoscaling logic in KEDA. By combining multiple triggers, one for message queue length and another for database write latency, you were able to pause scaling when a backend system was under pressure and resume it once the system stabilized. This is useful when building context-aware autoscaling strategies
+that respond not only to application demand, but also to the health of dependent systems.
+Now let’s look at how to go beyond those limits. In the next section, we’ll explore
+external scalers
+, which allow you to extend KEDA’s functionality when built-in scalers aren’t enough.
+Extending KEDA with external scalers
+Another way to
+extend KEDA’s
+capabilities is by using external scalers. KEDA offers several built-in scalers, which I’d recommend you explore before creating an external scaler. However, if the scaler you need doesn’t exist yet, or your organization needs to own the code because you need to interact with private APIs, then you might consider creating an external scaler. Another reason might be that the scaler’s complexity requires a separate controller to create additional resources, similar to what the HTTP add-on does when creating a resource to hold incoming requests when scaling from 0 to 1. This book won’t cover how to create an external scaler, as that would involve going into coding one in depth and would require its own chapter; instead, we’ll simply cover at a high level what you’d need to do to create one and how to use it.
+KEDA’s built-in scalers run within the KEDA operator, while external scalers run outside of KEDA, and you’d need to communicate with them through a remote procedure call (or
+gRPC
+, an open source framework for communication between services originally developed by Google). To build an external scaler, the endpoint needs to implement KEDA’s built-in scaler interface so KEDA knows when the scaler is active or not, and can query metrics used to define how many replicas are needed.
+To use an external scaler, you have either the
+external
+or
+external-push
+scaler types. The main difference is that the
+external-push
+scaler is able to connect to an endpoint that can stream KEDA requests to
+receive
+updates from the scaler. The following is how you’d use an external scaler:
+triggers:
+    - type: external
+      metadata:
+        scalerAddress: your-internal-scaler-endpoint:8080
+        organization: eCommerce
+        business_unit: Payment
+The
+scalerAddress
+is the endpoint of the scaler API that implements the scaler interface, and the other two fields are custom fields used to pass parameters to the scaler. KEDA sends the entire
+metadata
+object to the external scaler endpoint. There are other fields, such as
+caCert
+,
+tlsClientCert
+,
+tlsClientKey
+, and
+unsafeSsl
+, that are used to configure TLS authentication to the scaler endpoint.
+When considering external scalers, you should understand that they introduce additional operational complexity to your KEDA setup. Unlike built-in scalers that run within the KEDA operator pods, external scalers require you to deploy and maintain separate services that implement the
+gRPC
+interface. This means you need to ensure these services are highly available, properly monitored, and maintained with security patches.
+So, before deciding to build an external scaler, explore the existing built-in scalers and consider whether your
+use case could be
+addressed by combining multiple triggers with scaling modifiers.
+KEDA with cloud providers
+Another very common use case of KEDA is the integration with scalers from different cloud providers. Instead of having to build all the machinery to use metrics provided by the vast number of services from a cloud provider, you can simply make use of the scalers already available in KEDA. Without these scalers, you might need to use other tools such as Prometheus to scrape metrics from cloud providers’ services. This would not only make autoscaling for your applications complex, but it would also slow it down as you’d be adding too many components in the middle before making these metrics available to HPA (assuming you wouldn’t go and build your own autoscaler).
+In the following sections, we’ll briefly explore how to use KEDA with cloud providers. This integration is what truly makes event-driven autoscaling a reality in Kubernetes. You’ll be able to see this in action in
+Chapter 11
+and
+Chapter 12
+, where we’ll be using Amazon EKS. However, in this chapter, we’ll cover, at a glance, how KEDA can be used in Microsoft Azure and Google Cloud Platform.
+The most important aspect is the authentication
+. To use KEDA in a cloud provider, you need to consider which permissions are needed – in terms of security, the fewer privileges it has, the better. As each cloud provider has its own set of services, identity configurations, and best practices, we won’t go into much depth about it, as it might require a separate chapter for each one of them. However, we’ll focus on the most important aspect: security.
+KEDA on Amazon EKS
+To use KEDA on Amazon
+EKS, the recommendation
+is that you first give KEDA’s controller the capability to assume other IAM roles, as you don’t want to give too many permissions to KEDA’s controller for the following reasons:
+For security purposes
+You might not want to restart KEDA’s controller every time you need to modify its permissions
+So, when you install KEDA, you need to configure which IAM role, which is tied to a Kubernetes service account, the controller will use. Regardless of the identity model you’re using on EKS,
+IAM Roles for Service Accounts
+(
+IRSA
+), or EKS Pod Identity, a Kubernetes service account is
+tied to an IAM role. We’ll skip these configuration steps and how they work for now, as we’ll cover them in
+Chapter 11
+.
+Let’s say that the Kubernetes service account you’ll use for KEDA’s controller will be named
+keda-operator
+. Therefore, if you’re installing KEDA through Helm, you need to make sure the service account is properly configured. By default, it is like this:
+serviceAccount:
+  operator:
+    create: true
+    name: keda-operator
+    automountServiceAccountToken: true
+    annotations: {}
+This service account will be tied to an IAM role called
+keda-operator
+as well, and how you do it depends on whether you use IRSA or EKS Pod Identity. If you’re using EKS Pod Identity, the IAM policy should look like this:
+{
+  “Version”: “2012-10-17”,
+  “Statement”: [
+    {
+      “Effect”: “Allow”,
+      “Principal”: {
+        “Service”: “pods.eks.amazonaws.com”
+      },
+      “Action”: [
+        “sts:AssumeRole”,
+        “sts:TagSession”
+      ],
+      “Condition”: {
+        “StringEquals”: {
+          “aws:SourceAccount”: “ACCOUNT_NUMBER”
+        },
+        “ArnEquals”: {
+          “aws:SourceArn”: “EKS_CLUSTER_ARN”
+        }
+      }
+    }
+  ]
+}
+This IAM policy would be the one that allows KEDA to assume other IAM roles, which in this case will be the ones assigned for workloads (pods) that you want to scale using KEDA.
+We’re recommending this approach as the workload you want to scale is already interacting with an AWS service
+. Therefore, it already
+has the
+permissions to interact with the AWS API. For instance, if the workload is consuming messages from an AWS SQS queue, it should have permissions to at least read messages, delete messages, and describe the queue to get its queue length, something like this:
+{
+  “Version”: “2012-10-17”,
+  “Statement”: [
+    {
+      “Sid”: “ConsumeSQSQueue”,
+      “Effect”: “Allow”,
+      “Action”: [
+        “sqs:DeleteMessage”,
+        “sqs:ReceiveMessage”,
+        “sqs:SendMessage”,
+        “sqs:GetQueueAttributes”,
+        “sqs:GetQueueUrl”
+      ],
+      “Resource”: “arn:aws:sqs:${AWS_REGION}:${ACCOUNT_ID}:${QUEUE_NAME}”
+    }
+  ]
+}
+Once KEDA’s controller
+is able to assume
+other IAM roles, and the workloads are able to interact with the AWS APIs, the next step you need to consider is the authentication configuration for the
+ScaledObject
+.
+We recommend that you use the
+authenticationRef
+property to delegate this configuration to the
+TriggerAuthentication
+object, which should have the following manifest:
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: aws-credentials
+spec:
+  podIdentity:
+    provider: aws
+    identityOwner: workload
+Notice that you’re saying it should use AWS as the provider and that it should take the identity (
+identityOwner
+) from the workload. KEDA’s controller will assume the IAM role that the workload is using to collect the metrics for the AWS scaler configured in the
+triggers
+section from the
+ScaledObject
+, like this:
+...
+  triggers:
+    - type: aws-sqs-queue
+      authenticationRef:
+        name: aws-credentials
+      metadata:
+        queueURL: autoscaling
+        queueLength: “5”
+        awsRegion: “eu-west-1”
+The advantage of using
+TriggerAuthentication
+to configure the AWS credentials is that you can reuse it within other
+ScaledObject
+s. Moreover, because we’re recommending that you configure authentication
+using the workload’s
+service account, it will simplify permissions management for you, as KEDA will assume the workload’s IAM role, allowing you to configure only the permissions a scaler will need instead of giving KEDA’s controller superpowers.
+Note
+At the time of writing this book, KEDA has five built-in scalers for AWS: AWS CloudWatch, AWS DynamoDB, AWS DynamoDB Streams, AWS Kinesis Data Stream, and AWS Simple Queue Service. For authentication, KEDA supports AWS IRSA and AWS Secret Manager. EKS Pod Identity (Wax) is an alternative approach, which we’ll explore in
+Chapter 11
+.
+KEDA on Azure Kubernetes Service
+To use KEDA on
+Azure Kubernetes Service
+(
+AKS
+), you can simply enable the KEDA add-on that installs all
+the KEDA components
+integrated with AKS. You can enable it
+through an
+Azure Resource Manager
+(
+ARM
+) template by adding the following section:
+“workloadAutoScalerProfile”: {
+    “keda”: {
+       “enabled”: true
+    }
+}
+Or, you can also use the Azure CLI and run the following command:
+$ az aks update --resource-group RESOURCE_GROUP_NAME --name AKS_CLUSTER_NAME --enable-keda
+Notice that you basically add the
+--enable-keda
+parameter.
+Note
+While the AKS KEDA add-on installs all built-in scalers, external scalers (such as the one for Azure Cosmos DB) must still be installed separately.
+Once KEDA is enabled, you first need to enable the AKS cluster to interact with the Azure APIs that your workloads will need to scale. For this book, we go into depth about the commands you need to run. We’ll only cover at a glance what the process looks like.
+To continue with KEDA’s configuration, the next step is to create an Azure Identity for the workloads and the KEDA operator. Then, to avoid having to specify secrets, you need to create a federated credential between the Azure Identity and the Kubernetes service account that the workload you’ll scale is going to use. You also need to create a second federated credential to give permissions to KEDA’s controller.
+Then, depending on the Azure scaler you’ll use, you need to provide the corresponding permissions to the Azure Identity you created. For instance, if you’re using the Azure Service Bus scaler, you need to give permissions to this API to the Azure Identity.
+Now you need to create a
+TriggerAuthentication
+object to allow scalers to use the Azure APIs. The manifest should look like this:
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: azure-credentials
+spec:
+  podIdentity:
+    provider:  azure-workload
+    identityId: $MI_CLIENT_ID
+Notice that the provider is an Azure workload, and that
+identityId
+is the Azure Identity ID you created before. With this configuration, KEDA will be able to use the workload identity to collect metrics from the
+scaler
+configured to scale the workload.
+Note
+At the time of writing this book, KEDA has nine built-in scalers for Azure: Azure Monitor, Azure Pipelines, Azure Event Hubs, Azure Queue Storage, Azure Application Insights, Azure Data Explorer, Azure Log Analytics, Azure Service Bus, and Azure Blob Storage. Additionally, there are two external scalers: KEDA External Scale for Azure Cosmos DB and Durable Task KEDA External Scaler. Regarding authentication providers, KEDA has support for Azure AD Workload Identity and Azure Key Vault.
+KEDA on Google Kubernetes Engine
+Using KEDA on
+Google Kubernetes Engine
+(
+GKE
+) is pretty similar to what you’ve seen so far. We won’t go into
+depth on
+how you’d configure the security aspects of using KEDA on GKE, but we’ll explore at a glance what the process looks like.
+First, you need to deploy KEDA’s components to GKE, and the Kubernetes service account that KEDA’s controller will use is going to be
+tied to a
+Google Service Account
+(
+GSA
+) that will have the proper permissions to use the API of
+Google Cloud Platform
+(
+GCP
+). Then, depending
+on the scalers you’ll use to scale your workloads, you need to provide the corresponding permissions to the GSA account.
+Similarly, as with the other cloud providers, the recommended approach, if your workloads are running in GKE, is to use the
+TriggerAuthentication
+object. For GCP, the manifest will look like this:
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: gcp-credentials
+spec:
+  podIdentity:
+    provider: gcp
+Notice that here you simply configure GCP as the provider. When your ScaledObject references this authentication object, KEDA’s controller will impersonate the IAM service account the workloads you’re scaling have.
+Note
+At the time of writing this book, KEDA has four built-in scalers for GCP: Google Cloud Platform Pub/Sub, Google Cloud Platform Storage, Google Cloud Platform Cloud Tasks, and Google Cloud Operations. And regarding authentication providers, KEDA has support for GCP Secret Manager and GCP Workload Identity.
+As you can see, the approach is the same in all three cloud providers, but the difference remains in the service names each provider uses and how they implement such security configurations. The reason we dedicated a section to exploring how KEDA works on cloud providers is to show you how KEDA adapts very well to what each of these cloud providers needs security-wise. Avoid
+giving
+extra permissions to KEDA’s controller, and instead use the permissions each of the workloads that you’re scaling has.
+Summary
+In this second chapter on KEDA, you were able to explore the benefits and autoscaling capabilities it brings to your applications. While you might have already had an idea from the previous chapter, in this chapter, I wanted to highlight very useful features that not many people know about KEDA. You might have heard that KEDA goes beyond CPU, memory, and external metrics, and that you can use KEDA as an event-driven autoscaler for your workloads. However, in this chapter, I wanted to focus on a few advanced features, along with additional scaling scenarios where KEDA fits very well. Moreover, I wanted to give you an introduction to how KEDA considers security when you need to use scalers from cloud providers such as AWS, Azure, or GCP. I could dedicate one single chapter to go into depth on how to use KEDA for each cloud provider, but as you can see, KEDA works similarly for many of the scalers, and that’s the intention of the project.
+You explored several features in this chapter, but one I’d like to highlight is scaling modifiers. This feature gives you a lot of flexibility to adapt to almost every autoscaling logic you might need. You can extend KEDA’s behavior by pausing or even speeding up scaling based on custom conditions you might have.
+Alright, so that’s it for now. Head over to the next chapter to close the autoscaling workload section of the book and learn about how you can do troubleshooting with KEDA, and a few other tools to help you optimize your workloads in Kubernetes.
+Get This Book’s PDF Version and Exclusive Extras
+Scan the QR code (or go to
+packtpub.com/unlock
+). Search for this book by name, confirm the edition, and then follow the steps on the page.
+Note
+: Keep your invoice handy. Purchases made directly from Packt don’t require one.
+
+6
+Workload Autoscaling Operations
+Up until this point, we’ve been exploring multiple ways to make your workloads more efficient in Kubernetes. In other words, we’ve discussed how to ensure your workloads are not wasting the resources available in the cluster. You’ve learned that to have consistent results, you need to be intentional about the number of CPU and memory requests your pods have. By doing so, you can then make use of tools such as HPA, VPA, and KEDA to adjust the number of replicas based on utilization or events that impact the performance of your workloads.
+However, how do you know you’re doing proper right-sizing for your workloads? How do you keep doing it continuously, as it’s not a one-time task? And how do you know why your workloads might not be scaling? Well, you need to learn how to do proper troubleshooting, read logs, interpret metrics, and watch for events in the tools you’re using.
+In this chapter, we’ll focus on the operational aspect of autoscaling your workloads, with a focus on the efficiency aspect. You’ll learn how to troubleshoot the different workload autoscaling tools we’ve explored so far: HPA, VPA, and KEDA. After reading
+Chapter 4
+and
+Chapter 5
+, you might have decided to use (or switch to) KEDA for autoscaling your workloads, even if you’re not quite there yet on the event-driven aspect. Therefore, we’ll show you how to set up a Grafana dashboard to have a quick overview of what could be happening with your KEDA scaling objects. Finally, we’ll close this chapter and the whole workload autoscaling section, with some best practices on how to keep your efficiency score in an optimal state.
+Learning how to monitor, troubleshoot, and optimize autoscaling using KEDA will help you ensure your applications remain responsive, cost-efficient, and resilient. Especially as your workloads and infrastructure evolve. You’ll be building confidence in production environments, where visibility and control are just as important as automation.
+We will be covering the following main topics:
+Workload autoscaling operations
+Troubleshooting workload autoscaling
+Monitoring KEDA
+Upgrading KEDA
+Best practices for workload efficiency
+Technical requirements
+For this chapter, you’ll continue using the Kubernetes cluster you created in
+Chapter 1
+. You can continue working with the local Kubernetes cluster for the first half of the chapter. If you turned down the cluster, make sure you bring it up for every hands-on lab in this chapter. You don’t need to install any additional tools, as most of the commands are going to be run using
+kubectl
+and
+helm
+. You can find the YAML manifests for all resources you’re going to create in this chapter in the
+chapter06
+folder from the Book’s GitHub repository you already cloned in
+Chapter 1
+.
+Workload autoscaling operations
+In
+an ideal world, systems work as expected all the time. But the reality is that the majority of the systems we interact with need maintenance, and things break all the time. This holds true with all the autoscaling tools and configurations we’ve explored so far. There might be times when you’ll be wondering why HPA, VPA, or KEDA aren’t adding or removing replicas to your workloads. As these are Kubernetes components, troubleshooting them is not very unique, and you’ll end up reusing most of the tools and techniques you’re already using to troubleshoot your workloads.
+Additionally, you’ve learned already, from the constant emphasis in previous chapters, that right-sizing your workloads is a very important task, especially as you configure scaling rules for your workloads, which will become even more crucial when we explore node autoscaling. So far, you’ve deployed a simple Grafana dashboard in
+Chapter 3
+to get a first glimpse of how to adjust the resources you request for every workload. But you’ll be doing this task continuously as your workloads are going to be in constant change.
+Therefore, during this chapter, we’ll spend some time exploring how to troubleshoot your workload autoscaling rules. We’ll show you a few options (out of many) you have to support with data how efficient your workloads are with the resources available in the Kubernetes cluster. Let’s start by looking at how and which logs to read.
+Troubleshooting workload autoscaling
+In
+previous chapters, you’ve practiced how to configure autoscaling rules for your workloads. So far, all of those hands-on labs should have worked without any problems (if not, please open a GitHub issue). These labs have been built to help you learn about the concepts we’ve been covering so far. However, when you want to apply the concepts learned to your environment, things might not work as expected. So, the following sections are aimed at helping you make the troubleshooting task a bit easier. Moreover, we’ll be including typical things to look at for common problems that you might not
+have experienced while doing the labs from this book. It’s worth mentioning that we’re assuming you already have a solid understanding of how these tools work, as we’ll focus solely on how to do troubleshooting.
+Troubleshooting HPA
+One of the
+most common problems in HPA lies in the process of retrieving metrics. You might have some misconfigurations in place, or the metrics provider might not be working. The most basic problem could be one of the following:
+The Metrics Server component is not installed in the cluster or isn’t working properly. Therefore, HPA won’t be able to get basic metrics such as CPU and memory from the pod(s).
+Custom or external metrics aren’t available. For instance, you might have configured a rule to scale using metrics from Prometheus, but there’s no adapter translating those metrics, or the query you’ve configured has an error.
+Networking issues between the cluster and the metric sources.
+Role-based access control
+(
+RBAC
+) permissions to interact with the Metrics API.
+The solution for all of the problems listed here might be obvious (i.e., deploy the Metrics Server, restart the Metrics Server, fix the scaling rule configuration, give proper RBAC permissions, etc.). But these might not be the only problems you could face. So, instead of giving you an extensive list of problems with their possible solution(s), let’s explore a few commands that can help you identify and confirm what could be the problem with HPA scaling rules.
+Reviewing HPA conditions and events
+Within
+every HPA, there’s a field named
+status.conditions
+that you could review. Kubernetes updates this field with some details indicating whether or not HPA could scale the target object. For instance, you could get details regarding HPA’s ability to collect metrics to determine the number of replicas, whether the rule is active or not, or whether it’s possible or not to add/remove replicas. To review the conditions from an HPA object, you need to describe the HPA object by running the following command:
+$ kubectl describe hpa montecarlo-pi
+You might get an output like the following:
+Conditions:
+  Type         Status  Reason          Message
+  ----         ------  ------          -------
+  AbleToScale  False   FailedGetScale  the HPA controller was unable to 
+  get the target’s current scale: deployments/scale.apps “montecarlo-pi” 
+  not found
+In this case, the message indicates that the
+montecarlo-pi
+deployment doesn’t exist, therefore HPA is not able to scale. Once you’ve identified this issue, the next step would be to check whether the deployment name is correct and ensure that the deployment has been created in the correct namespace. If it’s missing, you should redeploy the application or update the HPA target reference accordingly. When you look at the
+Events
+section from the same output after describing the HPA object, you’ll see something like this:
+Events:
+  Type     Reason          Age  From                       Message
+  ----     ------          ---  ----                       -------
+  Warning  FailedGetScale  5s    horizontal-pod-autoscaler 
+  deployments/scale.apps “montecarlo-pi” not found
+Similar to the
+conditions
+field, the
+Events
+section also provides valuable information about any scaling action that HPA might or might not be taking.
+Checking Metrics Server logs
+Remember
+that HPA relies on the Metrics Server component. When HPA can’t fetch metrics for resources such as CPU and memory from the target object, then it won’t be able to determine the number of replicas needed to meet the target. If you see an error message from the conditions or
+Events
+section indicating that HPA couldn’t fetch metrics for a resource, then you’ll need to check the logs from the Metrics Server pod(s).
+To check logs from the Metrics Server pod(s), run the following command:
+$ kubectl logs -n kube-system -l app.kubernetes.io/name=metrics-server --all-containers=true --tail=20
+With this command, you’re getting logs from all the pods that have the label/value of
+app.kubernetes.io/name=metrics-server
+, including all containers from the pod(s), and you’ll only get the latest 20 log lines. From these logs, you might find the reason why metrics can be fetched from a node, for instance, due to a networking issue. Another common reason is that the Metrics Server pod(s) are failing because they’re reaching a memory limit, or any other application error that is causing the pod(s) to fail. If this is happening, you need to check the resource
+limits
+and
+requests
+for the
+metrics-server
+deployment. You may need to increase its memory allocation or investigate and resolve any underlying errors. Also, restarting the
+metrics-server
+pod can also help in cases where it becomes temporarily unresponsive.
+That’s pretty much how you can do troubleshooting in HPA. Typically, the information you get from the
+conditions
+and
+event
+fields is enough to have an idea of why scaling is not working as expected. However, there
+might be times when you simply get an error that says HPA is not able to fetch metrics. If you’re getting metrics from Prometheus, make sure that the query doesn’t have any errors and that you’re getting the value in the format you need.
+Troubleshooting VPA
+As you
+already know, VPA doesn’t come as a built-in feature in Kubernetes. To use VPA, you need to deploy its three components:
+VPA updater
+VPA recommender
+VPA admission controller
+Most of the troubleshooting will be done within the controller and the recommender.
+So, what do you need to do if VPA is not doing what you’re expecting?
+Check that the VPA components are up and running.
+Confirm that the VPA’s CRDs were deployed.
+Validate that the Metrics Server component is up and running.
+Review the events from the VPA objects.
+Read the logs from VPA’s components to find out what’s wrong.
+Verify why VPA can’t apply recommendations.
+The first three steps are pretty straightforward, and you already know how to do these after doing the labs from
+Chapter 3
+. Therefore, let’s focus on the rest of the steps, as some need you to understand what to look for and which commands to run.
+Reviewing the events and status of the VPA objects
+To review
+the events that Kubernetes emits to the VPA objects, you need to run a command similar to the following to describe the VPA object:
+$ kubectl describe vpa montecarlo-pi
+You might not find something in the
+Events
+section, but you can have a better understanding of what’s happening within the
+Conditions
+and
+Recommendation
+fields from the
+Conditions
+section. For instance, you could get an output like the following:
+...
+Status:
+  Conditions:
+    Last Transition Time:  2024-11-27T22:03:02Z
+    Status:                True
+    Type:                  RecommendationProvided
+  Recommendation:
+    Container Recommendations:
+      Container Name:  montecarlo-pi
+...
+From this output, you can see when the last time VPA applied a recommendation was and what the recommended values were. However, if this information is still not relevant or useful, you can then check the VPA components logs.
+Reading the logs from VPA components
+To check the logs
+from every component, you can run the following commands:
+VPA recommender logs:
+$ kubectl logs -n kube-system -l app=vpa-recommender --all-containers=true --tail=20
+VPA updater logs:
+$ kubectl logs -n kube-system -l app=vpa-updater --all-containers=true --tail=20
+VPA admission
+controller logs:
+$ kubectl logs -n kube-system -l app=vpa-admission-controller --all-containers=true --tail=20
+Notice that, similar to what you did with HPA, you’re getting logs from all the pods from all the containers that have the label/value for the VPA components, and you’ll only get the latest 20 log lines. You might find very useful hints about why VPA is not able to apply (or calculate) recommender resources to pods.
+Verifying why VPA can’t apply recommendations
+Let’s talk about resources. Imagine
+your workload has a memory leak or the utilization is growing because it’s processing a large payload. However, you might be wondering why VPA is not resizing the pods. This could be because of one of the following:
+You might have VPA maximum allowance or resource limits (at the pod or namespace level) that are not letting VPA apply recommendations.
+The cluster can’t allocate bigger pods as there are no resources available.
+The pods you’re expecting to be adjusted are not part of a replica controller.
+VPA isn’t configured with the
+Auto
+or
+Recreate
+mode.
+The metrics data history length is too big or too small. By default, VPA checks 8 days back, but it can be adjusted using the
+history-length
+parameter. If you’re using Prometheus, you might need to check the query to adjust the period length.
+As discussed in
+Chapter 3
+, the new recommendations will be applied when pods have been running for enough time, which by default is 12 hours (this is to avoid too many pod r
+otations after applying the first recommendation). You can adjust this configuration using the
+in-recommendation-bounds-eviction-lifetime-threshold
+parameter.
+These are the most common problems you might encounter with VPA. As long as you keep in mind the role of each component, the vertical autoscaling workflow, and how to find out what’s happening by reading logs/events, you might be able to spot problems very quickly.
+Troubleshooting KEDA
+Similar to
+VPA, KEDA doesn’t come as a built-in feature in Kubernetes. Therefore, when you deploy KEDA to your cluster, you deploy a few pods (components) you’ll use to troubleshoot when scaling isn’t working. Scaling might not be working mainly because KEDA can’t collect metrics from the source, but there might be other reasons we’ll explore in a moment.
+As a quick reminder, as you learned in
+Chapter 4
+, there are three KEDA components:
+KEDA’s operator
+KEDA’s metric server
+KEDA’s admission webhook.
+You’ll likely spend more time reading KEDA’s operator logs, as that’s like KEDA’s brain.
+So, what do you need to do if KEDA is not doing what you’re expecting?
+Check that the KEDA components are up and running.
+Confirm that KEDA’s CRDs were deployed.
+Validate that the Metrics Server is working if using CPU and memory scalers.
+Validate that
+you have properly authenticated to the scaler API.
+Confirm that there aren’t any network policies denying traffic to KEDA.
+Review the events from
+ScaledObject
+or
+ScaledJob
+objects.
+Review the events from the HPA objects (if scaling is active).
+Read the logs from KEDA’s components to find out what’s wrong.
+Let’s see how you can check events and review logs from KEDA’s components.
+Reviewing events from ScaledObject or ScaledJob objects
+After
+confirming KEDA’s components are up and running, and CRDs are deployed into the cluster, the next step would be to review the events from the KEDA scaling objects you’ve created. Suppose that you deploy a
+ScaledObject
+object, but not the target workload it’s supposed to be scaling.
+Deploy a sample
+ScaledObject
+object by running the following command:
+$ kubectl apply -f troubleshooting/scaledobject.yaml
+To review the events from
+ScaledObject
+, run the following command:
+$ kubectl describe scaledobject queue-consumer
+You should get an output similar to the following within the
+Events
+section:
+...
+  Warning  ScaledObjectCheckFailed  1s (x12 over 11s)  keda-operator  
+    Target resource doesn’t exist
+  Warning  ScaledObjectCheckFailed  1s (x12 over 11s)  keda-operator  
+    ScaledObject doesn’t have correct scaleTargetRef specification
+The event shown was the
+ScaledObjectCheckFailed
+event, which appears when the check validation of
+ScaledObject
+fails. Notice how KEDA’s operator tried to create the HPA object, but the
+target workload to scale doesn’t exist, showing the
+Target resource doesn't exist
+error. KEDA emits many different events, but the ones you might need to keep an eye on are the
+Warning
+event types. A couple of other examples are
+KEDAScalerFailed
+when the scaler fails to create/verify its event source, and
+KEDAScaleTargetDeactivationFailed
+when KEDA can’t scale to 0 the target. For a full list of events, check KEDA’s doc site (
+https://keda.sh/docs/latest/reference/events/
+).
+Note
+If the KEDA link is not working by the time you’re reading the book, you can try searching KEDA’s doc site for the list of Kubernetes events that KEDA emits.
+Reading the logs from KEDA’s components
+Reviewing
+events is a good start, but as you can see, they don’t give you too many details about what’s wrong. Therefore, you need to read KEDA’s component logs to get a more precise idea about the error. But before you have a look at that, let me give you the commands you need to keep handy.
+To check the logs from every KEDA component, you can run the following commands:
+For KEDA operator logs:
+$ kubectl logs -n keda -l app=keda-operator --all-containers=true --tail=20
+For KEDA metrics server logs:
+$ kubectl logs -n keda -l app=keda-operator-metrics-apiserver --all-containers=true --tail=20
+For KEDA admission webhooks logs:
+$ kubectl logs -n keda -l app=keda-admission-webhooks --all-containers=true --tail=20
+If you run the
+command to read the KEDA operator logs, you should see an error describing in more detail what the problem is (which you already know is because we didn’t create the target workload):
+...ERROR Reconciler error {“controller”: “scaledobject”, “controllerGroup”: “keda.sh”, “controllerKind”: “ScaledObject”, “ScaledObject”: {“name”:”queue-consumer”,”namespace”:”default”}, “namespace”: “default”, “name”: “queue-consumer”, “reconcileID”: “ee2eb037-62eb-4386-8322-ae5378400ca0”, “error”: “deployments.apps \”queue-consumer\” not found”}
+Notice how the error logs are more precise, saying that there’s no
+Deployment
+object called
+queue-consumer
+. If you go back to
+Chapter 4
+and complete the
+Hands-On: Scaling from/to Zero
+lab, you should see how the error events and logs are gone as you create the missing resources, and KEDA then is able to scale the application without problems.
+Centralizing logs and events
+Before we move on to the next section, I wanted to make it very clear that the commands you explored before come in handy when you need to have a quick overview of what the problem could be. However, reading events and logs in the command line doesn’t scale when you end up having several scaling rules running in the same workload. At some point, there is going to be so much noise that it will be hard to find out what’s happening with a specific workload you’re struggling to scale.
+Therefore, the recommendation would be to use a centralized tool to store and review all the events and logs from the cluster, and have a single pane of glass to troubleshoot easily. Most likely, you already have a solution for this. But if not, tools such as Grafana Loki (in combination with Grafana and Alloy) or Elasticsearch (in combination with Kibana and Logstash) are a few (of many) examples of tools you can use to centralize logs and events from multiple Kubernetes clusters.
+So far, you’ve
+learned how to identify and resolve common issues in KEDA by inspecting events, checking component logs, and validating deployment configurations. These are very important techniques that will help you troubleshoot and fix problems in a production environment.
+Next, let’s explore how you can take one step further by looking at how to monitor KEDA itself using Prometheus and Grafana, to give you visibility into the health and behavior of KEDA’s internal components.
+Monitoring KEDA
+Another
+important aspect for operating KEDA is monitoring. This effectively means observing metrics that define the status or health of a system. So, in this case, we’re interested in observing metrics from KEDA’s components. In
+Chapter 3
+, you already used Prometheus and Grafana to monitor the resource utilization of a workload with the purpose of right-sizing the requests of CPU and memory. To monitor KEDA’s components, we’re going to continue using these tools and take advantage of what KEDA’s components already provide.
+KEDA’s components already expose a certain number of metrics for Prometheus to scrape. As most of the work in KEDA is done in the operator, you’ll find that most of the metrics come from this component. However, KEDA also exposes metrics for KEDA’s metric server and KEDA’s admission webhook. All these metrics can be scraped by Prometheus on port
+8080
+at the
+/metrics
+endpoint.
+KEDA will
+update each
+ScaledObject
+or
+ScaledJob
+object with the list of metrics that the triggers will be using. If you’d like to get this information, you need to run a command like the following:
+$ kubectl get scaledobject queue-consumer -o jsonpath={.status.externalMetricNames}
+This will return the metrics the scaling object will use, like this:
+[“s0-rabbitmq-autoscaling”]
+The metrics you get here depend on the scaler you use, and as you continue to deploy more scaling rules using different scalers, you’ll start to see a few additional metrics available. For example, the following table shows a few metrics you could use to understand the existing status of your
+ScaledObject
+rules:
+Name
+Description
+keda_scaler_active
+Indicates whether the scaler is active (
+1
+) or inactive (
+0
+)
+keda_scaled_object_paused
+Indicates whether a
+ScaledObject
+object is paused (
+1
+) or unpaused (
+0
+).
+keda_scaler_metrics_value
+Indicates the current value for each scaler’s metric that HPA uses when computing the target (average) number of replicas.
+Table 6.1 – Subset of basic metrics emitted by KEDA’s operator
+This subset of metrics is going to help you understand why KEDA might or might not be scaling your workloads. But if you’d like to understand why KEDA might be having issues scaling your workloads,
+Table 6.2
+shows a subset of metrics you could use:
+Name
+Description
+keda_scaler_metrics_latency_seconds
+Latency of retrieving the current metric from each scaler. Useful to know if there are connectivity issues with the scaler.
+keda_scaler_detail_errors_total
+Number of errors for each scaler.
+keda_scaled_object_errors_total
+Number of errors for each
+ScaledObject
+object.
+keda_scaled_job_errors_total
+Number of errors for each
+ScaledJob
+object.
+keda_trigger_registered_total
+Number of triggers per trigger (scaler) type.
+Table 6.2 – Subset of metrics used for troubleshooting KEDA
+Table 6.2
+includes
+a subset of metrics you could use not only to understand how bad or big a problem is, but you can also use these metrics to configure alarms to notify you when something goes outside of a certain threshold. For example, it might not be harmful to get a few errors from time to time. But, if the error rate keeps increasing, you might want to get paged and fix any problems with your KEDA scaling rules as soon as possible. As I said before, these are not the only metrics KEDA emits. The full list of metrics is available on the KEDA docs site (
+https://keda.sh/docs/latest/operate/metrics-server/
+). Make sure you check the integration with Prometheus to learn more and see other metrics we didn’t include in this book, but that might be important for your workload(s).
+Note
+If the KEDA link is not working by the time you’re reading the book, you can try searching KEDA’s doc site for the list of metrics that KEDA exposes.
+Similar to
+what I said before about events and logs, you can’t operate KEDA with
+kubectl
+only, even if it provides the information you need. Lucky for us, a while ago, KEDA released a Grafana dashboard to have a single pane of glass to view metrics exposed by KEDA. So, let’s go back to the terminal and deploy the Grafana dashboard.
+Hands-on lab: Deploying KEDA’s Grafana dashboard
+Before you
+deploy the Grafana dashboard, you need to enable KEDA’s component to expose the
+metrics we explored before at the
+/metrics
+endpoint. By default, Prometheus integration is disabled, and as we’ve deployed KEDA using Helm, let’s update its configuration using Helm as well.
+Open a new terminal, and change the directory to the
+chapter06
+folder from the GitHub repository. You’ll find a
+monitoring/keda-values.yaml
+file with the additional settings you need to enable metrics exposure. The new Helm settings should look similar to this:
+prometheus:
+  operator:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+      additionalLabels:
+        release: prometheus
+... // Same for metricServer and webhooks
+To update KEDA’s Helm release, run the following command:
+$ helm upgrade keda kedacore/keda --namespace keda -f monitoring/keda-values.yaml
+KEDA’s pods should
+be recreated with the new settings, and you should also see that a new
+ServiceMonitor
+has been created to let Prometheus
+know that it should scrape the
+/metrics
+endpoint for each KEDA component.
+You can confirm this by running the following command:
+$ kubectl get servicemonitor -n keda
+You should see three Prometheus service monitors, one for each KEDA component.
+Now, let’s deploy one of the labs you did in
+Chapter 4
+to generate some metrics, so that when you deploy KEDA’s dashboard, you can see something. In your terminal, don’t change directories, and simply run the following command to deploy the application and all its dependencies to configure autoscaling:
+$ kubectl apply -f ../chapter04/queue-deployment/consumer.yaml
+Then, run the following command to generate a small load test:
+$ kubectl apply -f ../chapter04/queue-deployment/producer.yaml
+While you wait for the load test to finish, let’s deploy the Grafana dashboard. To do so, open the Grafana UI by exposing the service locally by running the following command:
+$ kubectl port-forward service/prometheus-grafana 3000:80 -n monitoring
+In a browser, open the
+http://localhost:3000/
+URL.
+For the user, type
+user
+, and for the password, type
+prom-operator
+. If these credentials don’t work, go back to
+Chapter 2
+to retrieve the username and password from Prometheus stack secrets.
+Next, you
+import the Grafana dashboard, and to do so, follow these steps:
+Click
+Dashboards
+from the left menu, or open the
+/dashboards
+endpoint.
+Click on the
+New
+button, and select
+Import
+in the drop-down menu.
+Click on the
+Upload a dashboard JSON file
+section, and pick the file located at
+chapter06/monitoring/keda-dashboard.json
+.
+Click on the
+Import
+button.
+The first part
+is the list of filters for the dashboard. You can filter by
+namespace
+,
+scaledObject
+,
+scaler
+, or
+metric
+. If you don’t see any data, try switching the
+datasource
+field.
+Notice that the first three visualizations show the error rates from the scaler(s) and scaled objects. This is a good source to know when things aren’t going well in KEDA. Next, you’ll see the current scaler metric values to understand which values KEDA is using to scale. Moreover, you’ll see a graph showing the maximum number of replicas and how KEDA has been adding and removing replicas while the load test was running. In this case, I ran the load test twice, which is why you see two changes in
+Figure 6.1
+:
+Figure 6.1 – KEDA’s dashboard showing the number of replicas in a sample workload
+If you continue
+scrolling down, you will see other visualizations
+to understand changes in the replica numbers for the workloads you’re monitoring. Additionally, you’ll see a graph that represents how close you’re getting to the maximum number of replicas.
+The version of the dashboard we showed in this book might differ from what you get when doing this lab. The reason is simple: KEDA occasionally updates the dashboard, and we may have a different version of the JSON manifest at the time of writing this book. If you’d like to get the latest version of this dashboard, check out KEDA’s official repository (
+https://github.com/kedacore/keda/blob/main/config/grafana/keda-dashboard.json
+).
+Note
+If the GitHub link for Grafana is not working by the time you’re reading this book, you can try searching in KEDA’s
+GitHub repository (
+https://github.com/kedacore/keda/
+)
+for the Grafana dashboard or open an issue.
+In this lab, you
+set up KEDA’s Grafana dashboard to visualize key metrics
+and error indicators across scalers and scaling objects. This provides insights into how your workloads are behaving and helps you quickly detect issues when autoscaling isn’t working as expected.
+Now, let’s look at how to keep your installation up to date. In the next section, we’ll walk through different strategies for upgrading KEDA.
+Upgrading KEDA
+Another
+important topic related to operating KEDA is upgrades. We recommend always using a recent version of KEDA to make the most of it, especially as KEDA will continue adding new features, fixing issues, and adding native scalers. Depending on how you decide to deploy KEDA’s components to production, the upgrade process might differ from the one you’ll see in this book.
+In
+Chapter 4
+, we used Helm to install KEDA in a very simple way. However, I’ve seen many organizations switching to a GitOps model using Argo CD and deploying KEDA by using YAML manifests. GitOps and Argo CD allow you to manage your Kubernetes applications using Git. Instead of manually applying changes, you just update a Git repo, and Argo CD makes sure your cluster matches what’s in the code. Many companies like using them for apps such as KEDA because it’s easier to keep track of changes and fix things if they break.
+Note
+If you decide to go with the approach described in this section, and you’ve installed KEDA using Helm, make sure you uninstall KEDA using Helm first, using the following command:
+helm uninstall keda -n keda
+. Keep in mind that when you uninstall KEDA, all the
+ScaledObject
+and/or
+ScaledJob
+objects you have will be removed. Then, install KEDA using the commands discussed later and use
+kubectl create
+instead of
+kubectl replace
+.
+When you
+install or upgrade KEDA, it’s important that you are specific about the version you want to install. This is so you can control which version to install when upgrading KEDA. It’s also important that you read the release notes to understand the impact of using a newer version. CRDs might change, and you’ll need to update any existing KEDA objects. Additionally, the release notes are where you’ll find recommendations on how to handle any breaking changes. Try to keep KEDA up to date and avoid falling too far behind the latest version. Regular updates help ensure you benefit from the latest features and security improvements while minimizing the complexity of future upgrades.
+To upgrade KEDA using only
+kubectl
+, you can run the following commands:
+$ export KEDA_VERSION=”2.18.0”
+$ curl -L -o keda.yaml https://github.com/kedacore/keda/releases/download/v$KEDA_VERSION/keda-$KEDA_VERSION.yaml
+$ kubectl replace -f keda.yaml
+Note
+If you get an error such as
+Error from server (NotFound): error when replacing "keda.yaml": customresourcedefinitions.apiextensions.k8s.io "XXX" not found
+, simply run
+kubectl create keda.yaml
+and ignore the errors saying that an object already exists. When you use tools such as Argo CD, they already have internal validations to avoid this problem of using
+kubectl replace
+or
+kubectl create
+, depending on the status of the objects.
+Notice that we specified the KEDA version we want to install. Next time you need to upgrade, you’ll
+use the specific version number you want to deploy. Then, it’s a good practice to download the release YAML manifest, which includes every component you need. Finally, you simply use
+kubectl
+to replace existing Kubernetes objects with the most recent ones.
+The benefit of downloading the YAML manifest is that you can version it in Git and keep track of the changes you’ll apply next. This is key if you’re going to use GitOps.
+Regardless of the approach you use to upgrade KEDA, make sure that you practice doing it in a pre-production environment, and that you’re aware that scaling actions might be paused for a very short period of time.
+Upgrading KEDA regularly ensures you benefit from the latest features, improvements, and bug fixes, but more importantly, it allows you to evolve the autoscaling capabilities of your workloads.
+Now, let’s take a step back and reflect on the broader picture. In the next and final section of this chapter, we’ll go over a set of best practices for workload efficiency. These principles will carry forward as we shift focus from application-level scaling to optimizing cluster-wide efficiency in the chapters ahead.
+Best practices for workload efficiency
+To
+close this chapter and the whole section about workload autoscaling, let me list the most important practices we’ve explored so far that will help you achieve a good efficiency score for your workloads. I’m not attempting to summarize everything you’ve read in only a few lines in this section. The main reason I want to highlight these practices is that they’ll be crucial for the following chapters, where we’ll explore the efficiency of nodes in a Kubernetes cluster.
+First, the most important task is to
+understand what influences the performance of your applications
+. Throughout the previous chapters, we didn’t talk only about CPU or memory utilization. Typically, there
+are other aspects such as latency, number of requests, error rate, and dozens of other events, such as messages in a queue or custom business metrics (e.g., using scaling modifiers in KEDA). As applications continue to evolve, what affects performance today might not be the same tomorrow. So, it’s key that you don’t approach this as a one-time task, but as something you need to do continuously. You need to constantly test your applications to understand them better (as we did a few times in the previous chapters).
+There’s nothing wrong with starting with only CPU or memory utilization as a metric driver for autoscaling your workloads. In fact, these are the first set of attributes
+kube-scheduler
+will use to schedule your pods accordingly. So, start by understanding the CPU and memory requirements for your applications.
+Once you know how much CPU and memory your applications need,
+it’s imperative that you configure a proper number of requests for all containers in a pod
+. You won’t only have a deterministic result when pods are scheduled, but it will also be used as the base to determine how much capacity the cluster needs to have. We’ll explore this topic in more depth in the upcoming chapters, and you’ll understand why I kept pushing for you to have a proper configuration in this regard.
+If you’re new to autoscaling,
+consider starting with KEDA
+. You can begin with CPU and memory, and then use other attributes as we’ve explored so far. With KEDA, it’s possible to scale to zero for almost all the scalers. Moreover,
+consider scaling with multiple metrics
+. There are times when all the pod replicas don’t receive the same amount of traffic, and even if the average CPU utilization looks good, your users might be experiencing high latencies or application errors. Thus, the importance of not treating autoscaling as a one-time process.
+Depending on the application needs, there will be times when you need to scale faster or slower. Take advantage of the
+scaleUp
+or
+scaleDown
+behaviors you can configure in HPA, either to
+control the rate (or speed) of replica changes or to prevent replica fluctuation (flapping)
+. Some
+applications can, in fact, have problems if you scale too fast, and you’d like to spin up Kubernetes nodes only when they’re really needed.
+Always keep these practices in mind as a minimum set of actions you need to take. As you progress in your workload efficiency journey, you might discover another set of practices you’ll consider “best.” This will be especially true once you finish the next four chapters about autoscaling the nodes you have in the cluster.
+Summary
+In this chapter, we delved into the operational aspects of workload autoscaling in Kubernetes, focusing on troubleshooting and monitoring techniques for HPA, VPA, and KEDA. We explored common issues that can arise when implementing autoscaling and provided practical approaches to diagnose and resolve these problems.
+We began by examining how to troubleshoot HPA, emphasizing the importance of reviewing conditions and events. Similarly, for VPA, we discussed the process of verifying component status, reviewing events, and analyzing logs from all the VPA components. Then we focused on KEDA. We covered how to review events from
+ScaledObject
+and
+ScaledJob
+resources and how to interpret logs from KEDA’s components. We also stressed the importance of centralizing logs and events for more effective troubleshooting in larger environments.
+Beyond troubleshooting, we explored monitoring strategies for KEDA, introducing key metrics that can be used to understand the health and performance of KEDA’s components and autoscaling rules. We provided a hands-on guide to deploying a Grafana dashboard for visualizing KEDA metrics, offering a broader view of autoscaling activities when using KEDA.
+Another operational aspect we covered was upgrading KEDA. We described some of the best practices and considerations for maintaining an up-to-date KEDA deployment. We discussed different approaches to upgrading, including the use of kubectl and potential integration with GitOps workflows.
+Finally, we concluded with a set of best practices for achieving workload efficiency. These practices emphasized the importance of understanding application performance drivers, properly configuring resource requests, and leveraging KEDA’s capabilities for advanced autoscaling scenarios. We underscored the need for continuous monitoring and adjustment of autoscaling configurations to ensure optimal performance and resource utilization.
+Now, you’re ready for the next adventure: the journey to have efficient nodes.
+Get This Book’s PDF Version and Exclusive Extras
+Scan the QR code (or go to
+packtpub.com/unlock
+). Search for this book by name, confirm the edition, and then follow the steps on the page.
+Note
+: Keep your invoice handy. Purchases made directly from Packt don’t require one.
+
+Part 3
+Node Autoscaling and Karpenter
+So far, we’ve focused on scaling workloads by adding and removing pods based on demand. However, you can have KEDA configured to automatically create new pods; it won’t matter if there’s nowhere for your pods to run. This is where node autoscaling comes in.
+Node autoscaling is the other half of the equation. When your workload autoscaling creates new pods that can’t be scheduled because your cluster is at capacity, you need a way to add nodes. And when those pods get removed and you’re left with underutilized nodes, you need a way to consolidate and remove them to stop wasting resources. This is what tools such as Cluster Autoscaler and Karpenter do: they manage the infrastructure layer so your workload autoscaling can actually work.
+We’ll start with Cluster Autoscaler, which has been around for years and is still what most teams use. You’ll learn how it works, how to set it up properly (especially on AWS), and its limitations. We’ll also touch on complementary projects such as Descheduler and Cluster Proportional Autoscaler, though they’re not the focus of this book.
+Then we’ll shift to Karpenter, which is where things get interesting. This part goes beyond the basics. You’ll learn how Karpenter decides when and what nodes to launch, how to deploy it to your cluster, and how to influence its decisions using pod constraints such as node selectors and affinities. More importantly, you’ll understand how Karpenter removes nodes. This will cover the consolidation process, drift detection, and disruption budgets that control how aggressive it gets with optimization.
+The final chapter covers what you need when running Karpenter in production: troubleshooting techniques, upgrade procedures (which can be tricky), common challenges and how to solve them, and monitoring with Grafana. By the end of this part, you’ll understand both how to provision capacity automatically and how to manage it operationally without surprises.
+This part has the following chapters:
+Chapter 7
+,
+Data Plane Autoscaling Overview
+Chapter 8
+,
+Node Autoscaling with Karpenter — Part 1
+Chapter 9
+,
+Node Autoscaling with Karpenter — Part 2
+Chapter 10
+,
+Karpenter Management Operations
+
+7
+Data Plane Autoscaling Overview
+We’re halfway through the journey of building automatically efficient Kubernetes clusters for your workloads. In
+Chapter 1
+, we provided a brief introduction to autoscaling in the Kubernetes ecosystem. In short, autoscaling in Kubernetes is done in two ways: the first is scaling your application pods, and the second is scaling the underlying infrastructure needed to run your application pods. We’ve spent quite some time diving into the details of how to scale your application pods efficiently. Now, for the next four chapters, we’ll focus on how to automatically scale the compute capacity for your Kubernetes clusters.
+First, we’ll cover what it means to scale the data plane of a Kubernetes cluster. You’ll learn why you need to take action and dive into the details to gain a complete view of autoscaling in Kubernetes. Even though the data plane autoscaling concept is basic, you will then learn about the different options you have to autoscale a data plane with
+projects such
+as
+Cluster Autoscaler
+(
+CAS
+) and
+Karpenter
+. These are currently the two main projects that take responsibility for adding compute capacity when your application needs it. We’ll then briefly explore other relevant scaler projects, such
+as
+Descheduler
+and
+Proportional Autoscaler
+. You’ll learn about the problems
+all of these projects are solving so that you know your options. But after finishing this chapter, we’ll focus solely on Karpenter.
+This chapter will start by diving deep into CAS, the first project that has been a long-runner in the ecosystem. If you’re an existing user of CAS, you might learn new things about how to optimize it for greater efficiency. Moreover, we’ll use this section to develop a solid understanding of why Karpenter was created and why its approach differs from CAS. Learning how CAS works is a foundational step toward understanding why Karpenter was created and will help you implement autoscaling best practices for CAS while you decide whether you transition to Karpenter.
+In this chapter, we are going to cover the following main headings:
+What is data plane autoscaling?
+Data plane autoscalers
+CAS on AWS
+Relevant autoscalers
+Let’s get into it and start warming up your console, as you’re going to learn by doing.
+Technical requirements
+For this chapter, you’ll continue using the Kubernetes cluster you created in
+Chapter 1
+. However, from this chapter onward, you won’t be able to use the local Kubernetes cluster you’ve been using (unless you’ve opted for the cloud option). Also, keep in mind that for this book, we’re using Amazon EKS. So, if you haven’t created the Amazon EKS cluster yet, go back to
+Chapter 1
+to learn how to do it. If you’ve been using this option already, just make sure you bring the cluster up for every hands-on lab in this chapter. You don’t need to install any additional tools, as most of the commands are going to be run using
+kubectl
+and
+helm
+. You can find the YAML manifests for all resources you’re going to create in this chapter in the
+chapter07
+folder from the book’s GitHub repository you already cloned in
+Chapter 1
+.
+What is data plane autoscaling?
+Before we start
+exploring data plane autoscaling in depth, let’s recap how autoscaling works in Kubernetes and what the scaling flow is. As you already know, scaling in Kubernetes is divided into two categories: workload autoscaling and data plane autoscaling. Look at
+Figure 7.1
+. The first category illustrated is about scaling application workloads. As the demand grows, in this case, the traffic increases five times in the application, and it then needs more pod replicas to fulfill that demand.
+Figure 7.1 – Pod replicas increase based on demand
+The second category in
+Figure 7.2
+is about the Kubernetes worker nodes, better known nowadays as
+the
+data plane
+, which works in a proportional manner to the application workload scaling.When more pods are needed and the existing capacity can’t host any additional ones, a situation known as unscheduled pods, controllers such as CAS or Karpenter launch new nodes. And, when the application demand shrinks, requiring a smaller number of pods, typically fewer nodes are needed.
+Figure 7.2 – Nodes are launched based on unscheduled pods
+From the two
+previous figures, and based on what you’ve learned in the previous chapters, you could say that workload autoscaling affects pods, and data plane autoscaling affects nodes. Data plane autoscaling has two goals in mind:
+Provision the necessary nodes to the clusters so all pods can be scheduled
+Remove underutilized nodes to reduce waste.
+Let’s be more precise with a simple example to understand the implementation details. Look at
+Figure 7.3
+, representing an application that only needs six pods running to support the existing traffic (
+1
+). At a certain moment in time, the traffic increases and the existing six pods can’t handle the load, causing your application to degrade (
+2
+). To prevent that degradation from happening, you’ve configured KEDA to add more pod replicas when the throughput increases. KEDA will update the relevant metrics, and then HPA will update the replica number, let’s say to nine replicas. Therefore, you need three extra pods. Kubernetes will try to schedule three more pods in the cluster. But as you can see in
+Figure 7.3
+, the cluster capacity is very limited (
+3
+).
+Figure 7.3 – Application workload scaling based on CPU and throughput using KEDA
+At this
+moment, as per
+Figure 7.3
+, the cluster has no capacity to run three additional pods. Therefore, your application will end up having three unscheduled pods, which will stay in the
+PENDING
+state until there’s enough capacity in the cluster. KEDA and HPA help you determine how many pod replicas are needed. However,
+how many nodes would you need to add?
+Data plane autoscalers need to aggregate what unscheduled pods are requesting, and, through bin-packing and scheduling simulations, determine the number of nodes needed.
+Bin-packing
+, in
+this context, refers to the efficient allocation of pods to nodes, maximizing resource utilization by fitting as many pods as possible onto each node without overloading it, similar to packing items into containers optimally.
+Kubernetes doesn’t have a native feature to automatically create new nodes, similar to what HPA does when more pods are needed. Why? Well, there are different tools and providers to create a Kubernetes cluster, and the implementation details of creating nodes vary a lot. For instance, you’ll need to use different tools to create a cluster on-premises, AWS, Azure, GCP, or any other
+infrastructure provider. Each of these providers has its own set of APIs, services, and configuration properties. Moreover, each provider will know better how to use their own APIs.
+Therefore, to address this challenge of automatically adding the capacity you need into the cluster, you need to use open source projects such as CAS or Karpenter, which may or may not have support for the infrastructure provider you’re using. But that’s a different discussion. In the meantime, let’s start exploring these two projects. We’ll dive a bit into CAS in this chapter, and Karpenter in the following chapters. We’re starting with CAS because it will help you understand why Karpenter was introduced and implement autoscaling best practices in CAS to start having efficient clusters right away, in case the transition to Karpenter takes some time.
+Data plane autoscalers
+Data plane autoscalers
+operate independently of application-level scaling mechanisms such as HPA or KEDA, focusing solely on cluster-level resource management. This approach helps maintain a balance between having enough capacity for applications to run efficiently and avoiding over-provisioning of resources, regardless of whether the cluster is running in the cloud or on-premises.
+Moreover, you might have different applications, with different needs, running on the same node. Scaling nodes based on metrics such as CPU utilization, or even based on other attributes such as latency and throughput, might create conflicts or race conditions with the scaling rules you’ve configured for the workloads with KEDA or HPA, especially if both are using the same metrics/events. Therefore, the projects we’ll explore next only react when there are unscheduled pods in the cluster. Let me re-emphasize what I just said, as it’s very important.
+Data plane autoscalers
+are triggered by unscheduled pods only, not by any other metric or event, such as CPU utilization or the message queue’s depth. This is where most newcomers looking to implement Kubernetes autoscaling get confused. Projects such as CAS and Karpenter don’t add capacity based on resource utilization; they only add capacity when there are unscheduled pods. Therefore, workload autoscalers and data plane autoscalers complement each other, and you need both to fully implement Kubernetes autoscaling.
+Another very common misconception is regarding scheduling. Data plane autoscalers are solely responsible for providing capacity to the cluster, not to schedule pods.
+kube-scheduler
+is still responsible for scheduling pods. Let’s proceed with the next section to examine the approach CAS and Karpenter take to scale nodes.
+CAS
+CAS
+was one of the first projects to address the challenge of automatically scaling
+the data plane of a Kubernetes cluster, and for a long time, it was the only one. The primary function of CAS is to ensure that there are always sufficient nodes available in the cluster to run all pods. When there are pods that cannot be scheduled due to insufficient cluster capacity, CAS will automatically provision new nodes to accommodate these unscheduled pods. Conversely, when nodes are empty, CAS removes these unnecessary nodes for cluster efficiency.
+In cloud environments, CAS integrates with cloud provider APIs to manage node groups or auto-scaling groups. For example, in AWS, it can work with EC2 Auto Scaling groups to add or remove instances as needed. In Azure, it works with Virtual Machine Scale Sets, and in GCP with managed instance groups. This integration allows CAS to leverage cloud-native scaling capabilities, making your Kubernetes cluster efficient and cost-effective in cloud deployments.
+For on-premises
+environments, CAS can also be configured to work with various infrastructure provisioning tools. However, the process is often more complex
+and may require additional setup and integration work. On-premises setups might involve integrating CAS with tools such as OpenStack, VMware vSphere, or bare-metal provisioning systems to manage the lifecycle of physical or virtual machines.
+CAS works with various cloud providers and on-premises setups, making it a valuable tool for managing Kubernetes cluster capacity across different environments, though the ease of implementation can vary significantly between cloud and on-premises deployments.
+Karpenter
+For a
+very long time, since April 2017, CAS was the only project available for
+autoscaling the data plane in Kubernetes. However, the landscape changed with the introduction of Karpenter, a Kubernetes cluster autoscaler developed by AWS as an open source project. Karpenter was announced as ready for production in November 2021, and its v1 version was released in August 2024.
+Karpenter takes a dynamic and fine-grained approach to node provisioning and manages nodes directly without any abstraction layer, such as Auto Scaling groups in AWS. Like CAS, Karpenter provisions new nodes in response to unschedulable pods, and it attempts to optimize node selection to maximize resource utilization based on pods’ resource needs, considering scheduling requirements such as affinities or tolerations. When a node is not needed, Karpenter can remove it or replace it with a smaller one; this process is known as
+consolidation
+. We’ll explore all the details about how this feature works in the next chapter.
+Additionally, it’s worth mentioning that Karpenter works in tandem with
+kube-scheduler
+. This means that Karpenter won’t schedule pods in the cluster; it will only provision nodes. It’s very important that you keep this in mind to make the most of Karpenter. When we look at the implementation details in the next chapter, this will be clearer, and you’ll understand why I’m emphasizing this now.
+Karpenter
+uses Kubernetes custom resources for configuration, making
+it easier to manage and integrate with existing Kubernetes workflows. While initially designed for AWS, Karpenter’s design principles aim to make it adaptable to other Kubernetes environments in the future. At the time of writing this book, besides the EKS provider, Microsoft has released the
+Karpenter provider for
+Azure Kubernetes Service
+(
+AKS
+). In the next chapter, we’ll dive deeper into how the Karpenter project is structured.
+In the meantime, let’s explore how CAS works in AWS.
+CAS on AWS
+Note
+Before we begin this section, as mentioned earlier, CAS is supported on different platforms and cloud providers. We’ve decided to focus on AWS in this book for two reasons: first, to maintain consistency across all hands-on labs, and second, to help you better understand why and how Karpenter’s implementation differs from CAS. Moreover, if you’re not currently using CAS and are planning to start with Karpenter, you may skip this section and move to the
+Relevant autoscalers
+or
+Summary
+section in this chapter. However, if you’re currently using CAS and not planning to migrate to Karpenter in the near future, this section will help you understand which best practices need to be in place for an efficient data plane.
+To use
+CAS in Amazon EKS, you typically deploy it as a Deployment in the cluster. Once CAS is running, it ensures that the Auto Scaling groups dynamically adjust cluster capacity based on workload demands.
+Look at
+Figure 7.4
+. It’s hard to represent how CAS works with a static image, but as we mentioned earlier, when
+introducing the data plane autoscalers concept, CAS is continuously monitoring the cluster’s state, and it reacts when there are unscheduled pods. The purpose of CAS is to ensure that there is enough compute capacity in the cluster to run your workloads. When
+kube-scheduler
+notices that there are pods that cannot be allocated due to insufficient resources, CAS initiates the process of expanding the relevant Auto Scaling groups (adding
++N
+to the desired capacity, while avoiding changes to the minimum and maximum values). Conversely, as pods are removed and some nodes remain underutilized for an extended period, CAS orchestrates their removal from the cluster.
+Figure 7.4 – CAS adjusts the compute capacity of relevant Auto Scaling groups
+As you’re going to deploy CAS as a Deployment within the cluster, you need to ensure that CAS has the necessary IAM permissions to describe and adjust the Auto Scaling groups on your behalf.
+In terms of how CAS manages the nodes, there’s an
+Auto Discovery
+mode, which is the preferred method to allow CAS to automatically identify and manage Auto Scaling groups based on predefined tags. This mode also enables CAS to consider Kubernetes scheduling constraints, including node selectors, taints, and tolerations. With all this information from the workloads and nodes, CAS can make informed decisions about scaling, especially when scaling from zero
+nodes, ensuring that new nodes are compatible with the scheduling requirements of unscheduled pods.
+Another important aspect we wanted to cover is how you configure node groups in EKS. Well, there are two ways of doing it:
+Managed node groups
+: With this method, EKS abstracts the complexity of manually provisioning the Auto Scaling group and follows the best practices on how to configure them, along with additional features such as node version upgrades and graceful termination
+Self-managed node groups
+: With this method, you’re responsible for provisioning the Auto Scaling group with the proper scripts so nodes register to the cluster when they’re created
+Both options are an abstraction layer in EKS on top of an Auto Scaling group. However, the recommended approach for node groups is to use managed node groups.
+At first glance, that’s how CAS works on AWS. There are other implementation details about how CAS works, but they’re out of scope for this book. We’ll explore a few best practices for CAS simply because they’ll become relevant in the next chapter.
+So for now, let’s see CAS in action.
+Hands-on lab: CAS on AWS
+Note
+This hands-on lab is going to use Terraform to create or update (if you created it already in
+Chapter 1
+) an EKS cluster. We recommend that you use this method as it will help you get started quickly and focus on learning about how CAS works.
+The setup we’ve
+been using so far for the Kubernetes cluster has been static. This means that if you deployed too many pods in the cluster, you would see that some pods were unscheduled, as there was no capacity in the cluster. If you’ve been using the EKS cluster from
+Chapter 1
+, you’ve been working with a managed node group of only two nodes. During this lab, you’ll deploy around 60 pods to force CAS to react when there are unscheduled pods and see how new nodes are being added automatically.
+Step 1: Deploy CAS
+Go back to
+your terminal and make sure you’re in the
+/chapter07
+folder from the book’s GitHub repository. In here, you’ll find a
+terraform
+folder that includes the scripts you’ll be using to create an EKS cluster with CAS and other add-ons.
+If this is the first time you’re creating the EKS cluster, you don’t need to make any changes to these scripts. However, if you already created the EKS cluster following the instructions from
+Chapter 1
+, then you’ll need to simply remove the
+#
+character from the
+/chapter01/terraform/main.tf
+file to use Terraform to deploy CAS. This will not only deploy the CAS controller, but it will also take care of configuring it with the proper IAM permissions.
+The Terraform template should look like this:
+...
+  enable_cluster_autoscaler = true
+...
+To either create the EKS cluster or apply the changes made to install CAS, run the following commands:
+$ sh bootstrap.sh
+If you’re
+creating the EKS cluster, wait around 15 minutes while the control plane is created and ready to register worker nodes, but if you’re simply updating it with CAS, wait around 5 minutes. Once the previous command has completed, run the following command to confirm that you have CAS up and running:
+$ kubectl get pods -n kube-system -l app.kubernetes.io/instance=cluster-autoscaler
+The CAS pod should have a
+Running
+status, and you should be able to proceed. As mentioned before, the EKS cluster already has a static managed node group with only two nodes. We’re going to force CAS to add more capacity by deploying a workload with several pods.
+Step 2: Remove VPA rules that could resize the sample application
+If you didn’t create
+the cluster from scratch in this chapter, you might have some VPA rules configured already from previous hands-on labs. To make sure you keep this lab consistent, let’s remove any VPA rule you might have that could resize the sample application. You could remove only the VPA rule that could affect the sample application, but if you want to remove all VPA rules, simply run this command:
+$ kubectl delete vpa --all
+Nothing else should be resizing the pods, but we’ll confirm it later on anyway.
+Step 3: Deploy a sample application to see how CAS adds new nodes
+Let’s continue
+using the sample application we’ve been using in the previous chapters. It doesn’t have anything special, but let’s note that the
+requests
+section looks like this:
+...
+        resources:
+          requests:
+            cpu: 900m
+            memory: 512Mi
+...
+Notice that it follows the recommendation of intentionally requesting a specific number of CPU and memory resources. This is the information CAS will use to decide how many nodes will be added in case there are unscheduled pods, which is something we’re going to force in a moment. For now, let’s deploy the application:
+$ kubectl apply -f montecarlopi.yaml
+You should see only one
+montecarlo-pi-*
+pod running. Let’s make sure that the pod’s requests weren’t modified. Run this command to verify it:
+$ kubectl describe pods | grep -i requests -A 2
+You should see that the CPU requests remain the same at
+900m
+.
+As you were previously adding a few replicas, let’s be a bit more aggressive and scale the deployment to 12 replicas. This will require CAS to add a few additional nodes. We’re going to keep it simple and scale the application manually. So, run the following command to do so:
+$ kubectl scale deployment montecarlo-pi --replicas=12
+As there was enough capacity in the cluster to host most of the pods, some pods should immediately have a
+Running
+status, but others will stay with a
+Pending
+status. Wait around 30 seconds, and run the following commands to see how many unscheduled pods remain:
+$ kubectl get pods --field-selector=status.phase=Pending
+You should see
+a few unscheduled pods, causing CAS to add new capacity to the cluster by modifying the desired capacity of the Auto Scaling group. Wait around two to three minutes, and you should see all pod replicas running on the new nodes that were added to the cluster. To confirm it, run this command:
+$ kubectl get nodes
+The number of nodes you see will depend on how many pods you had running before manually scaling out the sample application. If you didn’t have any other applications running, you might see only one extra node.
+Step 4: Remove the sample application to see how CAS removes unnecessary nodes
+The idea of using
+CAS is to not only make it easier to add more capacity when it’s needed, but also to remove capacity when it’s not needed. So, let’s remove the sample application by running the following command:
+$ kubectl delete -f montecarlopi.yaml
+By default, CAS will wait 10 minutes before a node is removed. So, give it time, and while you wait, you could review the CAS logs to confirm that empty nodes will be removed after 10 minutes. To review CAS logs, run this command:
+$ kubectl logs -n kube-system -l app.kubernetes.io/instance=cluster-autoscaler --all-containers=true -f --tail=20
+Once you see in the logs that the nodes were removed, you could run the previous command you ran to
+get the list of the nodes to confirm it. Don’t proceed to the next step until the extra nodes are removed.
+Step 5: Uninstall CAS
+In the following
+chapters, we won’t be using CAS anymore, so let’s remove it now. If you used the Terraform installation method, simply set the value from line 147 in the
+/terraform/main.tf
+file to
+false
+, like this:
+...
+  enable_cluster_autoscaler = false
+...
+Then, run the following script again to apply the changes to remove CAS (along with all the other resources Terraform created):
+$ sh bootstrap.sh
+Wait around five minutes, and confirm that CAS is no longer installed:
+$ kubectl get all -n kube-system | grep autoscaler
+If CAS was uninstalled successfully, the preceding command shouldn’t return any results.
+You’ve come to the end of this lab. In this hands-on lab, you learned how to deploy CAS into an existing EKS cluster using Terraform. You simply have to activate a flag, and the Terraform module creates and configures all the resources needed to run CAS in EKS. You then saw CAS in action, adding new nodes when there were unscheduled pods, and then removing the extra nodes 10 minutes after the application was removed.
+Now that you have the CAS basics, let’s move to the next section to learn about some of the CAS best practices on EKS.
+CAS best practices
+Even though this
+book doesn’t go in depth about CAS, you might be in a transition phase to Karpenter, and it would be wise to know about the minimum set of configurations and considerations you need to implement when using CAS with EKS and configure efficient Kubernetes clusters. Moreover, it will help you understand why some implementation details in Karpenter are different and why the following recommendations will impact your efficiency score.
+Use homogeneous instance types
+This practice might be the most important one in terms of compute efficiency. To configure a node group, one of the required parameters is to set an instance type that will be used to launch an EC2 instance. A best practice in AWS, regarding instance types, is to configure not just one type but as many types as possible (the more, the merrier). The reason for this recommendation is to secure the capacity you’ll need (although, to truly reserve capacity, you have other
+mechanisms such as
+On-Demand Capacity Reservations
+(
+ODCR
+), but that’s out of scope for now). When EC2 can’t launch instances of a specific instance type (the cloud is not infinite), the Auto Scaling group can launch an EC2 instance of another type, from the multiple ones you’ve configured that you’re flexible to use. This is
+known as
+instance type diversification
+.
+If your node group is using EC2 Spot instances, then diversification becomes even more important. EC2 Spot instances are spare capacity from On-Demand, and when On-Demand needs that capacity back, you receive a Spot interruption. This means that the EC2 Spot instance will be terminated in two minutes. However, the good news is that the Auto Scaling group can launch an EC2 Spot instance of another type where there’s more spare capacity available, and it will pick the cheapest one when there are instance types with similar spare capacity numbers.
+But how is all of this previous information relevant to CAS and using homogeneous instance types? Well, when you use multiple instance types, CAS will consider the first type in the list to calculate how many extra nodes are required based on the specs of that first instance type. If the list has types with different specs, and the Auto Scaling group ends up launching instances with
+different specs than what CAS used to calculate the number of extra nodes to launch, you might end up with the challenge of either wasting capacity (nodes with more specs than the first instance type) or constraining the cluster with smaller nodes (nodes with fewer specs than the first instance type). Of course, at some point, CAS will either remove unnecessary nodes or launch new nodes if there are still unscheduled pods. But while that happens, you’ll be paying for resources you don’t really need or experience a degradation in your workloads.
+Therefore, the recommendation is to use homogeneous instance types, the same CPU, and memory specs. If CAS uses the first instance type to decide how many extra nodes to launch, it won’t matter which instance type the Auto Scaling group ends up launching, because it will have the same specs that CAS considered initially.
+Limit the number of node groups
+While the previous recommendation was to use as many homogeneous instance types as possible in one node group, you need to limit the number of node groups you have in the cluster. The reason is because of how CAS works.
+In order to optimize pod scheduling, CAS scans the cluster every 10 seconds (by default), and loads into memory information about the cluster, such as pods, nodes, and EKS node groups, to simulate scheduling and make decisions. For example, if there are multiple node groups, CAS must decide which group to scale out. Therefore, the larger the number of node groups you have, the slower CAS might be in scaling out your cluster.
+You might be wondering why someone would need to have multiple node groups in a cluster. In the previous section, you learned that to optimize availability (and efficiency to some extent if using Spot) in a cluster, it’s recommended to use homogeneous instance types to mitigate any compute capacity constraints you might face when launching nodes, especially when you are using Spot instances. Another reason could be when organizations use multiple node groups to isolate workloads in a cluster. Instead, if possible, isolate workloads at the Kubernetes namespace level.
+Configure a sane scaling speed
+While it might be
+tempting to configure a very small scan interval to achieve faster scaling, this approach can lead to unintended consequences. Although a shorter interval could theoretically make CAS more responsive with spiky workloads or where speed matters very much, it’s important to consider that launching new EC2 instances takes time, often several minutes (mostly due to a high number of running agents on bootstrap). Setting an overly aggressive scan interval might result in CAS making unnecessary API calls before the previously requested nodes are even ready.
+Moreover, frequent API calls can quickly exhaust rate limits imposed by AWS (and other cloud providers as well), potentially leading to API throttling or even service disruptions. A good practice is to set the scan interval to a value that balances responsiveness with API efficiency. For example, setting the interval to 1 minute instead of the default 10 seconds can significantly reduce API call volume while only marginally increasing the scale-up time. If you do not need to modify the default configuration, just don’t do it unless you’ve run proper testing and understand which values work for your use case.
+You can adjust the scan interval using the
+--scan-interval
+flag. Additionally, you can fine-tune scale-down behavior using flags such as
+--scale-down-delay-after-add
+,
+--scale-down-delay-after-delete
+,
+--scale-down-unneeded-time
+, and
+--scale-down-delay-after-failure
+. These allow you to control how long CAS waits before considering scale-down operations after various cluster events.
+Use a priority expander with multiple nodes
+CAS uses
+expanders
+to
+decide which node group to scale when multiple options are available. The default expander is random, which, as the name suggests, chooses a node group at random. However, when working with multiple node groups, especially in large and complex
+environments, you might want more control over the scaling decisions.
+This is where the priority expander becomes valuable (not many people know this configuration exists and why it’s useful). By using the
+--expander=priority
+flag, you can define a specific order in which CAS should consider node groups for scaling. For example, this is particularly useful when you have a preferred set of instance types or when using Spot instances.
+Let’s say you’re using Spot instances with different tiers for size because, as you’ve learned before, it’s a good practice to use node groups with homogeneous instance types. Or, maybe you’d like to give priority to instance types from the latest generations. With a priority expander, you can define a priority list of which node types CAS should use, like this:
+A node group with only
+large
+Spot instances
+A node group with
+xlarge
+Spot instances
+A node group
+2xlarge
+Spot instances
+CAS will try to scale the first group, and only if it can’t (due to capacity constraints or other issues), it will move to the second, and so on. You can define this priority list in a
+ConfigMap
+like this:
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: spot-priority-expander
+  namespace: kube-system
+data:
+  priorities: |-
+    10:
+      - .*-spot-large
+    20:
+      - .*-spot-xlarge
+    30:
+      - .*-spot-2xlarge
+While this approach provides fine-grained control, it’s important to note that it’s a sequential process. If capacity isn’t available in the higher-priority groups, it may take longer to eventually scale up using lower-priority options. Even if you configured a short scan interval.
+Use a single Availability Zone for persistent volumes
+When working with
+persistent volumes, particularly Amazon EBS volumes, it’s crucial to
+consider
+Availability Zone
+(
+AZ
+) placement. EBS volumes are AZ-specific, meaning a pod using an EBS volume must be scheduled in the same AZ as the volume.
+If you’re using multi-AZ node groups with persistent volumes, you risk scenarios where pods can’t be scheduled because they’re assigned to nodes in a different AZ from their volumes. This can lead to data unavailability or, in worst-case scenarios, data loss. This consideration is particularly important for applications that rely on data sharding or replication, such as Elasticsearch. In these cases, improper AZ management could impair the application’s ability to maintain data integrity and availability.
+To mitigate these risks, consider using single-AZ node groups for workloads that depend on persistent volumes. This ensures that pods are always scheduled in the same AZ as their volumes. Alternatively, if you need multi-AZ resilience, consider using storage solutions that span multiple AZs, such as Amazon EFS or Amazon FSx for Lustre.
+An additional benefit of this approach is the reduction of inter-AZ network traffic and latency within the cluster, which can help optimize costs and improve application performance. When data and compute resources are co-located in the same AZ, you avoid the additional latency and potential data transfer costs associated with cross-AZ communication.
+Note
+Using single-AZ node groups for persistent volumes improves scheduling reliability and performance for certain stateful workloads, but it comes with an availability trade-off. Avoid using single-AZ in scenarios (especially for stateful systems such as Elasticsearch) where you should distribute volumes across multiple AZs. For example, the built-in replication processes of such systems can protect against an AZ outage.
+Now that
+you’ve seen the key practices to follow when using CAS, it’s time to expand your view of the autoscaling landscape. While CAS and Karpenter handle most of the heavy lifting for compute scaling, Kubernetes’ ecosystem has additional tools that solve complementary problems, such as balancing workloads more effectively or adjusting control plane components dynamically.
+In this next section, we’ll take a brief look at some of these tools so that you can better understand your full range of options and when each might be appropriate to use.
+Relevant autoscalers
+While CAS and Karpenter are the primary tools for managing node-level scaling in Kubernetes clusters, there are other autoscaling projects that address specific needs within the Kubernetes ecosystem. These tools complement the core autoscalers and work in harmony with all the previous projects we’ve explored so far.
+In this section, we’ll briefly introduce three such projects: Descheduler,
+Cluster Proportional Autoscaler
+(
+CPA
+), and
+Cluster Proportional Vertical Autoscaler
+(
+CPVA
+). The aim is to help you get familiar with the autoscaling landscape in Kubernetes and help you identify when and where they might be useful in your own clusters.
+Each of these autoscalers serves a unique purpose:
+Descheduler focuses on optimizing pod placement after initial scheduling
+CPA helps scale auxiliary services proportionally to the cluster size
+CPVA aims to vertically scale resources based on cluster metrics
+Later, in
+Chapters 11
+and
+12
+, we’ll see some of these tools in action to help you understand how and when they can be integrated into your autoscaling strategy.
+Descheduler
+While
+the initial scheduling of pods is handled by the Kubernetes scheduler, over time, the distribution of workloads can become uneven. This is where the Descheduler comes into play. The Descheduler is an open source project that aims to improve cluster resource utilization by moving pods from over-utilized nodes to under-utilized ones. It runs as a Kubernetes add-on and uses various informers to monitor cluster resources and make decisions based on predefined policies.
+Imagine a scenario where some nodes in your cluster are running at 90% capacity while others are barely breaking 30%. The Descheduler can identify this imbalance and evict pods from the highly utilized nodes, allowing them to be rescheduled on the under-utilized nodes. This rebalancing act not only improves overall cluster performance but can also lead to cost savings by optimizing resource usage. To use the Descheduler, you’ll need to deploy its controller in your cluster and configure a policy
+ConfigMap
+with your desired strategies. Common strategies include
+LowNodeUtilization
+and
+RemoveDuplicates
+. Once set up, the Descheduler will automatically analyze and rebalance your cluster based on these policies.
+When using the Descheduler, it’s important to adopt a cautious approach to minimize potential risks. For instance, it’s recommended to
+use
+pod disruption budgets
+(
+PDBs
+) to ensure a
+minimum number of pods remain available during descheduling operations. Moreover, carefully configure the Descheduler’s strategies to match your cluster’s specific needs, and consider using the simulation mode to test configurations without affecting live workloads. Implement a gradual rollout, starting with a small subset of your cluster and expanding as you gain confidence. Leverage node affinity and anti-affinity rules to guide pod placement and prevent critical workloads from being disrupted. At this point in the book, you should have already guessed that proper resource requests and limits for pods will help the Descheduler make more informed decisions.
+CPA
+CPA is an open
+source project that scales workloads based on the size of the cluster itself, and doesn’t rely on metrics such as CPU or memory usage. The primary purpose of CPA is to maintain an appropriate number of replicas for cluster-wide services as your cluster grows or shrinks. This makes it particularly useful for managing system components such as
+kube-dns
+or monitoring services, which typically need to scale in proportion to the overall cluster size. CPA is currently in beta, but I’ve seen many people using it to scale workloads without problems.
+CPA is a controller that continuously monitors the number of schedulable nodes, nodes in the cluster that have available capacity to run new pods, and CPU cores available in your cluster. Based on this information, it adjusts the number of replicas for the target resource using either
+linear
+or
+ladder
+scaling methods. To use CPA, you’ll need to deploy it as a separate controller in your cluster and configure a
+ConfigMap
+with your desired scaling parameters. You’ll then set up the target workload (such as a Deployment) to be managed by CPA.
+It’s important to note that CPA may not be the best choice for application-specific workloads that need to scale based on their own unique metrics or usage patterns.
+CPVA
+While CPA
+focuses on horizontal scaling, CPVA addresses the vertical scaling needs of cluster-wide services. CPVA’s primary function is to automatically adjust resource requests for workloads based on the size of your cluster. This makes it a nice fit for system components or workloads that need to scale vertically as your cluster grows or shrinks. It’s worth noticing that CPVA is also in beta.
+Similar to CPA, CPVA continuously monitors the number of schedulable nodes and cores in your cluster, using this information to adjust the CPU and memory requests for target workloads. CPVA supports linear scaling and allows you to set configurable minimum and maximum resource limits. To use CPVA in your cluster, you need to deploy the controller and configure a
+ConfigMap
+with your desired scaling parameters. You then target the workloads you want CPVA to manage, which can include Deployments, DaemonSets, or ReplicaSets.
+Before I finish with the
+Relevant autoscalers
+section, it’s important to remember that our aim wasn’t to provide an exhaustive deep dive into each tool. Rather, we sought to broaden your awareness of the autoscaling tools related to the Kubernetes data plane. The Descheduler, CPA, and CPVA each offer unique approaches to optimizing cluster resources, and knowing when and how to leverage them can significantly enhance your cluster’s efficiency. However, the key takeaway is not about the tools themselves, but about the overarching goal they serve. Regardless of which autoscalers you choose to implement, the ultimate objective remains the same: to create and maintain an efficient Kubernetes cluster that optimally utilizes resources, scales smoothly with demand, and provides a robust platform for your applications.
+Summary
+In this chapter, you learned about the role of data plane autoscaling in Kubernetes, with a focus on two primary goals: ensuring sufficient nodes are available for all pods to be scheduled and removing underutilized resources to reduce waste, thereby optimizing costs and increasing efficiency.
+We began by examining CAS, a tool for managing node-level scaling in Kubernetes clusters. We delved into its operation within Amazon EKS, discussing best practices for implementation and the challenges it addresses. We then introduced Karpenter, another node-level scaling solution, highlighting its differences from CAS and the different approach it brings to the table. We’ll dedicate the following three chapters to Karpenter.
+It’s very important that you don’t forget that data plane autoscalers such as CAS and Karpenter are responsible for
+cluster-level resource management only
+. They work in conjunction with application-level scaling solutions such as HPA, VPA, or KEDA. This complementary relationship ensures that both the infrastructure and the applications running on it can scale efficiently to meet demand. Therefore, this means that
+data plane autoscalers are not responsible for scheduling pods
+. Their role is to provide or remove the underlying infrastructure resources, while the Kubernetes scheduler remains in charge of placing pods on available nodes.
+We finished by exploring other relevant autoscalers, including the Descheduler, CPA, and CPVA. While these tools serve specific purposes and can enhance cluster efficiency in certain scenarios, they are not replacements for core data plane autoscalers.
+As we move forward, remember that the ultimate goal is to maintain an efficient Kubernetes cluster. Whether you choose CAS, Karpenter, or a combination of different autoscaling tools, the focus should always be on optimizing resource utilization, reducing costs, and ensuring that your applications have the resources they need to perform optimally. In the next chapter, we’ll focus on Karpenter to close the Kubernetes autoscaling loop. So let’s get into it.
+Get This Book’s PDF Version and Exclusive Extras
+Scan the QR code (or go to
+packtpub.com/unlock
+). Search for this book by name, confirm the edition, and then follow the steps on the page.
+Note
+: Keep your invoice handy. Purchases made directly from Packt don’t require one.

@@ -84,6 +84,58 @@ python knowledge/importer.py sources/pdf/trivy-docs.pdf sbom-analysis "trivy,cve
 | EPUB | `.epub` | `ebooklib`, `beautifulsoup4` |
 | PDF | `.pdf` | `pypdf` or `pdfplumber` |
 | Text | `.txt`, `.md` | None |
+| Web | URL | `requests`, `beautifulsoup4` |
+
+## Web Documentation Import
+
+Import online documentation with TTL (time-to-live) for periodic refresh:
+
+```bash
+# CLI usage
+python scripts/import_web_docs.py <url> <agent> <title> [ttl_days] [tags]
+
+# Example: Import Argo Workflows docs with 30-day TTL
+python scripts/import_web_docs.py \
+    "https://argo-workflows.readthedocs.io/en/latest/" \
+    argocd \
+    "Argo Workflows Documentation" \
+    30 \
+    "argo,workflows,kubernetes"
+```
+
+```python
+# Python API
+from knowledge.importer import KnowledgeImporter
+
+importer = KnowledgeImporter()
+
+# Import web documentation with TTL
+metadata = importer.import_web_docs(
+    url="https://docs.example.com/",
+    content=fetched_content,  # Pre-fetched markdown content
+    agent="argocd",
+    title="Documentation Title",
+    tags=["tag1", "tag2"],
+    ttl_days=30,  # Refresh after 30 days
+)
+
+# Check for expired knowledge
+expired = importer.get_expired_knowledge()
+for k in expired:
+    print(f"{k.title} expired on {k.expires_at}")
+    # Optionally delete and re-import
+    importer.delete_knowledge(k.id)
+```
+
+### Check Expired Knowledge
+
+```bash
+# Check all agents
+python scripts/check_expired_knowledge.py
+
+# Check specific agent
+python scripts/check_expired_knowledge.py argocd
+```
 
 ## Agent Domains
 

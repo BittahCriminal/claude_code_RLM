@@ -1,0 +1,7426 @@
+t any time, the timestamp and resource version data that Kubernetes tracks for us will enable us to detect what cluster changes we’ve already processed when we reconnect.
+We could use the API server’s
+watch
+capability directly from a
+curl
+command or directly in an HTTP client, but it’s much easier to use a Kubernetes client library. For this example, we’ll use the Python client library to illustrate how to watch our custom resource. Here’s the Python script we’ll use:
+watch.py
+#!/usr/bin/env python3
+   from kubernetes import client, config, watch
+   import json, os, sys
+
+   try:
+➊
+config.load_incluster_config()
+   except:
+     print("In cluster config failed, falling back to file", file=sys.stderr)
+➋
+config.load_kube_config()
+➌
+group = os.environ.get('WATCH_GROUP', 'bookofkubernetes.com')
+   version = os.environ.get('WATCH_VERSION', 'v1')
+   namespace = os.environ.get('WATCH_NAMESPACE', 'default')
+   resource = os.environ.get('WATCH_RESOURCE', 'samples')
+api = client.CustomObjectsApi()
+
+   w = watch.Watch()
+➍
+for event in w.stream(api.list_namespaced_custom_object,
+          group=group, version=version, namespace=namespace, plural=resource):
+➎
+json.dump(event, sys.stdout, indent=2)
+    sys.stdout.flush()
+To connect to the API server, we need to load cluster configuration. This includes the location of the API server as well as the authentication information we saw in
+Chapter 11
+. If we’re running in a container within a Kubernetes Pod, we’ll automatically have that information available to us, so we first try to load an in-cluster config
+➊
+. However, if we’re outside a Kubernetes cluster, the convention is to use a Kubernetes config file, so we try that as a secondary option
+➋
+.
+After we’ve established how to talk to the API server, we use the custom objects API and a watch object to stream events related to our custom resource
+➍
+. The
+stream()
+method takes the name of a function and the associated parameters, which we’ve loaded from the environment or from default values
+➌
+. We use the
+list_namespaced_custom_object
+function because we’re interested in our custom resource. All of the various
+list_*
+methods in the Python library are designed to work with
+watch
+to return a stream of add, update, and remove events rather than simply retrieving the current list of objects. As events occur, we then print them to the console in an easy-to-read format
+➎
+.
+We’ll use this Python script within a Kubernetes Deployment. I’ve built and published a container image to run it, so this is an easy task. Here’s the Deployment definition:
+watch.yaml
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: watch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: watch
+  template:
+    metadata:
+      labels:
+        app: watch
+    spec:
+      containers:
+      - name: watch
+        image: bookofkubernetes/crdwatcher:stable
+      serviceAccountName: watcher
+This Deployment will run the Python script that watches for events on instances of the Sample CRD. However, before we can create this Deployment, we need to ensure that our watcher script will have permissions to read our custom resource. The default ServiceAccount has minimal permissions, so we need to create a ServiceAccount for this Deployment and ensure that it has the rights to see our Sample custom resources.
+We could bind a custom Role to our ServiceAccount to do this, but it’s more convenient to take advantage of role aggregation to add our Sample custom resource to the
+view
+ClusterRole that already exists. This way, any user in the cluster with the
+view
+ClusterRole will acquire rights to our Sample custom resource.
+We start by defining a new ClusterRole for our custom resource:
+sample-reader.yaml
+---
+ apiVersion: rbac.authorization.k8s.io/v1
+ kind: ClusterRole
+ metadata:
+   name: sample-reader
+   labels:
+➊
+rbac.authorization.k8s.io/aggregate-to-view: "true"
+ rules:
+➋
+- apiGroups: ["bookofkubernetes.com"]
+    resources: ["samples"]
+    verbs: ["get", "watch", "list"]
+This ClusterRole gives permission to
+get
+,
+watch
+, and
+list
+our Sample custom resources
+➋
+. We also add a label to the metadata
+➊
+to signal the cluster that we want these permissions to be aggregated into the
+view
+ClusterRole. Thus, rather than bind our ServiceAccount into the
+sample-reader
+ClusterRole we’re defining here, we can bind our ServiceAccount into the generic
+view
+ClusterRole, giving it read-only access to all kinds of resources.
+We also need to declare the ServiceAccount and bind it to the
+view
+ClusterRole:
+sa.yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: watcher
+  namespace: default
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: viewer
+  namespace: default
+subjects:
+- kind: ServiceAccount
+name: watcher
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io
+We use a RoleBinding to limit this ServiceAccount to read-only access solely within the
+default
+Namespace. The RoleBinding binds the
+watcher
+ServiceAccount to the generic
+view
+ClusterRole. This ClusterRole will have access to our Sample custom resources thanks to the role aggregation we specified.
+We’re now ready to apply all of these resources, including our Deployment:
+root@host01:~#
+kubectl apply -f /opt/sample-reader.yaml
+clusterrole.rbac.authorization.k8s.io/sample-reader created
+root@host01:~#
+kubectl apply -f /opt/sa.yaml
+serviceaccount/watcher created
+rolebinding.rbac.authorization.k8s.io/viewer created
+root@host01:~#
+kubectl apply -f /opt/watch.yaml
+deployment.apps/watch created
+After a little while, our watcher Pod will be running:
+root@host01:~#
+kubectl get pods
+NAME                     READY   STATUS    RESTARTS   AGE
+watch-69876b586b-jp25m   1/1     Running   0          47s
+We can print the watcher’s logs to see the events it has received from the API server:
+root@host01:~#
+kubectl logs
+watch-69876b586b-jp25m
+{
+  "type": "ADDED",
+  "object": {
+    "apiVersion": "bookofkubernetes.com/v1",
+    "kind": "Sample",
+    "metadata": {
+...
+      "creationTimestamp": "...",
+...
+      "name": "somedata",
+      "namespace": "default",
+      "resourceVersion": "9386",
+      "uid": "37cc58db-179f-40e6-a9bf-fbf6540aa689"
+},
+    "spec": {
+      "value": 123
+    }
+  },
+...
+Note that the watcher Pod receives an
+ADDED
+event for the
+somedata
+Sample we created, even though we created that Sample before we deployed our watcher. The API server is able to determine that our watcher has not yet retrieved this object, so it sends us an event immediately on connection as if the object were newly created, which avoids a race condition that we would otherwise be forced to handle. However, note that if the client is restarted, it will appear as a new client to the API server and will see the same
+ADDED
+event again for the same Sample. For this reason, when we implement the logic to handle our custom resources, it’s essential to make the logic idempotent so that we can handle processing the same event multiple times.
+Operators
+What kinds of actions would we take in response to the creation, update, or deletion of custom resources, other than just logging the events to the console? As we saw when we examined the way that custom resources are used to configure Calico networking in our cluster, one use for custom resources is to configure for cluster infrastructure components such as networking and storage. But another pattern that really makes the best use of custom resources is the Kubernetes
+Operator
+.
+The Kubernetes Operator pattern extends the behavior of the cluster to make it easier to deploy and manage specific application components. Rather than using the standard set of Kubernetes resources such as Deployments and Services directly, we simply create custom resources that are specific to the application component, and the operator manages the underlying Kubernetes resources for us.
+Let’s look at an example to illustrate the power of the Kubernetes Operator pattern. We’ll add a Postgres Operator to our cluster that will enable us to deploy a highly available PostgreSQL database to our cluster by just adding a single custom resource.
+Our automation has staged the files that we need into
+/etc/kubernetes/components
+and has performed some initial setup, so the only step remaining is to add the operator. The operator is a normal Deployment that will run in whatever Namespace we choose. It then will watch for custom
+postgresql
+resources and will create PostgreSQL instances accordingly.
+Let’s deploy the operator:
+root@host01:~#
+kubectl apply -f /etc/kubernetes/components/postgres-operator.yaml
+deployment.apps/postgres-operator created
+This creates a Deployment for the operator itself, which creates a single Pod:
+root@host01:~#
+kubectl get pods
+NAME                                 READY   STATUS    RESTARTS   AGE
+postgres-operator-5cdbff85d6-cclxf   1/1     Running   0          27s
+...
+The Pod communicates with the API server to create the CRD needed to define a PostgreSQL database:
+root@host01:~#
+kubectl get crd postgresqls.acid.zalan.do
+NAME                        CREATED AT
+postgresqls.acid.zalan.do   ...
+No instances of PostgreSQL are running in the cluster yet, but we can easily deploy PostgreSQL by creating a custom resource based on that CRD:
+pgsql.yaml
+---
+apiVersion: "acid.zalan.do/v1"
+kind: postgresql
+metadata:
+  name: pgsql-cluster
+  namespace: default
+spec:
+  teamId: "pgsql"
+  volume:
+    size: 1Gi
+    storageClass: longhorn
+  numberOfInstances: 3
+  users:
+    dbuser:
+    - superuser
+    - createdb
+  databases:
+    defaultdb: dbuser
+  postgresql:
+    version: "14"
+This custom resource tells the Postgres Operator to spawn a PostgreSQL database using server version 14, with three instances (a primary and two backups). Each instance will have persistent storage. The primary instance will be configured with the specified user and database.
+The real value of the Kubernetes Operator pattern is that the YAML resource file we declare is short, simple, and clearly relates to the PostgreSQL configuration we want to see. The operator’s job is to convert this information into a StatefulSet, Services, and other cluster resources as needed to operate this database.
+We apply this custom resource to the cluster like any other resource:
+root@host01:~#
+kubectl apply -f /opt/pgsql.yaml
+postgresql.acid.zalan.do/pgsql-cluster created
+After we apply it, the Postgres Operator will receive the add event and will create the necessary cluster resources for PostgreSQL:
+root@host01:~#
+kubectl logs
+postgres-operator-5cdbff85d6-cclxf
+... level=info msg="Spilo operator..."
+...
+... level=info msg="ADD event has been queued" 
+  cluster-name=default/pgsql-cluster pkg=controller worker=0
+... level=info msg="creating a new Postgres cluster" 
+  cluster-name=default/pgsql-cluster pkg=controller worker=0
+...
+... level=info msg="statefulset 
+  \"default/pgsql-cluster\" has been successfully created" 
+  cluster-name=default/pgsql-cluster pkg=cluster worker=0
+...
+Ultimately, there will be a StatefulSet and three Pods running (in addition to the Pod for the operator itself, which is still running):
+root@host01:~#
+kubectl get sts
+NAME            READY   AGE
+pgsql-cluster   3/3     2m39s
+root@host01:~#
+kubectl get po
+NAME                                 READY   STATUS    RESTARTS   AGE
+pgsql-cluster-0                      1/1     Running   0          2m40s
+pgsql-cluster-1                      1/1     Running   0          2m18s
+pgsql-cluster-2                      1/1     Running   0          111s
+postgres-operator-5cdbff85d6-cclxf   1/1     Running   0          4m6s
+...
+It can take several minutes for all of these resources to be fully running on the cluster.
+Unlike the PostgreSQL StatefulSet we created in
+Chapter 15
+, all instances in this StatefulSet are configured for high availability, as we can demonstrate by inspecting the logs for each Pod:
+root@host01:~#
+kubectl logs pgsql-cluster-0
+...
+... INFO: Lock owner: None; I am pgsql-cluster-0
+... INFO: trying to bootstrap a new cluster
+...
+... INFO: initialized a new cluster
+...
+... INFO: no action. I am (pgsql-cluster-0) the leader with the lock
+root@host01:~#
+kubectl logs pgsql-cluster-1
+...
+... INFO: Lock owner: None; I am pgsql-cluster-1
+... INFO: waiting for leader to bootstrap
+... INFO: Lock owner: pgsql-cluster-0; I am pgsql-cluster-1
+...
+... INFO: no action. I am a secondary (pgsql-cluster-1) and following 
+    a leader (pgsql-cluster-0)
+As we can see, the first instance,
+pgsql-cluster-0
+, has identified itself as the leader, whereas
+pgsql-cluster-1
+has configured itself as a follower that will replicate any updates to the leader’s databases.
+To manage the PostgreSQL leaders and followers and enable database clients to reach the leader, the operator has created multiple Services:
+root@host01:~#
+kubectl get svc
+NAME                   TYPE        CLUSTER-IP      ... PORT(S)    AGE
+...
+pgsql-cluster          ClusterIP   10.101.80.163   ... 5432/TCP   6m52s
+pgsql-cluster-config   ClusterIP   None            ... <none>     6m21s
+pgsql-cluster-repl     ClusterIP   10.96.13.186    ... 5432/TCP   6m52s
+The
+pgsql-cluster
+Service routes traffic to the primary only; the other Services are used to manage replication to the backup instances. The operator handles the task of updating the Service if the primary instance changes due to failover.
+To remove the PostgreSQL database, we need to remove only the custom resource, and the Postgres Operator handles the rest:
+root@host01:~#
+kubectl delete -f /opt/pgsql.yaml
+postgresql.acid.zalan.do "pgsql-cluster" deleted
+The operator detects the removal and cleans up the associated Kubernetes cluster resources:
+root@host01:~#
+kubectl logs
+postgres-operator-5cdbff85d6-cclxf
+...
+... level=info msg="deletion of the cluster started" 
+  cluster-name=default/pgsql-cluster pkg=controller worker=0
+... level=info msg="DELETE event has been queued" 
+  cluster-name=default/pgsql-cluster pkg=controller worker=0
+...
+... level=info msg="cluster has been deleted" 
+  cluster-name=default/pgsql-cluster pkg=controller worker=0
+The Postgres Operator has now removed the StatefulSet, persistent storage, and other resources associated with this database cluster.
+The ease with which we were able to deploy and remove a PostgreSQL database server, including multiple instances automatically configured in a highly available configuration, demonstrates the power of the Kubernetes
+Operator pattern. By defining a CRD, a regular Deployment can act to extend the behavior of our Kubernetes cluster. The result is a seamless addition of new cluster capability that is fully integrated with the built-in features of the Kubernetes cluster.
+Final Thoughts
+CustomResourceDefinitions and Kubernetes Operators bring advanced features to a cluster, but they do so by building on the basic Kubernetes cluster functionality we’ve seen throughout this book. The Kubernetes API server has the extensibility to handle storage and retrieval of any type of cluster resource. As a result, we’re able to define new resource types dynamically and have the cluster manage them for us.
+We’ve seen this pattern across many of the features we’ve examined in
+Part II
+of this book. Kubernetes itself is built on the fundamental features of containers that we saw in
+Part I
+, and it is built so that its more advanced features are implemented by bringing together its more basic features. By understanding how those basic features work, we’re better able to understand the more advanced features, even if the behavior looks a bit magical at first.
+We’ve now worked our way through the key capabilities of Kubernetes that we need to understand to build high-quality, performant applications. Next, we’ll turn our attention to ways to improve the performance and resiliency of our applications when running them in a Kubernetes cluster.
+
+PART III
+PERFORMANT KUBERNETES
+Even though containers are designed to hide some of the complexity of the individual hosts in a cluster and their underlying hardware, real-world applications need tuning to get the most out of the available computing power. This tuning must be done in a way that works with the scalability and resiliency of our Kubernetes cluster so that we don’t lose the advantages of dynamic scheduling and horizontal scaling. In other words, we need to provide hints to a cluster to help it schedule containers in the most efficient way.
+
+18
+AFFINITY AND DEVICES
+The ideal application exhibits complete simplicity. It is simple to design. It is simple to develop. It is simple to deploy. Its individual components are stateless, so it’s easy to scale to serve as many users as needed. The individual service endpoints act as pure functions where the output is determined solely by the input. The application operates on a reasonable amount of data, with modest CPU and memory requirements, and requests and responses easily fit into a JSON structure that is at most a couple of kilobytes.
+Of course, outside of tutorials, ideal applications don’t exist. Real-world applications store state, both in long-term persistent storage and in caches that can be accessed quickly. Real-world applications have data security and authorization concerns, so they need to authenticate users, remember who those users are, and limit access accordingly. And many real-world applications need to access specialized hardware rather than just using idealized CPU, memory, storage, and network resources.
+We want to deploy real-world applications on our Kubernetes cluster, not just idealized applications. This means that we need to make smart decisions about how to deploy the application components that move us away from an ideal world in which the cluster decides how many container instances to run and where to schedule them. However, we don’t want to create an application architecture that is so rigid that we lose our cluster’s scalability and resiliency. Instead, we want to work within the cluster to give it hints about how to deploy our application components while still maintaining as much flexibility as possible. In this chapter, we’ll explore how our application components can enforce a little bit of coupling to other components or to specialized hardware without losing the benefits of Kubernetes.
+Affinity and Anti-affinity
+We’ll begin by looking at the case in which we want to manage the scheduling of Pods so that we can prefer or avoid co-locating multiple containers on the same node. For example, if we have two containers that consume significant network bandwidth communicating with each other, we might want those two containers to run together on a node to reduce latency and avoid slowing down the rest of the cluster. Or, if we want to ensure that a highly available component can survive the loss of a node in the cluster, we may want to split Pod instances so they run on as many different cluster nodes as possible.
+One way to co-locate containers is to combine multiple separate containers into a single Pod specification. That is a great solution for cases in which two processes are completely dependent on each other. However, it removes the ability to scale the instances separately. For example, in a web application backed by distributed storage, we might need many more instances of the web server process than we would need of the storage process. We need to place those application components in different Pods to be able to scale them separately.
+In
+Chapter 8
+, when we wanted to guarantee that a Pod ran on a specified node, we added the
+nodeName
+field to the Pod specification to override the scheduler. That was fine for an example, but for a real application it would eliminate the scaling and failover that are essential for performance and reliability. Instead, we’ll use the Kubernetes concept of
+affinity
+to give the scheduler hints about how to allocate Pods without forcing any Pod to run on a specific node.
+Affinity allows us to restrict where a Pod should be scheduled based on the presence of other Pods. Let’s look at an example using the
+iperf3
+network testing application.
+CLUSTER ZONES
+Pod affinity is most valuable for large clusters that span multiple networks. For example, we might deploy a Kubernetes cluster to multiple different data centers to eliminate single points of failure. In those cases, we would configure affinity based on a zone, which might contain many nodes. Here, we have only a small example cluster, so we’ll treat each node in our cluster as a separate zone.
+Anti-affinity
+Let’s start with the opposite of affinity:
+anti-affinity
+. Anti-affinity causes the Kubernetes scheduler to avoid co-locating Pods. In this case, we’ll create a Deployment with three separate
+iperf3
+server Pods, but we’ll use anti-affinity to distribute those three Pods across our nodes so that each node gets a Pod.
+NOTE
+The example repository for this book is at
+https://github.com/book-of-kubernetes/examples
+.
+See “Running Examples” on
+page xx
+for details on getting set up.
+Here’s the YAML definition we need:
+ipf-server.yaml
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: iperf-server
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: iperf-server
+  template:
+    metadata:
+      labels:
+        app: iperf-server
+    spec:
+➊
+affinity:
+        podAntiAffinity:
+➋
+requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - iperf-server
+➌
+topologyKey: "kubernetes.io/hostname"
+containers:
+      - name: iperf
+        image: bookofkubernetes/iperf3:stable
+        env:
+        - name: IPERF_SERVER
+          value: "1"
+This Deployment resource is typical except for the new
+affinity
+section
+➊
+. We specify an anti-affinity rule that is based on the same label that the Deployment uses to manage its Pods. With this rule, we specify that we don’t want a Pod to be scheduled into a zone that already has a Pod with the
+app=iperf-server
+label.
+The
+topologyKey
+➌
+specifies the size of the zone. In this case, each node in the cluster has a different
+hostname
+label, so each node is considered to be a different zone. The anti-affinity rule therefore prevents
+kube-scheduler
+from placing a second Pod onto a node after the first Pod has already been scheduled there.
+Finally, because we specified the rule using
+requiredDuringScheduling
+➋
+, it’s a
+hard
+anti-affinity rule, which means that the scheduler won’t schedule the Pod unless it can satisfy the rule. It is also possible to use
+preferredDuringScheduling
+and assign a weight to give the scheduler a hint without preventing Pod scheduling if the rule can’t be satisfied.
+NOTE
+The
+topologyKey
+can be based on any label that’s applied on the node. Cloud-based Kubernetes distributions typically automatically apply labels to each node based on the availability zone for that node, making it easy to use anti-affinity to spread Pods across availability zones for redundancy.
+Let’s apply this Deployment and see the result:
+root@host01:~#
+kubectl apply -f /opt/ipf-server.yaml
+deployment.apps/iperf-server created
+As soon as our Pods are running, we see that a Pod has been allocated to each node in the cluster:
+root@host01:~#
+kubectl get po -o wide
+NAME                            READY   STATUS    ... NODE     ...
+iperf-server-7666fb76d8-7rz8j   1/1     Running   ... host01   ...
+iperf-server-7666fb76d8-cljkh   1/1     Running   ... host02   ...
+iperf-server-7666fb76d8-ktk92   1/1     Running   ... host03   ...
+Because we have three nodes and three instances, it’s essentially identical to using a DaemonSet, but this approach is more flexible because it doesn’t require an instance on every node. In a large cluster, we still might need only a few Pod instances to meet demand for this service. Using anti-affinity with zones based on hostnames allows us to specify the correct scale for our Deployment while still distributing each Pod to a distinct node for higher availability. And anti-affinity can be used to distribute Pods across other types of zones as well.
+Before we continue, let’s create a Service with which our
+iperf3
+clients will be able to find a server instance. Here’s the YAML:
+ipf-svc.yaml
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: iperf-server
+spec:
+  selector:
+    app: iperf-server
+  ports:
+  - protocol: TCP
+    port: 5201
+    targetPort: 5201
+Let’s apply this to the cluster:
+root@host01:~#
+kubectl apply -f /opt/ipf-svc.yaml
+service/iperf-server created
+The Service picks up all three Pods:
+root@host01:~#
+kubectl get ep iperf-server
+NAME           ENDPOINTS                                                 ...
+iperf-server   172.31.239.207:5201,172.31.25.214:5201,172.31.89.206:5201 ...
+The
+ep
+is short for
+endpoints
+. Each Service has an associated Endpoint object that records the current Pods that are receiving traffic for the Service.
+Affinity
+We’re now ready to deploy our
+iperf3
+client to use these server instances. We would like to distribute the clients to each node in the same way, but we want to make sure that each client is deployed to a node that has a server instance. To do this, we’ll use both an affinity and an anti-affinity rule:
+ipf-client.yaml
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: iperf
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: iperf
+  template:
+    metadata:
+      labels:
+app: iperf
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - iperf
+            topologyKey: "kubernetes.io/hostname"
+➊
+podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - iperf-server
+            topologyKey: "kubernetes.io/hostname"
+      containers:
+      - name: iperf
+        image: bookofkubernetes/iperf3:stable
+The additional
+podAffinity
+rule
+➊
+ensures that each client instance is deployed to a node only if a server instance is already present. The fields in an affinity rule work the same way as an anti-affinity rule.
+Let’s deploy the client instances:
+root@host01:~#
+kubectl apply -f /opt/ipf-client.yaml
+deployment.apps/iperf created
+After these Pods are running, we can see that they have also been distributed across all three nodes in the cluster:
+root@host01:~#
+kubectl get po -o wide
+NAME                            READY   STATUS    ... NODE     ... 
+iperf-c8d4566f-btppf            1/1     Running   ... host02   ... 
+iperf-c8d4566f-s6rpn            1/1     Running   ... host03   ... 
+iperf-c8d4566f-v9v8m            1/1     Running   ... host01   ... 
+...
+It may seem like we’ve deployed our
+iperf3
+client and server in a way that enables each client to talk to its local server instance, maximizing the bandwidth between client and server. However, that’s not actually the case. Because the
+iperf-server
+Service is configured with all three Pods, each client Pod is connecting to a random server. As a result, our clients may not behave correctly. You might see logs indicating that a client is able to connect
+to a server, but you might also see client Pods in the
+Error
+or
+CrashLoopBackOff
+state, with log output like this:
+root@host01:~#
+kubectl logs
+iperf-c8d4566f-v9v8m
+iperf3: error - the server is busy running a test. try again later
+iperf3 error - exiting
+This indicates that a client is connecting to a server that already has a client connected, which means that we must have at least two clients using the same server.
+Service Traffic Routing
+We would like to configure our client Pods with the ability to access the local server Pod we deployed rather than a server Pod on a different node. Let’s start by confirming that traffic is being routed randomly across all three server Pods. We can examine the
+iptables
+rules created by
+kube-proxy
+for this Service:
+root@host01:~#
+iptables-save | grep iperf-server
+...
+-A KUBE-SVC-KN2SIRYEH2IFQNHK -m comment --comment "default/iperf-server" 
+  -m statistic --mode random --probability 0.33333333349 -j KUBE-SEP-IGBNNG5F5VCPRRWI
+-A KUBE-SVC-KN2SIRYEH2IFQNHK -m comment --comment "default/iperf-server" 
+  -m statistic --mode random --probability 0.50000000000 -j KUBE-SEP-FDPADR4LUNHDJSPL
+-A KUBE-SVC-KN2SIRYEH2IFQNHK -m comment --comment "default/iperf-server" 
+  -j KUBE-SEP-TZDPKVKUEZYBFM3V
+We’re running this command on
+host01
+, and we see that there are three separate
+iptables
+rules, with a random selection of the destination. This means that the
+iperf3
+client on
+host01
+could potentially be routed to any server Pod.
+To fix that, we need to change the internal traffic policy configuration of our Service. By default, the policy is
+Cluster
+, indicating that all Pods in the cluster are valid destinations. We can change the policy to
+Local
+, which restricts the Service to route only to Pods on the same node.
+Let’s patch the Service to change this policy:
+root@host01:~#
+kubectl patch svc iperf-server -p '{"spec":{"internalTrafficPolicy":"Local"}}'
+service/iperf-server patched
+The change takes effect immediately, as we can see by looking at the
+iptables
+rules again:
+root@host01:~#
+iptables-save | grep iperf-server
+...
+-A KUBE-SVC-KN2SIRYEH2IFQNHK -m comment --comment "default/iperf-server" \
+  -j KUBE-SEP-IGBNNG5F5VCPRRWI
+This time, only one possible destination is configured on
+host01
+, as there is only one local Pod instance for this Service.
+After a few minutes, the
+iperf3
+clients now show the kind of output we expect to see:
+root@host01:~#
+kubectl logs
+iperf-c8d4566f-btppf
+Connecting to host iperf-server, port 5201
+...
+[ ID] Interval           Transfer     Bitrate         Retr
+[  5]   0.00-10.00  sec  8.67 GBytes  7.45 Gbits/sec  1250             sender
+[  5]   0.00-10.00  sec  8.67 GBytes  7.45 Gbits/sec                  receiver
+...
+Not only are all of the clients able to connect to a unique server, but the performance is consistently high as the network connection is local to each node.
+Before we go further, let’s clean up these resources:
+root@host01:~#
+kubectl delete svc/iperf-server deploy/iperf deploy/iperf-server
+service "iperf-server" deleted
+deployment.apps "iperf" deleted
+deployment.apps "iperf-server" deleted
+Although the
+Local
+internal traffic policy is useful for maximizing bandwidth between client and server, it has a major limitation. If a node does not contain a healthy Pod instance, clients on that node will not be able to access the Service at all, even if there are healthy instances on other nodes. It is critical when using this design pattern to also configure a readiness probe, as described in
+Chapter 13
+, that checks not only the Pod itself but also its Service dependencies. This way, if a Service is inaccessible on a particular node, the client on that node will also report itself to be unhealthy so that no traffic will be routed to it.
+The affinity and anti-affinity capabilities we’ve seen allows us to give hints to the scheduler without losing the scalability and resilience we want for our application components. However, even though it might be tempting to use these features whenever we have closely connected components in our application architecture, it’s probably best to allow the scheduler to work unhindered and add affinity only for cases in which real performance testing shows that it makes a significant difference.
+Service routing for improved performance is an active area of development in Kubernetes. For clusters running across multiple zones, a new feature called Topology Aware Hints can enable Kubernetes to route connections to Services to the closest instances wherever possible, improving network performance while still allowing cross-zone traffic where necessary.
+Hardware Resources
+Affinity and anti-affinity allow us to control where Pods are scheduled but should be used only if necessary. But what about cases for which a Pod needs access to some specialized hardware that is available only on some nodes? For example, we might have processing that would benefit from a graphics processing unit (GPU), but we might limit the number of GPU nodes in the cluster to reduce cost. In that case, it is absolutely necessary to ensure that the Pod is scheduled in the right place.
+As before, we could tie our Pod directly to a node using
+nodeName
+. But we might have many nodes in our cluster with the right hardware, so what we really want is to be able to tell Kubernetes about the requirement and then let the scheduler decide how to satisfy it.
+Kubernetes provides two related methods to address this need: device plug-ins and extended resources. A device plug-in provides the most complete functionality, but the plug-in itself must exist for the hardware device. Meanwhile, extended resources can be used for any hardware device, but the Kubernetes cluster only tracks allocation of the resource; it doesn’t actually manage its availability in the container.
+Implementing a device plug-in requires close collaboration with
+kubelet
+. Similar to the storage plug-in architecture we saw in
+Chapter 15
+, a device plug-in registers itself with the
+kubelet
+instance running on a node, identifying any devices it manages. Pods identify any devices they require, and the device manager tells
+kubelet
+how to make the device available inside the container (typically by mounting the device from the host into the container’s filesystem).
+Because we’re operating in a virtualized example cluster, we don’t have any specialized hardware to demonstrate a device plug-in, but an extended resource works identically from an allocation standpoint, so we can still get a feel for the overall approach.
+Let’s begin by updating the cluster to indicate that one of the nodes has an example extended resource. We do this by patching the
+status
+for the node. Ideally, we could do this with
+kubectl patch
+, but unfortunately it’s not possible to update the
+status
+of a resource with that command, so we’re reduced to using
+curl
+to call the Kubernetes API directly. The
+/opt
+directory has a script to make this easy.
+Listing 18-1
+presents the relevant part.
+add-hw.sh
+#!/bin/bash
+...
+patch='
+[
+  {
+    "op": "add", 
+    "path": "/status/capacity/bookofkubernetes.com~1special-hw", 
+    "value": "3"
+  }
+]
+'
+curl --cacert $ca --cert $cert --key $key \
+  -H "Content-Type: application/json-patch+json" \
+  -X PATCH -d "$patch" \
+  https://192.168.61.10:6443/api/v1/nodes/host02/status
+...
+Listing 18-1: Special hardware script
+This
+curl
+command sends a JSON patch object to update the
+status
+field for the node, adding an entry called
+bookofkubernetes.com/special-hw
+under
+capacity
+. The
+~1
+acts as a slash character.
+Run the script to update the node:
+root@host01:~#
+/opt/add-hw.sh
+...
+The response from the API server includes the entire Node resource. Let’s double-check just the field we care about to make sure it applied:
+root@host01:~#
+kubectl get node host02 -o json | jq .status.capacity
+{
+  "bookofkubernetes.com/special-hw": "3",
+  "cpu": "2",
+  "ephemeral-storage": "40593612Ki",
+  "hugepages-2Mi": "0",
+  "memory": "2035228Ki",
+  "pods": "110"
+}
+The extended resource shows up alongside the standard resources for the node. We can now request this resource similar to how we request standard resources, as we saw in
+Chapter 14
+.
+Here’s a Pod that requests the special hardware:
+hw.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sleep
+spec:
+  containers:
+  - name: sleep
+    image: busybox
+    command: ["/bin/sleep", "infinity"]
+    resources:
+      limits:
+        bookofkubernetes.com/special-hw: 1
+We specify the requirement for the special hardware using the
+resources
+field. The resource is either allocated or not allocated; thus, there’s no distinction between requests and limits, so Kubernetes expects us to specify it using
+limits
+. When we apply this to the cluster, the Kubernetes scheduler will ensure that this Pod runs on a node that can meet this requirement:
+root@host01:~#
+kubectl apply -f /opt/hw.yaml
+pod/sleep created
+As a result, the Pod ends up on
+host02
+:
+root@host01:~#
+kubectl get po -o wide
+NAME    READY   STATUS    ... NODE     ...
+sleep   1/1     Running   ... host02   ...
+Additionally, the node status now reflects an allocation for this extended resource:
+root@host01:~#
+kubectl describe node host02
+Name:               host02
+...
+Allocated resources:
+...
+  Resource                         Requests     Limits
+  --------                         --------     ------
+...
+  bookofkubernetes.com/special-hw  1            1
+...
+Both the available quantity of three
+special-hw
+that we specified when we added the extended resource in
+Listing 18-1
+and the allocation of that resource to our Pod are arbitrary. The extended resource acts like a semaphore in preventing too many users from using the same resource, but we would need to add additional processing to deconflict multiple users if we really had three separate special hardware devices on the same node.
+If we do try to over-allocate based on what we specified is available, the Pod won’t be scheduled. We can confirm this if we try to add another Pod that needs all three of our special hardware devices:
+hw3.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sleep3
+spec:
+  containers:
+  - name: sleep
+    image: busybox
+    command: ["/bin/sleep", "infinity"]
+    resources:
+limits:
+        bookofkubernetes.com/special-hw: 3
+Let’s try to add this Pod to the cluster:
+root@host01:~#
+kubectl apply -f /opt/hw3.yaml
+pod/sleep created
+Because there aren’t enough special hardware devices available, this Pod stays in the Pending state:
+root@host01:~#
+kubectl get po -o wide
+NAME    READY   STATUS    ... NODE     ...
+sleep   1/1     Running   ... host02   ...
+sleep3  0/1     Pending   ... <none>   ...
+The Pod will wait for the hardware to be available. Let’s delete our original Pod to free up room:
+root@host01:~#
+kubectl delete pod sleep
+pod/sleep deleted
+Our new Pod will now start running:
+root@host01:~#
+kubectl get po -o wide
+NAME    READY   STATUS    ... NODE     ...
+sleep3  1/1     Running   ... host02   ...
+As before, the Pod was scheduled onto
+host02
+because of the special hardware requirement.
+Device drivers work identically from an allocation standpoint. In both cases, we use the
+limits
+field to identify our hardware requirements. The only difference is that we don’t need to patch the node manually to record the resource, because
+kubelet
+updates the node’s status automatically when the device driver registers. Additionally,
+kubelet
+invokes the device driver to perform any necessary allocation and configuration of the hardware when a container is created.
+Final Thoughts
+Unlike ideal applications, in the real world we often must deal with closely coupled application components and the need for specialized hardware. It’s critical that we account for those application requirements without losing the flexibility and resiliency that we gain from deploying our application to a Kubernetes cluster. In this chapter, we’ve seen how affinity and device drivers allow us to provide hints and resource requirements to the scheduler while still allowing it the flexibility to manage the application at scale dynamically.
+Scheduling is not the only concern we might have as we consider how to obtain the desired behavior and performance from real-world applications. In the next chapter, we’ll see how we can shape the processing and memory allocation for our Pods through the use of quality-of-service classes.
+
+19
+TUNING QUALITY OF SERVICE
+Ideally, our applications would use minimal or highly predictable processing, memory, storage, and network resources. In the real world, though, applications are “bursty,” with changes in load driven by user demand, large amounts of data, or complex processing. In a Kubernetes cluster, where application components are deployed dynamically to various nodes in the cluster, uneven distribution of load across those nodes can cause performance bottlenecks.
+From an application architecture standpoint, the more we can make the application components small and scalable, the more we can evenly distribute load across the cluster. Unfortunately, it’s not always possible to solve performance issues with horizontal scaling. In this chapter, we’ll look at how we can use resource specifications to provide hints to the cluster about how to schedule our Pods, with the goal of making application performance more predictable.
+Achieving Predictability
+In normal, everyday language, the term
+real time
+has the sense of something that happens quickly and continuously. But in computer science, we make a distinction between
+real time
+and
+real fast
+to such a degree that they are thought of as opposites. This is due to the importance of predictability.
+Real-time processing is simply processing that needs to keep up with some activity that is happening in the real world. It could be anything from airplane cockpit software that needs to keep up with sensor data input and maintain up-to-date electronic flight displays, to a video streaming application that needs to receive and decode each frame of video in time to display it. In real-time systems, it is critical that we can guarantee that processing will be “fast enough” to keep up with the real-world requirement.
+Fast enough is all we need. It’s not necessary for the processing to go any faster than the real world, as there isn’t anything else for the application to do. But even a single time interval when the processing is slower than the real world means we fall behind our inputs or outputs, leading to annoyed movie watchers—or even to crashed airplanes.
+For this reason, the main goal in real-time systems is predictability. Resources are allocated based on the worst-case scenario the system will encounter, and we’re willing to provide significantly more processing than necessary to have plenty of margin on that worst case. Indeed, it’s common to require these types of systems to stay under 50 percent utilization of the available processing and memory, even at maximum expected load.
+But whereas responsiveness is always important, most applications don’t operate in a real-time environment, and this additional resource margin is expensive. For that reason, most systems try to find a balance between predictability and efficiency, which means that we are often willing to tolerate a bit of slower performance from our application components as long as it is temporary.
+Quality of Service Classes
+To help us balance predictability and efficiency for the containers in a cluster, Kubernetes allocates Pods to one of three different Quality of Service classes:
+BestEffort
+,
+Burstable
+, and
+Guaranteed
+. In a way, we can think of these as descriptive.
+BestEffort
+is used when we don’t provide Kubernetes with any resource requirements, and it can only do its best to provide enough resources for the Pod.
+Burstable
+is used when a Pod might exceed its resource request.
+Guaranteed
+is used when we provide consistent resource requirements and our Pod is expected to stay within them. Because these classes are descriptive and are based solely on how the containers in the Pod specify their resource requirements, there is no way to specify the QoS for a Pod manually.
+The QoS class is used in two ways. First, Pods in a QoS class are grouped together for Linux control groups (cgroups) configuration. As we saw in
+Chapter 3
+, cgroups are used to control resource utilization, especially processing and memory, for a group of processes, so a Pod’s cgroup affects its
+priority in use of processing time when the system load is high. Second, if the node needs to start evicting Pods due to lack of memory resources, the QoS class affects which Pods are evicted first.
+BestEffort
+The simplest case is one in which we declare a Pod with no
+limits
+. In that case, the Pod is assigned to the
+BestEffort
+class. Let’s create an example Pod to explore what that means.
+NOTE
+The example repository for this book is at
+https://github.com/book-of-kubernetes/examples
+.
+See “Running Examples” on
+page xx
+for details on getting set up.
+Here’s the Pod definition:
+best-effort.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: best-effort
+spec:
+  containers:
+  - name: best-effort
+    image: busybox
+    command: ["/bin/sleep", "infinity"]
+  nodeName: host01
+This definition includes no
+resources
+field at all, but the QoS class would be the same if we included a
+resources
+field with
+requests
+but no
+limits
+.
+We use
+nodeName
+to force this Pod onto
+host01
+so that we can observe how its resource use is configured. Let’s apply it to to the cluster:
+root@host01:~#
+kubectl apply -f /opt/best-effort.yaml
+pod/best-effort created
+After the Pod is running, we can look at its details to see that it has been allocated to the
+BestEffort
+QoS class:
+root@host01:~#
+kubectl get po best-effort -o json | jq .status.qosClass
+"BestEffort"
+We can use the
+cgroup-info
+script we saw in
+Chapter 14
+to see how the QoS class affects the cgroup configuration for containers in the Pod:
+root@host01:~#
+/opt/cgroup-info best-effort
+Container Runtime
+-----------------
+Pod ID: 205...
+Cgroup path: /kubepods.slice/kubepods-besteffort.slice/kubepods-...
+
+CPU Settings
+------------
+CPU Shares: 2
+CPU Quota (us): -1 per 100000
+
+Memory Settings
+---------------
+Limit (bytes): 9223372036854771712
+The Pod is effectively unlimited in CPU and memory usage. However, the Pod’s cgroup is under the
+kubepods-besteffort.slice
+path, reflecting its allocation to the
+BestEffort
+QoS class. This allocation has an immediate effect on its CPU priority, as we can see when we compare the
+cpu.shares
+allocated to the
+BestEffort
+class compared to the
+Burstable
+class:
+root@host01:~#
+cat /sys/fs/cgroup/cpu/kubepods.slice/kubepods-besteffort.slice/cpu.shares
+2
+root@host01:~#
+cat /sys/fs/cgroup/cpu/kubepods.slice/kubepods-burstable.slice/cpu.shares
+1157
+As we saw in
+Chapter 14
+, these values are relative, so this configuration means that when our system’s processing load is high, containers in
+Burstable
+Pods are going to be allocated more than 500 times the processor share that containers in
+BestEffort
+Pods receive. This value is based on the number of Pods that are already in the
+BestEffort
+and
+Burstable
+QoS classes, including the various cluster infrastructure components already running on
+host01
+, thus you might see a slightly different value.
+The
+kubepods.slice
+cgroup sits at the same level as cgroups for user and system processes, so when the system is loaded it gets an approximately equal share of processing time as those other cgroups. Based on the
+cpu.shares
+identified within the
+kubepods.slice
+cgroup,
+BestEffort
+Pods are receiving less than 1 percent of the total share of processing compared to
+Burstable
+Pods, even without considering any processor time allocated to
+Guaranteed
+Pods. This means that
+BestEffort
+Pods receive almost no processor time when the system is loaded, so they should be used only for background processing that can run when the cluster is idle. In addition, because Pods are placed in the
+BestEffort
+class only if they have no
+limits
+specified, they cannot be created in a Namespace with limit quotas. So most of our application Pods will be in one of the other two QoS classes.
+Burstable
+Pods are placed in the
+Burstable
+class if they specify both
+requests
+and
+limits
+and if those two specifications are different. As we saw in
+Chapter 14
+, the
+requests
+specification is used for scheduling purposes, whereas the
+limits
+specification is used for runtime enforcement. In other words, Pods in this
+situation can have “bursts” of resource utilization above their
+requests
+level, but they cannot exceed their
+limits
+.
+Let’s look at an example:
+burstable.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: burstable
+spec:
+  containers:
+  - name: burstable
+    image: busybox
+    command: ["/bin/sleep", "infinity"]
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "50m"
+      limits:
+        memory: "128Mi"
+        cpu: "100m"
+  nodeName: host01
+This Pod definition supplies both
+requests
+and
+limits
+resource requirements, and they are different, so we should expect this Pod to be placed in the
+Burstable
+class.
+Let’s apply this Pod to the cluster:
+root@host01:~#
+kubectl apply -f /opt/burstable.yaml
+pod/burstable created
+Next, let’s verify that it was assigned to the
+Burstable
+QoS class:
+root@host01:~#
+kubectl get po burstable -o json | jq .status.qosClass
+"Burstable"
+Indeed, the cgroup configuration follows the QoS class and the
+limits
+we specified:
+root@host01:~# /opt/cgroup-info burstable
+
+Container Runtime
+-----------------
+Pod ID: 8d0...
+Cgroup path: /kubepods.slice/kubepods-burstable.slice/kubepods-...
+
+CPU Settings
+------------
+CPU Shares: 51
+CPU Quota (us): 10000 per 100000
+Memory Settings
+---------------
+Limit (bytes): 134217728
+The
+limits
+specified for this Pod were used to set both a CPU limit and a memory limit. Also, as we expect, this Pod’s cgroup is placed within
+kubepods-burstable.slice
+.
+Adding another Pod to the
+Burstable
+QoS class has caused Kubernetes to rebalance the allocation of processor time:
+root@host01:~#
+cat /sys/fs/cgroup/cpu/kubepods.slice/kubepods-besteffort.slice/cpu.shares
+2
+root@host01:~#
+cat /sys/fs/cgroup/cpu/kubepods.slice/kubepods-burstable.slice/cpu.shares
+1413
+The result is that Pods in the
+Burstable
+QoS class now show a value of 1413 for
+cpu.shares
+, whereas Pods in the
+BestEffort
+class still show 2. This means that the relative processor share under load is now 700 to 1 in favor of Pods in the
+Burstable
+class. Again, you may see slightly different values based on how many infrastructure Pods Kubernetes has allocated to
+host01
+.
+Because
+Burstable
+Pods are scheduled based on
+requests
+but cgroup runtime enforcement is based on
+limits
+, a node’s processor and memory resources can be overcommitted. It works fine as long as the Pods on a node balance out one another so that the average utilization matches the
+requests
+. It becomes a problem if the average utilization exceeds the
+requests
+. In that case, Pods will see their CPU throttled and may even be evicted if memory becomes scarce, as we saw in
+Chapter 10
+.
+Guaranteed
+If we want to increase predictability for the processing and memory available to a Pod, we can place it in the
+Guaranteed
+QoS class by giving the
+requests
+and
+limits
+equal settings. Here’s an example:
+guaranteed.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: guaranteed
+spec:
+  containers:
+  - name: guaranteed
+    image: busybox
+    command: ["/bin/sleep", "infinity"]
+    resources:
+      limits:
+        memory: "64Mi"
+cpu: "50m"
+  nodeName: host01
+In this example, only
+limits
+is specified given that Kubernetes automatically sets the
+requests
+to match the
+limits
+if
+requests
+is missing.
+Let’s apply this to the cluster:
+root@host01:~#
+kubectl apply -f /opt/guaranteed.yaml
+pod/guaranteed created
+After the Pod is running, verify the QoS class:
+root@host01:~#
+kubectl get po guaranteed -o json | jq .status.qosClass
+"Guaranteed"
+The cgroups configuration looks a little different:
+root@host01:~#
+/opt/cgroup-info guaranteed
+Container Runtime
+-----------------
+Pod ID: 146...
+Cgroup path: /kubepods.slice/kubepods-...
+
+CPU Settings
+------------
+CPU Shares: 51
+CPU Quota (us): 5000 per 100000
+
+Memory Settings
+---------------
+Limit (bytes): 67108864
+Rather than place these containers into a separate directory, containers in the
+Guaranteed
+QoS class are placed directly in
+kubepods.slice
+. Putting them in this location has the effect of privileging containers in
+Guaranteed
+Pods when the system is loaded because those containers receive their CPU shares individually rather than as a class.
+QoS Class Eviction
+The privileged treatment of Pods in the
+Guaranteed
+QoS class extends to Pod eviction as well. As described in
+Chapter 3
+, cgroup enforcement of memory limits is handled by the OOM killer. The OOM killer also runs when a node is completely out of memory. To help the OOM killer choose which containers to terminate, Kubernetes sets the
+oom_score_adj
+parameter based on the QoS class of the Pod. This parameter can have a value from –1000 to 1000. The higher the number, the more likely the OOM killer will choose a process to be killed.
+The
+oom_score_adj
+value is recorded in
+/proc
+for each process. The automation has added a script called
+oom-info
+to retrieve it for a given Pod. Let’s check the values for the Pods in each QoS class:
+root@host01:~#
+/opt/oom-info best-effort
+OOM Score Adjustment: 1000
+root@host01:~#
+/opt/oom-info burstable
+OOM Score Adjustment: 968
+root@host01:~#
+/opt/oom-info guaranteed
+OOM Score Adjustment: -997
+Pods in the
+BestEffort
+QoS class have the maximum adjustment of 1000, so they would be targeted first by the OOM killer. Pods in the
+Burstable
+QoS class have a score calculated based on the amount of memory specified in the
+requests
+field, as a percentage of the node’s total memory capacity. This value will therefore be different for every Pod but will always be between 2 and 999. Thus, Pods in the
+Burstable
+QoS class will always be second in priority for the OOM killer. Meanwhile, Pods in the
+Guaranteed
+QoS class are set close to the minimum value, in this case –997, so they are protected from the OOM killer as much as possible.
+Of course, as mentioned in
+Chapter 3
+, the OOM killer terminates a process immediately, so it is an extreme measure. When memory on a node is low but not yet exhausted, Kubernetes attempts to evict Pods to reclaim memory. This eviction is also prioritized based on the QoS class. Pods in the
+BestEffort
+class and Pods in the
+Burstable
+class that are using more than their
+requests
+value (high-use
+Burstable
+) are the first to be evicted, followed by Pods in the
+Burstable
+class that are using less than their
+requests
+value (low-use
+Burstable
+) and Pods in the
+Guaranteed
+class.
+Before moving on, let’s do some cleanup:
+root@host01:~#
+kubectl delete po/best-effort po/burstable po/guaranteed
+pod "best-effort" deleted
+pod "burstable" deleted
+pod "guaranteed" deleted
+Now we can have a fresh start when we look at Pod priorities later in this chapter.
+Choosing a QoS Class
+Given this prioritization in processing time and eviction priority, it might be tempting to place all Pods in the
+Guaranteed
+QoS class. And there are application components for which this is a viable strategy. As described in
+Chapter 7
+, we can configure a HorizontalPodAutoscaler to make new Pod instances automatically if the existing instances are consuming a significant percentage of their allocated resources. This means that we can request a reasonable
+limits
+value for Pods in a Deployment and allow the cluster to automatically scale the Deployment if we’re getting too close to the limit across those Pods. If the cluster is running in a cloud environment, we can even
+extend autoscaling to the node level, dynamically creating new cluster nodes when load is high and reducing the number of nodes when the cluster is idle.
+Using only
+Guaranteed
+Pods together with autoscaling sounds great, but it assumes that our application components are easily scalable. It also only works well when our application load consists of many small requests, so that an increase in load primarily means we are handing similar-sized requests from more users. If we have application components that periodically handle large or complex requests, we must set the
+limits
+for those components to accommodate the worst-case scenario. Given that Pods in the
+Guaranteed
+QoS class have
+requests
+equal to
+limits
+, our cluster will need enough resources to handle this worst-case scenario, or we won’t even be able to schedule our Pods. This results in a cluster that is largely idle unless the system is under its maximum load. Similarly, if we have scalability limitations such as dependency on specialized hardware, we might have a natural limit on the number of Pods we can create for a component, forcing each Pod to have more resources to handle its share of the overall load.
+For this reason, it makes sense to balance the use of the
+Guaranteed
+and
+Burstable
+QoS classes for our Pods. Any Pods that have consistent load, or that can feasibly be scaled horizontally to meet additional demand, should be in the
+Guaranteed
+class. Pods that are harder to scale, or need to handle a mix of large and small workloads, should be in the
+Burstable
+class. These Pods should specify their
+requests
+based on their average utilization, and specify
+limits
+based on their worst-case scenario. Specifying resource requirements in this way will ensure that the cluster’s expected performance margin can be monitored by simply comparing the allocated resources to the cluster capacity. Finally, if a large request causes multiple application components to run at their worst-case utilization simultaneously, it may be worth running performance tests and exploring anti-affinity, as described in
+Chapter 18
+, to avoid overloading a single node.
+Pod Priority
+In addition to using hints to help the Kubernetes cluster understand how to manage Pods when the system is highly loaded, it is possible to tell the cluster directly to give some Pods a higher priority than others. This higher priority applies during Pod eviction, as Pods will be evicted in priority order within their QoS class. It also applies during scheduling because the Kubernetes scheduler will evict Pods if necessary to be able to schedule a higher-priority Pod.
+Pod priority is a simple numeric field; higher numbers are higher priority. Numbers greater than one billion are reserved for critical system Pods. To assign a priority to a Pod, we must create a
+PriorityClass
+resource first. Here’s an example:
+essential.yaml
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: essential
+value: 999999
+Let’s apply this to the cluster:
+root@host01:~#
+kubectl apply -f /opt/essential.yaml
+priorityclass.scheduling.k8s.io/essential created
+Now that this PriorityClass has been defined, we can apply it to Pods. However, let’s first create a large number of low-priority Pods through which we can see Pods being preempted. We’ll use this Deployment:
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: lots
+spec:
+  replicas: 1000
+  selector:
+    matchLabels:
+      app: lots
+  template:
+    metadata:
+      labels:
+        app: lots
+    spec:
+      containers:
+      - name: sleep
+        image: busybox
+        command: ["/bin/sleep", "infinity"]
+        resources:
+          limits:
+            memory: "64Mi"
+            cpu: "250m"
+This is a basic Deployment that runs
+sleep
+and doesn’t request very much memory or CPU, but it does set
+replicas
+to
+1000
+, so we’re asking our Kubernetes cluster to create 1,000 Pods. The example cluster isn’t large enough to deploy 1,000 Pods, both because we don’t have sufficient resources to meet the specification and because a node is limited to 110 Pods by default. Still, let’s apply it to the cluster, as shown in
+Listing 19-1
+, and the scheduler will create as many Pods as it can:
+root@host01:~#
+kubectl apply -f /opt/lots.yaml
+deployment.apps/lots created
+Listing 19-1: Deploy lots of Pods
+Let’s describe the Deployment to see how things are going:
+root@host01:~#
+kubectl describe deploy lots
+Name:                   lots
+Namespace:              default
+...
+Replicas:               1000 desired ... | 7 available | 993 unavailable
+...
+We managed to get only seven Pods in our example cluster, given the number of Pods already running for cluster infrastructure components. Unfortunately, that’s all the Pods we’ll get:
+root@host01:~#
+kubectl describe node host01
+Name:               host01
+  (Total limits may be over 100 percent, i.e., overcommitted.)
+Allocated resources:
+...
+  Resource           Requests     Limits
+  --------           --------     ------
+  cpu
+➊
+1898m (94%)  768m (38%)
+  memory             292Mi (15%)  192Mi (10%)
+  ephemeral-storage  0 (0%)       0 (0%)
+  hugepages-2Mi      0 (0%)       0 (0%)
+...
+The data for
+host01
+shows that we’ve allocated 94 percent of the available CPU
+➊
+. But each of our Pods is requesting 250 millicores, so there isn’t enough capacity remaining to schedule another Pod on this node. The other two nodes are in a similar situation, with insufficient CPU room to schedule any more Pods. Still, the cluster is performing just fine. We’ve theoretically allocated all of the processing power, but those containers are just running
+sleep
+, and as such, they aren’t actually using much CPU.
+Also, it’s important to remember that the
+requests
+field is used for scheduling, so even though we have a number of infrastructure
+BestEffort
+Pods that specify
+requests
+but no
+limits
+and we have plenty of
+Limits
+capacity on this node, we still don’t have any room for scheduling new Pods. Only
+Limits
+can be overcommitted, not
+Requests
+.
+Because we have no more CPU to allocate to Pods, the rest of the Pods in our Deployment are stuck in a Pending state:
+root@host01:~#
+kubectl get po | grep -c Pending
+993
+All 993 of these Pods have the default pod priority of 0. As a result, when we create a new Pod using the
+essential
+PriorityClass, it will jump to the front of the scheduling queue. Not only that, but the cluster will evict Pods as necessary to enable it to be scheduled.
+Here’s the Pod definition:
+needed.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: needed
+spec:
+  containers:
+  - name: needed
+    image: busybox
+    command: ["/bin/sleep", "infinity"]
+    resources:
+      limits:
+        memory: "64Mi"
+        cpu: "250m"
+  priorityClassName: essential
+The key difference here is the specification of the
+priorityClassName
+, matching the PriorityClass we created. Let’s apply this to the cluster:
+root@host01:~#
+kubectl apply -f /opt/needed.yaml
+pod/needed created
+It will take the cluster a little time to evict another Pod so that this one can be scheduled, but after a minute or so it will start running:
+root@host01:~#
+kubectl get po needed
+NAME     READY   STATUS    RESTARTS   AGE
+needed   1/1     Running   0          36s
+To allow this to happen, one of the Pods from the
+lots
+Deployment we created in
+Listing 19-1
+had to be evicted:
+root@host01:~#
+kubectl describe deploy lots
+Name:                   lots
+Namespace:              default
+CreationTimestamp:      Fri, 01 Apr 2022 19:20:52 +0000
+Labels:                 <none>
+Annotations:            deployment.kubernetes.io/revision: 1
+Selector:               app=lots
+Replicas:               1000 desired ... |
+➊
+6 available | 994 unavailable
+We’re now down to only six Pods available in the Deployment
+➊
+, as one Pod was evicted. It’s worth noting that being in the
+Guaranteed
+QoS class did not prevent this Pod from being evicted. The
+Guaranteed
+QoS class gets priority for evictions caused by node resource usage, but not for eviction caused by the scheduler finding room for a higher-priority Pod.
+Of course, the ability to specify a higher priority for a Pod, resulting in the eviction of other Pods, is powerful and should be used sparingly. Normal users do not have the ability to create a new PriorityClass, and administrators can apply a quota to limit the use of a PriorityClass in a given Namespace, effectively limiting normal users from creating high-priority Pods.
+Final Thoughts
+Deploying an application to Kubernetes so that it is performant and reliable requires an understanding of the application architecture and of the normal and worst-case load for each component. Kubernetes QoS classes allow us to shape the way that Pods are deployed to nodes to achieve a balance of predictability and efficiency in the use of resources. Additionally, both QoS classes and Pod priorities allow us to provide hints to the Kubernetes cluster so the deployed applications degrade gracefully as the load on the cluster becomes too high.
+In the next chapter, we’ll bring together the ideas we’ve seen on how to best use the features of a Kubernetes cluster to deploy performant, resilient applications. We’ll also explore how we can monitor those applications and respond automatically to changes in behavior.
+
+20
+APPLICATION RESILIENCY
+Over the course of this book, we’ve seen how containers and Kubernetes enable scalable, resilient applications. Using containers, we can encapsulate application components so that processes are isolated from one another, have separate virtualized network stacks, and a separate filesystem. Each container can then be rapidly deployed without interfering with other containers. When we add Kubernetes as a container orchestration layer on top of the container runtime, we are able to include many separate hosts into a single cluster, dynamically scheduling containers across available cluster nodes with automatic scaling and failover, distributed networking, traffic routing, storage, and configuration.
+All of the container and Kubernetes features we’ve seen in this book work together to provide the necessary infrastructure to deploy scalable, resilient applications, but it’s up to us to configure our applications correctly to take advantage of what the infrastructure provides. In this chapter, we’ll take another look at the
+todo
+application we deployed in
+Chapter 1
+. This
+time, however, we’ll deploy it across multiple nodes in a Kubernetes cluster, eliminating single points of failure and taking advantage of the key features that Kubernetes has to offer. We’ll also explore how to monitor the performance of our Kubernetes cluster and our deployed application so that we can identify performance issues before they lead to downtime for our users.
+Example Application Stack
+In
+Chapter 1
+, we deployed
+todo
+onto a Kubernetes cluster running
+k3s
+from Rancher. We already had some amount of scalability and failover available. The web layer was based on a Deployment, so we were able to scale the number of server instances with a single command. Our Kubernetes cluster was monitoring those instances so failed instances could be replaced. However, we still had some single points of failure. We had not yet introduced the idea of a highly available Kubernetes control plane, so we chose to run
+k3s
+only in a single-node configuration. Additionally, even though we used a Deployment for our PostgreSQL database, it was lacking in any of the necessary configuration for high availability. In this chapter, we’ll see the details necessary to correct those limitations, and we’ll also take advantage of the many other Kubernetes features we’ve learned.
+Database
+Let’s begin by deploying a highly available PostgreSQL database.
+Chapter 17
+demonstrated how the Kubernetes Operator design pattern uses CustomResourceDefinitions to extend the behavior of a cluster, making it easy to package and deploy advanced functionality. We’ll use the Postgres Operator we introduced in that chapter to deploy our database.
+NOTE
+The example repository for this book is at
+https://github.com/book-of-kubernetes/examples
+.
+See “Running Examples” on
+page xx
+for details on getting set up. This chapter uses a larger six-node cluster to provide room for the application and all the monitoring components that we’ll be deploying. See the
+README.md
+file for this chapter for more information.
+The automation for this chapter has already deployed the Postgres Operator together with its configuration. You can inspect the Postgres Operator and its configuration by looking at the files in
+/etc/kubernetes/components
+. The operator is running in the
+todo
+Namespace, where the
+todo
+application is also deployed. Many operators prefer to run in their own Namespace and operate across the cluster, but the Postgres Operator is designed to be deployed directly into the Namespace where the database will reside.
+Because we’re using the Postgres Operator, we can create a highly available PostgreSQL database by applying a custom resource to the cluster:
+database.yaml
+---
+ apiVersion: "acid.zalan.do/v1"
+ kind: postgresql
+metadata:
+➊
+name: todo-db
+ spec:
+   teamId: todo
+   volume:
+     size: 1Gi
+     storageClass: longhorn
+➋
+numberOfInstances: 3
+   users:
+➌
+todo:
+     - superuser
+     - createdb
+   databases:
+➍
+todo: todo
+   postgresql:
+     version: "14"
+All of the files shown in this walkthrough have been staged to the
+/etc/kubernetes/todo
+directory so that you can explore them and experiment with changes. The
+todo
+application is automatically deployed, but it can take several minutes for all the components to reach a healthy state.
+The Postgres Operator has the job of creating the Secrets, StatefulSets, Services, and other core Kubernetes resources needed to deploy PostgreSQL. We’re only required to supply the configuration it should use. We start by identifying the name for this database,
+todo-db
+➊
+, which will be used as the name of the primary Service that we’ll use to connect to the primary database instance, so we’ll see this name again in the application configuration.
+We want a highly available database, so let’s specify three instances
+➋
+. We also ask the Postgres Operator to create a
+todo
+user
+➌
+and to create a
+todo
+database with the
+todo
+user as the owner
+➍
+. This way, our database is already set up and we only need to populate the tables to store the application data.
+We can verify that the database is running in the cluster:
+root@host01:~#
+kubectl -n todo get sts
+NAME      READY   AGE
+todo-db   3/3     6m1s
+The
+todo-db
+StatefulSet has three Pods, all of which are ready.
+Because the Postgres Operator is using a StatefulSet, as we saw in
+Chapter 15
+, a PersistentVolumeClaim is allocated for the database instances as they are created:
+root@host01:~#
+kubectl -n todo get pvc
+NAME               STATUS   ... CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+pgdata-todo-db-0   Bound    ... 1Gi        RWO            longhorn       10m
+pgdata-todo-db-1   Bound    ... 1Gi        RWO            longhorn       8m44s
+pgdata-todo-db-2   Bound    ... 1Gi        RWO            longhorn       7m23s
+These PersistentVolumeClaims will be reused if one of the database instance Pods fails and must be re-created, and the Longhorn storage engine is distributing its storage across our entire cluster, so the database will retain the application data even if we have a node failure.
+Note that when we requested the Postgres Operator to create a
+todo
+user, we didn’t specify a password. For security, the Postgres Operator automatically generates a password. This password is placed into a Secret based on the name of the user and the name of the database. We can see the Secret created for the
+todo
+user:
+root@host01:~#
+kubectl -n todo get secret
+NAME                                                    TYPE    DATA   AGE
+...
+todo.todo-db.credentials.postgresql.acid.zalan.do       Opaque  2      8m30s
+We’ll need to use this information to configure the application so that it can authenticate to the database.
+Before we look at the application configuration, let’s inspect the Service that the Postgres Operator created:
+root@host01:~#
+kubectl -n todo get svc todo-db
+NAME      TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)    AGE
+todo-db   ClusterIP   10.110.227.34   <none>        5432/TCP   59m
+This is a
+ClusterIP
+Service, meaning that it is reachable from anywhere inside the cluster but is not externally exposed. That matches perfectly with what we want for our application, as our web service component is the only user-facing component and thus the only one that will be exposed outside the cluster.
+Application Deployment
+All of our application’s data is in the PostgreSQL database, so the web server layer is stateless. For this stateless component, we’ll use a Deployment and set up automatic scaling.
+The Deployment has a lot of information, so let’s look at it step by step. To see the entire Deployment configuration and get a sense of how it all fits together, you can look at the file
+/etc/kubernetes/todo/application.yaml
+on any of the cluster nodes.
+The first section tells Kubernetes that we’re creating a Deployment:
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: todo
+  labels:
+    app: todo
+This part is simple because we’re only specifying the metadata for the Deployment. Note that we don’t include the
+namespace
+in the metadata. Instead, we provide it to Kubernetes directly when we apply this Deployment to the cluster. This way, we can reuse the same Deployment YAML for development, test, and production versions of this application, keeping each in a separate Namespace to avoid conflict.
+The
+label
+field is purely informational, though it also provides a way for us to query the cluster for all of the resources associated with this application by matching on the label.
+The next part of the Deployment YAML specifies how the cluster should handle updates:
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 30%
+      maxSurge: 50%
+The
+replicas
+field tells Kubernetes how many instances to create initially. The autoscaling configuration will automatically adjust this.
+The
+strategy
+field allows us to configure this Deployment for updates without any application downtime. We can choose either
+RollingUpdate
+or
+Recreate
+as a strategy. With
+Recreate
+, when the Deployment changes, all of the existing Pods are terminated, and then the new Pods are created. With
+RollingUpdate
+, new Pods are immediately created, and old Pods are kept running to ensure that this application component can continue functioning while it is updated.
+We can control how the rolling update operates using the
+maxUnavailable
+and
+maxSurge
+fields, which we can specify either as integer numbers or as a percentage of the current number of replicas. In this case, we specified 30 percent for
+maxUnavailable
+, so the Deployment will throttle the rolling update process to prevent us from falling below 70 percent of the current number of replicas. Additionally, because we set
+maxSurge
+at 50 percent, the Deployment will immediately start new Pods until the number of Pods that are running or in the creation process reaches 150 percent of the current number of replicas.
+The
+RollingUpdate
+strategy is the default, and by default, both
+maxSurge
+and
+maxUnavailable
+are 25 percent. Most Deployments should use the
+RollingUpdate
+strategy unless it is absolutely necessary to use
+Recreate
+.
+The next part of the Deployment YAML links the Deployment to its Pods:
+selector:
+    matchLabels:
+      app: todo
+  template:
+metadata:
+      labels:
+        app: todo
+The
+selector
+and the
+labels
+in the Pod
+metadata
+must match. As we saw in
+Chapter 7
+, the Deployment uses the
+selector
+to track its Pods.
+With this part, we’ve now begun defining the
+template
+for the Pods this Deployment creates. The rest of the Deployment YAML completes the Pod template, which consists entirely of configuration for the single container this Pod runs:
+spec:
+      containers:
+      - name: todo
+        image: bookofkubernetes/todo:stable
+The container name is mostly informational, though it is essential for Pods with multiple containers so that we can choose a container when we need to retrieve logs and use
+exec
+to run commands. The
+image
+tells Kubernetes what container image to retrieve in order to run this container.
+The next section of the Pod template specifies the environment variables for this container:
+env:
+        - name: NODE_ENV
+          value: production
+        - name: PREFIX
+          value: /
+        - name: PGHOST
+          value: todo-db
+        - name: PGDATABASE
+          value: todo
+        - name: PGUSER
+          valueFrom:
+            secretKeyRef:
+              name: todo.todo-db.credentials.postgresql.acid.zalan.do
+              key: username
+              optional: false
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: todo.todo-db.credentials.postgresql.acid.zalan.do
+              key: password
+              optional: false
+Some of the environment variables have static values; they’re expected to remain the same for all uses of this Deployment. The
+PGHOST
+environment variable matches the name of the PostgreSQL database. The Postgres Operator has created a Service with the name
+todo-db
+in the
+todo
+Namespace
+where these Pods will run, so the Pods are able to resolve this hostname to the Service IP address. Traffic destined for the Service IP address is then routed to the primary PostgreSQL instance using the
+iptables
+configuration we saw in
+Chapter 9
+.
+The final two variables provide the credentials for the application to authenticate to the database. We’re using the ability to fetch configuration from a Secret and provide it as an environment variable to a container, similar to what we saw in
+Chapter 16
+. However, in this case, we need the environment variable to have a different name from the key name in the Secret, so we use a slightly different syntax that allows us to specify each variable name separately.
+Finally, we declare the resource requirements of this container and the port it exposes:
+resources:
+          requests:
+            memory: "128Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "50m"
+        ports:
+        - name: web
+          containerPort: 5000
+The
+ports
+field in a Pod is purely informational; the actual traffic routing will be configured in the Service.
+Within the
+resources
+field, we set the
+requests
+and
+limits
+to be the same for this container. As we saw in
+Chapter 19
+, this means that Pod will be placed in the
+Guaranteed
+Quality of Service class. The web service component is stateless and easy to scale, so it makes sense to use a relatively low CPU limit, in this case, 50 millicores, or 5 percent of a core, and rely on the autoscaling to create new instances if the load becomes high.
+Pod Autoscaling
+To automatically scale the Deployment to match the current load, we use a HorizontalPodAutoscaler, as we saw in
+Chapter 7
+. Here’s the configuration for the autoscaler:
+scaler.yaml
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: todo
+  labels:
+    app: todo
+spec:
+scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: todo
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 50
+As we did in our earlier example, we apply a label to this resource purely for informational purposes. Three key configuration items are necessary for this autoscaler. First, the
+scaleTargetRef
+specifies that we want to scale the
+todo
+Deployment. Because this autoscaler is deployed to the
+todo
+Namespace, it finds the correct Deployment to scale.
+Second, we specify a range for
+minReplicas
+and
+maxReplicas
+. We choose
+3
+as the minimum number of replicas, as we want to make sure the application is resilient even if we have a Pod failure. For simplicity, we didn’t apply the anti-affinity configuration we saw in
+Chapter 18
+, but this may also be a good practice to avoid having all of the instances on a single node. We choose a maximum number of replicas based on the size of our cluster; for a production application, we would measure our application load and choose based on the highest load we expect to handle.
+Third, we need to specify the metric that the autoscaler will use to decide how many replicas are needed. We base this autoscaler on CPU utilization. If the average utilization across the Pods is greater than 50 percent of the Pod’s
+requests
+, the Deployment will be scaled up. We set the
+requests
+at 50 millicores, so this means that an average utilization greater than 25 millicores will cause the autoscaler to increase the number of replicas.
+To retrieve the average CPU utilization, the autoscaler relies on a cluster infrastructure component that retrieves metrics data from the
+kubelet
+service running on each node and exposes that metrics data via an API. For this chapter, we have some extra cluster monitoring functionality to demonstrate, so the automation has skipped the regular metrics server component we described in
+Chapter 6
+. We’ll deploy an alternative later in this chapter.
+Application Service
+The final cluster resource for our application is the Service.
+Listing 20-1
+presents the definition we’re using for this chapter.
+service.yaml
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: todo
+  labels:
+    app: todo
+spec:
+  type: NodePort
+  selector:
+    app: todo
+  ports:
+  - name: web
+    protocol: TCP
+    port: 5000
+    nodePort: 5000
+Listing 20-1: Todo Service
+We use the same
+selector
+that we saw in the Deployment to find the Pods that will receive traffic sent to this Service. As we saw in
+Chapter 9
+, the
+ports
+field of a Service is essential because
+iptables
+traffic routing rules are configured only for the ports we identify. In this case, we declare the
+port
+to be 5000 and don’t declare a
+targetPort
+, so this Service will send to port 5000 on the Pods, which matches the port on which our web server is listening. We also configure a
+name
+on this port, which will be important later when we configure monitoring.
+For this chapter, we’re exposing our application Service using
+NodePort
+, which means that all of our cluster’s nodes will be configured to route traffic to the Service that is sent to the
+nodePort
+for any host interface. Thus, we can access port 5000 on any of our cluster’s nodes and we’ll be routed to our application:
+root@host01:~#
+curl -v http://host01:5000/
+...
+< HTTP/1.1 200 OK
+< X-Powered-By: Express
+...
+<html lang="en" data-framework="backbonejs">
+    <head>
+        <meta charset="utf-8">
+        <title>Todo-Backend client</title>
+        <link rel="stylesheet" href="css/vendor/todomvc-common.css">
+        <link rel="stylesheet" href="css/chooser.css">
+    </head>
+...
+</html>
+This Service traffic routing works on any host interface, so the
+todo
+application can be accessed from outside the cluster as well. The URL is different depending on whether you’re using the Vagrant or Amazon Web
+Services configuration, so the automation for this chapter includes a message with the URL to use.
+NODEPORT, NOT INGRESS
+When we deployed
+todo
+in
+Chapter 1
+, we exposed the Service using an Ingress. The Ingress, as we saw in
+Chapter 9
+, consolidates multiple Services such that they can all be exposed outside the cluster without requiring each Service to have a separate externally routable IP address. We’ll expose a monitoring service later in this chapter, so we have multiple Services to expose outside the cluster. However, because we’re working with an example cluster on a private network, we don’t have the underlying network infrastructure available to use an Ingress to its full potential. By using a
+NodePort
+instead, we’re able to expose multiple Services outside the cluster in a way that works well with both the Vagrant and Amazon Web Services configurations.
+We’ve now looked all of the components in the
+todo
+application, using what we’ve learned in this book to eliminate single points of failure and maximize scalability.
+You can also explore the source code for the
+todo
+application at
+https://github.com/book-of-kubernetes/todo
+, including the
+Dockerfile
+that’s used to build the application’s container image and the GitHub Actions that automatically build it and publish it to Docker Hub whenever the code changes.
+However, although our Kubernetes cluster will now do its best to keep this application running and performing well, we can do more to monitor both the
+todo
+application and the Kubernetes cluster.
+Application and Cluster Monitoring
+Proper application and cluster monitoring is essential for applications, for multiple reasons. First, our Kubernetes cluster will try to keep the applications running, but any hardware or cluster failures could leave an application in a non-working or degraded state. Without monitoring, we would be dependent on our users to tell us when the application is down or behaving badly, which is poor user experience. Second, if we do see failures or performance issues with our application, we’re going to need data to diagnose them or to try to identify a pattern in order to find a root cause. It’s a lot easier to build in monitoring ahead of time than to try to apply it after we’re already seeing problems. Finally, we may have problems with our cluster or application that occurs below the level at which users notice, but that indicates potential performance or stability issues. Integrating proper monitoring allows us to detect those kinds of issues before they become a bigger headache. It also allows us to measure an application over time to make sure that added features aren’t degrading its performance.
+Fortunately, although we do need to think about monitoring at the level of each of our application components, we don’t need to build a monitoring framework ourselves. Many mature monitoring tools are already designed to work in a Kubernetes cluster, so we can get up and running quickly. In
+this chapter, we’ll look at
+kube-prometheus
+, a complete stack of tools that we can deploy to our cluster and use to monitor both the cluster and the
+todo
+application.
+Prometheus Monitoring
+The core component of
+kube-prometheus
+is, as the name implies, the open source Prometheus monitoring software. Prometheus deploys as a server that periodically queries various metrics sources and accumulates the data it receives. It supports a query language that is optimized for “time series” data, which makes it easy to collect individual data points showing a system’s performance at a moment in time. It then aggregates those data points to get a picture of the system’s load, resource utilization, and responsiveness.
+For each component that exposes metrics, Prometheus expects to reach out to a URL and receive data in return in a standard format. It’s common to use the path
+/metrics
+to expose metrics to Prometheus. Following this convention, the Kubernetes control plane components already expose metrics in the format that Prometheus is expecting.
+To illustrate, we can use
+curl
+to visit the
+/metrics
+path on the API server to see the metrics that it provides. To do this, we’ll need to authenticate to the API server, so let’s use a script that collects a client certificate for authentication:
+api-metrics.sh
+#!/bin/bash
+conf=/etc/kubernetes/admin.conf
+...
+curl --cacert $ca --cert $cert --key $key https://192.168.61.10:6443/metrics
+...
+Running this script returns a wealth of API server metrics:
+root@host01:~#
+/opt/api-server-metrics.sh
+...
+# TYPE rest_client_requests_total counter
+rest_client_requests_total{code="200",host="[::1]:6443",method="GET"} 9051
+rest_client_requests_total{code="200",host="[::1]:6443",method="PATCH"} 25
+rest_client_requests_total{code="200",host="[::1]:6443",method="PUT"} 21
+rest_client_requests_total{code="201",host="[::1]:6443",method="POST"} 179
+rest_client_requests_total{code="404",host="[::1]:6443",method="GET"} 155
+rest_client_requests_total{code="404",host="[::1]:6443",method="PUT"} 1
+rest_client_requests_total{code="409",host="[::1]:6443",method="POST"} 5
+rest_client_requests_total{code="409",host="[::1]:6443",method="PUT"} 62
+rest_client_requests_total{code="500",host="[::1]:6443",method="GET"} 18
+rest_client_requests_total{code="500",host="[::1]:6443",method="PUT"} 1
+...
+This example illustrates only a few of the hundreds of metrics that are collected and exposed. Each line of this response provides one data point to Prometheus. We can include additional parameters for the metric in curly
+braces, allowing for more complex queries. For example, the API server data in the preceding example can be used to determine not only the total number of client requests served by the API server but also the raw number and percentage of requests that resulted in an error. Most systems are resilient to a few HTTP error responses, but a sudden increase in error responses is often a good indication of a more serious issue, so this is valuable in configuring a reporting threshold.
+In addition to all of the data that the Kubernetes cluster is already providing to Prometheus, we can also configure our application to expose metrics. Our application is based on Node.js, so we do this using the
+prom-client
+library. As demonstrated in
+Listing 20-2
+, our
+todo
+application is exposing metrics at
+/metrics
+, like the API server.
+root@host01:~#
+curl http://host01:5000/metrics/
+# HELP api_success Successful responses
+# TYPE api_success counter
+api_success{app="todo"} 0
+
+# HELP api_failure Failed responses
+# TYPE api_failure counter
+api_failure{app="todo"} 0
+...
+# HELP process_cpu_seconds_total Total user and system CPU time ...
+# TYPE process_cpu_seconds_total counter
+process_cpu_seconds_total{app="todo"} 0.106392
+...
+Listing 20-2: Todo metrics
+The response includes some default metrics that are relevant to all applications. It also includes some counters that are specific to the
+todo
+application and track API usage and responses over time.
+Deploying kube-prometheus
+At this point, our Kubernetes cluster and our application are ready to provide these metrics on demand, but we don’t yet have a Prometheus server running in the cluster to collect them. To fix this, we’ll deploy the complete
+kube-prometheus
+stack. This includes not only a Prometheus Operator that makes it easy to deploy and configure Prometheus but also other useful tools, such as Alertmanager, which can trigger notifications in response to cluster and application alerts, and Grafana, a dashboard tool that we’ll use to see the metrics we’re collecting.
+To deploy
+kube-prometheus
+, we’ll use a script that’s been installed in
+/opt
+. This script downloads a current
+kube-prometheus
+release from GitHub and applies the manifests.
+Run the script as follows:
+root@host01:~#
+/opt/install-kube-prometheus.sh
+...
+These manifests also include a Prometheus Adapter. The Prometheus Adapter implements the same Kubernetes metrics API as the
+metrics-server
+we deployed to the clusters throughout
+Part II
+, so it exposes CPU and memory data obtained from
+kubelet
+, enabling our HorizontalPodAutoscaler to track CPU utilization of our
+todo
+application. However, it also exposes that utilization data to Prometheus so that we can observe it in Grafana dashboards. For this reason, we use the Prometheus Adapter in this chapter in place of the regular
+metrics-server
+.
+We can see the Prometheus Adapter and the other components by listing Pods in the
+monitoring
+Namespace:
+root@host01:~#
+kubectl -n monitoring get pods
+NAME                                   READY   STATUS    RESTARTS   AGE
+alertmanager-main-0                    2/2     Running   0          14m
+alertmanager-main-1                    2/2     Running   0          14m
+alertmanager-main-2                    2/2     Running   0          14m
+blackbox-exporter-6b79c4588b-pgp5r     3/3     Running   0          15m
+grafana-7fd69887fb-swjpl               1/1     Running   0          15m
+kube-state-metrics-55f67795cd-mkxqv    3/3     Running   0          15m
+node-exporter-4bhhp                    2/2     Running   0          15m
+node-exporter-8mc5l                    2/2     Running   0          15m
+node-exporter-ncfd2                    2/2     Running   0          15m
+node-exporter-qp7mg                    2/2     Running   0          15m
+node-exporter-rtn2t                    2/2     Running   0          15m
+node-exporter-tpg97                    2/2     Running   0          15m
+prometheus-adapter-85664b6b74-mglp4    1/1     Running   0          15m
+prometheus-adapter-85664b6b74-nj7hp    1/1     Running   0          15m
+prometheus-k8s-0                       2/2     Running   0          14m
+prometheus-k8s-1                       2/2     Running   0          14m
+prometheus-operator-6dc9f66cb7-jtrqd   2/2     Running   0          15m
+In addition to the Prometheus Adapter, we see Pods for Alertmanager, Grafana, and various
+exporter
+Pods, which collect metrics from the cluster infrastructure and expose it to Prometheus. We also see Pods for Prometheus itself and for the Prometheus Operator. The Prometheus Operator automatically updates Prometheus whenever we change the custom resources that the Prometheus Operator is monitoring. The most important of those custom resources is the Prometheus resource shown in
+Listing 20-3
+.
+root@host01:~#
+kubectl -n monitoring describe prometheus
+Name:         k8s
+Namespace:    monitoring
+...
+API Version:  monitoring.coreos.com/v1
+Kind:         Prometheus
+...
+Spec:
+...
+  Image:  quay.io/prometheus/prometheus:v2.32.1
+...
+  Service Account Name:  prometheus-k8s
+  Service Monitor Namespace Selector:
+  Service Monitor Selector:
+...
+Listing 20-3: Prometheus configuration
+The Prometheus custom resource allows us to configure which Namespaces will be watched for Services to monitor. The default configuration presented in
+Listing 20-3
+does not specify a value for the Service Monitor Namespace Selector or the Service Monitor Selector. For this reason, by default the Prometheus Operator will be looking for monitoring configuration in all Namespaces, with any metadata label.
+To identify specific Services to monitor, the Prometheus Operator keeps an eye out for another custom resource,
+ServiceMonitor
+, as demonstrated in
+Listing 20-4
+.
+root@host01:~#
+kubectl -n monitoring get servicemonitor
+NAME                      AGE
+alertmanager-main         20m
+blackbox-exporter         20m
+coredns                   20m
+grafana                   20m
+kube-apiserver            20m
+kube-controller-manager   20m
+kube-scheduler            20m
+kube-state-metrics        20m
+kubelet                   20m
+node-exporter             20m
+prometheus-adapter        20m
+prometheus-k8s            20m
+prometheus-operator       20m
+Listing 20-4: Default ServiceMonitors
+When we installed
+kube-prometheus
+, it configured multiple ServiceMonitor resources. As a result, our Prometheus instance is already watching the Kubernetes control plane components and the
+kubelet
+services running on our cluster nodes. Let’s see the targets from which Prometheus is scraping metrics and see how those metrics are used to populate dashboards in Grafana.
+Cluster Metrics
+The installation script patched the Grafana and Prometheus Services in the
+monitoring
+Namespace to expose them as
+NodePort
+Services. The automation scripts print the URL you can use to access Prometheus. The initial page looks like
+Figure 20-1
+.
+Figure 20-1: Prometheus initial page
+Click the
+Targets
+item underneath the
+Status
+menu on the top menu bar to see which components in the cluster Prometheus is currently scraping. Click
+Collapse All
+to get a consolidated list, as shown in
+Figure 20-2
+.
+Figure 20-2: Prometheus targets
+This list matches the list of ServiceMonitors we saw in
+Listing 20-4
+, showing us that Prometheus is scraping Services as configured by the Prometheus Operator.
+We can use the Prometheus web interface to query data directly, but Grafana has already been configured with some useful dashboards, so we
+can more easily see the data there. The automation scripts print the URL you can use to access Grafana. Log in using the default
+admin
+as the username and
+admin
+as the password. You will be prompted to change the password; you can just click
+Skip
+. At this point you should see the Grafana initial page, as shown in
+Figure 20-3
+.
+Figure 20-3: Grafana initial page
+From this page, choose the
+Browse
+item under
+Dashboards
+in the menu. There are many dashboards in the
+Default
+folder. For example, by selecting
+Default
+and then selecting
+Kubernetes
+▸
+Compute Resources
+▸
+Pod
+, you can see a dashboard, depicted in
+Figure 20-4
+, that shows CPU and memory usage over time for any Pod in the cluster.
+Figure 20-4: Pod compute resources
+All of the
+todo
+database and application Pods are selectable in this dashboard by first selecting the
+todo
+Namespace, so we can already get valuable information about our application by using nothing more than the default
+monitoring configuration. This is possible because the Prometheus Adapter is pulling data from the
+kubelet
+services, which includes resource utilization for each of the running Pods. The Prometheus Adapter is then exposing a
+/metrics
+endpoint for Prometheus to scrape and store, and Grafana is querying Prometheus to build the chart showing usage over time.
+There are numerous other Grafana dashboards to explore in the default installation of
+kube-prometheus
+. Choose the
+Browse
+menu item again to select other dashboards and see what data is available.
+Adding Monitoring for Services
+Although we are already getting useful metrics for our
+todo
+application, Prometheus is not yet scraping our application Pods to pull in the Node.js metrics we saw in
+Listing 20-2
+. To configure Prometheus to scrape our
+todo
+metrics, we’ll need to provide a new ServiceMonitor resource to the Prometheus Operator, informing it about our
+todo
+Service.
+In a production cluster, the team deploying an application like our
+todo
+application wouldn’t have the permissions to create or update resources in the
+monitoring
+Namespace. However, the Prometheus Operator looks for ServiceMonitor resources in all Namespaces by default, so we can create a ServiceMonitor in the
+todo
+Namespace instead.
+First, though, we need to give Prometheus permission to see the Pods and Services we’ve created in the
+todo
+Namespace. As this access control configuration needs to apply only in a single Namespace, we’ll do this by creating a Role and a RoleBinding. Here’s the Role configuration we’ll use:
+rbac.yaml
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+...
+  name: prometheus-k8s
+rules:
+  - apiGroups:
+    - ""
+    resources:
+    - services
+    - endpoints
+    - pods
+    verbs:
+    - get
+    - list
+    - watch
+...
+We need to make sure we allow access to Services, Pods, and Endpoints, so we confirm that these are listed in the
+resources
+field. The Endpoint resource records the current Pods that are receiving traffic for a Service, which
+will be critical for Prometheus to identify all of the Pods it scrapes. Because Prometheus needs only read-only access, we specify only the
+get
+,
+list
+, and
+watch
+verbs.
+After we have this Role, we need to bind it to the ServiceAccount that Prometheus is using. We do that with this RoleBinding:
+rbac.yaml
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+...
+  name: prometheus-k8s
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: prometheus-k8s
+subjects:
+  - kind: ServiceAccount
+    name: prometheus-k8s
+    namespace: monitoring
+The
+roleRef
+matches the Role we just declared in the preceding example, whereas the
+subjects
+field lists the ServiceAccount Prometheus is using, based on the information we saw in
+Listing 20-3
+.
+Both of these YAML resources are in the same file, so we can apply them both to the cluster at once. We need to make sure we apply them to the
+todo
+Namespace, as that’s the Namespace where we want to enable access by Prometheus:
+root@host01:~#
+kubectl -n todo apply -f /opt/rbac.yaml
+role.rbac.authorization.k8s.io/prometheus-k8s created
+rolebinding.rbac.authorization.k8s.io/prometheus-k8s created
+Now that we’ve granted permission to Prometheus to see our Pods and Services, we can create the ServiceMonitor. Here’s that definition:
+svc-mon.yaml
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: todo
+spec:
+  selector:
+    matchLabels:
+      app: todo
+  endpoints:
+    - port: web
+A ServiceMonitor uses a selector, similar to a Service or a Deployment. We previously applied the
+app: todo
+label to the Service, so the
+matchLabels
+field will cause Prometheus to pick up the Service. The
+endpoints
+field matches the name of the port we declared in the Service in
+Listing 20-1
+. Prometheus requires us to name the port in order to match it.
+Let’s apply this ServiceMonitor to the cluster:
+root@host01:~#
+kubectl -n todo apply -f /opt/svc-mon.yaml
+servicemonitor.monitoring.coreos.com/todo created
+As before, we need to make sure we deploy this to the
+todo
+Namespace because Prometheus will be configured to look for Services with the appropriate label in the same Namespace as the ServiceMonitor.
+Because the Prometheus Operator is watching for new ServiceMonitor resources, using the API we saw in
+Chapter 17
+, it picks up this new resource and immediately reconfigures Prometheus to start scraping the Service. Prometheus then takes a few minutes to register the new targets and start scraping them. If we go back to the Prometheus Targets page after this is complete, the new Service shows up, as illustrated in
+Figure 20-5
+.
+Figure 20-5: Prometheus monitoring todo
+If we click the
+show more
+button next to the
+todo
+Service, we see its three Endpoints, shown in
+Figure 20-6
+.
+Figure 20-6: Todo Endpoints
+It may be surprising that we created a ServiceMonitor, specifying the
+todo
+Service as the target, and yet Prometheus is scraping Pods. However, it’s essential that Prometheus works this way. Because Prometheus is using a regular HTTP request to scrape metrics, and because Service traffic routing chooses a random Pod for every new connection, Prometheus would get metrics from a random Pod each time it did scraping. By reaching behind the Service to identify the Endpoints, Prometheus is able to scrape metrics from all the Service’s Pods, enabling aggregation of metrics for the entire application.
+We’ve successfully incorporated the Node.js and custom metrics for the
+todo
+application into Prometheus, in addition to the default resource utilization metrics already collected. Before we finish our look at application monitoring, let’s run a Prometheus query to demonstrate that the data is being pulled in. First, you should interact with the
+todo
+application using the URL printed out by the automation scripts. This will ensure that there are metrics to display and that enough time has passed for Prometheus to scrape that data. Next, open the Prometheus web interface again, or click
+Prometheus
+at the top of any Prometheus web page to go back to the main page. Then, type
+api_success
+into the query box and press ENTER. Custom
+todo
+metrics should appear, as illustrated in
+Figure 20-7
+.
+Figure 20-7: Todo metric query
+We’re now able to monitor both the Kubernetes cluster and the
+todo
+application.
+Final Thoughts
+In this chapter, we’ve explored how the various features of containers and Kubernetes come together to enable us to deploy a scalable, resilient application. We’ve used everything we learned about containers—Deployments, Services, networking, persistent storage, Kubernetes Operators, and role-based access control—to not only deploy the
+todo
+application but also configure Prometheus monitoring of our cluster and our application.
+Kubernetes is a complex platform with many different capabilities, and new capabilities are being added all the time. The purpose of this book is not only to show you the most important features you need to run an application on Kubernetes, but also to give you the tools to explore a Kubernetes cluster for troubleshooting and performance monitoring. As a result, you should be equipped to explore new features as they are added to Kubernetes and to conquer the challenges of deploying complex applications and getting them to perform well.
+
+INDEX
+A
+abstraction,
+xix
+,
+4
+,
+51
+access control,
+8
+,
+107
+,
+114
+,
+174
+,
+188
+,
+195
+,
+201
+,
+233
+,
+268–270
+,
+272
+,
+295
+,
+339
+,
+343
+access mode,
+262
+ReadWriteMany
+,
+262
+ReadWriteOnce
+,
+262
+Address Resolution Protocol,
+137
+,
+140
+,
+141
+proxy ARP,
+137
+affinity,
+296
+,
+297
+,
+299
+,
+300
+,
+302
+,
+303
+,
+306
+air-gapped systems,
+20
+Alertmanager,
+334
+,
+335
+Alpine Linux,
+12
+,
+72
+,
+74
+,
+155–157
+,
+179
+,
+180
+,
+183
+,
+198
+,
+199
+Amazon Web Services,
+xxi
+,
+16
+,
+91
+,
+96
+,
+139
+,
+250
+,
+332
+Ansible,
+xx
+,
+xxi
+anti-affinity,
+297–300
+,
+302
+,
+303
+,
+317
+,
+330
+API server.
+See
+Kubernetes: API server
+API, Kubernetes.
+See
+Kubernetes: REST API
+apk
+,
+157
+,
+183
+application server,
+5
+apt
+,
+27
+,
+92–94
+architecture,
+1
+,
+3–7
+,
+17
+,
+87–89
+,
+124
+,
+144
+,
+153
+,
+188
+,
+218
+,
+228
+,
+249
+,
+296
+,
+302
+,
+303
+,
+309
+,
+321
+ArgoCD,
+267
+ARP.
+See
+Address Resolution Protocol
+authentication,
+99
+,
+105
+,
+130
+,
+188
+,
+190–192
+,
+195
+,
+200
+,
+203
+,
+207
+,
+210
+,
+269
+,
+275
+,
+278
+,
+285
+,
+326
+,
+329
+,
+333
+authorization,
+188
+,
+190
+,
+191
+,
+193
+,
+203
+,
+295
+availability zones,
+139
+,
+297
+,
+298
+,
+302
+AWS.
+See
+Amazon Web Services
+B
+background processing,
+312
+base64 encoding,
+277
+bind-tools
+,
+157
+breakpoints,
+184
+br_netfilter
+,
+91
+Brooks, Fred,
+5
+Buildah,
+26
+bursty,
+309
+BusyBox,
+24
+,
+28
+,
+29
+,
+35
+,
+53–58
+,
+60
+,
+61
+,
+63–66
+,
+76
+,
+82
+,
+83
+,
+133
+,
+155
+,
+156
+C
+C,
+179
+,
+180
+caching,
+295
+Calico,
+100–102
+,
+106–109
+,
+127
+,
+128
+,
+130
+,
+131
+,
+133–135
+,
+137
+,
+139–141
+,
+144
+,
+146
+,
+147
+,
+149
+,
+194
+,
+211
+,
+213
+,
+280
+,
+281
+,
+288
+Installation,
+281
+cat
+,
+207
+cgroups,
+313
+.
+See also
+Linux: cgroups
+change tracking,
+224
+,
+267
+character special file,
+80
+chroot,
+22
+,
+70
+cloud native,
+4
+,
+6
+,
+7
+,
+17
+,
+88
+,
+89
+,
+298
+,
+316
+Cloud Native Computing Foundation,
+91
+ClusterRole,
+195–197
+,
+201
+,
+286
+,
+287
+ClusterRoleBinding,
+197
+,
+202
+CNI.
+See
+Container Network Interface
+cohesion,
+4
+co-location,
+296
+,
+297
+ConfigMap,
+265
+,
+267–274
+,
+276
+,
+278
+configuration,
+8
+,
+264–267
+,
+274
+,
+279
+,
+280
+,
+285
+,
+323
+,
+324
+,
+330
+drift,
+267
+externalized,
+267
+,
+269
+,
+272
+,
+278
+,
+329
+files,
+272
+,
+273
+,
+278
+,
+281
+repository,
+274–276
+containerd
+,
+23
+,
+25–27
+,
+29
+,
+32
+,
+91
+,
+107
+,
+206
+,
+208
+container engine,
+23
+,
+83
+,
+203
+container image,
+8
+,
+9
+,
+13
+,
+23
+,
+24
+,
+35
+,
+52
+,
+69–72
+,
+74
+,
+75
+,
+77
+,
+81–83
+,
+98
+,
+101
+,
+112–114
+,
+116
+,
+155
+,
+173
+,
+180
+,
+181
+,
+185
+,
+208
+,
+260
+,
+272
+,
+278
+,
+285
+,
+328
+Container Network Interface,
+28
+,
+100
+,
+129
+,
+130
+,
+145
+,
+147
+,
+148
+,
+239
+container orchestration,
+3
+,
+9
+,
+14
+,
+17
+,
+37
+,
+51
+,
+84
+,
+87
+,
+88
+,
+188
+,
+323
+container platform,
+9
+,
+23
+container runtime,
+9
+,
+19
+,
+23
+,
+24
+,
+27
+,
+30
+,
+32
+,
+173
+,
+174
+,
+176
+,
+178
+,
+205
+,
+206
+,
+208
+,
+212
+,
+213
+,
+218
+,
+233
+,
+235
+,
+237
+,
+238
+,
+248
+,
+265
+,
+270
+,
+278
+,
+323
+Container Runtime Interface,
+27
+,
+113
+,
+208
+containers,
+3
+,
+7
+,
+8
+,
+12
+,
+17
+,
+22
+,
+32
+,
+107
+,
+108
+,
+111
+,
+128
+,
+167
+,
+219
+,
+233
+,
+249
+,
+279
+,
+292
+,
+310
+,
+323
+,
+343
+environment variables,
+12
+,
+70
+,
+74
+,
+82
+,
+178
+,
+179
+,
+183
+,
+253
+,
+264–266
+,
+268
+,
+269
+,
+272
+,
+273
+,
+278
+,
+328
+,
+329
+exit code,
+122
+,
+178
+,
+181
+,
+221
+filesystems,
+11
+,
+21
+,
+22
+,
+32
+,
+53
+,
+67
+,
+70–72
+,
+74
+,
+78
+,
+80
+,
+81
+,
+83
+,
+84
+,
+112
+,
+323
+image building,
+75
+,
+180
+image layers,
+73–78
+,
+81
+limits,
+33
+,
+49
+,
+122
+,
+170
+,
+214
+,
+232–235
+,
+238
+,
+244–246
+,
+248
+,
+310–317
+,
+319
+,
+329
+logs,
+179
+,
+182
+networking,
+11
+,
+13
+,
+22
+,
+26
+,
+28
+,
+32
+,
+49
+,
+51
+,
+67
+,
+112
+,
+128
+,
+129
+,
+131
+,
+134
+,
+138
+,
+160
+,
+343
+non-root user,
+xxi
+overhead,
+8
+,
+14
+,
+46
+,
+67
+,
+77
+,
+78
+,
+84
+,
+209
+packaging,
+8
+,
+17
+,
+23
+,
+69
+,
+84
+port forwarding,
+13
+,
+76
+,
+103
+,
+131
+,
+134
+,
+183
+,
+184
+private image,
+174
+,
+175
+registry,
+70
+,
+76
+,
+77
+,
+174
+,
+175
+storage,
+67
+,
+72
+,
+81
+versioning,
+8
+,
+10
+,
+72
+,
+74–76
+volume mount,
+12
+,
+26
+,
+30
+,
+112
+,
+125
+,
+251–253
+,
+260
+,
+272–274
+,
+303
+Container Storage Interface,
+102
+,
+108
+,
+250
+,
+251
+,
+258
+Control groups.
+See
+Linux: cgroups
+copy on write,
+78
+CoreDNS,
+156
+coupling,
+4
+,
+296
+,
+306
+CPU instruction sets,
+168
+CRD.
+See
+CustomResourceDefinition
+CRI (Container Runtime Interface),
+27
+,
+113
+,
+208
+crictl
+,
+27
+,
+28
+,
+35
+,
+36
+,
+41
+,
+45
+,
+52
+,
+55
+,
+56
+,
+91
+,
+105
+,
+107
+,
+113
+,
+114
+,
+126
+,
+132
+,
+208
+,
+217
+,
+237
+,
+251
+,
+252
+CRI-O,
+26–29
+,
+32
+,
+36
+,
+39
+,
+41
+,
+43
+,
+45
+,
+52
+,
+55
+,
+57
+,
+58
+,
+60
+,
+62
+,
+63
+,
+65
+,
+66
+,
+206
+,
+208
+cron
+,
+124
+CronJob,
+122–124
+,
+243
+,
+264
+cross-cutting concerns,
+87–89
+,
+106
+CSI.
+See
+Container Storage Interface
+curl
+,
+76
+,
+93
+,
+101
+,
+103
+,
+109
+,
+154
+,
+165
+,
+189
+,
+190
+,
+199
+,
+221–223
+,
+231
+,
+232
+,
+260
+,
+261
+,
+284
+,
+303
+,
+304
+,
+333
+customization,
+89
+,
+279
+,
+280
+,
+285
+,
+288
+,
+292
+CustomResourceDefinition,
+145
+,
+280–284
+,
+286
+,
+288
+,
+289
+,
+291
+,
+292
+,
+324
+Postgresql,
+288–290
+Sample,
+282
+,
+283
+,
+286–288
+D
+DaemonSet,
+101
+,
+108
+,
+122
+,
+127
+,
+128
+,
+131
+,
+145
+,
+146
+,
+158
+,
+211
+,
+213
+,
+250
+,
+298
+data centers,
+297
+dd
+,
+72
+Debian,
+70
+,
+71
+declarative configuration,
+14
+,
+89
+,
+90
+,
+111
+,
+119
+,
+280
+denial-of-service,
+234
+Deployment,
+15
+,
+115–122
+,
+124
+,
+125
+,
+127
+,
+152–154
+,
+156
+,
+163
+,
+172
+,
+179
+,
+181–183
+,
+188
+,
+194
+,
+196
+,
+198
+,
+200–202
+,
+207
+,
+212–214
+,
+216
+,
+219–222
+,
+224–229
+,
+234–236
+,
+238
+,
+240
+,
+243
+,
+244
+,
+248
+,
+249
+,
+252
+,
+259–264
+,
+266–269
+,
+271–274
+,
+278
+,
+280
+,
+284–289
+,
+292
+,
+297
+,
+298
+,
+316
+,
+318–320
+,
+324
+,
+326–328
+,
+330
+,
+341
+,
+343
+autoscaling,
+326
+,
+327
+,
+329
+,
+330
+.
+See also
+HorizontalPodAutoscaler; Kubernetes: autoscaling
+replicas,
+116–121
+,
+247
+,
+327
+,
+330
+scaling,
+16
+,
+119
+,
+122
+,
+212
+,
+215
+,
+247
+,
+261
+,
+263
+,
+316
+,
+318
+,
+324
+device plug-in,
+303
+,
+306
+dig
+,
+157
+,
+158
+discovery,
+8
+,
+152
+distributed application,
+6
+,
+8
+,
+88
+,
+218
+,
+296
+,
+301
+,
+309
+distributed storage,
+249
+,
+250
+,
+296
+,
+326
+DNS.
+See
+Domain Name System
+Docker,
+9
+,
+10
+,
+16
+,
+23
+,
+24
+,
+70
+,
+72
+,
+73
+,
+75
+,
+77
+,
+82
+,
+208
+docker build
+,
+75
+docker run
+,
+10
+,
+12
+Dockerfile
+,
+74
+,
+75
+,
+81
+,
+180
+Docker Hub,
+77
+,
+174
+,
+175
+,
+180
+Docker multistage build,
+180
+Domain Name System,
+125
+,
+138
+,
+155–157
+,
+161
+,
+164
+,
+165
+,
+209
+,
+210
+,
+255
+downtime,
+211
+,
+324
+,
+327
+E
+encryption,
+270
+,
+278
+Endpoint,
+17
+,
+155
+,
+230
+,
+231
+,
+284
+,
+299
+,
+339
+,
+341
+,
+342
+environment variables,
+12
+,
+70
+,
+74
+,
+82
+,
+178
+,
+179
+,
+183
+,
+253
+,
+264–266
+,
+268
+,
+269
+,
+272
+,
+273
+,
+275
+,
+278
+,
+328
+,
+329
+etcd
+,
+211
+,
+274–276
+,
+278
+,
+280
+etcdctl
+,
+275
+,
+276
+extended resource,
+303–305
+extensibility,
+280
+,
+292
+,
+324
+F
+failover,
+7
+,
+111
+,
+112
+,
+115
+,
+116
+,
+124
+,
+149
+,
+151
+,
+153
+,
+160
+,
+166
+,
+185
+,
+249
+,
+256
+,
+264
+,
+291
+,
+296
+,
+323
+,
+324
+,
+326
+,
+330
+,
+332
+Flannel,
+139
+flexibility,
+296
+FluxCD,
+267
+G
+gcc
+,
+180
+gdb
+,
+183–185
+gdbserver
+,
+184
+Git,
+267
+GitHub,
+334
+GitHub Actions,
+180
+GitOps,
+267
+Google Container Engine,
+250
+GPG,
+92
+graceful degradation,
+1
+,
+321
+,
+324
+,
+332
+Grafana,
+334–337
+,
+339
+Graphics Processing Unit (GPU),
+234
+,
+243
+,
+303
+grep
+,
+159
+H
+head
+,
+277
+high availability,
+15
+,
+91
+,
+96
+,
+98
+,
+105
+,
+109
+,
+112
+,
+164–166
+,
+192
+,
+216
+,
+228
+,
+256
+,
+275
+,
+276
+,
+279
+,
+288–291
+,
+296
+,
+298
+,
+324
+,
+325
+HorizontalPodAutoscaler,
+120
+,
+121
+,
+280
+,
+316
+,
+329
+,
+335
+horizontal scaling,
+309
+,
+317
+HTTP Bearer authentication,
+193
+,
+199
+,
+207
+HTTP header,
+164–166
+HTTP path,
+164
+HTTP return code,
+221
+,
+224
+,
+232
+,
+334
+HTTP reverse proxy,
+163
+,
+166
+,
+190
+I
+ICMP,
+138
+,
+141–143
+,
+158
+,
+160
+idempotence,
+90
+,
+124
+,
+224
+,
+288
+identity management,
+191
+Ingress,
+103
+,
+149
+,
+151
+,
+152
+,
+162–166
+,
+332
+ingress controller,
+100
+,
+103
+,
+160
+,
+161
+,
+163–165
+,
+267
+interdependency,
+5
+iperf3
+,
+47
+,
+48
+,
+239–241
+,
+296
+,
+297
+,
+299–302
+iptables
+,
+65
+,
+66
+,
+92
+,
+158–160
+,
+216
+,
+230
+,
+301
+,
+329
+,
+331
+iSCSI,
+102
+isolation,
+8
+,
+10
+,
+17
+,
+19–23
+,
+27
+,
+31
+,
+32
+,
+48
+,
+52
+,
+56
+,
+71
+,
+84
+,
+173
+,
+323
+J
+Java Enterprise,
+5
+Job,
+122–125
+,
+177
+,
+264
+jq
+,
+30
+,
+55
+,
+56
+,
+72
+,
+80
+,
+82
+,
+83
+,
+100
+,
+102
+,
+132
+,
+136
+,
+181
+,
+182
+,
+237
+,
+260
+,
+276
+,
+277
+,
+304
+JSONPath,
+260
+K
+K3s,
+14
+k3s
+,
+324
+kubeadm
+,
+90
+,
+92–94
+,
+96–100
+,
+131
+,
+188
+,
+189
+,
+191
+,
+193
+,
+206
+,
+208–211
+,
+250
+kubectl
+,
+14
+,
+93
+,
+98
+,
+99
+,
+101
+,
+103
+,
+104
+,
+106
+,
+108
+,
+113
+,
+114
+,
+117
+,
+126
+,
+183
+,
+184
+,
+188
+,
+189
+,
+191
+,
+203
+,
+207
+,
+260
+,
+263
+,
+276
+,
+278
+,
+282
+annotate
+,
+104
+apply
+,
+101
+,
+103
+,
+113
+,
+119
+,
+162
+,
+176
+,
+177
+,
+195
+,
+224
+,
+283
+,
+290
+certificate
+,
+105
+cp
+,
+261
+delete
+,
+119
+,
+126
+,
+213
+describe
+,
+99
+,
+107
+,
+114
+,
+117
+,
+169
+,
+171
+,
+173
+,
+175
+,
+176
+,
+178
+,
+181
+,
+221
+,
+236
+,
+262
+,
+283
+drain
+,
+212
+edit
+,
+182
+exec
+,
+126
+,
+136
+,
+182
+,
+183
+,
+198
+,
+255
+,
+269
+,
+271
+,
+274
+,
+328
+get
+,
+98
+,
+108
+,
+113
+,
+118
+,
+127
+,
+136
+,
+169
+,
+173
+,
+176
+,
+177
+,
+181
+,
+183
+,
+280
+label
+,
+169
+,
+170
+logs
+,
+115
+,
+178
+,
+182
+,
+224
+,
+301
+patch
+,
+162
+,
+301
+,
+303
+port-forward
+,
+184
+run
+,
+108
+,
+255
+scale
+,
+119
+,
+216
+set
+,
+176
+top
+,
+171
+,
+214
+,
+236
+uncordon
+,
+214
+kube-dns
+,
+156
+kubelet
+,
+89
+,
+93–96
+,
+98
+,
+100
+,
+104
+,
+105
+,
+113
+,
+114
+,
+121
+,
+130
+,
+131
+,
+133
+,
+144
+,
+146
+,
+173
+,
+176
+,
+188
+,
+191
+,
+192
+,
+203
+,
+205–218
+,
+224–226
+,
+228
+,
+239
+,
+242
+,
+251
+,
+252
+,
+274
+,
+303
+,
+306
+,
+330
+,
+335
+,
+336
+,
+339
+kube-prometheus
+,
+333
+,
+334
+,
+336
+,
+339
+kube-proxy
+,
+158–160
+,
+162
+,
+163
+,
+284
+,
+301
+kube-vip
+,
+91
+,
+96
+,
+97
+KUBECONFIG
+,
+99
+,
+191
+,
+202
+,
+245
+Kubernetes,
+xix
+,
+xxi
+,
+4
+,
+9
+,
+14
+,
+16
+,
+17
+,
+27
+,
+37
+,
+43
+,
+44
+,
+49
+,
+51
+,
+52
+,
+67
+,
+84
+,
+85
+,
+87
+,
+101
+,
+105
+,
+111
+,
+128
+,
+134
+,
+135
+,
+152
+,
+156
+,
+157
+,
+167
+,
+176
+,
+177
+,
+179
+,
+185
+,
+187
+,
+194
+,
+199
+,
+205
+,
+214
+,
+218
+,
+219
+,
+233
+,
+250
+,
+264
+,
+265
+,
+269
+,
+280
+,
+292
+,
+296
+,
+302
+,
+303
+,
+309
+,
+310
+,
+315
+,
+323
+,
+334
+,
+343
+annotations,
+104
+,
+242
+API server,
+14
+,
+89
+,
+96
+,
+97
+,
+99
+,
+101
+,
+105–107
+,
+118
+,
+126
+,
+184
+,
+187–196
+,
+198–200
+,
+203
+,
+207
+,
+209
+,
+210
+,
+275
+,
+280
+,
+281
+,
+284
+,
+285
+,
+287–289
+,
+292
+,
+304
+,
+333
+,
+334
+autoscaling,
+14
+,
+104
+,
+111
+,
+117
+,
+120–122
+,
+317
+back-off algorithm,
+174–177
+backward compatibility,
+121
+bootstrap,
+95
+,
+96
+,
+105
+,
+190
+,
+193
+,
+194
+,
+199
+,
+207
+certificates,
+95–97
+,
+99
+,
+104
+,
+105
+,
+189–193
+,
+195
+,
+199
+,
+202
+,
+207
+,
+213
+,
+275
+,
+333
+client API,
+284
+custom object,
+285
+events,
+284–288
+stream,
+285
+watch object,
+285
+cloud controller,
+89
+,
+161
+,
+188
+cluster state,
+88
+,
+89
+,
+279
+,
+280
+conformance,
+91
+controller manager,
+96
+,
+104
+,
+105
+,
+187
+,
+193
+,
+195
+,
+212
+,
+284
+control plane,
+89–91
+,
+96–98
+,
+100
+,
+106–109
+,
+112
+,
+118
+,
+127
+,
+130
+,
+160
+,
+185
+,
+187
+,
+188
+,
+191
+,
+205
+,
+210–212
+,
+216–218
+,
+275
+,
+276
+,
+279
+,
+284
+,
+324
+,
+333
+,
+336
+cordon,
+213
+,
+214
+debugging,
+114
+,
+115
+,
+117
+,
+120
+,
+149
+,
+156
+,
+160
+,
+166
+,
+167
+,
+169
+,
+170
+,
+173
+,
+175–179
+,
+182–185
+,
+224
+,
+275
+,
+343
+distributions,
+14
+,
+15
+,
+90
+,
+144
+,
+298
+environment variables,
+178
+,
+179
+,
+183
+,
+253
+,
+264–266
+,
+268
+,
+269
+,
+272
+,
+273
+,
+278
+,
+328
+,
+329
+event log,
+90
+,
+114
+,
+117
+,
+169
+,
+171
+,
+173–175
+,
+215
+,
+223
+group,
+195
+,
+197
+ingress controller,
+100
+,
+103
+,
+160
+,
+161
+,
+163–165
+,
+267
+IP address management,
+108
+,
+113
+,
+130
+,
+133
+,
+134
+,
+137
+,
+140
+,
+141
+,
+144
+,
+148
+,
+149
+,
+152–154
+,
+158
+,
+160
+,
+209
+,
+254
+,
+281
+,
+332
+labels,
+117
+,
+118
+,
+120
+,
+168–170
+,
+286
+,
+298
+,
+327
+,
+328
+,
+330
+,
+336
+,
+341
+large clusters,
+297
+limits,
+122
+,
+170
+,
+214
+,
+232–235
+,
+238
+,
+244–246
+,
+248
+,
+305
+,
+310–317
+,
+319
+,
+329
+logs,
+115
+,
+123
+,
+178
+,
+182
+,
+202
+,
+222
+,
+224
+,
+287
+,
+290
+,
+301
+,
+328
+metrics server,
+104
+,
+105
+,
+121
+,
+157
+,
+158
+,
+194
+,
+207
+,
+236
+,
+330
+,
+335
+networking,
+51
+,
+57
+,
+67
+,
+87
+,
+91
+,
+95
+,
+99
+,
+100
+,
+103
+,
+108
+,
+109
+,
+127–133
+,
+144
+,
+149
+,
+151
+,
+152
+,
+158
+,
+160
+,
+166
+,
+209
+,
+343
+customized,
+144
+,
+148
+,
+149
+nodes,
+89–91
+,
+97–102
+,
+109
+,
+112
+,
+118
+,
+128–130
+,
+133
+,
+139
+,
+162
+,
+165
+,
+168
+,
+169
+,
+188
+,
+192
+,
+194
+,
+203
+,
+205
+,
+211
+,
+213–216
+,
+218
+,
+233
+,
+249
+,
+251
+,
+255
+,
+275
+,
+276
+,
+296
+,
+298
+,
+299
+,
+303
+,
+305
+,
+309
+,
+317–321
+,
+323
+,
+324
+,
+330
+,
+331
+,
+336
+operators,
+101
+,
+256
+,
+278
+,
+288–292
+,
+324–326
+,
+343
+resource naming,
+121
+,
+196
+,
+201
+,
+256
+,
+257
+,
+263
+,
+280
+,
+282
+,
+283
+,
+327
+resource patching,
+104
+,
+161
+,
+162
+,
+222
+,
+224
+,
+301
+,
+303
+,
+306
+resource schema,
+282
+resource updates,
+172
+,
+176
+,
+182
+,
+183
+,
+262
+,
+264
+,
+327
+resource versioning,
+95
+,
+96
+,
+112
+,
+116
+,
+121
+,
+196
+,
+280
+,
+282
+,
+284
+resource watch,
+284
+,
+285
+resources.
+See names of individual resources
+REST API,
+188
+,
+203
+,
+280
+,
+303
+roles,
+195
+scheduler,
+49
+,
+88
+,
+89
+,
+102
+,
+109
+,
+113–115
+,
+128
+,
+135
+,
+167–170
+,
+172
+,
+173
+,
+187
+,
+188
+,
+233
+,
+235
+,
+296–299
+,
+302
+,
+303
+,
+305
+,
+307
+,
+309
+,
+314
+,
+317–320
+,
+323
+security,
+188
+,
+193
+,
+243
+,
+266–269
+,
+278
+selectors,
+117
+,
+118
+,
+120
+,
+128
+,
+154
+,
+162
+,
+168
+,
+169
+,
+228
+,
+328
+,
+331
+,
+341
+service account,
+130
+,
+190
+static Pods,
+210
+,
+211
+storage,
+87
+,
+100
+,
+102
+,
+108
+,
+109
+,
+124
+,
+126
+,
+127
+,
+248–250
+,
+267
+,
+323
+,
+343
+traffic routing,
+109
+,
+129
+,
+130
+,
+133
+,
+134
+,
+136
+,
+137
+,
+139–142
+,
+149
+,
+151
+,
+152
+,
+154
+,
+155
+,
+158
+,
+160
+,
+163
+,
+165
+,
+166
+,
+184
+,
+187
+,
+188
+,
+199
+,
+219
+,
+228
+,
+279
+,
+284
+,
+300–302
+,
+323
+,
+329
+,
+331
+,
+342
+update strategy,
+262
+volume access mode,
+262
+volume mount,
+112
+,
+125
+,
+251–253
+,
+260
+,
+272–274
+Kubic,
+27
+L
+least privilege,
+269
+limits,
+33
+,
+49
+,
+122
+,
+170
+,
+214
+,
+232–235
+,
+238
+,
+244–246
+,
+248
+,
+305
+,
+310–317
+,
+319
+,
+329
+CPU,
+34
+,
+38–45
+,
+47
+,
+173
+,
+235
+,
+237
+,
+314
+,
+329
+memory,
+43–45
+,
+47
+,
+235–239
+,
+314
+network,
+47
+,
+48
+,
+131
+,
+234
+,
+238
+,
+240–243
+Linux,
+180
+cgroups,
+37–41
+,
+43
+,
+44
+,
+46
+,
+47
+,
+49
+,
+236–238
+,
+310–312
+,
+314
+,
+315
+chroot,
+22
+Completely Fair Scheduler,
+34
+distribution,
+10
+,
+74
+kernel,
+10–12
+,
+22
+,
+27
+,
+31
+,
+32
+,
+34
+,
+78
+,
+91
+,
+92
+,
+248
+namespaces,
+19
+,
+25
+,
+29–32
+,
+49
+,
+51
+,
+55–65
+,
+76
+,
+129–134
+,
+137
+,
+171
+,
+208
+OOM killer,
+46
+permissions,
+21
+,
+22
+,
+32
+PID,
+25
+,
+30
+,
+31
+,
+36
+,
+39
+,
+56
+,
+112
+scheduler,
+34
+signal,
+31
+,
+32
+,
+46
+swap,
+43
+traffic control,
+47–49
+,
+239
+,
+240
+,
+242
+,
+243
+users,
+xxi
+,
+21
+,
+44
+load balancing,
+7
+,
+9
+,
+14
+,
+17
+,
+67
+,
+88
+,
+96
+,
+109
+,
+149
+,
+151–154
+,
+159
+,
+160
+,
+164
+,
+165
+,
+192
+,
+228
+,
+232
+,
+254
+,
+267
+,
+309
+,
+314
+,
+317
+,
+321
+,
+330
+Longhorn,
+102
+,
+103
+,
+106
+,
+108
+,
+194
+,
+211
+,
+213
+,
+250–252
+,
+255
+,
+257
+,
+258
+,
+280
+,
+326
+long polling,
+284
+lsns
+,
+25
+,
+30
+,
+31
+,
+55
+M
+macvlan
+,
+149
+masquerade.
+See
+Network Address Translation
+memory access error,
+179
+message-driven architecture,
+153
+metrics server,
+104
+,
+105
+,
+121
+,
+157
+,
+158
+,
+194
+,
+207
+,
+236
+microservice,
+5–7
+,
+17
+,
+51
+,
+87
+,
+89
+,
+109
+,
+228
+Microsoft Azure,
+96
+,
+250
+modularity,
+4
+monitoring,
+8
+,
+9
+,
+14
+,
+16
+,
+17
+,
+116
+,
+119–121
+,
+187
+,
+188
+,
+205
+,
+218
+,
+321
+,
+324
+,
+330–333
+,
+336
+,
+339
+,
+342
+,
+343
+mount
+,
+79
+,
+80
+,
+209
+,
+210
+multitasking,
+20
+multitenancy,
+37
+,
+38
+,
+88
+,
+106
+,
+233
+,
+268
+Multus,
+144–147
+Mythical Man-Month, The
+,
+5
+N
+Namespace,
+102
+,
+104
+,
+106–108
+,
+114
+,
+127
+,
+156–158
+,
+194–198
+,
+200–202
+,
+243–245
+,
+247
+,
+248
+,
+268
+,
+269
+,
+282
+,
+288
+,
+312
+,
+321
+,
+324
+,
+327
+,
+336
+,
+339–341
+calico-system
+,
+102
+,
+107
+,
+127
+default
+,
+107
+,
+108
+,
+113–115
+,
+156
+,
+158
+,
+165
+,
+197
+,
+199
+,
+202
+,
+287
+kube-system
+,
+107
+,
+156–158
+,
+193
+,
+197
+,
+200
+,
+202
+longhorn-system
+,
+108
+monitoring
+,
+335
+,
+337
+,
+339
+sample
+,
+194
+,
+195
+,
+197
+,
+199
+,
+200
+,
+202
+,
+244
+,
+245
+todo
+,
+324
+,
+328
+,
+330
+,
+338–341
+namespaces, Linux.
+See
+Linux: namespaces
+Nano,
+182
+NAT.
+See
+Network Address Translation
+ndots
+,
+157
+network
+bandwidth,
+6
+,
+296
+,
+300
+,
+302
+bridge,
+25
+,
+51
+,
+60–64
+,
+92
+,
+133
+burst,
+243
+egress,
+47
+,
+48
+,
+242
+firewall,
+26
+,
+61
+,
+91
+,
+92
+,
+133
+,
+135
+,
+139
+,
+158–160
+,
+216
+fragmentation,
+143
+ingress,
+242
+jumbo frames,
+144
+latency,
+296
+MAC,
+60
+,
+137
+,
+138
+,
+140–143
+maximum transmission unit,
+143
+MTU,
+143
+namespaces.
+See
+Linux: namespaces
+port conflicts,
+52–54
+,
+67
+,
+134
+,
+163
+routing,
+52
+,
+54
+,
+60
+,
+61
+,
+64
+,
+65
+,
+92
+,
+134–137
+,
+139
+,
+141
+,
+142
+,
+144
+,
+149
+token bucket filter,
+48
+,
+242
+,
+243
+tracing,
+62
+,
+63
+traffic control,
+47–49
+virtual device,
+51
+,
+52
+,
+54
+,
+58
+,
+60
+,
+66
+,
+129–131
+,
+133
+,
+134
+,
+141
+,
+239
+,
+323
+virtual Ethernet (veth) pair,
+58–61
+,
+63
+,
+133
+,
+134
+,
+137
+,
+141
+,
+243
+VLAN,
+47
+,
+144
+,
+149
+Network Address Translation,
+25
+,
+52
+,
+64–66
+,
+134
+,
+159
+,
+160
+NetworkAttachmentDefinition,
+145
+,
+148
+NFS,
+102
+NGINX,
+13
+,
+14
+,
+23
+,
+52–55
+,
+58
+,
+61
+,
+70–72
+,
+75
+,
+76
+,
+80
+,
+81
+,
+103
+,
+108
+,
+109
+,
+112–117
+,
+119
+,
+121
+,
+152–156
+,
+158
+,
+159
+,
+161–165
+,
+170
+,
+220
+,
+221
+,
+224
+,
+225
+,
+227–231
+,
+236–238
+,
+259
+,
+260
+,
+263
+,
+264
+,
+272
+,
+274
+Node,
+304
+Node.js,
+15
+,
+334
+,
+339
+,
+342
+O
+OOM killer,
+46
+,
+315
+,
+316
+oom_score_adj
+,
+315
+,
+316
+Open Container Initiative (OCI),
+82
+,
+83
+OpenShift,
+26
+OpenSUSE,
+27
+optimization,
+5
+overcommitment,
+238
+,
+314
+,
+319
+overlay filesystem,
+78
+,
+80
+,
+81
+,
+84
+overlay network,
+128–130
+,
+134–137
+,
+142–144
+,
+149
+,
+151
+,
+152
+,
+158
+,
+160
+,
+209
+P
+pause process,
+29
+,
+55
+,
+56
+,
+133
+,
+208
+peer review,
+224
+performance,
+6
+,
+234
+,
+238
+,
+292
+,
+296
+,
+302
+,
+307
+,
+309
+,
+310
+,
+314
+,
+317
+,
+321
+,
+324
+,
+330
+,
+332
+,
+343
+performance margin,
+310
+,
+317
+PersistentVolume,
+256–259
+,
+272
+,
+274
+PersistentVolumeClaim,
+255–260
+,
+262–264
+,
+325
+,
+326
+pgrep
+,
+207
+,
+208
+ping
+,
+54
+,
+58–64
+,
+66
+,
+109
+,
+136–139
+,
+141
+,
+142
+,
+158
+Pod,
+15
+,
+16
+,
+28
+,
+35
+,
+44
+,
+56
+,
+107–109
+,
+112–115
+,
+117–119
+,
+121–128
+,
+130–136
+,
+138–141
+,
+143–149
+,
+151–160
+,
+162
+,
+163
+,
+167–173
+,
+176
+,
+177
+,
+179
+,
+181
+,
+183
+,
+184
+,
+188
+,
+196–202
+,
+208–214
+,
+217–219
+,
+221–225
+,
+228
+,
+230
+,
+233–240
+,
+242–245
+,
+249
+,
+250
+,
+252
+,
+254
+,
+256
+,
+257
+,
+260–264
+,
+266–271
+,
+274
+,
+278
+,
+281
+,
+284
+,
+285
+,
+287–290
+,
+296–303
+,
+305–307
+,
+309–321
+,
+327–329
+,
+331
+,
+335
+,
+339
+,
+340
+,
+342
+eviction,
+213–215
+,
+311
+,
+314–317
+,
+319–321
+logs,
+115
+,
+123
+,
+178
+,
+182
+,
+202
+,
+222
+,
+224
+,
+287
+,
+290
+,
+301
+,
+328
+multiple containers,
+296
+priority,
+316
+,
+317
+,
+319
+,
+321
+restartPolicy
+,
+122
+status
+ContainerCreating
+,
+262
+CrashLoopBackOff
+,
+177
+,
+301
+CreateContainerConfigError
+,
+268
+Error
+,
+177
+,
+301
+ImagePullBackOff
+,
+174
+,
+176
+,
+177
+OutOfMemory
+,
+216
+Pending
+,
+168
+,
+170
+,
+173
+,
+175
+,
+262
+,
+306
+,
+319
+Running
+,
+113
+,
+222
+Terminating
+,
+217
+,
+222
+Podman,
+26
+Postgres Operator,
+288–291
+,
+324–326
+,
+328
+PostgreSQL,
+15
+,
+177–179
+,
+225
+,
+226
+,
+252–256
+,
+266
+,
+267
+,
+269
+,
+288–291
+,
+324–326
+,
+328
+,
+329
+predictability,
+309
+,
+310
+,
+314
+,
+321
+PriorityClass,
+317–321
+privilege escalation,
+21
+probes,
+218–220
+,
+223
+,
+232
+,
+302
+exec,
+220
+,
+221
+,
+223
+,
+225
+HTTP,
+223–225
+liveness,
+220–224
+,
+226–229
+,
+232
+readiness,
+220
+,
+226
+,
+228–232
+startup,
+220
+,
+226–228
+,
+232
+TCP,
+225
+,
+226
+process,
+11–14
+,
+17
+,
+19
+,
+20
+,
+33
+,
+46
+isolation,
+8
+,
+10
+,
+17
+,
+19–23
+,
+27
+,
+31
+,
+32
+,
+48
+,
+52
+,
+56
+,
+71
+,
+84
+,
+173
+,
+323
+nice level,
+35
+,
+37
+policy,
+34
+FIFO,
+35
+round-robin,
+35
+time-sharing,
+35
+priority,
+34–37
+,
+311
+,
+312
+real-time,
+34
+,
+35
+,
+38
+,
+310
+zombie,
+31
+prom-client
+,
+334
+Prometheus,
+333–337
+,
+339–343
+scraping,
+336
+,
+337
+,
+339–342
+Prometheus Adapter,
+335
+,
+339
+Prometheus Operator,
+334
+,
+335
+,
+337
+,
+339
+,
+341
+Prometheus query,
+342
+protobuf
+,
+276–278
+protoc
+,
+277
+,
+278
+Python,
+284–286
+Q
+Quality of Service (QoS),
+234
+,
+236
+,
+238
+,
+307
+,
+310–313
+,
+315–317
+,
+321
+classes
+BestEffort
+,
+310–312
+,
+314
+,
+316
+,
+319
+Burstable
+,
+310
+,
+312–314
+,
+316
+,
+317
+Guaranteed
+,
+310
+,
+312
+,
+314–317
+,
+320
+,
+329
+quay.io
+,
+76
+quotas,
+232
+,
+233
+,
+243–248
+,
+250
+,
+268
+,
+312
+,
+321
+CPU,
+243
+,
+244
+memory,
+243
+,
+244
+R
+Rancher,
+14
+,
+102
+,
+324
+RBAC.
+See
+access control
+real-time processing,
+34
+,
+35
+,
+38
+,
+310
+Redis,
+72–74
+reliability,
+6
+,
+7
+,
+17
+,
+73
+,
+87
+,
+88
+,
+109
+,
+219
+,
+233
+,
+248
+,
+296
+,
+302
+,
+321
+renew
+,
+191
+ReplicaSet,
+115–118
+replication,
+291
+ReplicationController,
+116
+,
+280
+requests,
+117
+,
+170
+,
+233–235
+,
+244
+,
+246
+,
+248
+,
+304–306
+,
+310–317
+,
+319
+,
+329
+,
+330
+CPU,
+171
+,
+172
+,
+235
+,
+238
+memory,
+235
+,
+238
+resilience,
+7
+,
+9
+,
+14
+,
+87
+,
+90
+,
+109
+,
+151
+,
+152
+,
+166
+,
+218
+,
+280
+,
+292
+,
+296
+,
+302
+,
+306
+,
+321
+,
+323
+,
+330
+,
+343
+ResourceQuota,
+244
+responsiveness,
+226
+,
+310
+,
+333
+,
+334
+restartPolicy
+,
+122
+Rocky Linux,
+10
+,
+71
+Role,
+195–197
+,
+282
+,
+286
+,
+339
+,
+340
+role aggregation,
+286
+,
+287
+role-based access control.
+See
+access control
+RoleBinding,
+197
+,
+202
+,
+245
+,
+282
+,
+287
+,
+339
+,
+340
+root cause,
+332
+rsyslogd
+,
+21
+S
+SAN (Subject Alternative Name),
+165
+scalability,
+4
+,
+6
+,
+16
+,
+17
+,
+87
+,
+88
+,
+109
+,
+112
+,
+115
+,
+151
+,
+152
+,
+166
+,
+185
+,
+249
+,
+279
+,
+295
+,
+296
+,
+302
+,
+306
+,
+309
+,
+317
+,
+323
+,
+324
+,
+332
+,
+343
+scheduler,
+171
+,
+317
+screen
+,
+xxi
+Secret,
+193
+,
+195
+,
+265
+,
+269–272
+,
+274
+,
+276–278
+,
+325
+,
+326
+,
+329
+base64 encoding,
+270
+,
+271
+binary content,
+271
+security,
+20
+,
+295
+sed
+,
+216
+segmentation fault,
+182
+,
+183
+,
+185
+self-healing,
+90
+,
+118
+semaphore,
+305
+seq
+,
+232
+Service,
+17
+,
+92
+,
+104
+,
+124–126
+,
+134
+,
+149
+,
+151–166
+,
+210
+,
+222
+,
+228–231
+,
+240
+,
+243
+,
+254
+,
+255
+,
+284
+,
+288
+,
+289
+,
+291
+,
+299–302
+,
+325
+,
+326
+,
+328–332
+,
+336
+,
+337
+,
+339–343
+ClusterIP
+,
+154
+,
+161
+,
+162
+,
+230
+,
+326
+endpoints,
+17
+,
+155
+,
+230
+,
+231
+,
+284
+,
+299
+,
+339
+,
+341
+,
+342
+ExternalName
+,
+161
+headless,
+161
+,
+254
+,
+255
+LoadBalancer
+,
+161
+NodePort
+,
+104
+,
+161–163
+,
+165
+,
+331
+,
+332
+,
+337
+traffic policy,
+301
+Cluster
+,
+301
+Local
+,
+301
+,
+302
+ServiceAccount,
+194
+,
+195
+,
+197–200
+,
+207
+,
+210
+,
+286
+,
+287
+,
+340
+ServiceMonitor,
+336
+,
+337
+,
+339–342
+SHA-256,
+83
+Skopeo,
+26
+,
+82
+socket,
+5
+,
+28
+,
+208
+,
+251
+,
+252
+specialized hardware,
+295
+,
+296
+,
+303
+,
+306
+,
+317
+Spring Boot,
+232
+ss
+,
+162
+SSL certificate,
+165
+stability,
+332
+stateful components,
+295
+StatefulSet,
+122
+,
+124
+,
+126
+,
+127
+,
+196
+,
+252–256
+,
+259
+,
+264
+,
+289–291
+,
+325
+stateless component,
+15
+,
+249
+,
+295
+,
+326
+,
+329
+StorageClass,
+250–252
+,
+255
+,
+257–259
+strace
+,
+183
+stress
+,
+35
+,
+36
+,
+39
+,
+40
+,
+42
+,
+44–46
+strings
+,
+207
+Subject Alternative Name,
+165
+sysctl
+,
+92
+systemctl
+,
+206
+,
+215
+,
+216
+systemd
+,
+206
+T
+taints,
+95
+,
+99–102
+tar
+,
+83
+tc.
+See
+Linux: traffic control
+TCP,
+159
+,
+160
+tcpdump
+,
+62
+,
+64
+,
+138
+,
+141–143
+throttling,
+314
+time–series data,
+333
+tmpfs
+,
+210
+tmux
+,
+xxi
+todo application,
+15
+,
+324
+,
+325
+,
+330–335
+,
+339
+,
+342
+,
+343
+tolerations,
+101
+,
+102
+top
+,
+36
+,
+41
+,
+42
+Topology Aware Hints,
+302
+traffic policy.
+See
+Service: traffic policy
+U
+Ubuntu,
+10
+,
+23
+,
+71
+,
+93
+,
+138
+,
+180
+UDP,
+139
+,
+142–144
+ulimit
+,
+43
+unshare
+,
+31
+update strategy
+Recreate
+,
+327
+RollingUpdate
+,
+327
+user experience,
+332
+utilization,
+38
+,
+104
+,
+121
+,
+122
+,
+247
+,
+310
+,
+313
+,
+314
+,
+317
+,
+330
+,
+333
+,
+335
+,
+338
+,
+339
+,
+342
+V
+Vagrant,
+xxi
+,
+16
+,
+91
+,
+96
+,
+209
+,
+331
+,
+332
+vi,
+182
+VirtualBox,
+xxi
+Virtual Extensible LAN,
+139
+,
+142–144
+,
+149
+virtual machines,
+xx
+,
+11–13
+,
+20
+,
+32
+,
+78
+,
+90
+,
+91
+,
+130
+,
+139
+,
+303
+volume mount,
+12
+,
+26
+,
+30
+,
+112
+,
+125
+,
+251–253
+,
+260
+,
+272–274
+,
+303
+VXLAN,
+139
+,
+142–144
+,
+149
+W
+watch
+,
+113
+WeaveNet,
+130
+,
+139
+,
+141
+,
+143
+well-known name,
+153
+,
+155–157
+,
+161
+,
+163
+,
+165
+,
+166
+,
+240
+,
+255
+wget
+,
+158
+Windows Subsystem for Linux,
+xx
+WSL,
+xx
+X
+xxd
+,
+277
+Y
+YAML multiline string,
+273
+yum,
+11
+
+The fonts used in
+The Book of Kubernetes
+are New Baskerville, Futura, The Sans Mono Condensed, and Dogma. The book was typeset with LATEX 2
+ε
+package
+nostarch
+by Boris Veytsman
+(2008/06/06 v1.3 Typesetting books for No Starch Press).

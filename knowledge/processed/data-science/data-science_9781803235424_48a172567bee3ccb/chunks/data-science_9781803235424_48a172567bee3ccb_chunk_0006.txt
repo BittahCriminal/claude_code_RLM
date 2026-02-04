@@ -1,0 +1,5714 @@
+Akaho, S., Asoh, H., and Sakuma, J., 2012,
+Fairness-Aware Classifier with Prejudice Remover Regularizer
+. ECML/PKDD:
+https://dl.acm.org/doi/10.5555/3120007.3120011
+A. Agarwal, A. Beygelzimer, M. Dudik, J. Langford, and H. Wallach,
+A Reductions Approach to Fair Classification
+, International Conference on Machine Learning, 2018.
+https://arxiv.org/pdf/1803.02453.pdf
+Kearns, M., Neel, S., Roth, A., and Wu, Z., 2018,
+Preventing Fairness Gerrymandering: Auditing and Learning for Subgroup Fairness
+. ICML:
+https://arxiv.org/pdf/1711.05144.pdf
+Pleiss, G., Raghavan, M., Wu, F., Kleinberg, J., and Weinberger, K.Q., 2017,
+On Fairness and Calibration
+. NIPS:
+https://arxiv.org/abs/1709.02012
+Foster, D. and Syrgkanis, V., 2019,
+Orthogonal Statistical Learning
+. ICML:
+http://arxiv.org/abs/1901.09036
+Learn more on Discord
+To join the Discord community for this book – where you can share feedback, ask the author questions, and learn about new releases – follow the QR code below:
+https://packt.link/inml
+
+12
+Monotonic Constraints and Model Tuning for Interpretability
+Most model classes have hyperparameters that can be tuned for faster execution speed, increasing predictive performance, and reducing overfitting. One way of reducing overfitting is by introducing regularization into the model training. In
+Chapter 3
+,
+Interpretation Challenges
+, we called regularization a remedial interpretability property, which reduces complexity with a penalty or limitation that forces the model to learn sparser representations of the inputs. Regularized models generalize better, which is why it is highly recommended to tune models with regularization to avoid overfitting to the training data. As a side effect, regularized models tend to have fewer features and interactions, making the model easier to interpret—
+less noise means a clearer signal
+!
+And even though there are many hyperparameters, we will only focus on those that improve interpretability by controlling overfitting. Also, to a certain extent, we will revisit bias mitigation through the class imbalance-related hyperparameters explored in previous chapters.
+Chapter 2
+,
+Key Concepts of Interpretability
+, explained three model properties that impact interpretability: non-linearity, interactivity, and non-monotonicity. Left to its own devices, a model can learn some spurious and counterintuitive non-linearities and interactivities. As discussed in
+Chapter 10
+,
+Feature Selection and Engineering for Interpretability
+, guardrails can be placed to prevent this through careful feature engineering. However, what can we do to place guardrails for monotonicity? In this chapter, we will learn how to do just this with monotonic constraints. And just as monotonic constraints can be the model counterpart to feature engineering, regularization can be the model counterpart to the feature selection methods we covered in
+Chapter 10
+!
+These are the main topics we are going to cover in this chapter:
+Placing guardrails with feature engineering
+Tuning models for interpretability
+Implementing model constraints
+Technical requirements
+This chapter’s example uses the
+mldatasets
+,
+pandas
+,
+numpy
+,
+sklearn
+,
+xgboost
+,
+lightgbm
+,
+catboost
+,
+tensorflow
+,
+bayes_opt
+,
+tensorflow_lattice
+,
+matplotlib
+,
+seaborn
+,
+scipy
+,
+xai
+, and
+shap
+libraries. Instructions on how to install these libraries are in the preface.
+The code for this chapter is located here:
+https://packt.link/pKeAh
+The mission
+The issue of algorithmic fairness is one with massive social implications, from the allocation of welfare resources to the prioritization of life-saving surgeries to screening job applications. These machine learning algorithms can determine a person’s livelihood or life, and it’s often the most marginalized and vulnerable populations that get the worst treatment from these algorithms because they perpetuate systemic biases learned from the data. Therefore, it’s poorer families that get misclassified for child abuse; it’s racial-minority people who get underprioritized for medical treatment; and it’s women who get screened out of high-paying tech jobs. Even in cases involving less immediate and individualized risks such as online searches, Twitter/X bots, and social media profiles, societal prejudices such as elitism, racism, sexism, and ageism are reinforced.
+This chapter will continue on the mission from
+Chapter 6
+,
+Anchors and Counterfactual Explanations
+. If you aren’t familiar with these techniques, please go back and read
+Chapter 6
+to get a solid understanding of the problem. The recidivism case from
+Chapter 6
+is one of
+algorithmic bias. The co-founder of the company that developed the
+COMPAS algorithm
+(where
+COMPAS
+stands for
+Correctional Offender Management Profiling Alternative Sanctions
+) admitted that it’s tough to make a score without questions that are correlated with race. This correlation is one of the main reasons that scores are biased against African Americans. The other reason is the likely overrepresentation of black defendants in the training data. We don’t know for sure because we don’t have the original training data, but we know that non-white minorities are overrepresented in the population of incarcerated individuals. We also know that black people are typically overrepresented in arrests because of codified discrimination in terms of minor drug-related offenses and over-policing in black communities.
+So, what can we do to fix it?
+In
+Chapter 6
+,
+Anchors and Counterfactual Explanations
+, we managed to demonstrate via a
+proxy model
+that the COMPAS algorithm was biased. For this chapter, let’s say that the journalist published your findings, and an algorithmic justice advocacy group read the article and reached out. Companies that make criminal assessment tools are not taking responsibility for bias and claim that their tools simply reflect
+reality
+. The advocacy group has hired you to demonstrate that a machine learning model can be trained to be significantly less biased toward black defendants while ensuring that the model reflects only proven criminal justice
+realities
+.
+These proven realities include the monotone decrease of recidivism risk with age, and a strong correlation with priors, which increases strongly with age. Another fact supported by the academic literature is how females are significantly less prone to recidivism and criminality in general.
+Before we move on, we must recognize that supervised learning models face several impediments in capturing domain knowledge from data. For instance, consider the following:
+Sample
+,
+exclusion
+,
+or
+prejudice bias
+: What if your data doesn’t truly represent the environment your model intends to generalize? If that’s the case, the domain knowledge won’t align with what you observe in the data. What if the environment that produced the data has a built-in systemic or institutional bias? Then, the data will reflect these biases.
+Class imbalance
+: As seen in
+Chapter 11
+,
+Bias Mitigation and Causal Inference Methods
+, class imbalance could favor some groups over others. While taking the most effective route toward high accuracy, a model will learn from this imbalance, contradicting domain knowledge.
+Non-monotonicity
+: Sparse areas in a features histogram or high-leverage outliers could cause a model to learn non-monotonicity when domain knowledge calls for otherwise, and any of the previously mentioned problems could contribute to this as well.
+Uninfluential features
+: An unregularized model will, by default, try to learn from all features as long as they carry some information, but this stands in the way of learning from relevant features or overfitting to noise in the training data. A more parsimonious model is more likely to prop up features supported by domain knowledge.
+Counterintuitive interactions
+: As mentioned in
+Chapter 10
+,
+Feature Selection and Engineering for Interpretability
+, there could be counterintuitive interactions that a model favors over domain knowledge-supported interactions. As a side effect, these could end up favoring some groups that correlate with them. And in
+Chapter 6
+, Anchors and Counterfactual Explanations
+, we saw proof of this through an understanding of double standards.
+Exceptions
+: Our domain knowledge facts are based on an aggregate understanding, but when looking for patterns on a more granular scale, models will find exceptions such as pockets where female recidivism is of higher risk than that of males. Known phenomena might not support these models but they could be valid nonetheless, so we must be careful not to erase them with our tuning efforts.
+The advocacy group has validated the data as adequately representative of only one county in Florida, and they have provided you with a balanced dataset. The first impediment is a tough one to ascertain and control. The second one has been taken care of. It’s now up to you to deal with the remaining four!
+The approach
+You have decided to take a three-fold approach, as follows:
+Placing guardrails with feature engineering
+: Leveraging lessons learned in
+Chapter 6
+,
+Anchors and Counterfactual Explanations
+, as well as the domain knowledge we already have about priors and age, in particular, we will engineer some features.
+Tuning models for interpretability
+: Once the data is ready, we will tune many models with different class weighting and overfitting prevention techniques. These methods will ensure that the models not only generalize better but are also easier to interpret.
+Implementing model constraints
+: Last but not least, we will implement monotonic and interaction constraints on the best models to make sure that they don’t stray from trusted and fair interactions.
+In the last two sections, we will make sure the models perform accurately and fairly. We will also compare recidivism risk distributions between the data and the model to ensure that they align.
+The preparations
+You will find the code for this example here:
+https://github.com/PacktPublishing/Interpretable-Machine-Learning-with-Python-2E/blob/main/12/Recidivism_part2.ipynb
+Loading the libraries
+To run this example, you need to install the following libraries:
+mldatasets
+to load the dataset
+pandas
+and
+numpy
+to manipulate it
+sklearn
+(scikit-learn),
+xgboost
+,
+lightgbm
+,
+catboost
+,
+tensorflow
+,
+bayes_opt
+, and
+tensorflow_lattice
+to split the data and fit the models
+matplotlib
+,
+seaborn
+,
+scipy
+,
+xai
+, and
+shap
+to visualize the interpretations
+You should load all of them first, as follows:
+import
+math
+import
+os
+import
+copy
+import
+mldatasets
+import
+pandas
+as
+pd
+import
+numpy
+as
+np
+from
+sklearn
+import
+preprocessing, model_selection, metrics,\
+    linear_model, svm, neural_network, ensemble
+import
+xgboost
+as
+xgb
+import
+lightgbm
+as
+lgb
+import
+catboost
+as
+cb
+import
+tensorflow
+as
+tf
+from
+bayes_opt
+import
+BayesianOptimization
+import
+tensorflow_lattice
+as
+tfl
+from
+tensorflow.keras.wrappers.scikit_learn
+import
+\
+                                                  KerasClassifier
+import
+matplotlib.pyplot
+as
+plt
+import
+seaborn
+as
+sns
+import
+scipy
+import
+xai
+import
+shap
+Let’s check that
+tensorflow
+has loaded the right version with
+print(tf.__version__)
+. This should be 2.8 and above.
+Understanding and preparing the data
+We load the data like this into a DataFrame we call
+recidivism_df
+:
+recidivism_df = mldatasets.
+load
+(
+"recidivism-risk-balanced"
+)
+There should be over 11,000 records and 11 columns. We can verify this was the case with
+info()
+, as follows:
+recidivism_df.info()
+The preceding code outputs the following:
+RangeIndex: 11142 entries, 0 to 11141
+Data columns (total 12 columns):
+#   Column                   Non-Null Count  Dtype  
+---  ------                   --------------  -----  
+0   sex                      11142 non-null  object
+1   age                      11142 non-null  int64
+2   race                     11142 non-null  object
+3   juv_fel_count            11142 non-null  int64
+4   juv_misd_count           11142 non-null  int64
+5   juv_other_count          11142 non-null  int64
+6   priors_count             11142 non-null  int64
+7   c_charge_degree          11142 non-null  object
+8   days_b_screening_arrest  11142 non-null  float64
+9   length_of_stay           11142 non-null  float64
+10  compas_score             11142 non-null  int64
+11  is_recid                 11142 non-null  int64
+dtypes: float64(2), int64(7), object(3)
+The output checks out. There are no missing values, and all but three features are numeric (
+sex
+,
+race
+, and
+charge_degree
+). This is the same data we used in
+Chapter 6
+,
+Anchors and Counterfactual Explanations
+, so the data dictionary is exactly the same. However, the dataset has been balanced with sampling methods, and, this time, it hasn’t been prepared for us so we will need to do this, but before this, let’s gain an understanding of what the balancing did.
+Verifying the sampling balance
+We
+can check how
+race
+and
+is_recid
+are distributed with XAI’s
+imbalance_plot
+. In other words, it will tally how many records exist for each
+race
+-
+is_recid
+combination. This plot will allow us to observe if there are imbalances in the number of defendants that recidivate for each
+race
+. The code can be seen in the following snippet:
+categorical_cols_l = [
+'sex'
+,
+'race'
+,
+'c_charge_degree'
+,
+'is_recid'
+,
+'compas_score'
+]
+xai.
+imbalance_plot
+(
+    recidivism_df,
+'
+race'
+,
+'is_recid'
+,
+    categorical_cols=categorical_cols_l
+)
+The preceding code outputs
+Figure 12.1
+, which depicts how all races have equal amounts of
+is_recid=0
+and
+is_recid=1
+. However,
+Other
+is not at parity in numbers with the other races. Incidentally, this version of the dataset has bucketed all other races as
+Other
+, and the choice to not
+upsample
+Other
+or
+downsample
+the other two races to achieve total parity is made because they are less represented in the defendant population. This balancing choice is one of many that can be done in a situation such as this. Demographically, it all depends on what your data is supposed to represent. Defendants? Inmates? Civilians in the general population? And at what level? Of the county? The state? The country?
+The output can be seen here:
+Figure 12.1: Distribution of 2-year recidivism (is_recid) by ethnicity
+Next, let’s
+compute how well each of our features monotonically correlates to the target. Spearman’s rank-order correlation will be instrumental in this chapter because it measures the monotonicity between two features. After all, one of the technical topics of this chapter is monotonic constraints, and the primary mission is to produce a significantly less biased model.
+We first create a new DataFrame without
+compas_score
+(
+recidivism_corr_df
+). Using this DataFrame, we output a color-coded DataFrame with a
+feature
+column with the first 10 features’ names and another one with the Spearman coefficient (
+correlation_to_target
+) for all 10 features toward the 11th—the target variable. The code can be
+seen in the following snippet:
+recidivism_corr_df = recidivism_df.
+drop
+(
+    [
+'compas_score'
+], axis=
+1
+)
+pd.
+DataFrame
+(
+    {
+'feature'
+: recidivism_corr_df.columns[:-
+1
+],
+'correlation_to_target'
+:\
+          scipy.stats.
+spearmanr
+(recidivism_corr_df).\
+          correlation[
+10
+,:-
+1
+]
+    }
+).style.background_gradient(cmap=
+'coolwarm'
+)
+The preceding code outputs the DataFrame shown in
+Figure 12.2
+. The most correlated features are
+priors_count
+followed by
+age
+, the three juvenile counts, and
+sex
+. The coefficients for
+c_charge_degree
+,
+days_b_screening_arrest
+,
+length_of_stay
+, and
+race
+are negligible.
+The output can be seen here:
+Figure 12.2: Spearman coefficients of all features toward the target, prior to feature engineering
+Next, we will learn how to use feature engineering to “bake in” some domain knowledge into the features.
+Placing guardrails with feature engineering
+In
+Chapter 6
+,
+Anchors and Counterfactual Explanations
+, we learned that besides
+race
+, the
+features most prominent in our explanations were
+age
+,
+priors_count
+, and
+c_charge_degree
+. Thankfully, the data is now balanced, so the racial bias attributed to this imbalance is now gone. However, through anchors and counterfactual explanations, we found some troubling inconsistencies. In the case of
+age
+and
+priors_count
+, these inconsistencies were due to how those features were distributed. We can correct issues with distribution through feature engineering, and, that way, ensure that a model doesn’t learn from uneven distributions. In
+c_charge_degree
+'s case, being categorical, it lacked a discernible order, and this lack of order created unintuitive explanations.
+In this section, we will study
+ordinalization
+,
+discretization
+, and
+interaction terms
+, three ways in which you can place guardrails through feature engineering.
+Ordinalization
+Let’s first
+take a look in the following code snippet at how many observations we have for every
+c_charge_degree
+category:
+recidivism_df.c_charge_degree.
+value_counts()
+The preceding code produced the following output:
+(F3)     6555
+(M1)     2632
+(F2)      857
+(M2)      768
+(F1)      131
+(F7)      104
+(MO3)      76
+(F5)        7
+(F6)        5
+(NI0)       4
+(CO3)       2
+(TCX)       1
+Each of the charge degrees corresponds to the charge’s gravity. There’s an order to these gravities, which is lost by using a categorical feature. We can easily fix this by replacing each category with a corresponding order.
+We can put a
+lot of thought into what this order should be. For instance, we could look at sentencing laws or guidelines—there are minimum or maximum years of prison enforced for different degrees. We could also look at statistics on how violent these people are on average and assign this information to the charge degree. There’s potential for bias in every decision such as this, and if we don’t have substantial evidence to support it, it’s best to use a sequence of integers. So, that’s what we are going to do now. We will create a dictionary (
+charge_degree_code_rank
+) that maps the degrees to a number corresponding to a rank of gravity, from low to high. Then, we can use the
+pandas
+replace
+function to use the dictionary to perform the replacements. The code can be seen in the following snippet:
+charge_degree_code_rank = {
+'(F10)'
+:
+15
+,
+'(F9)'
+:
+14
+,
+'(F8)'
+:
+13
+,\
+'(F7)'
+:
+12
+,
+'(TCX)'
+:
+11
+,
+'(F6)'
+:
+10
+,
+'(F5)'
+:
+9
+,\
+'(F4)'
+:
+8
+,
+'(F3)'
+:
+7
+,
+'(F2)'
+:
+6
+,
+'(F1)'
+:
+5
+,
+'(M1)'
+:
+4
+,\
+'(NI0)'
+:
+4
+,
+'(M2)'
+:
+3
+,
+'(CO3)'
+:
+2
+,
+'(MO3)'
+:
+1
+,
+'(X)'
+:
+0
+}
+recidivism_df.c_charge_degree.
+replace
+(
+    charge_degree_code_rank, inplace=
+True
+)
+One way to assess how this order corresponds to recidivism probability is through a line plot that shows how it changes as the charge degree increases. We can use a function called
+plot_prob_progression
+for this, which takes a continuous feature in the first argument (
+c_charge_degree
+) to measure against probability for a binary feature in the second (
+is_recid
+). It can split the continuous feature by intervals (
+x_intervals
+), and even use quantiles (
+use_quantiles
+). Lastly, you can define axis labels and titles. The code can be seen in the following snippet:
+mldatasets.
+plot_prob_progression
+(
+    recidivism_df.
+c_charge_degree
+,
+    recidivism_df.
+is_recid
+, x_intervals=
+12
+,
+    use_quantiles=
+False
+,
+    xlabel=
+'Relative Charge Degree'
+,
+    title=
+'Probability of Recidivism by Relative Charge Degree'
+)
+The preceding
+code generates the plot in
+Figure 12.3
+. As the now-ranked charge degree increases, the tendency is that the probability of 2-year recidivism decreases, except for rank 1. Below the probability, there are bar charts that show the distribution of the observations over every rank. Because it is so unevenly distributed, you should take the tendency with a grain of salt. You’ll notice that some ranks, such as 0, 8, and 13–15, aren’t in the plot because the charge-degree categories existed in the criminal justice system but weren’t in the data.
+The output can be seen here:
+Figure 12.3: Probability progression plot by charge degree
+Feature engineering-wise, we can’t do much more to improve
+c_charge_degree
+because it already represents discrete categories now enhanced with an order. Any further transformations could produce a significant loss of information unless we have evidence to suggest otherwise. On the other hand, continuous features inherently have an order; however, a
+problem may arise from the level of precision they carry because small differences may not be meaningful but the data may tell the model otherwise. Uneven distributions and counterintuitive interactions only exacerbate this problem.
+Discretization
+To understand
+how to discretize our
+age
+continuous feature best, let’s try two different approaches. We can use equal-sized discretization, also known as fixed-width bins or intervals, which means the size of the bin is determined by
+, where
+N
+is the number of bins. Another way to do this is with equal-frequency discretization, also known as quantiles, which ensures that each bin has approximately the same number of observations. Although, sometimes, given the histogram’s skewed nature, it may be impossible to split them
+N
+ways, so you may end up with
+N-1
+or
+N-2
+quantiles.
+It is easy to compare both approaches with
+plot_prob_progression
+, but this time, we produce two plots, one with fixed-width bins (
+use_quantiles=False
+) and another with quantiles (
+use_quantiles=True
+). The code can be seen in the following snippet:
+mldatasets.plot_
+prob_progression
+(
+    recidivism_df.
+age
+,
+    recidivism_df.
+is_recid
+,
+    x_intervals=
+7
+,
+    use_quantiles=
+False
+,
+    title=
+'Probability of Recidivism by Age Discretized in Fix-Width \
+Bins'
+,
+    xlabel=
+'Age'
+)
+mldatasets.
+plot_prob_progression
+(
+    recidivism_df.
+age
+,
+    recidivism_df.
+is_recid
+,
+    x_intervals=
+7
+, use_quantiles=
+True
+,
+    title=
+'Probability of Recidivism by Age Discretized \
+in Quantiles'
+,
+    xlabel=
+'Age'
+)
+The preceding snippet outputs
+Figure 12.4
+. By looking at the
+Observations
+portion of the fixed-width bin plot, you can tell that the histogram for the
+age
+feature is right-skewed, which causes the probability to shoot up for the last bin. The reason for this is that some outliers exist in this bin. On the other hand, the fixed-frequency (quantile) plot
+histogram is more even, and probability consistently decreases. In other words, it’s monotonic—as it should be, according to our domain knowledge on the subject.
+The output can be seen here:
+Figure 12.4: Comparing two discretization approaches for age
+It is easy to observe why using quantiles to bin the feature is a better approach. We can take
+age
+and engineer a new feature called
+age_group
+. The
+qcut
+pandas
+function can perform quantile-based discretization. The code can be seen in the following snippet:
+recidivism_df[
+'age_group'
+] = pd.
+qcut
+(
+    recidivism_df.
+age
+,
+7
+, precision=
+0
+).astype(
+str
+)
+So, we now have discretized
+age
+into
+age_group
+. However, it must be noted that many model classes discretize automatically, so why bother? Because it allows you to control its effects. Otherwise, the model might decide on bins that don’t ensure monotonicity. For instance, maybe the model might always use 10 quantiles whenever possible. Still, if you attempt this level of granularity on
+age
+(
+x_intervals=10
+), you’ll end up with spikes in the probability progression. Our goal was to make sure that the models would learn that
+age
+and the incidence of
+is_recid
+have a monotonic relationship, and we cannot ascertain this if we allow the model to choose bins that may or may not achieve the same goal.
+We will remove
+age
+because
+age_group
+has everything we need. But wait—you ask—won’t we lose some important information by removing this variable? Yes, but only because
+of its interaction with
+priors_count
+. So, before we drop any features, let’s examine this relationship and realize how, through creating an interaction term, we can retain some of the information lost through the removal of
+age
+, while keeping the interaction.
+Interaction terms and non-linear transformations
+We
+already know from
+Chapter 6
+,
+Anchors and Counterfactual Explanations
+, that
+age
+and
+priors_count
+are two of the
+most important predictors, and we can observe how, together, they impact the incidence of recidivism (
+is_recid
+) with
+plot_prob_contour_map
+. This function produces contour lines with color-coded contour regions, signifying different magnitudes. They are useful in topography, where they show elevation heights. In machine learning, they can show a two-dimensional plane representing feature interaction with a metric. In this case, the dimensions are
+age
+and
+priors_count
+, and the metric is the incidence of recidivism. The arguments received by this function are the same as
+plot_prob_progression
+except that it takes two features corresponding to the
+x
+axis and
+y
+axis. The code can be seen in the following snippet:
+mldatasets.plot_
+prob_contour_map
+(
+    recidivism_df.
+age
+,
+    recidivism_df.
+priors_count
+,
+    recidivism_df.
+is_recid
+,
+    use_quantiles=
+True
+,
+    xlabel=
+'Age'
+,
+    ylabel=
+'
+Priors Count'
+,
+    title=
+'Probability of Recidivism by Age/Priors Discretized in \
+Quantiles'
+)
+The preceding snippet generated
+Figure 12.5
+, which shows how, when discretized by quantiles, the probability of 2-year recidivism increases, the lower the
+age
+and the higher the
+priors_count
+. It also shows histograms for both features.
+priors_count
+is very right-skewed, so discretization is challenging, and the contour map does not offer a perfectly diagonal progression between the bottom right and top left. And if this plot looks familiar, it’s because it’s just like the partial dependence interaction plots we produced in
+Chapter 4
+,
+Global Model-Agnostic Interpretation Methods
+, except it’s not measured against the predictions of a model but the ground truth (
+is_recid
+). We must distinguish
+between
+what the data can tell us directly and what the model has learned from it.
+The output can be seen here:
+Figure 12.5: Recidivism probability contour map for age and priors_count
+We can now engineer an interaction term that includes both features. Even though the contour map discretized the features to observe a smoother progression, we do not need to discretize this relationship. What makes sense is to make it a ratio of
+priors_count
+per year. But years since when? Years since the defendants were an adult, of course. But to obtain the years, we cannot use
+age - 18
+because this would lead to zero division, so we will use
+17
+instead. There are, of course, many ways to do this. The best way would be if we hypothetically had ages with decimals, and by deducting 18, we could compute a very precise
+priors_per_year
+ratio. Still, unfortunately, we don’t have that. You can see the code in the following snippet:
+recidivism_df[
+'priors_per_year'
+] =\
+            recidivism_df[
+'priors_count'
+]/(recidivism_df[
+'age'
+] -
+17
+)
+Black-box models
+typically find interaction
+terms automatically. For instance, hidden layers in a neural network have all the first-order interactions, but because of the non-linear activations, it is not limited to linear combinations. However, “manually” defining interaction terms and even non-linear transformation allows us to interpret these better once the model has been fitted. Furthermore, we can also use monotonic constraints on them, precisely what we will do later with
+priors_per_year
+. For now, let’s examine if its monotonicity holds with
+plot_prob_progression
+. Have a look at the following code snippet:
+mldatasets.
+plot_prob_progression
+(
+    recidivism_df.
+priors_per_year
+,
+    recidivism_df.
+is_recid
+,
+    x_intervals=
+8
+,
+    xlabel=
+'Priors Per Year'
+,
+    title=
+'Probability of Recidivism by Priors per Year (\
+according to data)'
+)
+The preceding snippet outputs the progression in the following screenshot, which shows how the new feature is almost monotonic:
+Figure 12.6: Probability progression for priors_per_year
+The
+reason
+priors_per_year
+isn’t more monotonic is how sparse the over-3.0
+priors_per_year
+interval is. It would therefore be very unfair to these few defendants to enforce
+monotonicity on this feature because they present a 75% risk dip. One way to tackle this is to shift them over to the left, by setting
+priors_per_year = -1
+for these observations, as illustrated in the following code snippet:
+recidivism_df.loc[recidivism_df.priors_per_year >
+3
+,\
+'priors_per_year'
+] = -
+1
+Of course, this shift changes the interpretation of the feature ever so slightly, knowing that the few values of
+-1
+really mean over
+3
+. Now, let’s generate another contour map, but this time, between
+age_group
+and
+priors_per_year
+. The latter will be discretized in quantiles (
+y_intervals=6, use_quantiles=True
+) so that the probability of recidivism is more easily observed. The code is shown in the following snippet:
+mldatasets.
+plot_prob_contour_map
+(
+    recidivism_df.
+age_group
+,
+    recidivism_df.
+priors_per_year
+,
+    recidivism_df.
+is_recid
+,
+    y_intervals=
+6
+,
+    use_quantiles=
+True
+,
+    xlabel=
+'Age Group'
+,
+    title=
+'Probability of Recidivism by Age/Priors per Year \
+Discretized in Quantiles'
+, ylabel=
+'Priors Per Year'
+)
+The
+preceding snippet
+generates the contours in
+Figure 12.7
+. It shows that, for the most part, the plot moves in one direction. We were hoping to achieve this outcome because it allows us, through one interaction feature, to control the monotonicity of what used to involve two features.
+The output can be seen here:
+Figure 12.7: Recidivism probability contour map for age_group and priors_per_year
+Almost
+everything
+is ready, but
+age_group
+is still categorical, so we have to encode it to take a numerical form.
+Categorical encoding
+The
+best categorical encoding
+method for
+age_group
+is
+ordinal encoding
+, also known
+as
+label encoding
+, because it will retain its order. We should also encode the other two categorical features in the dataset,
+sex
+and
+race
+. For
+sex
+, ordinal encoding converts it into binary form—equivalent to
+dummy encoding
+. On
+the other hand,
+race
+is a tougher call because it has three categories, and using ordinal encoding could lead to bias. However, whether to use
+one-hot encoding
+instead
+depends on which model classes you are using. Tree-based models have no bias issues with ordinal features but other models that operate with weights on a feature basis, such as neural networks and logistic regression, could be biased by this order.
+Considering that the dataset has been balanced on
+race
+, there’s a lower risk of this happening and we will remove this feature later anyway, so we will go ahead and ordinal-encode it.
+To
+ordinal-encode the three features, we will use scikit-learn’s
+OrdinalEncoder
+. We can use its
+fit_transform
+function to fit and transform the features in one fell swoop. Then, we should also delete unnecessary features while we are at it. Have a look at the following code snippet:
+cat_feat_l = [
+'sex'
+,
+'race'
+,
+'age_group'
+]
+ordenc = preprocessing.
+OrdinalEncoder
+(dtype=np.int8)
+recidivism_df[cat_feat_l] =\
+                  ordenc.
+fit_transform
+(recidivism_df[cat_feat_l])
+recidivism_df.drop([
+'age'
+,
+'priors_count'
+,
+'compas_score'
+],\
+                    axis=
+1
+, inplace=
+True
+)
+Now, we aren’t entirely done yet. We still ought to initialize our random seeds and train/test split our data.
+Other preparations
+The next preparations are straightforward. To ensure reproducibility, let’s set a random seed everywhere it is needed, then set our
+y
+as
+is_recid
+and
+X
+as every other feature. We perform
+train_test_split
+on those two. Lastly, we reconstruct the
+recidivism_df
+DataFrame with the
+X
+followed by the
+y
+. The only reason for this is so that
+is_recid
+is the last column, which will help with the next step. The code can be seen here:
+rand =
+9
+os.environ[
+'PYTHONHASHSEED'
+] =
+str
+(rand)
+tf.random.set_seed(rand)
+np.random.seed(rand)
+y = recidivism_df[
+'is_recid'
+]
+X = recidivism_df.drop([
+'is_recid'
+], axis=
+1
+).copy()
+X_train, X_test, y_train, y_test = model_selection.
+train_test_split
+(
+    X, y, test_size=
+0.2
+, random_state=rand
+)
+recidivism_df = X.join(y)
+We will now verify that Spearman’s correlations have improved where needed and stay the same otherwise. Have a look at the following code snippet:
+pd.DataFrame(
+    {
+'feature'
+: X.columns,
+'correlation_to_target'
+:scipy.stats.
+spearmanr
+(recidivism_df).\
+        correlation[
+10
+,:-
+1
+]
+    }
+).style.background_gradient(cmap=
+'coolwarm'
+)
+The preceding code outputs the DataFrame shown in
+Figure 12.8
+. Please compare it with
+Figure 12.2
+. Note that discretized in quantiles,
+age
+is slightly less monotonically correlated with the target. Once ordinalized,
+c_charge_degree
+is also much more correlated, and
+priors_per_year
+has also improved over
+priors_count
+. No other features should have been affected, including those that have the lowest coefficients.
+The output can be seen here:
+Figure 12.8: Spearman correlation coefficients of all features toward the target (after feature engineering)
+Features with the lowest coefficients are likely also unnecessary in a model, but we will let the model decide if they are useful through regularization. That’s what we will do next.
+Tuning models for interpretability
+Traditionally, regularization
+was only achieved by imposing penalty terms such as
+L1
+,
+L2
+, or
+elastic net
+on the coefficients or weights, which shrink the impact of the least relevant features. As seen in the
+Embedded methods
+section of
+Chapter 10
+,
+Feature Selection and Engineering for Interpretability
+, this form of regularization results in feature selection while also reducing overfitting. And this brings us to another broader definition of regularization, which does not require a penalty term. Often, this comes as imposing a limitation, or a stopping criterion that forces the model to curb its complexity.
+In addition to regularization, both in its narrow (penalty-based) and broad sense (overfitting methods), there are other methods that tune a model for interpretability—that is, improve the fairness, accountability, and transparency of a model through adjustments to the training process. For instance, the class imbalance hyperparameters we discussed in
+Chapter 10
+,
+Feature Selection and Engineering for Interpretability
+, and the adversarial debiasing in
+Chapter 11
+,
+Bias Mitigation and Causal Inference Methods
+, enhance fairness. Also, the constraints we will study further in this chapter have potential benefits for fairness, accountability, and transparency.
+There are so many different tuning possibilities and model classes. As stated at the beginning of the chapter, we will focus on interpretability-related options, but will also limit the model classes to a popular deep learning library (Keras), a handful of popular tree ensembles (XGBoost, Random Forest, and so on),
+Support Vector Machines
+(
+SVMs
+), and logistic regression. Except for the last one, these are all considered black-box models.
+Tuning a Keras neural network
+For a Keras
+model, we
+will choose the best
+regularization parameters through hyperparameter tuning and
+stratified K-fold cross-validation
+. We will do this using the following steps:
+First, we need to define the model and the parameters to tune.
+Then, we run the tuning.
+Next, we examine its results.
+Finally, we
+extract the best model and evaluate its predictive performance.
+Let’s look at each of these steps in detail.
+Defining the model and parameters to tune
+The first thing
+we ought to do is create a function (
+build_nn_mdl
+) to build and compile a regularizable Keras model. The function takes arguments that will help tune it. It takes a tuple with the number of neurons in hidden layers (
+hidden_layer_sizes
+), and a value of L1 (
+l1_reg
+) and L2 (
+l1_reg
+) regularization to apply on the layer’s kernel. Lastly, it takes the
+dropout
+parameter, which, unlike L1 and L2 penalties, is a
+stochastic regularization method
+because it
+employs random selection. Have a look at the following code snippet:
+def
+build_nn_mdl
+(
+hidden_layer_sizes, l1_reg=
+0
+, l2_reg=
+0
+, dropout=
+0
+):
+    nn_model = tf.keras.Sequential([
+        tf.keras.Input(shape=[
+len
+(X_train.keys())]),\
+        tf.keras.layers.experimental.preprocessing.
+Normalization
+()
+    ])
+    reg_args = {}
+if
+(l1_reg >
+0
+)
+or
+(l2_reg >
+0
+):
+        reg_args = {
+'kernel_regularizer'
+:\
+                    tf.keras.regularizers.
+l1_l2
+(l1=l1_reg, l2=l2_reg)}
+for
+hidden_layer_size
+in
+hidden_layer_sizes:
+        nn_model.add(tf.keras.layers.
+Dense
+(hidden_layer_size,\
+                        activation=
+'relu'
+,
+**reg_args
+))
+if
+dropout >
+0
+:
+        nn_model.add(tf.keras.layers.
+Dropout
+(dropout))
+    nn_model.add(tf.keras.layers.
+Dense
+(
+1
+, activation=
+'sigmoid'
+))
+    nn_model.
+compile
+(
+        loss=
+'binary_crossentropy'
+,
+        optimizer=tf.keras.optimizers.Adam(lr=
+0.0004
+),
+        metrics=[
+'
+accuracy'
+,tf.keras.metrics.AUC(name=
+'auc'
+)]
+)
+return
+nn_model
+The previous function initializes the model (
+nn_model
+) as a
+Sequential
+model with an input layer that corresponds to the number of features in training data, and a
+Normalization()
+layer that standardizes the input. Then, if either penalty term is over zero, it will set a dictionary (
+reg_args
+) with the
+kernel_regularizer
+assigned to
+tf.keras.regularizers.l1_l2
+initialized with these penalties. Once it adds the hidden (
+Dense
+) layers with the corresponding
+hidden_layer_size
+, it will pass the
+reg_args
+dictionary as
+extra arguments to each layer. After all hidden layers have been added, it will optionally add the
+Dropout
+layer and the final
+Dense
+layer with the
+sigmoid
+activation for the output. The model is then compiled with
+binary_crossentropy
+and an
+Adam
+optimizer with a slow learning rate and is set to monitor
+accuracy
+and
+auc
+metrics.
+Running the hyperparameter tuning
+Now that we have
+defined the model and parameters to tune, we initialize the
+RepeatedStratifiedKFold
+cross-validator, which splits (
+n_splits
+) the training data in five a total of three times (
+n_repeats
+), using different randomization in each repetition. We then create a grid (
+nn_grid
+) for the grid-search hyperparameter tuning. It’s testing only two possible options for three of the parameters (
+l1_reg
+,
+l2_reg
+, and
+dropout
+), which will result in
+combinations. We will use a scikit-learn wrapper (
+KerasClassifier
+) for our model to be compatible with the scikit-learn grid search. Speaking of which, we next initialize
+GridSearchCV
+, which, using the Keras model (
+estimator
+), performs a cross-validated (
+cv
+) grid search (
+param_grid
+). We want it to choose the best parameters based on precision (
+scoring
+) and not raise errors in the process (
+error_score=0
+). Finally, we fit
+GridSearchCV
+as we would with any Keras model, passing
+X_train
+,
+y_train
+,
+epochs
+, and
+batch_size
+. The code can be seen in the following snippet:
+cv = model_selection.
+RepeatedStratifiedKFold
+(
+    n_splits=
+5
+,
+    n_repeats=
+3
+,
+    random_state=rand
+)
+nn_grid = {
+'hidden_layer_sizes'
+:[(
+80
+,)],
+'l1_reg'
+:[
+0
+,
+0.005
+],
+'l2_reg'
+:[
+0
+,
+0.01
+],
+'dropout'
+:[
+0
+,
+0.05
+]
+}
+nn_model = KerasClassifier(build_fn=build_nn_mdl)
+nn_grid_search = model_selection.
+GridSearchCV
+(
+    estimator=nn_model,
+    cv=cv,
+    n_jobs=-
+1
+,
+    param_grid=nn_grid,
+    scoring=
+'
+precision'
+,
+    error_score=
+0
+)
+nn_grid_result = nn_grid_search.
+fit
+(
+    X_train.astype(
+float
+),
+    y_train.astype(
+float
+),
+    epochs=
+400
+,batch_size=
+128
+)
+Next, we can
+examine the results of our grid search.
+Examining the results
+Once the
+grid search has been completed, you can output the best parameters in a dictionary with this command:
+print(nn_grid_result.best_params_)
+. Or you can place all the results into a DataFrame, sort them by the highest precision (
+sort_values
+), and output them as follows:
+pd.
+DataFrame
+(nn_grid_result.
+cv_results
+_)[
+    [
+'param_hidden_layer_sizes'
+,
+'param_l1_reg'
+,
+'param_l2_reg'
+,
+'param_dropout'
+,
+'mean_test_score'
+,
+'std_test_score'
+,
+'rank_test_score'
+]
+].
+sort_values
+(by=
+'rank_test_score'
+)
+The preceding snippet outputs the DataFrame shown in
+Figure 12.9
+. The unregularized model is dead last, showing that all regularized model combinations performed better. One thing to note is that given the 1.5–2% standard deviations (
+std_test_score
+) and that the top performer is only 2.2% from the lowest performer, in this case, the benefits are marginal from a precision standpoint, but you should use a regularized model nonetheless because of other benefits.
+The output can be seen here:
+Figure 12.9: Results for cross-validated grid search for a neural net model
+Evaluating the best model
+Another
+important element that the grid search produced is the best-performing model (
+nn_grid_result.best_estimator_
+). We can create a dictionary to store all the models we will fit in this chapter (
+fitted_class_mdls
+) and then, using
+evaluate_class_mdl
+, evaluate this regularized Keras model and keep the evaluation in the dictionary at the same time. Have a look at the following code snippet:
+fitted_class_mdls = {}
+fitted_class_mdls[
+'keras_reg'
+] = mldatasets.
+evaluate_class_mdl
+(
+    nn_grid_result.best_estimator_,
+    X_train.astype(
+float
+),
+    X_test.astype(
+float
+),
+    y_train.astype(
+float
+),
+    y_test.astype(
+float
+),
+    plot_roc=
+False
+,
+    plot_conf_matrix=
+True
+,
+ret_eval_dict=
+True
+)
+The preceding snippet produced the confusion matrix and metrics shown in
+Figure 12.10
+. The accuracy is a little bit better than the original COMPAS model from
+Chapter 6
+,
+Anchors and Counterfactual Explanations
+, but the strategy to optimize for higher precision while regularizing yielded a model with nearly half as many false positives but 50% more false negatives.
+The output can be seen here:
+Figure 12.10: Evaluation of the regularized Keras model
+Calibrating
+the class balance can be improved even further by employing a custom loss function or class weights, as we will do later. Next, we will cover how to tune other model classes.
+Tuning other popular model classes
+In this
+section, we will fit many different
+models, both unregularized and regularized. To this end, we will pick from a wide selection of parameters that perform penalized regularization, control overfitting through other means, and account for class imbalance.
+A quick introduction to relevant model parameters
+For your reference, there
+are two tables with parameters used to tune many popular models. These have been split into two parts. Part A (
+Figure 12.11
+) has five scikit-learn models with penalty regularization. Part B (
+Figure 12.12
+) shows all the tree ensembles, including scikit-learn’s Random Forest models and models from the most popular boosted-tree libraries (XGBoost, LightGBM, and CatBoost).
+Part A can be seen here:
+Figure 12.11: Tuning parameters for penalty-regularized scikit-learn models
+In
+Figure 12.11
+, you can observe models in the columns and corresponding parameter names in the rows with their default values to the right. In between the parameter name and default value, there’s a plus or minus sign indicating whether changing the defaults in one direction or another should make the model more conservative. These parameters are also grouped by the following categories:
+algorithm
+: Some training algorithms are less prone to overfitting, but this often depends on the data.
+regularization
+: Only in the stricter sense. In other words, parameters that control penalty-based regularization.
+iterations
+: This controls how many training rounds, iterations, or epochs are performed. Adjusting this in one direction or another can impact overfitting. In tree-based models, the number of estimators or trees is what’s analogous.
+learning rate
+: This controls how quickly the learning happens. It works in tandem with iterations. The lower the learning rate, the more iterations are needed to optimize the objective function.
+early stopping
+: These parameters control when to stop the training. This allows you to prevent your model from overfitting to training data.
+class imbalance
+: For
+most models, this penalizes misclassifications on smaller classes in the loss function, and for tree-based models, in particular, it is used to reweight the splitting criterion. Either way, it only works with classifiers.
+sample weight
+: We leveraged this one in
+Chapter 11
+,
+Bias Mitigation and Causal Inference Methods
+, to assign weights on a sample basis to mitigate bias.
+There are both classification and regression models in the headings, and they share the same parameters. Please note that scikit-learn’s
+LinearRegression
+isn’t featured under
+LogisticRegression
+because it doesn’t have built-in regularization. In any case, we will use only classification models in this section.
+Part B can be seen here:
+Figure 12.12: Tuning parameters for tree-ensemble models
+Figure 12.12
+is very similar to
+Figure 12.11
+except that it has a few more parameter categories that are
+only available in tree ensembles, such as the following:
+feature sampling
+: This works by considering fewer features in node splits, nodes, or tree training. It is a stochastic regularization method because features are randomly selected.
+tree size
+: This constrains the tree either by maximum depth or maximum leaves, or some other parameter that restricts its growth, which, in turn, curbs overfitting.
+splitting
+: Any parameter that controls how nodes in the tree are split can indirectly impact overfitting.
+bagging
+: Also known
+as
+bootstrap aggregating
+, this starts by bootstrapping, which involves randomly taking samples from the training data to fit weak learners. This method reduces variance and helps with overfitting, and by extension, the corresponding sampling parameters are usually prominent in hyperparameter tuning.
+constraints
+: We will explain these in further detail in the next section, but this maps how the features should be constrained to decrease or increase against the output. It can reduce overfitting in areas where data is very sparse. However, reducing overfitting is not usually the main goal, while interaction constraints can limit which features are allowed to interact.
+Please note that parameters with an asterisk (
+*
+) in
+Figure 12.12
+denote those set in the
+fit
+function as opposed to those initialized with the model. Also, except for scikit-learn’s
+RandomForest
+models, all other parameters typically have many aliases. For these, we are using the scikit-learn wrapper functions, but all the parameters also exist in the native versions. We can’t possibly explain every model parameter here, but it is recommended that you go directly to the documentation for more insight into what each one does. The point of the section was to serve as a guide or reference.
+Next, we will take steps similar to what we did with the Keras model but for many different models at once, and, lastly, we will assess the best model for fairness.
+Batch hyperparameter tuning models
+OK—so, now
+that we have taken a quick crash course on which levers we can pull to tune the models, let’s define a dictionary with all the models, as we’ve done in other chapters. This time, we have included a
+grid
+with some parameter values for a grid search. Have a look at the following code snippet:
+class_mdls = {
+'logistic'
+:{
+'model'
+:linear_model.
+LogisticRegression
+(random_state=rand,\
+                                                max_iter=
+1000
+),
+'grid'
+:{
+'C'
+:np.linspace(
+0.01
+,
+0.49
+,
+25
+),
+'class_weight'
+:[{
+0
+:
+6
+,
+1
+:
+5
+}],
+'solver'
+:[
+'lbfgs'
+,
+'liblinear'
+,
+'newton-cg'
+]
+        }
+     },
+'svc'
+:{
+'model'
+:svm.
+SVC
+(probability=
+True
+, random_state=rand),
+'grid'
+:{
+'C'
+:[
+15
+,
+25
+,
+40
+],
+'class_weight'
+:[{
+0
+:
+6
+,
+1
+:
+5
+}]}
+    },
+'nu-svc'
+:{
+'model'
+:svm.
+NuSVC
+(
+            probability=
+True
+,
+            random_state=rand
+        ),
+'grid'
+:{
+'nu'
+:[
+0.2
+,
+0.3
+],
+'gamma'
+:[
+0.6
+,
+0.7
+],\
+'class_weight'
+:[{
+0
+:
+6
+,
+1
+:
+5
+}]}
+        },
+'mlp'
+:{
+'model'
+:neural_network.
+MLPClassifier
+(
+            random_state=rand,
+            hidden_layer_sizes=(
+80
+,),
+            early_stopping=
+True
+),
+'grid'
+:{
+'alpha'
+:np.linspace(
+0.05
+,
+0.15
+,
+11
+),
+'activation'
+:[
+'relu'
+,
+'tanh'
+,
+'logistic'
+]}
+        },
+'rf'
+:{
+'model'
+:ensemble.
+RandomForestClassifier
+(
+                random_state=rand, max_depth=
+7
+, oob_score=
+True
+, \
+                bootstrap=
+True
+),
+'grid'
+:{
+'max_features'
+:[
+6
+,
+7
+,
+8
+],
+'max_samples'
+:[
+0.75
+,
+0.9
+,
+1
+],
+'class_weight'
+:[{
+0
+:
+6
+,
+1
+:
+5
+}]}
+            },
+'xgb-rf'
+:{
+'model'
+:xgb.
+XGBRFClassifier
+(
+            seed=rand, eta=
+1
+, max_depth=
+7
+, n_estimators=
+200
+),
+'grid'
+:{
+'scale_pos_weight'
+:[
+0.85
+],
+'reg_lambda'
+:[
+1
+,
+1.5
+,
+2
+],
+'reg_alpha'
+:[
+0
+,
+0.5
+,
+0.75
+,
+1
+]}
+        },
+'xgb'
+:{
+'model'
+:xgb.
+XGBClassifier
+(
+            seed=rand, eta=
+1
+, max_depth=
+7
+),
+'grid'
+:{
+'scale_pos_weight'
+:[
+0.7
+],
+'reg_lambda'
+:[
+1
+,
+1.5
+,
+2
+],
+'reg_alpha'
+:[
+0.5
+,
+0.75
+,
+1
+]}
+        },
+'lgbm'
+:{
+'model'
+:lgb.
+LGBMClassifier
+(
+            random_seed=rand,
+            learning_rate=
+0.7
+,
+            max_depth=
+5
+),
+'grid'
+:{
+'lambda_l2'
+:[
+0
+,
+0.5
+,
+1
+],
+'lambda_l1'
+:[
+0
+,
+0.5
+,
+1
+],
+'scale_pos_weight'
+:[
+0.8
+]}
+        },
+'catboost'
+:{
+'model'
+:cb.
+CatBoostClassifier
+(
+            random_seed=rand,
+            depth=
+5
+,
+            learning_rate=
+0.5
+,
+            verbose=
+0
+),
+'grid'
+:{
+'l2_leaf_reg'
+:[
+2
+,
+2.5
+,
+3
+],
+'scale_pos_weight'
+:[
+0.65
+]}
+        }
+}
+The next step is to add a
+for
+loop to every model in the dictionary, then
+deepcopy
+it and
+fit
+it to produce a “base” unregularized model. Next, we produce an evaluation for it with
+evaluate_class_mdl
+and save it into the
+fitted_class_mdls
+dictionary we had previously created for the Keras model. Now, we need to produce the regularized version of the model. So, we do another
+deepcopy
+and follow the same steps we took with Keras to do the
+RepeatedStratifiedKFold
+cross-validated grid search with
+GridSearchCV
+, and
+we also evaluate in the same way, saving the results in the fitted model dictionary. The code is shown in the following snippet:
+for
+mdl_name
+in
+class_mdls:
+    base_mdl = copy.deepcopy(class_mdls[mdl_name][
+'model'
+])
+    base_mdl = base_mdl.
+fit
+(X_train, y_train)
+    fitted_class_mdls[mdl_name+
+'_base'
+] = \
+        mldatasets.
+evaluate_class_mdl
+(
+            base_mdl, X_train, X_test,y_train, y_test,
+            plot_roc=
+False
+, plot_conf_matrix=
+False
+,
+            show_summary=
+False
+, ret_eval_dict=
+True
+)
+    reg_mdl = copy.deepcopy(class_mdls[mdl_name][
+'model'
+])
+    grid = class_mdls[mdl_name][
+'grid'
+]
+    cv = model_selection.
+RepeatedStratifiedKFold
+(
+        n_splits=
+5
+, n_repeats=
+3
+, random_state=rand
+    )
+    grid_search = model_selection.
+GridSearchCV
+(
+    estimator=reg_mdl, cv=cv, param_grid=grid,
+    scoring=
+'precision'
+, n_jobs=-
+1
+, error_score=
+0
+, verbose=
+0
+)
+    grid_result = grid_search.
+fit
+(X_train, y_train)
+    fitted_class_mdls[mdl_name+
+'_reg'
+] =\
+        mldatasets.
+evaluate_class_mdl
+(
+            grid_result.
+best_estimator
+_, X_train, X_test, y_train,
+            y_test, plot_roc=
+False
+,
+            plot_conf_matrix=
+False
+, show_summary=
+False
+,
+            ret_eval_dict=
+True
+)
+    fitted_class_mdls[mdl_name+
+'_reg'
+][
+'cv_best_params'
+] =\
+        grid_result.
+best_params
+_
+Once the code has finished, we can rank models by precision.
+Evaluating models by precision
+We can
+extract the fitted model dictionary’s metrics and place them into a DataFrame with
+from_dict
+. We can then sort the models by their highest test precision and color code the two columns that matter the most, which are
+precision_test
+and
+recall_test
+. The code can be seen in the following snippet:
+class_metrics = pd.DataFrame.from_dict(fitted_class_mdls,
+'index'
+)[
+    [
+'accuracy_train'
+,
+'accuracy_test'
+,
+'precision_train'
+,
+'precision_test'
+,
+'recall_train'
+,
+'recall_test'
+,
+'
+roc-auc_test'
+,
+'f1_test'
+,
+'mcc_test'
+]
+]
+with
+pd.option_context(
+'display.precision'
+,
+3
+):
+    html = class_metrics.sort_values(
+        by=
+'precision_test'
+, ascending=
+False
+).style.background_gradient(
+        cmap=
+'plasma'
+,subset=[
+'precision_test'
+]
+    ).background_gradient(
+        cmap=
+'
+viridis'
+, subset=[
+'recall_test'
+])
+html
+The preceding code will output the DataFrame shown in
+Figure 12.13
+. You can tell that regularized tree-ensemble models mostly rule the ranks, followed by their unregularized counterparts. The one exception is regularized Nu-SVC, which is number one, and its unregularized version is dead last!
+The output can be seen here:
+Figure 12.13: Top models according to the cross-validated grid search
+You will find that
+the Keras regularized neural network model has lower precision than regularized logistic regression, but higher recall. It’s true that we want to optimize for high precision because it impacts false positives, which we want to minimize, but precision can be at 100% and recall at 0%, and if that’s the case, your model is no good. At the same time, there’s fairness, which is about having a low false-positive rate but being equally distributed across races. So, there’s a balancing act, and chasing one metric won’t get us there.
+Assessing fairness for the highest-performing model
+To
+determine how to proceed, we must first assess how our highest-performing model does in terms of fairness. We can do this with
+compare_confusion_matrices
+. As you would do with scikit-learn’s
+confusion_matrix
+, the first argument is the ground truth or target values (often known as
+y_true
+), and the second is the model’s predictions (often known as
+y_pred
+). The difference here is it takes two sets of
+y_true
+and
+y_pred
+, one corresponding to one segment of the observations and one to another. After these first four arguments, you give each segment a name, so this is what the following two arguments tell you. Lastly,
+compare_fpr=True
+ensures that it will compare the
+False Positive Rate
+(
+FPR
+) between both confusion matrices. Have a look at the following code snippet:
+y_test_pred = fitted_class_mdls[
+'catboost_reg'
+][
+'preds_test'
+]
+_ = mldatasets.
+compare_confusion_matrices
+(
+    y_test[X_test.race==
+1
+],
+    y_test_pred[X_test.race==
+1
+],
+    y_test[X_test.race==
+0
+],
+    y_test_pred[X_test.race==
+0
+],
+'Caucasian'
+,
+'African-American'
+,
+compare_fpr=
+True
+)
+y_test_pred =  fitted_class_mdls[
+'catboost_base'
+][
+'preds_test'
+]
+_ = mldatasets.
+compare_confusion_matrices
+(
+    y_test[X_test.race==
+1
+],
+    y_test_pred[X_test.race==
+1
+],
+    y_test[X_test.race==
+0
+],
+    y_test_pred[X_test.race==
+0
+],
+'Caucasian'
+,
+'African-American'
+,
+compare_fpr=
+True
+)
+The
+preceding snippet outputs
+Figure 12.14
+and
+Figure 12.15
+, corresponding to the regularized and base models, respectively. You can see
+Figure 12.14
+here:
+Figure 12.14: Confusion matrices between races for the regularized CatBoost model
+Figure 12.15
+tells us that the FPRs are significantly lower for the regularized model. You can see
+the output here:
+Figure 12.15: Confusion matrices between races for the base CatBoost model
+However, the
+base model in
+Figure 12.15
+has an FPR ratio of 1.11 compared to 1.47 for the regularized model, which is significantly more despite the similar overall metrics. But when trying to achieve several goals at once, it’s hard to evaluate and compare models, and that’s what we will do in the next section.
+Optimizing for fairness with Bayesian hyperparameter tuning and custom metrics
+Our mission is
+to produce a model with high precision and good recall while maintaining fairness across different races. So, achieving this mission will require a custom metric to be designed.
+Designing a custom metric
+We could
+use the F1 score, but it treats precision and recall equally, so we will have to create a weighted metric. We can also factor in how precision and recall are distributed for each race. One way to do this is by using the standard deviation, which quantifies the variation in this distribution. To that end, we will penalize precision with half the intergroup standard deviation for precision, and we can call this penalized precision. The formula is shown here:
+We can do the same for recall, as illustrated here:
+Then, we make a weighted average for penalized precision and recall where precision is worth twice as much as recall, as illustrated here:
+To compute this new metric, we will need to create a function that we can call
+weighted_penalized_pr_average
+. It takes
+y_true
+and
+y_pred
+as the predictive performance metrics. However, it also includes
+X_group
+with a
+pandas
+series or array containing the values for the group, and
+group_vals
+with a list of values that it will subset the predictions by. In this case, the group is
+race
+, which can be values from 0 to 2. The function includes a
+for
+loop that iterates through these possible values, subsetting the predictions by each group. That way, it can compute precision and recall for each group. After this, the rest of the function simply performs the three mathematical operations outlined previously. The code can be seen in the following snippet:
+def
+weighted_penalized_pr_average
+(
+y_true, y_pred, X_group,\
+group_vals, penalty_mult=
+0.5
+,\
+precision_mult=
+2
+,\
+recall_mult=
+1
+):
+    precision_all = metrics.
+precision_score
+(
+        y_true, y_pred, zero_division=
+0
+)
+    recall_all = metrics.
+recall_score
+(
+        y_true, y_pred, zero_division=
+0
+)
+    p_by_group = []
+    r_by_group = []
+for
+group_val
+in
+group_vals:
+        in_group = X_group==group_val
+        p_by_group.append(metrics.
+precision_score
+(
+            y_true[in_group], y_pred[in_group], zero_division=
+0
+)
+        )
+        r_by_group.append(metrics.
+recall_score
+(
+            y_true[in_group], y_pred[in_group], zero_division=
+0
+)
+        )
+    precision_all = precision_all - \
+                   (np.array(p_by_group).std()*penalty_mult)
+    recall_all = recall_all -\
+                (np.array(r_by_group).std()*penalty_mult)
+return
+((precision_all*precision_mult)+
+            (recall_all*recall_mult))/\
+            (precision_mult+recall_mult)
+Now, to put this function to work, we will need to run the tuning.
+Running Bayesian hyperparameter tuning
+Bayesian optimization
+is a
+global optimization method
+that uses the posterior distribution of black-box objective functions and their continuous parameters. In other words, it sequentially searches the best parameters to test next based on past results. Unlike grid search, it doesn’t try fixed combinations of parameters on a grid but exploits what it already knows and explores the unknown.
+The
+bayesian-optimization
+library is model-agnostic. All it needs is a function and parameters with their bounds. It will explore values for those parameters within those bounds. The function takes those parameters and returns a number. This is the number, or target, that the Bayesian optimization algorithm will maximize.
+The following code is for the
+objective
+function, which initializes a
+RepeatedStratifiedKFold
+cross-validation with four splits and three repeats. It then iterates across the splits and fits the
+CatBoostClassifier
+with them. Lastly, it computes the
+weighted_penalized_pr_average
+custom metric for each model training and appends it to a list. Finally, the function returns the
+median
+of the custom metric for all 12 training samples. The code is shown in the following snippet:
+def
+hyp_catboost
+(
+l2_leaf_reg, scale_pos_weight
+):
+    cv = model_selection.
+RepeatedStratifiedKFold
+(
+        n_splits=
+4
+,n_repeats=
+3
+, random_state=rand
+    )
+    metric_l = []
+for
+train_index, val_index
+in
+cv.split(X_train, y_train):
+        X_train_cv, X_val_cv = X_train.iloc[train_index],\
+                               X_train.iloc[val_index]
+        y_train_cv, y_val_cv = y_train.iloc[train_index],
+                               y_train.iloc[val_index]
+        mdl = cb.
+CatBoostClassifier
+(
+            random_seed=rand, learning_rate=
+0.5
+, verbose=
+0
+, depth=
+5
+,\
+            l2_leaf_reg=l2_leaf_reg, scale_pos_weight=scale_pos_weight
+        )
+        mdl = mdl.
+fit
+(X_train_cv, y_train_cv)
+        y_val_pred = mdl.
+predict
+(X_val_cv)
+        metric =
+weighted_penalized_pr_average
+(
+            y_val_cv,y_val_pred, X_val_cv[
+'race'
+],
+range
+(
+3
+)
+        )
+        metric_l.
+append
+(metric)
+return
+np.
+median
+(np.array(metric_l))
+Now that the function has been defined, running the Bayesian optimization process is straightforward. First, set the parameter-bounds dictionary (
+pbounds
+), initialize
+BayesianOptimization
+with the
+hyp_catboost
+function, and then run it with
+maximize
+. The
+maximize
+function takes
+init_points
+, which sets how many iterations it should run initially using random exploration. Then,
+n_iter
+is the number of optimization iterations it should perform to find the maximum value. We will set
+init_points
+and
+n_iter
+to
+3
+and
+7
+, respectively, because it could take a long time, but the larger these numbers, the better. The code can be seen in the following snippet:
+pbounds = {
+'l2_leaf_reg'
+: (
+2
+,
+4
+),
+'
+scale_pos_weight'
+: (
+0.55
+,
+0.85
+)
+    }
+optimizer =
+BayesianOptimization
+(
+hyp_catboost
+,
+    pbounds, 
+    random_state=rand
+)
+optimizer.maximize(init_points=
+3
+, n_iter=
+7
+)
+Once it’s finished, you can access the best parameters, like this:
+print
+(optimizer.
+max
+[
+'params'
+])
+It will return a dictionary with the parameters, as follows:
+{'l2_leaf_reg': 2.0207483077713997, 'scale_pos_weight': 0.7005623776446217}
+Now, let’s fit a model with these parameters and evaluate it.
+Fitting and evaluating a model with the best parameters
+Initializing
+CatBoostClassifier
+with these parameters is as simple as passing the
+best_params
+dictionary as an argument. Then, all you need to do is
+fit
+the model and evaluate it (
+evaluate_class_mdl
+). The code is shown in the following snippet:
+cb_opt = cb.
+CatBoostClassifier
+(
+    random_seed=rand,
+    depth=
+5
+,
+    learning_rate=
+0.5
+,
+    verbose=
+0
+,
+    **optimizer.
+max
+[
+'params'
+]
+)
+cb_opt = cb_opt.
+fit
+(X_train, y_train)
+fitted_class_mdls[
+'catboost_opt'
+] = mldatasets.
+evaluate_class_mdl
+(
+    cb_opt,
+    X_train,
+    X_test,
+    y_train,
+    y_test,
+    plot_roc=
+False
+,
+    plot_conf_matrix=
+True
+,
+ret_eval_dict=
+True
+)
+The preceding snippet outputs the following predictive performance metrics:
+Accuracy_train:  0.9652		Accuracy_test:   0.8192
+Precision_test:  0.8330		Recall_test:     0.8058
+ROC-AUC_test:    0.8791		F1_test:         0.8192
+They are the highest
+Accuracy_test
+,
+Precision_test
+, and
+Recall_test
+metrics we have achieved so far. Let’s now see how the model fares with fairness using
+compare_confusion_matrices
+. Have a look at the following code snippet:
+y_test_pred = fitted_class_mdls[
+'catboost_opt'
+][
+'preds_test'
+]
+_ = mldatasets.
+compare_confusion_matrices
+(
+    y_test[X_test.race==
+1
+],
+    y_test_pred[X_test.race==
+1
+],
+    y_test[X_test.race==
+0
+],
+    y_test_pred[X_test.race==
+0
+],
+'Caucasian'
+,
+'African-American'
+,
+compare_fpr=
+True
+)
+The preceding code outputs
+Figure 12.16
+, which shows some of the best fairness metrics we have obtained so far, as you can see here:
+Figure 12.16: Comparison of confusion matrices between races for the optimized CatBoost model
+These results are good, but we cannot be completely assured that the model is not racially biased because the feature is still there. One way to measure its impact is through feature importance methods.
+Examining racial bias through feature importance
+Although CatBoost is our best-performing model in most metrics, including accuracy, precision, and F1 score, we are moving forward with XGBoost because CatBoost doesn’t support interaction constraints, which we will implement in the next section. But first, we will compare them both in terms of what they found important. Also,
+SHapley Additive exPlanations
+(
+SHAP
+) values provide a robust means to measure and visualize feature importance, so let’s compute them for our optimized CatBoost and regularized XGBoost models. To do so, we need to initialize
+TreeExplainer
+with each model and then use
+shap_values
+to produce the values for each, as illustrated in the following code snippet:
+fitted_cb_mdl = fitted_class_mdls[
+'catboost_opt'
+][
+'fitted'
+]
+shap_cb_explainer = shap.
+TreeExplainer
+(fitted_cb_mdl)
+shap_cb_values = shap_cb_explainer.
+shap_values
+(X_test)
+fitted_xgb_mdl = fitted_class_mdls[
+'xgb_reg'
+][
+'fitted'
+]
+shap_xgb_explainer = shap.
+TreeExplainer
+(fitted_xgb_mdl)
+shap_xgb_values = shap_xgb_explainer.
+shap_values
+(X_test)
+Next, we can generate two
+summary_plot
+plots side by side, using Matplotlib’s
+subplot
+, as follows:
+ax0 = plt.subplot(
+1
+,
+2
+,
+1
+)
+shap.
+summary_plot
+(
+shap_xgb_values
+,
+    X_test,
+    plot_type=
+"dot"
+,
+    plot_size=
+None
+,
+    show=
+False
+)
+ax0.set_title(
+"XGBoost SHAP Summary"
+)
+ax1 = plt.subplot(
+1
+,
+2
+,
+2
+)
+shap.
+summary_plot
+(
+shap_cb_values
+,
+    X_test,
+    plot_type=
+"dot"
+,
+    plot_size=
+None
+,
+    show=
+False
+)
+ax1.set_title(
+"Catboost SHAP Summary"
+)
+The preceding snippet generates
+Figure 12.17
+, which shows how similar CatBoost and XGBoost are. This similarity shouldn’t be surprising because, after all, they are both gradient-boosted decision trees. The bad news is that
+race
+is in the top four for both. However, the prevalence of the shade that corresponds to lower feature values on the right suggests that African American (
+race=0
+) negatively correlates with recidivism.
+The output can be seen here:
+Figure 12.17: SHAP summary plot for the regularized XGBoost and optimized CatBoost models
+In
+any case, it makes sense to remove
+race
+from the training data, but we must first ascertain why the model thinks this is a critical feature. Have a look at the following code snippet:
+shap_xgb_interact_values =\
+                shap_xgb_explainer.shap_interaction_values(X_test)
+In
+Chapter 4
+,
+Global Model-Agnostic Interpretation Methods
+, we discussed assessing interaction effects. It’s time to revisit this topic, but this time, we will extract SHAP’s interaction values (
+shap_interaction_values
+) instead of using SHAP’s dependence plots. We can easily rank SHAP interactions with a
+summary_plot
+plot. A SHAP summary plot is very informative, but it’s not nearly as intuitive as a heatmap for interactions. To generate a heatmap with labels, we must place the
+shap_xgb_interact_values
+summed on the first axis in a DataFrame, then name the columns and rows (
+index
+) with the names of the features. The rest is simply using Seaborn’s
+heatmap
+function to plot the DataFrame as a heatmap. The code can be seen in the following snippet:
+shap_xgb_interact_avgs = np.
+abs
+(
+shap_xgb_interact_values
+).mean(
+0
+)
+np.fill_diagonal(shap_xgb_interact_avgs,
+0
+)
+shap_xgb_interact_df = pd.
+DataFrame
+(shap_xgb_interact_avgs)
+shap_xgb_interact_df.columns = X_test.columns
+shap_xgb_interact_df.index = X_test.columns
+sns.
+heatmap
+(shap_xgb_interact_df, cmap=
+'Blues'
+, annot=
+True
+,\
+            annot_kws={
+'size'
+:
+13
+}, fmt=
+'.2f'
+, linewidths=
+.5
+)
+The
+preceding code produced the heatmap shown in
+Figure 12.18
+. It demonstrates how
+race
+interacts most heavily with
+length_of_stay
+,
+age_group
+, and
+priors per year
+. These interactions would, of course, disappear once we removed
+race
+. However, given this finding, careful consideration ought to be given if these features don’t have racial bias built in. Research supports the need for
+age_group
+and
+priors_per_year
+, which leaves
+length_of_stay
+as a candidate for scrutiny. We won’t do this in this chapter, but it’s certainly food for thought:
+Figure 12.18: Heatmap with SHAP interaction values for the regularized XGBoost model
+Another
+interesting insight from
+Figure 12.18
+is how features can be clustered. You can draw a box around the lower-right quadrant between
+c_charge_degree
+and
+priors_per_year
+because, once we remove
+race
+, most of the interaction will be located here. There are many benefits to limiting troubling interactions. For instance, why should all the juvenile delinquency features, such as
+juv_fel_count
+, interact with
+age_group
+? Why should
+sex
+interact with
+length_of_stay
+? Next, we will learn how to place a fence around the lower-right quadrant, limiting interactions between those
+features with
+interaction constraints
+. We will also ensure monotonicity for
+priors_per_year
+with
+monotonic constraints
+.
+Implementing model constraints
+We will
+discuss how to implement constraints first with XGBoost and all popular tree ensembles, for that matter, because the parameters are named the same (see
+Figure 12.12
+). Then, we will do so with TensorFlow Lattice. But before we move forward with any of that, let’s remove
+race
+from the data, as follows:
+X_train_con = X_train.
+drop
+([
+'race'
+], axis=
+1
+).copy()
+X_test_con = X_test.
+drop
+([
+'race'
+], axis=
+1
+).copy()
+Now, with
+race
+out of the picture, the model may still have some bias. However, the feature engineering we performed and the constraints we will place can help align the model against them, given the double standards we found in
+Chapter 6
+, Anchors and Counterfactual Explanations
+. That being said, the resulting model might perform worse against the test data. There are two reasons for this, outlined here:
+Loss of information
+: Race, especially through interaction with other features, impacted the outcome, so it unfortunately carried some information.
+Misalignment between reality and policy-driven ideals
+: This occurs when the main reason to enforce these constraints is to ensure that the model not only complies with domain knowledge but also ideals, and these might not be evident in the data. We must remember that a whole host of institutional racism could have tainted the ground truth. The model reflects the data, but the data reflects reality on the ground, which is itself biased.
+With that in mind, let’s get started with constraint implementation!
+Constraints for XGBoost
+We will
+take three simple steps in this section. We
+will first define our training parameters, then train and evaluate a constrained model, and, lastly, examine the effects of the constraints.
+Setting regularization and constraint parameters
+We take the best
+parameters for our regularized XGBoost model with
+print(fitted_class_mdls['xgb_reg']['cv_best_params'])
+. They are in the
+best_xgb_params
+dictionary, along with
+eta
+and
+max_depth
+. Then, to enforce monotonic constraints on
+priors_per_year
+, we must first know its position and the direction of the monotonic correlation. From
+Figure 12.8
+, we know the answers to both questions. It is the last feature, and
+the correlation is positive, so the
+mono_con
+tuple should have nine items, with the last one being a
+1
+and the rest
+0
+s. As for interaction constraints, we will only allow the last five features to interact with each other, and the same goes for the first four. The
+interact_con
+tuple is a list of lists that reflects these constraints. The code can be seen in the following snippet:
+best_xgb_params
+= {
+'eta'
+:
+0.3
+,
+'max_depth'
+:
+28
+,\
+'reg_alpha'
+:
+0.2071
+,
+'reg_lambda'
+:
+0.6534
+,\
+'scale_pos_weight'
+:
+0.9114
+}
+mono_con
+= (
+0
+,
+0
+,
+0
+,
+0
+,
+0
+,
+0
+,
+0
+,
+0
+,
+1
+)
+interact_con
+= [[
+4
+,
+5
+,
+6
+,
+7
+,
+8
+],[
+0
+,
+1
+,
+2
+,
+3
+]]
+Next, we will train and evaluate the XGBoost model with these constraints.
+Training and evaluating the constrained model
+We will now train and
+evaluate our constrained model. First, we initialize the
+XGBClassifier
+model with our constraint and
+regularization parameters and then fit it using training data that lacks the
+race
+feature (
+X_train_con
+). We then evaluate the predictive performance with
+evaluate_class_mdl
+and compare fairness with
+compare_confusion_matrices
+, as we have done before. The code can be seen in the following snippet:
+xgb_con = xgb.XGBClassifier(
+    seed=rand,monotone_constraints=
+mono_con
+,\
+    interaction_constraints=
+interact_con
+,
+**best_xgb_params
+)
+xgb_con = xgb_con.
+fit
+(X_train_con, y_train)
+fitted_class_mdls[
+'xgb_con'
+] = mldatasets.
+evaluate_class_mdl
+(
+    xgb_con, X_train_con, X_test_con, y_train, y_test,\
+    plot_roc=
+False
+, ret_eval_dict=
+True
+)
+y_test_pred = fitted_class_mdls[
+'xgb_con'
+][
+'preds_test'
+]
+_ = mldatasets.
+compare_confusion_matrices
+(
+    y_test[X_test.race==
+1
+],
+    y_test_pred[X_test.race==
+1
+],
+    y_test[X_test.race==
+0
+],
+    y_test_pred[X_test.race==
+0
+],
+'Caucasian'
+,
+'African-American'
+,
+compare_fpr=
+True
+)
+The
+preceding snippet produces the confusion matrix pair in
+Figure 12.19
+and some predictive performance metrics. If we
+compare the matrices to those in
+Figure 12.16
+, racial disparities, as measured by our FPR ratio, took a hit. Also, predictive performance is lower than the optimized CatBoost model across the board, by 2–4%. We could likely increase these metrics a bit by performing the same
+Bayesian hyperparameter tuning
+on this model.
+The confusion matrix output can be seen here:
+Figure 12.19: Comparison of confusion matrices between races for the constrained XGBoost model
+One thing to consider is that, although racial inequity is a primary concern of this chapter, we also want to ensure that the model is optimal in other ways. As stated before, it’s a balancing act. For instance, it’s only fitting that defendants with the most
+priors_per_year
+are riskier than those with the least, and we ensured this with monotonic constraints. Let’s verify these outcomes!
+Examining constraints
+An
+easy way to observe the constraints in action is to plot a SHAP
+summary_plot
+, as we did in
+Figure 12.17
+, but this time, we will only plot one. Have a look at the following ode snippet:
+fitted_xgb_con_mdl = fitted_class_mdls[
+'xgb_con'
+][
+'fitted'
+]
+shap_xgb_con_explainer = shap.
+TreeExplainer
+(fitted_xgb_con_mdl)
+shap_xgb_con_values = shap_xgb_con_explainer.
+shap_values
+(
+    X_test_con
+)
+shap.
+summary_plot
+(
+    shap_xgb_con_values, X_test_con, plot_type=
+"dot"
+)
+The preceding code produces
+Figure 12.20
+. This demonstrates how
+priors_per_year
+from left to right is a cleaner gradient, which means that lower values are consistently having a negative impact, and the higher ones a positive one—as they should!
+You can see the output here:
+Figure 12.20: SHAP summary plot for the constrained XGBoost model
+Next, let’s
+examine the
+age_group
+versus
+priors_per_year
+interaction we saw through the lens of the data in
+Figure 12.7
+. We can also use
+plot_prob_contour_map
+for models by adding extra arguments, as follows:
+The fitted model (
+fitted_xgb_con_mdl
+)
+The DataFrame to use for inference with the model (
+X_test_con
+)
+The names of the two columns in the DataFrame to compare on each axis (
+x_col
+and
+y_col
+)
+The outcome is an interaction partial dependence plot, like those shown in
+Chapter 4
+,
+Global Model-Agnostic Interpretation Methods
+, except that it uses the dataset (
+recidivism_df
+) to create the histograms for each axis. We will create two such plots right now for
+comparison—one for the regularized XGBoost model and another for the constrained one. The code for this can be seen in the following snippet:
+mldatasets.
+plot_prob_contour_map
+(
+    recidivism_df.
+age_group
+, recidivism_df.
+priors_per_year
+,
+    recidivism_df.
+is_recid
+, x_intervals=ordenc.categories_[
+2
+],
+    y_intervals=
+6
+, use_quantiles=
+True
+, xlabel=
+'Age Group'
+,
+    ylabel=
+'Priors Per Year'
+, model=
+fitted_xgb_mdl
+,
+    X_df=
+X_test
+,x_col=
+'age_group'
+,y_col=
+'priors_per_year'
+,
+    title=
+'
+Probability of Recidivism by Age/Priors per Year \
+(according to XGBoost Regularized Model)'
+)
+mldatasets.
+plot_prob_contour_map
+(
+    recidivism_df.
+age_group
+, recidivism_df.
+priors_per_year
+,
+    recidivism_df.is_recid, x_intervals=ordenc.categories_[
+2
+],
+    y_intervals=
+6
+, use_quantiles=
+True
+, xlabel=
+'Age Group'
+,
+    ylabel=
+'Priors Per Year'
+, model=
+fitted_xgb_con_mdl
+,
+    X_df=
+X_test_con
+,x_col=
+'age_group'
+,y_col=
+'priors_per_year'
+,
+    title=
+'(according to XGBoost Constrained Model)'
+)
+The preceding code produces the plots shown in
+Figure 12.21
+. It shows that the regularized XGBoost model reflects the data (see
+Figure 12.7
+). On the other hand, the constrained XGBoost model smoothened and simplified the contours, as can be seen here:
+Figure 12.21: Recidivism probability contour map for age_group and priors_per_year according to XGBoost regularized and constrained models
+Next, we can
+generate the SHAP interaction values heatmap from
+Figure 12.18
+but for the constrained model. The code is the same but uses the
+shap_xgb_con_explainer
+SHAP explainer and
+X_test_con
+data. The code can be seen in the following snippet:
+shap_xgb_interact_values =\
+        shap_xgb_con_explainer.
+shap_interaction_values
+(X_test_con)
+shap_xgb_interact_df =\
+        pd.
+DataFrame
+(np.
+sum
+(
+shap_xgb_interact_values
+, axis=
+0
+))
+shap_xgb_interact_df.columns = X_test_con.columns
+shap_xgb_interact_df.index = X_test_con.columns
+sns.
+heatmap
+(
+    shap_xgb_interact_df, cmap=
+'RdBu'
+, annot=
+True
+,
+    annot_kws={
+'size'
+:
+13
+}, fmt=
+'.0f'
+, linewidths=
+.5
+)
+The preceding snippet outputs the heatmap shown in
+Figure 12.22
+. It shows how the interaction constraints were effective because of zeros in the lower-left and lower-right quadrants, which correspond to interactions between the two groups of features we separated. If we compare with
+Figure 12.18
+, we can also tell how the constraints shifted the most salient interactions, making
+age_group
+and
+length_of_stay
+by far the most important ones.
+The output can be seen here:
+Figure 12.22: Heatmap with SHAP interaction values for the constrained XGBoost model
+Now, let’s see
+how TensorFlow implements monotonicity and other “shape constraints” via TensorFlow Lattice.
+Constraints for TensorFlow Lattice
+Neural
+networks can be very efficient in finding
+an optimal solution for the
+loss
+function. The loss is tied to a consequence we wish to predict. In this case, that would be 2-year recidivism. In ethics, a
+utilitarian
+(or
+consequentialist
+) view of fairness has no problem with this as long as the model’s training data isn’t biased. Yet a
+deontological
+view is that ethical principles or policies drive ethical questions and supersede consequences. Inspired
+by this,
+TensorFlow Lattice
+(
+TFL
+) can embody ethical principles in models as model shape constraints.
+A
+lattice
+is an
+interpolated lookup table
+, which
+is a grid that approximates inputs to outputs through interpolation. In high-dimensional space, these grids become hypercubes. The mappings of each input to output are constrained
+through
+calibration layers
+, and they support many kinds of constraints—not just monotonicity.
+Figure 12.23
+shows this here:
+Figure 12.23: Some of the constraints supported by TensorFlow Lattice
+Figure 12.23
+shows several shape constraints. The first three are applied to a single feature (
+x
+) constraining the
+line, representing the output. The last two are applied to a pair of features (
+x
+1
+and
+x
+2
+) constraining the color-coded contour map (
+). A brief explanation for each follows:
+Monotonicity
+: This makes
+the function (
+) always increase (1) or decrease (-1) against the input (
+x
+).
+Convexity
+: This forces
+the function (
+) to be convex (1) or concave (-1) against the input (
+x
+). Convexity can be mixed with monotonicity to have an effect like the one in
+Figure 12.23
+.
+Unimodality
+: This
+is like monotonicity, except that it goes in both directions, allowing the function (
+) to have a single valley (1) or peak (-1).
+Trust
+: This forces one
+monotonic feature (
+x
+1
+) to rely on another one (
+x
+2
+). The example in
+Figure 12.23
+is
+Edgeworth Trust
+, but
+there’s also
+a
+Trapezoid Trust
+variation with a different shape constraint.
+Dominance
+: Monotonic
+dominance constrains one monotonic (
+x
+1
+) feature to define the direction of the slope or effects when compared to another (
+x
+2
+). An alternative, range dominance, is similar, except both features are monotonic.
+Neural networks
+are particularly prone to
+overfitting, and the levers for controlling it are comparably more difficult. For instance, exactly what combination of hidden nodes, dropout, weight regularization, and epochs will lead to an acceptable level of overfitting is challenging to tell. On the other hand, moving a single parameter in a tree-based model, tree depth, in one direction will likely lower overfitting to an acceptable level, albeit it might require many different parameters to make it optimal.
+Enforcing shape constraints not only increases interpretability but also regularizes the model because it simplifies the function. TFL also supports different kinds of penalty-based regularization on a per-feature basis or to the calibration layer’s kernel, leveraging L1 and L2 penalties via
+Laplacian
+,
+Hessian
+,
+Torsion
+, and
+Wrinkle
+regularizers. These
+regularizers
+have the effect of making
+functions
+more flat, linear, or smooth. We won’t explain them but it suffices to say that there is regularization to cover many use cases.
+There
+are also
+several ways to implement the framework—too many to elaborate here! Yet, it’s important to point out that this example is just one of a handful of ways of implementing it. TFL comes with
+built-in
+canned estimators
+that abstract some of the configurations. You can also create a
+custom estimator
+using
+the TFL layers. For Keras, you can either use
+premade models
+or
+build a Keras model with TensorFlow Lattice layers. This last one is what we will do next!
+Initializing the model and Lattice inputs
+We
+will now create a series of
+input layers
+, which each include a single feature. These connect to
+calibration layers
+, which make each
+input fit into a
+Piece-Wise Linear
+(
+PWL
+) function
+that complies with individual constraints and regularizations, except for
+sex
+, which will use categorical calibration. The calibration layers all feed into a multidimensional
+Lattice layer
+, producing output via a
+Dense layer
+with
+sigmoid
+activation. This description can be a lot to take in, so feel free to skip ahead to
+Figure 12.24
+to get some visual aid.
+Incidentally, there are
+many kinds of layers available that you can connect to produce a
+Deep Lattice Network
+(
+DLN
+), including the following:
+Linear
+for linear functions between more than one input, including those with dominance shape constraints.
+Aggregation
+to perform an aggregation function on more than one input.
+Parallel combination
+to place many calibration layers within a single function, making it compatible with Keras
+Sequential
+layers.
+We won’t use any of these layers in this example, but perhaps knowing this will inspire you to explore the TensorFlow Lattice library further. Anyway, back to this example!
+The first thing to define is
+lattice_sizes
+, which is a tuple that corresponds to a number of vertices per dimension. We have one dimension per feature in the chosen architecture, so we need to choose nine numbers greater than or equal to two. Features with less
+cardinality for categorical features or inflection points for continuous ones warrant fewer
+vertices. However, we might also want to restrict a feature’s expressiveness by purposely choosing an even smaller number of vertices. For instance,
+juv_fel_count
+has 10 unique values, but we will assign only two vertices to it.
+lattice_sizes
+is shown here:
+lattice_sizes = [
+2
+,
+2
+,
+2
+,
+2
+,
+4
+,
+5
+,
+7
+,
+7
+,
+7
+]
+Next, we initialize two lists, one to place all the input layers (
+model_inputs
+) and another for the calibration layers (
+lattice_inputs
+). Then, for each feature, one by one, we define an input layer with
+tf.keras.layers.Input
+and a calibration layer with either categorical calibration (
+tfl.layers.CategoricalCalibration
+) or PWL calibration (
+tfl.layers.PWLCalibration
+). Both input and calibration layers will be appended to their respective lists for each feature. What happens inside the calibration layer depends on the feature. All PWL calibrations use
+input_keypoints
+, which asks where the PWL function should be segmented. Sometimes, this is best answered with fixed widths (
+np.linspace
+), and other times with fixed frequency (
+np.quantile
+). Categorical calibration instead uses buckets (
+num_buckets
+) that correspond to the number of categories. All calibrators have the following arguments:
+output_min
+: The minimum output for the calibrator
+output_max
+: The maximum output for the calibrator—always has to match the output minimum + lattice size - 1
+monotonicity
+: Whether it should monotonically constrain the PWL function, and if so, how
+kernel_regularizer
+: How to regularize the function
+In addition to these arguments,
+convexity
+and
+is_cyclic
+(for monotonic unimodal) can modify the constraint shape. Have a look at the following code snippet:
+model_inputs = []
+lattice_inputs = []
+sex_input =
+tf.keras.layers.Input
+(shape=[
+1
+], name=
+'sex'
+)
+lattice_inputs.append(
+tfl.layers.CategoricalCalibration
+(
+    name=
+'sex_calib'
+,
+    num_buckets=
+2
+,
+    output_min=
+0.0
+,
+    output_max=lattice_sizes[
+0
+] -
+1.0
+,
+    kernel_regularizer=tf.keras.regularizers.l1_l2(l1=
+0.001
+),
+    kernel_initializer=
+'constant'
+)(sex_input)
+)
+model_inputs.append(sex_input)
+juvf_input =
+tf.keras.layers.Input
+(shape=[
+1
+],\
+                                   name=
+'juv_fel_count'
+)
+lattice_inputs.append(
+tfl.layers.PWLCalibration
+(
+    name=
+'juvf_calib'
+,
+monotonicity
+=
+'none'
+,
+    input_keypoints=np.linspace(
+0
+,
+20
+, num=
+5
+, dtype=np.float32),
+    output_min=
+0.0
+,
+    output_max=lattice_sizes[
+1
+] -
+1.0
+,\
+    kernel_regularizer=tf.keras.regularizers.l1_l2(l1=
+0.001
+),
+    kernel_initializer=
+'equal_slopes'
+)(juvf_input)
+)
+model_inputs.append(juvf_input)
+age_input =
+tf.keras.layers.Input
+(shape=[
+1
+], name=
+'age_group'
+)
+lattice_inputs.append(
+tfl.layers.PWLCalibration
+(
+    name=
+'age_calib'
+,
+monotonicity
+=
+'none'
+,
+    input_keypoints=np.linspace(
+0
+,
+6
+, num=
+7
+, dtype=np.float32),
+    output_min=
+0.0
+,
+    output_max=lattice_sizes[
+7
+] -
+1.0
+,
+    kernel_regularizer=(
+'hessian'
+,
+0.0
+,
+1e-4
+))(age_input)
+)
+model_inputs.append(age_input)
+priors_input =
+tf.keras.layers.Input
+(shape=[
+1
+],\
+                                     name=
+'priors_per_year'
+)
+lattice_inputs.append(
+tfl.layers.PWLCalibration
+(
+    name=
+'priors_calib'
+,
+monotonicity
+=
+'increasing'
+,
+    input_keypoints=np.quantile(X_train_con[
+'priors_per_year'
+],
+                                np.linspace(
+0
+,
+1
+, num=
+7
+)),
+    output_min=
+0.0
+,
+    output_max=lattice_sizes[
+8
+]-
+1.0
+)(priors_input))
+model_inputs.append(priors_input)
+So, we
+now
+have a list with
+model_inputs
+and another with calibration layers, which will be the input to the lattice (
+lattice_inputs
+). All we need to do now is tie these together to a lattice.
+Building a Keras model with TensorFlow Lattice layers
+We already
+have the first two building blocks of this model connected. Now, let’s create the last two building blocks, starting with the lattice (
+tfl.layers.Lattice
+). As arguments, it takes
+lattice_sizes
+, output minimums and maximums, and
+monotonicities
+it should enforce. Note that the last item,
+priors_per_year
+, has monotonicity set as
+increasing
+. The lattice layer then feeds into the final piece, which is the
+Dense
+layer with
+sigmoid
+activation. The code can be seen in the following snippet:
+lattice =
+tfl.layers.Lattice
+(
+    name=
+'lattice'
+,
+    lattice_sizes=
+lattice_sizes
+,
+monotonicities
+=[
+'
+none'
+,
+'none'
+,
+'none'
+,
+'none'
+,
+'none'
+,
+'none'
+,
+'none'
+,
+'none'
+,
+'increasing'
+],
+    output_min=
+0.0
+, output_max=
+1.0
+)(
+lattice_inputs
+)
+model_output = tf.keras.layers.
+Dense
+(
+1
+, name=
+'output'
+,
+                                     activation=
+'sigmoid'
+)(lattice)
+The first two building blocks as
+inputs
+can now get connected with the last two as
+outputs
+with
+tf.keras.models.Model
+. And voilà! We now have a fully formed model, with the code shown here:
+tfl_mdl =
+tf.keras.models.Model
+(inputs=model_inputs,
+                                outputs=model_output)
+You can always run
+tfl_mdl.summary()
+to get an idea of how all the layers connect, but it’s not as intuitive as using
+tf.keras.utils.plot_model
+, which is illustrated in the following code snippet:
+tf.keras.utils.plot_model(tfl_mdl, rankdir=
+'LR'
+)
+The preceding code generates the model diagram shown here in
+Figure 12.24
+:
+Figure 12.24: A diagram of the Keras model with TFL layers
+Next, we
+need to compile the model. We will use a
+binary_crossentropy
+loss function and an
+Adam
+optimizer, and employ accuracy
+and
+Area Under the Curve
+(
+AUC
+) as metrics, as illustrated in the following code snippet:
+tfl_mdl.
+compile
+(
+    loss=
+'binary_crossentropy'
+,
+    optimizer=tf.keras.optimizers.Adam(lr=
+0.001
+),
+    metrics=[
+'accuracy'
+,tf.keras.metrics.AUC(name=
+'auc'
+)]
+)
+We are almost
+ready to go now! What follows next is the very last step.
+Training and evaluating the model
+If you
+take one hard look at
+Figure 12.24
+, you’ll notice that the model doesn’t have one input layer but nine, so this means that we must split our training and test data into nine parts. We can use
+np.split
+to do
+this, which will yield a list of nine NumPy arrays. As for the labels, TFL doesn’t accept arrays with a single dimension. With
+expand_dims
+, we convert their shapes from
+(N,)
+to
+(N,1)
+, as illustrated in the following code snippet:
+X_train_expand = np.
+split
+(
+    X_train_con.values.astype(np.float32),
+    indices_or_sections=
+9
+,
+    axis=
+1
+)
+y_train_expand = np.
+expand_dims
+(
+    y_train.values.astype(np.float32),
+    axis=
+1
+)
+X_test_expand = np.
+split
+(
+    X_test_con.values.astype(np.float32),
+    indices_or_sections=
+9
+,
+    axis=
+1
+)
+y_test_expand = np.
+expand_dims
+(
+    y_test.values.astype(np.float32),
+    axis=
+1
+)
+Now comes the training! To prevent overfitting, we can use
+EarlyStopping
+by monitoring the validation AUC (
+val_auc
+). And to account for class imbalance, in the
+fit
+function, we
+use
+class_weight
+, as
+illustrated in the following code snippet:
+es = tf.keras.callbacks.
+EarlyStopping
+(
+    monitor=
+'
+val_auc
+'
+,
+    mode=
+'max'
+,
+    patience=
+40
+,
+    restore_best_weights=
+True
+)
+tfl_history = tfl_mdl.
+fit
+(
+    X_train_expand,
+    y_train_expand,
+class_weight
+={
+0
+:
+18
+,
+1
+:
+16
+},
+    batch_size=
+128
+,
+    epochs=
+300
+,
+    validation_split=
+0.2
+,
+    shuffle=
+True
+,
+    callbacks=[
+es
+]
+)
+Once the model has been trained, we can use
+evaluate_class_mdl
+to output a quick summary of predictive performance, as we have before, and then
+compare_confusion_matrices
+to examine fairness, as we did previously. The code is shown in the following snippet:
+fitted_class_mdls[
+'tfl_con'
+] = mldatasets.
+evaluate_class_mdl
+(
+    tfl_mdl,
+    X_train_expand,
+    X_test_expand,
+    y_train.values.astype(np.float32),
+    y_test.values.astype(np.float32),
+    plot_roc=
+False
+,
+    ret_eval_dict=
+True
+)
+y_test_pred = fitted_class_mdls[
+'tfl_con'
+][
+'preds_test'
+]
+_ = mldatasets.
+compare_confusion_matrices
+(
+    y_test[X_test.race==
+1
+],
+    y_test_pred[X_test.race==
+1
+],
+    y_test[X_test.race==
+0
+],
+    y_test_pred[X_test.race==
+0
+],
+'Caucasian'
+,
+'African-American'
+,
+    compare_fpr=
+True
+)
+The preceding
+snippet produced the confusion matrices in
+Figure 12.25
+. The TensorFlow Lattice model
+performs much better than the regularized Keras model, yet the FPR ratio is better than the constrained XGBoost model. It must be noted that XGBoost’s parameters were previously tuned. With TensorFlow Lattice, a lot could be done to improve FPR, including using a custom loss function or better early-stopping metrics that somehow account for racial disparities.
+The output can be seen here:
+Figure 12.25: Comparison of confusion matrices between races for the constrained TensorFlow Lattice model
+Next, we will make some conclusions based on what was learned in this chapter and determine if we accomplished the mission.
+Mission accomplished
+It’s often the data that takes the blame for a poor-performing, uninterpretable, or biased model, and that can be true, but many different things can be done in the preparation and model development stages to improve it. To offer an analogy, it’s like baking a cake. You need quality ingredients, yes. But seemingly small differences in the preparation of these ingredients and baking itself—such as the baking temperature, the container used, and time—can make a huge difference. Hell! Even things that are out of your control, such as atmospheric pressure or moisture, can impact baking! Even after it’s all finished, how many different ways can you assess the quality of a cake?
+This chapter is about these many details, and, as with baking, they are
+part exact science
+and
+part art form
+. The concepts discussed in this chapter also have far-reaching consequences, especially regarding how to optimize a problem that doesn’t have a single goal and has profound societal implications. One possible approach is to combine metrics and account for imbalances. To that end, we have created a metric: a weighted average of precision recall that penalizes racial inequity, and we can efficiently compute it for all of our models and place it into the model dictionary (
+fitted_class_mdls
+). Then, as we have done before, we put it into a DataFrame and output it but, this time, sort by the custom metric (
+wppra_test
+). The code can be seen in the following snippet:
+for
+mdl_name
+in
+fitted_class_mdls:
+    fitted_class_mdls[mdl_name][
+'wppra_test'
+] =\
+weighted_penalized_pr_average
+(
+        y_test,
+        fitted_class_mdls[mdl_name][
+'preds_test'
+],
+        X_test[
+'race'
+],
+range
+(
+3
+)
+    )
+class_metrics = pd.
+DataFrame.from_dict
+(fitted_class_mdls,
+'index'
+)[
+    [
+'precision_test'
+,
+'recall_test'
+,
+'wppra_test'
+]
+]
+with
+pd.option_context(
+'display.precision'
+,
+3
+):
+    html = class_metrics.
+sort_values
+(
+        by=
+'
+wppra_test
+'
+,
+        ascending=
+False
+).style.background_gradient(
+           cmap=
+'plasma'
+,subset=[
+'precision_test'
+]
+        ).background_gradient(
+           cmap=
+'viridis'
+, subset=[
+'recall_test'
+])
+html
+The preceding code produced the DataFrame shown here in
+Figure 12.26
+:
+Figure 12.26: Top models in this chapter when sorted by weighted penalized precision-recall average custom metric
+In
+Figure 12.26
+, it’s tempting to propose one of the models at the very top. However, they were trained with
+race
+as a feature and didn’t account for proven criminal justice
+realities
+. However, the highest-performing constrained model—the XGBoost one (
+xgb_con
+)—lacked
+race
+, ensured that
+priors_per_year
+is monotonic and that
+age_group
+isn’t allowed to interact with juvenile delinquency features, and it did all this while significantly improving predictive performance when compared to the original model. It is fairer, too, because it reduced the ratio of the FPR between the privileged and underprivileged groups from 1.84x (
+Figure 6.2
+from
+Chapter 6
+,
+Anchors and Counterfactual Explanations
+) to 1.39x (
+Figure 12.19
+). It’s not perfect, but it’s a massive improvement!
+The mission was to prove that accuracy and domain knowledge could coexist with progress toward fairness, and we have completed it successfully. That being said, there’s still room for improvement. Therefore, the plan of action would have to showcase the constrained XGBoost model to your client and continue improving and building more constrained models. The unconstrained ones should only serve as a benchmark.
+You can make substantial fairness improvements if you combine the methods from this chapter with those learned in
+Chapter 11
+,
+Bias Mitigation and Causal Inference Methods
+. We didn’t incorporate them into this chapter, to focus solely on model (or in-processing) methods that are typically not seen as part of the bias-mitigation toolkit, but they very much can assist to that end, not to mention model-tuning methods that serve to make a model more reliable.
+Summary
+After reading this chapter, you should now understand how to leverage data engineering to enhance interpretability, regularization to reduce overfitting, and constraints to comply with policies. The primary end goals are to place guardrails and curb the complexity that hinders interpretability.
+In the next chapter, we will look at ways to enhance model reliability through adversarial robustness.
+Dataset sources
+ProPublica Data Store (2019).
+COMPAS Recidivism Risk Score Data and Analysis
+. Originally retrieved from
+https://www.propublica.org/datastore/dataset/compas-recidivism-risk-score-data-and-analysis
+Further reading
+Hastie, T. J., Tibshirani, R. J. and Friedman, J. H. (2001).
+The elements of statistical learning
+. Springer-Verlag, New York, USA
+Wang, S. & Gupta, M. (2020).
+Deontological Ethics By Monotonicity Shape Constraints
+. AISTATS.
+https://arxiv.org/abs/2001.11990
+Cotter, A., Gupta, M., Jiang, H., Ilan, E. L., Muller, J., Narayan, T., Wang, S. & Zhu, T. (2019).
+Shape Constraints for Set Functions
+. ICML.
+http://proceedings.mlr.press/v97/cotter19a.html
+Gupta, M. R., Cotter A., Pfeifer, J., Voevodski, K., Canini, K., Mangylov, A., Moczydlowski, W. and van Esbroeck, A. (2016).
+Monotonic Calibrated Interpolated Look-Up Tables. Journal of Machine Learning Research
+17(109):1−47.
+https://arxiv.org/abs/1505.06378
+Noble, S. (2018).
+Algorithms of oppression: data discrimination in the age of Google
+. NYU Press
+Learn more on Discord
+To join the Discord community for this book – where you can share feedback, ask the author questions, and learn about new releases – follow the QR code below:
+https://packt.link/inml
+
+13
+Adversarial Robustness
+Machine learning interpretation has many concerns, ranging from knowledge discovery to high-stakes ones with tangible ethical implications, like the fairness issues examined in the last two chapters. In this chapter, we will direct our attention to concerns involving reliability, safety, and security.
+As we realized using the
+contrastive explanation method
+in
+Chapter 7
+,
+Visualizing Convolutional Neural Networks
+, we can easily trick an image classifier into making embarrassingly false predictions. This ability can have serious ramifications. For instance, a perpetrator can place a black sticker on a yield sign, and while most drivers would still recognize this as a yield sign, a self-driving car may no longer recognize it and, as a result, crash. A bank robber could wear a cooling suit designed to trick the bank vault’s thermal imaging system, and while any human would notice it, the imaging system would fail to do so.
+The risk is not limited to sophisticated image classifiers. Other models can be tricked! The
+counterfactual examples
+produced in
+Chapter 6
+, Anchors and Counterfactual Explanations,
+are like adversarial examples except with the goal of deception. An attacker could leverage any misclassification example, straddling the decision boundary adversarially. For instance, a spammer could realize that adjusting some email attributes increases the likelihood of circumventing spam filters.
+Complex models are more vulnerable to adversarial attacks. So why would we trust them?! We can certainly make them more foolproof, and that’s what adversarial robustness entails. An adversary can purposely thwart a model in many ways, but we will focus on evasion attacks and briefly explain other forms of attacks. Then we will explain two defense methods: spatial smoothing preprocessing and adversarial training. Lastly, we will demonstrate one robustness evaluation method.
+These are the main topics we will cover:
+Learning about evasion attacks
+Defending against targeted attacks with preprocessing
+Shielding against any evasion attack through adversarial training of a robust classifier
+Technical requirements
+This chapter’s example uses the
+mldatasets
+,
+numpy
+,
+sklearn
+,
+tensorflow
+,
+keras
+,
+adversarial-robustness-toolbox
+,
+matplotlib
+, and
+seaborn
+libraries. Instructions on how to install all of these libraries are in the
+Preface
+.
+The code for this chapter is located here:
+https://packt.link/1MNrL
+The mission
+The privately contracted security services industry market worldwide is valued at over USD 250 billion and is growing at around 5% annually. However, it faces many challenges, such as shortages of adequately trained guards and specialized security experts in many jurisdictions, and a whole host of unexpected security threats. These threats include widespread coordinated cybersecurity attacks, massive riots, social upheaval, and, last but not least, health risks brought on by pandemics. Indeed, 2020 tested the industry with a wave of ransomware, misinformation attacks, protests, and COVID-19 to boot.
+In the wake of this, one of the largest hospital networks in the United States asked their contracted security company to monitor the correct use of masks by both visitors and personnel throughout the hospitals. The security company has struggled with this request because it diverts security personnel from tackling other threats, such as intruders, combative patients, and belligerent visitors. It has video surveillance in every hallway, operating room, waiting room, and hospital entrance. It’s impossible to have eyes on every camera feed every time, so the security company thought they could assist guards with deep learning models.
+These models already alert unusual activities, such as running in the hallways and brandishing weapons anywhere on the premises. They have proposed to the hospital network that they would like to add a new model that detects masks’ correct usage. Before COVID-19, there were policies in place for mandatory mask usage in certain areas of each hospital, and during COVID-19, it was required everywhere. The hospital administrators would like to turn on and off this monitoring feature, depending on pandemic risk levels moving forward. They realize that personnel get fatigued and forget to put masks back on, or they partially slip off at times. Many visitors are also hostile toward using masks and may wear one when entering the hospital but take it off when no guard is around. This isn’t always intentional, so they wouldn’t want to dispatch guards on every alert, unlike other threats. Instead, they’d rather use awareness and a little bit of shame to modify behavior and only intervene with repeat offenders:
+Figure 13.1: Radar speed signs like this one help curb speeding
+Awareness is a very effective method with radar speed signs (see
+Figure 13.1
+), which make roads safer by only making drivers aware that they are driving too fast. Likewise, having a screen at the end of heavily trafficked hallways showing snapshots of those who have recently either mistakenly or purposely not complied with mandatory mask usage potentially creates some embarrassment for offenders. The system will log repeat offenders so that security guards can look for them and either make them comply or ask them to vacate the premises.
+There’s some concern with visitors trying to trick the model into evading compliance, so the security company has hired you to ensure that the model is robust in the face of this kind of adversarial attack. Security officers have noticed some low-tech trickery before, such as people momentarily covering their faces with their hands or a part of their sweater when they realize cameras monitor them. Also, in one disturbing incident, a visitor dimmed the lights and sprayed some gel on a camera, and in another, an individual painted their mouth. However, there are concerns about higher-tech attacks, such as jamming the camera’s wireless signal or shining high-powered lasers directly into cameras. Devices that perform these attacks are increasingly easier to obtain and could impact other surveillance functions on a larger scale, like preventing theft. The security company hopes this robustness exercise can inform their efforts to improve every surveillance system and model.
+Eventually, the security company would like to produce its own dataset with face images from the hospitals they monitor. Meanwhile, synthetically masked faces from external sources are the best they can do to productionize a model in the short term. To this end, you have been provided a large dataset of synthetically correctly and incorrectly masked faces and their unmasked counterparts. The two datasets were combined into a single one, and the original dimensions of 1,024 × 1,024 were reduced to the thumbnail size of 124 × 124. Also, for efficiency’s sake, 21,000 images were sampled from roughly 210,000 in these datasets.
+The approach
+You’ve decided to take a four-fold approach:
+Exploring several possible evasion attacks to understand how vulnerable the model is to them and how credible they are as threats
+Using a preprocessing method to protect a model against these attacks
+Leveraging adversarial retraining to produce a robust classifier that is intrinsically less prone to many of these attacks
+Evaluating robustness with state-of-the-art methods to assure hospital administrators that the model is adversarially robust
+Let’s get started!
+The preparations
+You will
+find the code for this example here:
+https://github.com/PacktPublishing/Interpretable-Machine-Learning-with-Python-2E/tree/main/13/Masks.ipynb
+Loading the libraries
+To run
+this example, you need to install the following libraries:
+mldatasets
+to load the dataset
+numpy
+and
+sklearn
+(scikit-learn) to manipulate it
+tensorflow
+to fit the models
+matplotlib
+and
+seaborn
+to visualize the interpretations
+You should load all of them first:
+import
+math
+import
+os
+import
+warnings
+warnings.filterwarnings("ignore")
+import
+mldatasets
+import
+numpy
+as
+np
+from
+sklearn
+import
+preprocessing
+import
+tensorflow
+as
+tf
+from
+tensorflow.keras.utils
+import
+get_file
+import
+matplotlib.pyplot
+as
+plt
+import
+seaborn
+as
+sns
+from
+sklearn
+import
+metrics
+from
+art.estimators.classification
+import
+KerasClassifier
+from
+art.attacks.evasion
+import
+FastGradientMethod,\
+                      ProjectedGradientDescent, BasicIterativeMethod
+from
+art.attacks.evasion
+import
+CarliniLInfMethod
+from
+art.attacks.evasion
+import
+AdversarialPatchNumpy
+from
+art.defences.preprocessor
+import
+SpatialSmoothing
+from
+art.defences.trainer
+import
+AdversarialTrainer
+from
+tqdm.notebook
+import
+tqdm
+Let’s check that TensorFlow has loaded the right version with
+print(tf.__version__)
+. The version should be 2.0 and above.
+We should also disable eager execution and verify that it worked with the following command:
+tf.compat.v1.disable_eager_execution()
+print
+(
+'Eager execution enabled:'
+, tf.executing_eagerly())
+The
+output should say that it’s
+False
+.
+In TensorFlow, turning eager execution mode on means that it doesn’t require a computational graph or a session. It’s the default for TensorFlow 2.x and later but not in prior versions, so you need to disable it to avoid incompatibilities with code that was optimized for prior versions of TensorFlow.
+Understanding and preparing the data
+We will load the
+data into four NumPy arrays, corresponding to the training/test datasets. While we are at it, we will divide
+X
+face images by 255 because, that way, they will be of values between zero and one, which is better for deep learning models. We call this feature scaling. We will need to record the
+min_
+and
+max_
+for the training data because we will need these later:
+X_train, X_test, y_train, y_test = mldatasets.load(
+"maskedface-net_thumbs_sampled"
+, prepare=
+True
+)
+X_train, X_test = X_train /
+255.0
+, X_test /
+255.0
+min_ = X_train.
+min
+()
+max_ = X_train.
+max
+()
+It’s always important to verify our data when we load it to make sure it didn’t get corrupted:
+print
+(
+'X_train dim:\t%s'
+% (X_train.
+shape
+,))
+print
+(
+'X_test dim:\t%s'
+% (X_test.
+shape
+,))
+print
+(
+'y_train dim:\t%s'
+% (y_train.
+shape
+,))
+print
+(
+'y_test dim:\t%s'
+% (y_test.
+shape
+,))
+print
+(
+'X_train min:\t%s'
+% (
+min_
+))
+print
+(
+'X_train max:\t%s'
+% (
+max_
+))
+print
+(
+'y_train labels:\t%s'
+% (np.
+unique
+(y_train)))
+The preceding snippet will produce the following output, which tells us that the images have dimensions of 128 × 128 pixels and three channels (color). There are 16,800 training images and 4,200 test images. The labels only have a 1 in the second value, which indicates
+that they are not one-hot encoded. Indeed, by printing the unique values (
+np.unique(y_train)
+), we can tell that labels are represented as text:
+Correct
+for correctly masked,
+Incorrect
+for incorrectly masked, and
+None
+for no mask:
+X_train dim:    (16800, 128, 128, 3)
+X_test dim: (4200, 128, 128, 3)
+y_train dim:    (16800, 1)
+y_test dim: (4200, 1)
+X_train min:    0.0
+X_train max:    1.0
+y_train labels: ['Correct' 'Incorrect' 'None']
+Therefore, a preprocessing step we will need to perform is to
+One-Hot Encode
+(
+OHE
+) the
+y
+labels because we will need the OHE form to evaluate the model’s predictive performance. Once we initialize the
+OneHotEncoder
+, we will need to
+fit
+it into the training data (
+y_train
+). We can also extract the categories from the encoder into a list (
+labels_l
+) to verify that it has all three:
+ohe = preprocessing.
+OneHotEncoder
+(sparse=
+False
+)
+ohe.
+fit
+(y_train)
+labels_l = ohe.
+categories_
+[
+0
+].tolist()
+print
+(labels_l)
+For reproducibility’s sake, always initialize your random seeds like this:
+rand =
+9
+os.environ[
+'PYTHONHASHSEED'
+] =
+str
+(rand)
+tf.random.set_seed(rand)
+np.random.seed(rand)
+Making machine learning truly reproducible means also making it deterministic, which means that training with the same data will produce a model with the same parameters. Determinism is very difficult with deep learning and is often session-, platform-, and architecture-dependent. If you use an NVIDIA GPU, you can install a library called
+framework-reproducibility
+.
+Many of the adversarial attack, defense, and evaluation methods we will study in this chapter are very resource-intensive, so if we used the entire test dataset with them, they could likely take many hours on a single method! For efficiency, it is strongly suggested to use samples of the test dataset. Therefore, we will create a medium 200-image sample (
+X_test_mdsample
+,
+y_test_mdsample
+) and a small 20-image sample (
+X_test_smsample
+,
+y_test_smsample
+) using
+np.random.choice
+:
+sampl_md_idxs = np.random.choice(X_test.shape[
+0
+],
+200
+, replace=
+False
+)
+X_test_mdsample = X_test[sampl_md_idxs]
+y_test_mdsample = y_test[sampl_md_idxs]
+sampl_sm_idxs = np.random.choice(X_test.shape[
+0
+],
+20
+, replace=
+False
+)
+X_test_smsample = X_test[sampl_sm_idxs]
+y_test_smsample = y_test[sampl_sm_idxs]
+We
+have two sample sizes because some methods could take too long with a larger sample size. Now, let’s take a peek at what images are in our datasets. In the preceding code, we have taken a medium and small sample of our test dataset. We will place each image of our small sample in a 4 × 5 grid with the class label above it, with the following code:
+plt.subplots(figsize=(
+15
+,
+12
+))
+for
+s
+in
+range
+(
+20
+):
+    plt.subplot(
+4
+,
+5
+, s+
+1
+)
+    plt.title(y_test_smsample[s][
+0
+], fontsize=
+12
+)
+    plt.imshow(X_test_smsample[s], interpolation=
+'spline16'
+)
+    plt.axis(
+'off'
+)
+plt.show()
+The preceding code plots the grid of images in
+Figure 13.2
+:
+Figure 13.2: A small test dataset sample of masked and unmasked faces
+Figure 13.2
+depicts
+a variety of correctly and incorrectly masked and unmasked faces of all ages, genders, and ethnicities. Despite the variety, one thing to note about this dataset is that it only has light blue surgical masks represented, and images are mostly at a front-facing angle. Ideally, we would generate an even larger dataset with all colors and types of masks and augment it further with random rotations, shears, and brightness adjustments, either before or during training. These augmentations would make for a much more robust model. Nevertheless, we must differentiate between this general type of robustness and adversarial robustness.
+Loading the CNN base model
+You don’t
+have to train the CNN base model, but the code to do so is provided nonetheless in the GitHub repository. The pretrained model has also been stored there. We can quickly load the model and output its summary like this:
+model_path =
+get_file
+(
+'CNN_Base_MaskedFace_Net.hdf5'
+,\
+'https://github.com/PacktPublishing/Interpretable-Machine-
+\
+Learning-with-Python/blob/master/models/
+\
+CNN_Base_MaskedFace_Net.hdf5?raw=true'
+)
+base_model = tf.keras.models.
+load_model
+(model_path)
+base_model.
+summary
+()
+The preceding snippet outputs the following summary:
+Model: "CNN_Base_MaskedFaceNet_Model"
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+conv2d_1 (Conv2D)            (None, 126, 126, 16)      448       _________________________________________________________________
+maxpool2d_1 (MaxPooling2D)   (None, 63, 63, 16)        0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 61, 61, 32)        4640      
+_________________________________________________________________
+maxpool2d_2 (MaxPooling2D)   (None, 30, 30, 32)        0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 28, 28, 64)        18496     
+_________________________________________________________________
+maxpool2d_3 (MaxPooling2D)   (None, 14, 14, 64)        0         
+_________________________________________________________________
+conv2d_4 (Conv2D)            (None, 12, 12, 128)       73856     
+_________________________________________________________________
+maxpool2d_4 (MaxPooling2D)   (None, 6, 6, 128)         0         
+_________________________________________________________________
+flatten_6 (Flatten)          (None, 4608)              0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 768)               3539712   
+_________________________________________________________________
+dropout_6 (Dropout)          (None, 768)               0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 2307      
+=================================================================
+Total params: 3,639,459
+Trainable params: 3,639,459
+Non-trainable params: 0
+_________________________________________________________________
+The
+summary has pretty much everything we need to know about the model. It has four convolutional layers (
+Conv2D
+), each followed by a max pool layer (
+MaxPooling2D
+). It then has a
+Flatten
+layer and a fully connected layer (
+Dense
+). Then, there’s more
+Dropout
+before the second
+Dense
+layer. Naturally, three neurons are in this final layer, corresponding to each class.
+Assessing the CNN base classifier
+We can
+evaluate the model using the test dataset with the
+evaluate_multiclass_mdl
+function. The arguments include the model (
+base_model
+), our test data (
+X_test
+), and the corresponding labels (
+y_test
+), as well as the class names (
+labels_l
+) and the encoder (
+ohe
+). Lastly, we don’t need to plot the ROC curves since, given the high accuracy, they won’t be very informative (
+plot_roc=False
+). This function returns the predicted labels and probabilities, which we can store as variables for later use:
+y_test_pred, y_test_prob = mldatasets.
+evaluate_multiclass_mdl
+(
+    base_model,
+    X_test,
+    y_test,
+    labels_l,
+    ohe,
+    plot_conf_matrix=
+True
+,
+    predopts={
+"verbose"
+:
+1
+}
+)
+The preceding code generates
+Figure 13.3
+, with a confusion matrix and performance metrics for each class:
+Figure 13.3: The confusion matrix and predictive performance metrics for the base classifier, evaluated on the test dataset
+Even though the confusion matrix in
+Figure 13.3
+seems to suggest a perfect classification, pay
+attention to the circled areas. We can tell the model had some issues with misclassifying incorrectly masked faces once we see the recall (99.5%) breakdown.
+Now, we can start attacking this model to assess how robust it actually is!
+Learning about evasion attacks
+There are six broad categories of adversarial attacks:
+Evasion
+: designing an
+input that can cause a
+model to make an incorrect prediction, especially when it wouldn’t fool a human observer. It can either be targeted or untargeted, depending on the attacker’s intention to fool the model into misclassifying a specific class (targeted) or, rather, misclassifying any class (untargeted). The attack methods can be white-box if the attacker has full access to the model and its training dataset, or black-box with only inference access. Gray-box sits in the middle. Black-box is always model-agnostic, whereas white and gray-box methods might be.
+Poisoning
+: injecting
+faulty training data or parameters
+into a model can come in many forms, depending on the attacker’s capabilities and access. For instance, for systems with user-generated data, the attacker may be capable of adding faulty data or labels. If they have more access, perhaps they can modify large amounts of data. They can also adjust the learning algorithm, hyperparameters, or data augmentation schemes. Like evasion, poisoning can also be targeted and untargeted.
+Inference
+: extracting the training dataset through model inference. Inference attacks
+also come in many forms
+and can be used for espionage (privacy attacks) through membership inference, which confirms if one example (for instance, a specific person) was in the training dataset. Attribute inference ascertains if an example category (for instance, an ethnicity) was represented in the training data. Input inference (also known as model inversion) has attack methods to extract a training dataset from a model rather than guessing and confirming. These have broad privacy and regulatory implications, especially in medical and legal applications.
+Trojaning
+: this
+implants malicious functionality
+activated with a trigger during inference but requires retraining the model.
+Backdooring
+: similar to
+trojans but a backdoor
+remains, even when a model is retrained from scratch.
+Reprogramming
+: remote
+sabotaging of a model during training by sneaking in examples that are specifically designed to produce specific outputs. For instance, if you provide enough examples labeled as tiger shark where four small black squares are always in the same place, the model will learn that that is a tiger shark, regardless of what it is, thus intentionally forcing the model to overfit.
+The first three are the most studied
+forms of adversarial attacks. Attacks can be further subcategorized once we split them by stage and goal (see
+Figure 13.4
+). The stage is when the attack is perpetrated because it can impact the model training or its inference, and the goal is what the attacker hopes to gain from it. This chapter will only deal with evasion sabotage attacks because we expect hospital visitors, patients, and personnel to occasionally sabotage the production model:
+Figure 13.4: Table of adversarial attack category methods by stage and goal
+Even though we use white-box methods to attack, defend, and evaluate a model’s robustness, we don’t expect attackers to have this level of access. We will only use white-box methods because we have full access to the model. In other circumstances, such as a bank surveillance system with a thermal imaging system and a corresponding model to detect perpetrators, we could expect professional attackers to use black-box methods to find vulnerabilities! So, as defenders of this system, we would be wise to try the very same attack methods.
+The library we will use for adversarial robustness
+is called the
+Adversarial Robustness Toolbox
+(
+ART
+), and it’s supported by the
+LF AI & Data Foundation
+– the
+same folks that support other open-source projects such as AIX360 and AIF360, explored in
+Chapter 11
+, Bias Mitigation and Causal Inference Methods
+. ART requires that attacked models are abstracted in an estimator or classifier, even if it’s a black-box one. We will use
+KerasClassifier
+for most of this chapter except for the last section, in which we will use
+TensorFlowV2Classifier
+. Initializing an ART classifier is simple. You must specify the
+model
+, and
+sometimes there are other required attributes. For
+KerasClassifier
+, all remaining attributes are optional, but it is recommended you use
+clip_values
+to specify the range of the features. Many attacks are input permutations, so knowing what input values are allowed or feasible is essential:
+base_classifier =
+KerasClassifier
+(
+    model=base_model, clip_values=(min_, max_)
+)
+y_test_mdsample_prob = np.
+max
+(
+    y_test_prob[sampl_md_idxs], axis=
+1
+)
+y_test_smsample_prob = np.
+max
+(
+    y_test_prob[sampl_sm_idxs], axis=
+1
+)
+In the preceding code, we also prepare two arrays with probabilities for the predicted class of the medium and small samples. It is entirely optional, but these assist in placing the predicted probability next to the predicted label when plotting some examples.
+Fast gradient sign method attack
+One of the
+most popular attack methods is
+the
+Fast Gradient Sign Method
+(
+FSGM
+or
+FGM
+). As the name implies, it leverages a deep learning model’s gradient to find adversarial examples. It performs small perturbations on the pixels of the input image, either additions or subtractions. Which one to use depends on the gradient’s sign, which indicates what direction would increase or decrease the loss according to the pixel’s intensity.
+As with all ART attack methods, you first initialize it by providing the ART estimator or classifier.
+FastGradientMethod
+also requires an attack step size
+eps
+, which will condition the attack strength. Incidentally,
+eps
+stands for epsilon (
+), which represents
+error margins or infinitesimal approximation errors. A small step size will cause pixel intensity changes to be less visible, but it will also misclassify fewer examples. A larger step size will cause more examples to be misclassified with more visible changes:
+attack_fgsm =
+FastGradientMethod
+(base_classifier, eps=
+0.1
+)
+After initializing, the next step is to
+generate
+the adversarial examples. The only required attribute is original examples (
+X_test_mdsample
+). Please note that FSGM can be targeted, so there’s an optional
+targeted
+attribute in the initialization, but you would also need to provide corresponding labels in the generation. This attack is untargeted because the attacker’s intent is to sabotage the model:
+X_test_fgsm = attack_fgsm.
+generate
+(X_test_mdsample)
+Generating the adversarial examples with FSGM is quick, unlike other methods, hence the “Fast”!
+Now, we will do two things in one swoop. First, evaluate the adversarial examples (
+X_test_fgsm
+) against our base classifier’s model (
+base_classifier.model
+) with
+evaluate_multiclass_mdl
+. Then we can employ
+compare_image_predictions
+to plot a grid of images, contrasting the randomly selected adversarial examples (
+X_test_fgsm
+) against the original ones (
+X_test_mdsample
+) and their corresponding predicted labels (
+y_test_fgsm_pred
+,
+y_test_mdsample
+) and probabilities (
+y_test_fgsm_prob
+,
+y_test_mdsample_prob
+). We customize the titles and limit the grid to four examples (
+num_samples
+). By default,
+compare_image_predictions
+only compares misclassifications but an optional attribute,
+use_misclass
+, can be set to
+False
+to compare correct classifications:
+y_test_fgsm_pred, y_test_fgsm_prob =\
+    mldatasets.
+evaluate_multiclass_mdl
+(\
+        base_classifier.model, X_test_fgsm, y_test_mdsample,\
+        labels_l, ohe, plot_conf_matrix=
+False
+, plot_roc=
+False
+)
+y_test_fgsm_prob = np.
+max
+(y_test_fgsm_prob, axis=
+1
+)
+mldatasets.
+compare_image_predictions
+(
+    X_test_fgsm, X_test_mdsample, y_test_fgsm_pred,\
+    y_test_mdsample.flatten(), y_test_fgsm_prob,\
+    y_test_mdsample_prob, title_mod_prefix=
+"Attacked:"
+,\
+    title_difference_prefix=
+"FSGM Attack Average Perturbation:"
+,\
+    num_samples=
+4
+)
+The
+preceding code outputs a table first, which shows that the model has only 44% accuracy with FSGM-attacked examples! And even though it wasn’t a targeted attack, it was most effective toward correctly masked faces. So hypothetically, if perpetrators managed to cause this level of signal distortion or interference, they would severely undermine the security companies’ ability to monitor mask compliance.
+The code also outputs
+Figure 13.5
+, which shows some misclassifications caused by the FSGM attack. The attack pretty much evenly distributed noise throughout the images. It also shows that the image was only modified by a mean absolute error of 0.092, and since pixel values range between 0 and 1, this means 9.2%. If you were to calibrate attacks so that they are less detectable but still impactful, you must note that an
+eps
+of 0.1 causes a 9.2% mean absolute perturbation, which reduces accuracy to 44%:
+Figure 13.5: Plot comparing FSGM-attacked versus the original images for the base classifier
+Speaking
+of less detectable attacks, we will now learn about Carlini and Wagner attacks.
+Carlini and Wagner infinity norm attack
+In 2017,
+Carlini and Wagner
+(
+C&W
+) employed
+three
+norm-based distance metrics
+:
+,
+, and
+, measuring
+the difference between the original and adversarial example. In
+other papers, these metrics had already been discussed, including the FSGM one. The innovation introduced by C&W was how these metrics were leveraged, using a gradient descent-based optimization algorithm designed to approximate a loss function minima. Specifically, to avoid getting stuck at a local minimum, they use multiple starting points in the gradient descent. And so that the process “yields a valid image,” it evaluates three methods to box-constrain the optimization problem. In this case, we want to find an adversarial example where the distances between that example and the original image are minimal, while also remaining realistic.
+All three C&W attacks (
+,
+, and
+) use the Adam optimizer to quickly converge. Their
+main difference is the distance metric, of which
+is arguably the best one. It’s defined as follows:
+And
+because it’s the maximum distance to any coordinate, you make sure that the adversarial example is not just “on average” minimally different but also not too different anywhere in the feature space. That’s what would make an attack less detectable!
+Initializing C&W infinity norm attacks and generating adversarial examples with them is similar to FSGM. To initialize
+CarliniLInfMethod
+, we define optionally a
+batch_size
+(the default is
+128
+). Then, to
+generate
+an untargeted adversarial attack, the same applies as with FSGM. Only
+X
+is needed when untargeted, and
+y
+when targeted:
+attack_cw =
+CarliniLInfMethod
+(
+    base_classifier, batch_size=
+40
+)
+X_test_cw = attack_cw.
+generate
+(X_test_mdsample)
+We will now evaluate the C&W adversarial examples (
+X_test_cw
+) just as we did with FSGM. It’s exactly the same code, only with
+fsgm
+replaced with
+cw
+and different titles in
+compare_image_predictions
+. Just as with FSGM, the following code will yield a classification report and grid of images (
+Figure 13.6
+):
+y_test_cw_pred, y_test_cw_prob =\
+    mldatasets.
+evaluate_multiclass_mdl
+(
+        base_classifier.model, X_test_cw, y_test_mdsample, labels_l,\
+        ohe, plot_conf_matrix=
+False
+, plot_roc=
+False
+)
+y_test_cw_prob = np.
+max
+(y_test_cw_prob, axis=
+1
+)
+mldatasets.
+compare_image_predictions
+(
+    X_test_cw,\
+    X_test_mdsample, y_test_cw_pred,\
+    y_test_mdsample.flatten(), y_test_cw_prob,\
+    y_test_mdsample_prob, title_mod_prefix=
+"Attacked:"
+,\
+    title_difference_prefix=
+"C&W Inf Attack Average Perturbation"
+,\
+    num_samples=
+4
+)
+As
+outputted by the preceding code, the C&W adversarial examples have a 92% accuracy with our base model. The
+drop is sufficient to render the model useless for its intended purpose. If the attacker disturbed a camera’s signal just enough, they could achieve the same results. And, as you can tell by
+Figure 13.6
+, the perturbation of 0.3% is tiny compared to FSGM, but it was sufficient to misclassify 8%, including the four in the grid that seem apparent to the naked eye:
+Figure 13.6: Plot comparing C&W infinity norm-attacked versus the original images for the base classifier
+Sometimes
+it doesn’t matter if an
+attack goes undetected or not. The point of it is to make a statement, and that’s what adversarial patches can do.
+Targeted adversarial patch attack
+Adversarial Patches
+(
+APs
+) are
+a robust, universal, and targeted method. You generate a patch you
+can either superimpose on
+an image, or print and physically place in a scene to trick a classifier into ignoring everything else in the scene. It is designed to work under a wide variety of conditions and transformations. Unlike other adversarial example generation approaches, there’s no intention of camouflaging the attack because, essentially, you replace a detectable portion of the scene with the patch. The
+method works by leveraging a variant of
+Expectation Over Transformation
+(
+EOT
+), which trains images over transformations of a given patch on different locations of an image. What it learns is the patch that fools the classifier the most, given the training examples.
+This
+method requires more parameters and steps than FSGM and C&W. For starters, we will use
+AdversarialPatchNumpy
+, which is the variant that works with any neural network image or video classifier. There’s also one for TensorFlow v2, but our base classifier is a
+KerasClassifier
+. The first argument is the classifier (
+base_classifier
+), and the other ones we will define are optional but highly recommended. The scaling ranges
+scale_min
+and
+scale_max
+are particularly important because they define how big can patches
+be in relation to the images – in this case, we want to test no smaller than 40% and no larger than 70%. Besides that, it makes sense to define a target class (
+target
+). In this case, we want the patch to target the “Correct” class. For the
+learning_rate
+and max iterations (
+max_iter
+), we use the defaults but note that these can be tuned to improve patch adversarial effectiveness:
+attack_ap =
+AdversarialPatchNumpy
+(
+    base_classifier, scale_min=
+0.4
+, scale_max=
+0.7
+,\
+    learning_rate=
+5.
+, max_iter=
+500
+,\
+    batch_size=
+40
+, target=
+0
+)
+We don’t want the patch generation algorithm to waste time testing patches everywhere in images, so we can direct this effort by using a Boolean mask. This mask tells it where it can center the patch. To make the mask, we start by creating an array of zeros, 128 × 128. Then we place ones in the rectangular area between pixels 80–93 and 45–84, which loosely corresponds to cover the center of the mouth area in most of the images. Lastly, we expand the array’s dimensions so that it’s
+(1, W, H)
+and convert it to a Boolean. Then we can proceed to
+generate
+patches using the small-size test dataset samples and the mask:
+placement_mask = np.
+zeros
+((
+128
+,
+128
+))
+placement_mask[
+80
+:
+93
+,
+45
+:
+83
+] =
+1
+placement_mask = np.
+expand_dims
+(placement_mask, axis=
+0
+).astype(
+bool
+)
+patch, patch_mask = attack_ap.
+generate
+(
+    x=X_test_smsample,
+    y=ohe.transform(y_test_smsample),
+    mask=placement_mask
+)
+We can now plot the patch with the following snippet:
+plt.
+imshow
+(patch * patch_mask)
+The preceding code produced the image in
+Figure 13.7
+. As expected, it has plenty of the shades of blue found in masks. It also has bright red and yellow hues, mostly missing from training examples, which confuse the classifier:
+Figure 13.7: AP generated image to misclassify as correctly masked
+Unlike
+other methods,
+generate
+didn’t produce
+adversarial examples but a single patch, which is an image we can then place on top of images to create adversarial examples. This task is performed with
+apply_patch
+, which takes the original examples
+X_test_smsample
+and a scale; we will use 55%. It is also recommended to use a
+mask
+that will make sure the patch is applied where it makes more sense – in this case, in the area around the mouth:
+X_test_ap = attack_ap.
+apply_patch
+(
+    X_test_smsample,
+    scale=
+0.55
+,
+    mask=placement_mask
+)
+Now it’s time to evaluate our attack and examine some misclassifications. We will do exactly as before and reuse the code that produced
+Figure 13.5
+and
+Figure 13.7
+, except we replace the variables so that they have
+ap
+and a corresponding title:
+y_test_ap_pred, y_test_ap_prob =\
+    mldatasets.evaluate_multiclass_mdl(
+        base_classifier.model, X_test_ap, y_test_smsample,
+        labels_l, ohe, plot_conf_matrix=
+False
+, plot_roc=
+False
+)
+y_test_ap_prob = np.
+max
+(y_test_ap_prob, axis=
+1
+)
+mldatasets.compare_image_predictions(
+    X_test_ap, X_test_smsample, y_test_ap_pred,\
+    y_test_smsample.flatten(), y_test_ap_prob,
+    y_test_smsample_prob, title_mod_prefix=
+"Attacked:"
+,\
+    title_difference_prefix=
+"AP Attack Average Perturbation:"
+, num_samples=
+4
+)
+The
+preceding code yields the accuracy result of our attack at 65%, which is quite good considering how few examples it was
+trained on. AP needs more data than other methods. Targeted attacks, in general, need more examples to understand how to best target one class. The preceding code also produced the grid of images in
+Figure 13.8
+, which demonstrates how, hypothetically, if people walked around holding a cardboard patch in front of their face, they could easily fool the model:
+Figure 13.8: Plot comparing AP-attacked versus the original images for base classifier
+So far, we have studied three attack methods but haven’t yet tackled how to defend against these attacks. We will explore a couple of solutions next.
+Defending against targeted attacks with preprocessing
+There are five broad categories of adversarial defenses:
+Preprocessing
+: changing
+the model’s inputs so that they are harder to attack.
+Training
+: training a
+new robust model that is designed to overcome attacks.
+Detection
+: detecting
+attacks. For instance, you can train a model to detect adversarial examples.
+Transformer
+: modifying
+model architecture and training so that it’s more robust – this may include techniques such as distillation, input filters, neuron pruning, and unlearning.
+Postprocessing
+: changing
+model outputs to overcome production inference or model extraction attacks.
+Only the
+first four defenses work
+with evasion attacks, and in this chapter, we will only cover the
+first two:
+preprocessing
+and
+adversarial training
+. FGSM and C&W can be defended easily with either of these, but an AP is tougher to defend
+against, so it might require a
+stronger
+detection
+or
+transformer
+method.
+Before we defend, we must create a targeted attack. We will employ
+Projected Gradient Descent
+(
+PGD
+), which
+is a strong attack very similar in output to FSGM – that is, it produces noisy images. We won’t explain PGD in detail here but what is important to note is, like FSGM, it is regarded as a
+first-order adversary
+because
+it leverages first-order information about a network (due to gradient descent). Also, experiments prove that robustness against PGD ensures robustness against any first-order adversary. Specifically, PGD is a strong attack, so it makes for conclusive benchmarks.
+To create a targeted attack against the correctly masked class, it’s best that we only select examples that aren’t correctly masked (
+x_test_notmasked
+) and their corresponding labels (
+y_test_notmasked
+) and predicted probabilities (
+y_test_notmasked_prob
+). Then, we want to create an array with the class (
+Correct
+) that we want to generate adversarial examples for (
+y_test_masked
+):
+not_masked_idxs
+= np.
+where
+(y_test_smsample !=
+'Correct'
+)[
+0
+]
+X_test_notmasked = X_test_smsample[
+not_masked_idxs
+]
+y_test_notmasked = y_test_smsample[
+not_masked_idxs
+]
+y_test_notmasked_prob = y_test_smsample_prob[
+not_masked_idxs
+]
+y_test_masked = np.array(
+    [
+'Correct'
+] * X_test_notmasked.shape[
+0
+]
+).reshape(-
+1
+,
+1
+)
+We
+initialize
+ProjectedGradientDescent
+as we did with FSGM, except we will set the maximum perturbation (
+eps
+), attack step size (
+eps_step
+), maximum iterations (
+max_iter
+), and
+targeted=True
+. Precisely because it is targeted, we will set both
+X
+and
+y
+:
+attack_pgd =
+ProjectedGradientDescent
+(
+    base_classifier, eps=
+0.3
+, eps_step=
+0.01
+,\
+    max_iter=
+40
+, targeted=
+True
+)
+X_test_pgd = attack_pgd.
+generate
+(
+    X_test_notmasked, y=ohe.transform(y_test_masked)
+)
+Now let’s evaluate the PGD attack as we did before, but this time, let’s plot the confusion matrix (
+plot_conf_matrix=True
+):
+y_test_pgd_pred, y_test_pgd_prob =\
+    mldatasets.
+evaluate_multiclass_mdl
+(
+        base_classifier.model, X_test_pgd, y_test_notmasked,\
+        labels_l, ohe, plot_conf_matrix=
+True
+, plot_roc=
+False
+)
+y_test_pgd_prob = np.
+max
+(y_test_pgd_prob, axis=
+1
+)
+The preceding snippet produces the confusion matrix in
+Figure 13.9
+. The PGD attack was so effective that it produced an accuracy of 0%, making all unmasked and incorrectly masked examples appear to be masked:
+Figure 13.9: Confusion matrix for PGD attacked examples evaluated against the base classifier
+Next, let’s
+run
+compare_image_prediction
+to see some random misclassifications:
+mldatasets.
+compare_image_predictions
+(
+    X_test_pgd, X_test_notmasked, y_test_pgd_pred,\
+    y_test_notmasked.flatten(), y_test_pgd_prob,\
+    y_test_smsample_prob, title_mod_prefix=
+"
+Attacked:"
+,\
+    num_samples=
+4
+, title_difference_prefix=
+"PGD Attack Average Perturbation:"
+)
+The preceding code plots the grid of images in
+Figure 13.10
+. The mean absolute perturbation is the highest we’ve seen so far at 14.7%, and all unmasked faces in the grid are classified as correctly masked:
+Figure 13.10: Plot comparing PGD-attacked versus original images for the base classifier
+The
+accuracy cannot get worse, and the images are grainy beyond repair. So how can we combat noise? If you recall, we have dealt with this problem before. In
+Chapter 7
+,
+Visualizing Convolutional Neural Networks
+,
+SmoothGrad
+improved
+saliency maps by averaging the gradients. It’s a different application but the same principle – just as with a human, a noisy saliency map is more challenging to interpret than a smooth one, and a grainy image is much more challenging for a model to interpret than a smooth one.
+Spatial smoothing
+is
+just a fancy way of saying blur! However, what’s novel about it being introduced as an adversarial defense method is that the proposed implementation (
+SpatialSmoothing
+) calls for using the median and not the mean in a sliding window. The
+window_size
+is configurable, and it is recommended to adjust it where it is most useful as a defense. Once the defense has been initialized, you plug in the adversarial examples (
+X_test_pgd
+). It will output spatially smoothed adversarial examples (
+X_test_pgd_ss
+):
+defence_ss =
+SpatialSmoothing
+(window_size=
+11
+)
+X_test_pgd_ss, _ =
+defence_ss
+(X_test_pgd)
+Now we
+can take the blurred adversarial examples produced and evaluate them as we did before – first, with
+evaluate_multiclass_mdl
+to get predicted labels (
+y_test_pgd_ss_pred
+) and probabilities (
+y_test_pgd_ss_prob
+) and the output of some predictive performance metrics. With
+compare_image_predictions
+to plot a grid of images, let’s use
+use_misclass=False
+to compare properly classified images – in other words, the adversarial examples that were defended successfully:
+y_test_pgd_ss_pred, y_test_pgd_ss_prob =\
+    mldatasets.
+evaluate_multiclass_mdl
+(
+        base_classifier.model, X_test_pgd_ss,\
+        y_test_notmasked, labels_l, ohe,\
+        plot_conf_matrix=
+False
+, plot_roc=
+False
+)
+y_test_pgd_ss_prob = np.
+max
+(y_test_pgd_ss_prob, axis=
+1
+)
+mldatasets.
+compare_image_predictions
+(
+    X_test_pgd_ss, X_test_notmasked, y_test_pgd_ss_pred,\
+    y_test_notmasked.flatten(), y_test_pgd_ss_prob,\
+    y_test_notmasked_prob, use_misclass=
+False
+,\
+    title_mod_prefix=
+"Attacked+Defended:"
+, num_samples=
+4
+,\
+    title_difference_prefix=
+"PGD Attack & Defended Average:"
+)
+The preceding code yields an accuracy of 54%, which is much better than 0% before the spatial smoothing defense. It also produces
+Figure 13.11
+, which demonstrates how blur effectively thwarted the PGD attack. It even halved the mean absolute perturbation!
+Figure 13.11: Plot comparing spatially smoothed PGD-attacked images versus the original images for the base classifier
+Next, we will
+try another defense method in our toolbox: adversarial training!
+Shielding against any evasion attack by adversarial training of a robust classifier
+In
+Chapter 7
+,
+Visualizing Convolutional Neural Networks
+, we identified a garbage image classifier
+that would likely perform poorly in the intended environment of a municipal recycling plant. The
+abysmal performance on out-of-sample data was due to the classifier being trained on a large variety of publicly available images that don’t match the expected conditions, or the characteristics of materials that are processed by a recycling plant. The chapter’s conclusion called for training a network with images that represent their intended environment to make for a more robust model.
+For model robustness, training data variety is critical, but only if it represents the intended environment. In statistical terms, it’s a question of using samples for training that accurately depict the population so that a model learns to classify them correctly. For adversarial robustness, the same principles apply. If you augment data to include plausible examples of adversarial attacks, the model will learn to classify them. That’s what adversarial training is in a nutshell.
+Machine learning
+researchers in the adversarial robustness field suggest this form of defense is very effective
+against any kind of evasion attack, essentially shielding it. That being said, it’s not impervious. Its effectiveness is contingent on using the right kind of adversarial examples in training, the optimal hyperparameters, and so forth. There are some guidelines outlined by researchers, such as increasing the number of neurons in the hidden layers and using PGD or BIM to
+produce adversarial examples for the training.
+BIM
+stands for
+Basic Iterative Method
+. It’s like FSGM but not fast because it iterates to approximate the best adversarial example within a
+-neighborhood for the original image. The
+eps
+attribute bounds this neighborhood.
+Training a robust model can be very resource-intensive. It is not required because we can download one already trained for us, but it’s important to understand how to perform this with ART. We will explain these steps to give the option of completing the model training with ART. Otherwise, just skip the steps and download the trained model. The
+robust_model
+is very much like the
+base_model
+except we use equal-sized filters in the four convolutional (
+Conv2D
+) layers. We do this to decrease complexity to counter the complexity we add by quadrupling the neurons in the first hidden (
+Dense
+) layer, as suggested by the machine learning researchers:
+robust_model = tf.keras.models.
+Sequential
+([
+    tf.keras.layers.
+InputLayer
+(input_shape=X_train.shape[
+1
+:]),
+    tf.keras.layers.
+Conv2D
+(
+32
+, kernel_size=(
+3
+,
+3
+), activation=
+'relu'
+),
+    tf.keras.layers.
+MaxPooling2D
+(pool_size=(
+2
+,
+2
+)),
+    tf.keras.layers.
+Conv2D
+(
+32
+, kernel_size=(
+3
+,
+3
+), activation=
+'relu'
+),
+    tf.keras.layers.
+MaxPooling2D
+(pool_size=(
+2
+,
+2
+)),
+    tf.keras.layers.
+Conv2D
+(
+32
+, kernel_size=(
+3
+,
+3
+), activation=
+'relu'
+),
+    tf.keras.layers.
+MaxPooling2D
+(pool_size=(
+2
+,
+2
+)),
+    tf.keras.layers.
+Conv2D
+(
+32
+, kernel_size=(
+3
+,
+3
+), activation=
+'relu'
+),
+    tf.keras.layers.
+MaxPooling2D
+(pool_size=(
+2
+,
+2
+)),
+    tf.keras.layers.
+Flatten
+(),
+    tf.keras.layers.
+Dense
+(
+3072
+, activation=
+'relu'
+),
+    tf.keras.layers.
+Dropout
+(
+0.2
+),
+    tf.keras.layers.
+Dense
+(
+3
+, activation=
+'softmax'
+)
+], name=
+'CNN_Robust_MaskedFaceNet_Model'
+)
+robust_model.
+compile
+(
+    optimizer=tf.keras.optimizers.Adam(lr=
+0.001
+),
+    loss=
+'categorical_crossentropy'
+,
+    metrics=[
+'accuracy'
+])
+robust_model.
+summary
+()
+The
+summary()
+in
+the
+preceding code outputs the following. You can see that trainable parameters total around 3.6 million – similar to the base model:
+Model: "CNN_Robust_MaskedFaceNet_Model"
+_________________________________________________________________
+Layer (type)                 Output Shape              Param #   
+=================================================================
+conv2d_1 (Conv2D)            (None, 126, 126, 32)      896       
+_________________________________________________________________
+maxpool2d_1 (MaxPooling2D)   (None, 63, 63, 32)        0         
+_________________________________________________________________
+conv2d_2 (Conv2D)            (None, 61, 61, 32)        9248      
+_________________________________________________________________
+maxpool2d_2 (MaxPooling2D)   (None, 30, 30, 32)        0         
+_________________________________________________________________
+conv2d_3 (Conv2D)            (None, 28, 28, 32)        9248      
+_________________________________________________________________
+maxpool2d_3 (MaxPooling2D)   (None, 14, 14, 32)        0         
+_________________________________________________________________
+conv2d_4 (Conv2D)            (None, 12, 12, 32)        9248      
+_________________________________________________________________
+maxpool2d_4 (MaxPooling2D)   (None, 6, 6, 32)          0         
+_________________________________________________________________
+flatten (Flatten)            (None, 1152)              0         
+_________________________________________________________________
+dense_1 (Dense)              (None, 3072)              3542016   
+_________________________________________________________________
+dropout (Dropout)            (None, 3072)              0         
+_________________________________________________________________
+dense_2 (Dense)              (None, 3)                 9219      
+=================================================================
+Total params: 3,579,875
+Trainable params: 3,579,875
+Non-trainable params: 0
+_________________________________________________________________
+Next, we
+can adversarially train the
+model by first initializing a new
+KerasClassifier
+with the
+robust_model
+. Then, we initialize a
+BasicIterativeMethod
+attack on this classifier. Lastly, we initialize
+AdversarialTrainer
+with the
+robust_classifier
+and the BIM attack and
+fit
+it. Please note that we saved the BIM attack into a variable called
+attacks
+because this could be a list of ART attacks instead of a single one. Also, note that
+AdversarialTrainer
+has an attribute called
+ratio
+. This attribute determines what percentage of the training examples are adversarial examples. This percentage dramatically impacts the effectiveness of adversarial attacks. If it’s too low, it might not perform well with adversarial examples, and if it’s too high, it might perform less effectively with non-adversarial examples. If we run the
+trainer
+, it will likely take many hours to complete, so don’t get alarmed:
+robust_classifier =
+KerasClassifier
+(
+    model=robust_model, clip_values=(min_, max_)
+)
+attacks =
+BasicIterativeMethod
+(
+    robust_classifier, eps=
+0.3
+, eps_step=
+0.01
+, max_iter=
+20
+)
+trainer =
+AdversarialTrainer
+(
+    robust_classifier, attacks, ratio=
+0.5
+)
+trainer.fit(
+    X_train, ohe.transform(y_train), nb_epochs=
+30
+, batch_size=
+128
+)
+If you didn’t train the
+robust_classifier
+, you can download a pretrained
+robust_model
+and initialize the
+robust_classifier
+with it like this:
+model_path =
+get_file
+(
+'CNN_Robust_MaskedFace_Net.hdf5'
+,
+'https://github.com/PacktPublishing/Interpretable-Machine- \
+Learning-with-Python/blob/master/models/ \
+CNN_Robust_MaskedFace_Net.hdf5?raw=true'
+)
+robust_model = tf.keras.models.
+load_model
+(model_path)
+robust_classifier =
+KerasClassifier
+(
+    model=robust_model, clip_values=(min_, max_)
+)
+Now, let’s evaluate the
+robust_classifier
+against the original test dataset using
+evaluate_multiclass_mdl
+. We set
+plot_conf_matrix=True
+to see the confusion matrix:
+y_test_robust_pred, y_test_robust_prob =\
+mldatasets.
+evaluate_multiclass_mdl
+(
+    robust_classifier.model, X_test, y_test, labels_l, ohe,\
+    plot_conf_matrix=
+True
+, predopts={
+"verbose"
+:
+1
+}
+)
+The
+preceding
+code outputs the confusion matrix and performance metrics in
+Figure 13.12
+. It’s 1.8% less accurate than the base classifier. Most of the misclassifications are with correctly masked faces getting classified as incorrectly masked. There’s certainly a trade-off when choosing a 50% adversarial example ratio, or perhaps we can tune the hyperparameters or the model architecture to improve this:
+Figure 13.12: Robust classifier confusion metrics and performance metrics
+Let’s see
+how the robust
+model fares against adversarial attacks. Let’s use
+FastGradientMethod
+again, but this time, replace
+base_classifier
+with
+robust_classifier
+:
+attack_fgsm_robust =
+FastGradientMethod
+(
+    robust_classifier, eps=
+0.1
+)
+X_test_fgsm_robust = attack_fgsm_robust.
+generate
+(X_test_mdsample)
+Next, we
+can employ
+evaluate_multiclass_mdl
+and
+compare_image_predictions
+to measure and observe the effectiveness of our attack, but this time against the
+robust_classifier
+:
+y_test_fgsm_robust_pred, y_test_fgsm_robust_prob =\
+    mldatasets.
+evaluate_multiclass_mdl
+(
+        robust_classifier.model, X_test_fgsm_robust,\
+        y_test_mdsample, labels_l, ohe,\
+        plot_conf_matrix=
+False
+, plot_roc=
+False
+)
+y_test_fgsm_robust_prob = np.
+max
+(
+    y_test_fgsm_robust_prob, axis=
+1
+)
+mldatasets.
+compare_image_predictions
+(
+    X_test_fgsm_robust, X_test_mdsample,
+    y_test_fgsm_robust_pred, num_samples=
+4
+,\
+    y_test_mdsample.flatten(), y_test_fgsm_robust_prob,\
+    y_test_mdsample_prob, title_mod_prefix=
+"Attacked:"
+,\
+    title_difference_prefix=
+"FSGM Attack Average Perturbation:"
+)
+The preceding
+snippet outputs some performance metrics, which evidenced a 95.5% accuracy. If you compare how an equally strengthened FSGM attack fared against the
+base_classifier
+, it yielded a 44% accuracy. That was quite an improvement! The preceding code also produces the image grid in
+Figure 13.13
+. You can tell how the FSGM attack against the robust model makes less grainy and more patchy images. On average, they are less perturbed than they were against the base model because so few of them were successful, but those that were significantly degraded. It appears as if the FSGM reduced their color depth from millions of possible colors (24+ bits) to 256 (8-bit) or 16 (4-bit) colors. Of course, an evasion attack can’t actually do that, but what happened was that the FSGM algorithm converged at the same shades of blue, brown, red, and orange that could fool the classifier! Other shades remain unaltered:
+Figure 13.13: Plot comparing FSGM-attacked versus the original images for the robust classifier
+So far, we have
+evaluated
+the robustness of models but only against one attack strength, without factoring in possible defenses, thus evaluating its robustness. In the next section, we will study a method that does this.
+Evaluating adversarial robustness
+It’s necessary
+to test your systems in any engineering endeavor to see how vulnerable they are to attacks or accidental failures. However, security is a domain where you must stress-test your solutions to ascertain what level of attacks are needed to make your system break down beyond an acceptable threshold. Furthermore, figuring out what level of defense is needed to curtail an attack is useful information too.
+Comparing model robustness with attack strength
+We
+now have two classifiers we can compare against an equally strengthened attack, and we try different attack strengths to see how they fare across all of them. We will use FSGM because it’s fast, but you could use any method!
+The first attack strength we can assess is no attack strength. In other words, what is the classification accuracy against the test dataset with no attack? We already had stored the predicted labels for both the base (
+y_test_pred
+) and robust (
+y_test_robust_pred
+) models, so this is easy to obtain with scikit-learn’s
+accuracy_score
+metric:
+accuracy_base_0 = metrics.accuracy_score(
+    y_test, y_test_pred
+)
+accuracy_robust_0 = metrics.accuracy_score(
+    y_test, y_test_robust_pred
+)
+We can now iterate across a range of attack strengths (
+eps_range
+) between 0.01 and 0.9. Using
+linspace
+, we can generate 9 values between 0.01 and 0.09 and 9 values between 0.1 and 0.9, and
+concatenate
+them into a single array. We will test attacks for these 18
+eps
+values by
+for
+-looping through all of them, attacking each model, and retrieving the post-attack accuracies with
+evaluate
+. The respective accuracies are appended to two lists (
+accuracy_base
+,
+accuracy_robust
+). And after the
+for
+loop, we prepend 0 to the
+eps_range
+to account for the accuracies prior to any attacks:
+eps_range = np.
+concatenate
+(
+    (np.linspace(
+0.01
+,
+0.09
+,
+9
+), np.linspace(
+0.1
+,
+0.9
+,
+9
+)), axis=
+0
+).tolist()
+accuracy_base = [accuracy_base_0]
+accuracy_robust = [accuracy_robust_0]
+for
+eps
+in
+tqdm(eps_range, desc=
+'EPS'
+):
+    attack_fgsm.set_params(**{
+'eps'
+:
+eps
+})
+    X_test_fgsm_base_i =attack_fgsm.
+generate
+(X_test_mdsample)
+    _, accuracy_base_i =\
+    base_classifier.model.
+evaluate
+(
+        X_test_fgsm_base_i, ohe.transform(y_test_mdsample)
+    )
+    attack_fgsm_robust.set_params(**{
+'eps'
+:
+eps
+})
+    X_test_fgsm_robust_i=attack_fgsm_robust.
+generate
+(
+        X_test_mdsample
+    )
+    _, accuracy_robust_i =\
+        robust_classifier.model.
+evaluate
+(
+            X_test_fgsm_robust_i, ohe.transform(y_test_mdsample)
+            )
+    accuracy_base.append(accuracy_base_i)
+    accuracy_robust.append(accuracy_robust_i) 
+eps_range = [
+0
+] + eps_range
+Now, we can
+plot the accuracies for both classifiers across all attack strengths with the following code:
+fig, ax = plt.subplots(figsize=(
+14
+,
+7
+))
+ax.plot(
+    np.array(eps_range), np.array(accuracy_base),\
+'b–'
+, label=
+'Base classifier'
+)
+ax.plot(
+    np.array(eps_range), np.array(accuracy_robust),\
+'r–'
+, label=
+'Robust classifier'
+)
+legend = ax.legend(loc=
+'upper center'
+)
+plt.xlabel(
+'Attack strength (eps)'
+)
+plt.ylabel(
+'Accuracy'
+)
+The preceding code generates
+Figure 13.14
+, which demonstrates that the robust model performs better between attack strengths of 0.02 and 0.3 but then does consistently about 10% worse:
+Figure 13.14: Accuracy measured for the robust and base classifiers at different FSGM attack strengths
+One thing
+that
+Figure 13.14
+fails to account for is defenses. For example, if hospital cameras were constantly jammed or tampered with, the security company would be remiss not to defend their models. The easiest way to do so for this kind of attack is with some sort of smoothing.
+Adversarial training also produces an empirically robust classifier that you cannot guarantee will work under certain pre-defined circumstances, which is why there’s a need for certifiable defenses.
+Mission accomplished
+The mission was to perform some adversarial robustness tests on their face mask model to determine if hospital visitors and staff can evade mandatory mask compliance. The base model performed very poorly on many evasion attacks, from the most aggressive to the most subtle.
+You also looked at possible defenses to these attacks, such as spatial smoothing and adversarial retraining. And then, you explored ways to evaluate the robustness of your proposed defenses. You can now provide an end-to-end framework to defend against this kind of attack. That being said, what you did was only a proof of concept.
+Now, you can propose training a certifiably robust model against the attacks the hospitals expect to encounter the most. But first, you need the ingredients for a generally robust model. To this end, you will need to take all 210,000 images in the original dataset, make many variations on mask colors and types with them, and augment them even further with reasonable brightness, shear, and rotation transformations. Lastly, the robust model needs to be trained with several kinds of attacks, including several kinds of APs. These are important because they mimic the most common compliance evasion behavior of concealing faces with body parts or clothing items.
+Summary
+After reading this chapter, you should understand how attacks can be perpetrated on machine learning models and evasion attacks in particular. You should know how to perform FSGM, BIM, PGD, C&W, and AP attacks, as well as how to defend against them with spatial smoothing and adversarial training. Last but not least, you know how to evaluate adversarial robustness.
+The next chapter is the last one, and it outlines some ideas on what’s next for machine learning interpretation.
+Dataset sources
+Adnane Cabani, Karim Hammoudi, Halim Benhabiles, and Mahmoud Melkemi, 2020,
+MaskedFace-Net - A dataset of correctly/incorrectly masked face images in the context of COVID-19
+, Smart Health, ISSN 2352–6483, Elsevier:
+https://doi.org/10.1016/j.smhl.2020.100144
+(Creative Commons BY-NC-SA 4.0 license by NVIDIA Corporation)
+Karras, T., Laine, S., and Aila, T., 2019,
+A Style-Based Generator Architecture for Generative Adversarial Networks
+. 2019 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 4396–4405:
+https://arxiv.org/abs/1812.04948
+(Creative Commons BY-NC-SA 4.0 license by NVIDIA Corporation)
+Further reading
+Polyakov, A., 2019, Aug 6,
+How to attack Machine Learning (Evasion, Poisoning, Inference, Trojans, Backdoors)
+[blog post]:
+https://towardsdatascience.com/how-to-attack-machine-learning-evasion-poisoning-inference-trojans-backdoors-a7cb5832595c
+Carlini, N., & Wagner, D., 2017,
+Towards Evaluating the Robustness of Neural Networks
+. 2017 IEEE Symposium on Security and Privacy (SP), 39–57:
+https://arxiv.org/abs/1608.04644
+Brown, T., Mané, D., Roy, A., Abadi, M., and Gilmer, J., 2017,
+Adversarial Patch
+. ArXiv:
+https://arxiv.org/abs/1712.09665
+Learn more on Discord
+To join the Discord community for this book – where you can share feedback, ask the author questions, and learn about new releases – follow the QR code below:
+https://packt.link/inml
+
+14
+What’s Next for Machine Learning Interpretability?
+Over the last thirteen chapters, we have explored the field of
+Machine Learning
+(
+ML
+) interpretability. As stated in the preface, it’s a broad area of research, most of which hasn’t even left the lab and become widely used yet, and this book has no intention of covering absolutely all of it. Instead, the objective is to present various interpretability tools in sufficient depth to be useful as a starting point for beginners and even complement the knowledge of more advanced readers. This chapter will summarize what we’ve learned in the context of the ecosystem of ML interpretability methods, and then speculate on what’s to come next!
+These are the main topics we are going to cover in this chapter:
+Understanding the current landscape of ML interpretability
+Speculating on the future of ML interpretability
+Understanding the current landscape of ML interpretability
+First, we will
+provide some context on how the book relates to the main goals of ML interpretability and how practitioners can start
+applying the methods to achieve those broad goals. Then, we’ll discuss the current areas of growth in research.
+Tying everything together!
+As discussed in
+Chapter 1
+,
+Interpretation, Interpretability, and Explainability; and Why Does It All Matter?
+, there are three main themes when talking about ML interpretability:
+Fairness, Accountability, and Transparency
+(
+FAT
+), and
+each of these presents a series of concerns (see
+Figure 14.1
+). I think we can all agree these are all desirable properties for a model! Indeed, these concerns all present opportunities for the improvement of
+Artificial Intelligence
+(
+AI
+) systems. These improvements start by leveraging model interpretation methods to evaluate models, confirm or dispute assumptions, and find problems.
+What your aim
+is will depend on what stage you are at in the ML workflow. If the model is already in production, the objective might be to evaluate it with a whole suite of metrics, but if the model is still in early development, the aim may be to find deeper problems that a metric won’t discover. Perhaps you are also just using black-box models for knowledge discovery as we did in
+Chapter 4
+– in other words, leveraging the models to learn from the data with no plan to take it to production. If this is the case, you might confirm or dispute the assumptions you had about the data, and by extension, the model:
+Figure 14.1: ML interpretation methods
+In any case, none of
+these aims are mutually exclusive, and you should probably always be looking for problems and disputing assumptions, even when the model appears to be performing well!
+And regardless of the aim and primary concern, it is recommended that you use many interpretation methods, not only because no technique is perfect but also because all problems and aims are interrelated. In other words, there’s no justice without consistency and no reliability without transparency.
+In fact, you can read
+Figure 14.1
+from bottom to top as if it were a pyramid, because transparency is foundational, followed by accountability in the second tier, and, ultimately, fairness is the cherry on top.
+Therefore, even when the goal is to assess model fairness, the model should be stress-tested for robustness. Most relevant feature importances and interactions should be understood. Otherwise, it won’t matter if predictions aren’t robust and transparent.
+There are
+many interpretation methods covered in
+Figure 14.1
+, and these are by no means every interpretation method available. They represent the most popular methods with well-maintained open-source libraries behind them. In this book, we have touched on most of them, albeit some of them only briefly. Those that weren’t discussed are in
+italics
+and those that were discussed have the relevant chapter numbers provided next to them. There’s been a focus
+on
+model-agnostic
+methods for
+black-box supervised learning models
+. Still, outside
+of this realm, there are also many other interpretation methods, such as those found in reinforcement learning, generative models, or the many statistical methods used strictly for linear regression. And even within the supervised learning black-box model realm, there are hundreds of application-specific model interpretation methods used for applications ranging from chemistry graph CNNs to customer churn classifiers.
+That being said, many of the methods discussed in this book can be tailored to a wide variety of applications. Integrated gradients can be used to interpret audio classifiers and weather forecasting models. Sensitivity analysis can be employed in financial modeling and infectious disease risk models. Causal inference methods can be leveraged to improve user experience and drug trials.
+Improve
+is the operative word here because interpretation methods have a flip side!
+In this book, that flip side has been referred to as
+tuning for interpretability
+, which means creating solutions to problems with FAT. Those solutions can be appreciated in
+Figure 14.2
+:
+Figure 14.2: Toolset to treat FAT issues
+I have observed
+five approaches to interpretability solutions:
+Mitigating Bias
+: Any
+corrective measure that is taken to account for bias. Please note that this bias refers to the sampling, exclusion, prejudice, and measurement biases in the data, along with any other bias introduced into the ML workflow.
+Placing Guardrails
+: Any
+solution that ensures that the model is constrained so that it doesn’t contradict the domain knowledge and predict without confidence.
+Enhancing Reliability
+: Any
+fix that increases the confidence and consistency of predictions, excluding those that do so by reducing complexity.
+Reducing Complexity
+: Any
+means by which sparsity is introduced. As a side effect, this generally enhances reliability by generalizing better.
+Ensuring Privacy
+: Any
+effort to secure private data and model architecture from third parties. We didn’t cover this approach in this book.
+There are also three areas in which these approaches can be applied:
+Data (“preprocessing”)
+: By modifying the training data
+Model (“in-processing”)
+: By modifying the model, its parameters, or training procedure
+Prediction (“postprocessing”)
+: By intervening in the inference of the model
+There’s a
+fourth area that can impact the other three – namely, data and algorithmic governance. This includes regulations and standards that dictate a certain methodology or framework. It’s a missing column because very few industries and jurisdictions have laws dictating what methods and approaches should be applied to comply with FAT. For instance, governance could impose a standard for explaining algorithmic decisions, data provenance, or a robustness certification threshold. We will discuss this further in the next section.
+You can tell in
+Figure 14.2
+that
+many of the methods
+repeat themselves for FAT.
+Feature Selection and Engineering, Monotonic Constraints
+, and
+Regularization
+benefit
+all three but are not always leveraged by the same approach.
+Data Augmentation
+also
+can enhance reliability for fairness and accountability. As with
+Figure 14.1
+, the items in italics were not covered in the book, of which three topics stand out:
+Uncertainty Estimation
+,
+Adversarial Robustness
+, and
+Privacy Preservation
+are
+fascinating
+topics
+and deserve books of their own.
+Current trends
+One of
+the most significant deterrents of AI adoption is a lack of interpretability, which is partially the reason why 50-90% of AI projects never take off (see the
+Further reading
+section for articles about this), and the other is the ethical transgressions that happen as a result of not complying with FAT. In this aspect,
+Interpretable Machine Learning
+(
+iML
+) has
+the power to lead ML as a whole because it can help with both goals with the corresponding methods in
+Figure 14.1
+and
+Figure 14.2
+.
+Thankfully, we
+are witnessing an increase in interest and production in iML, mostly
+under
+Explainable Artificial Intelligence
+(
+XAI
+) – see
+Figure 14.3
+. In the scientific community, iML is still the most popular term, but XAI dominates in public settings:
+Figure 14.3: Publication and search trends for iML and XAI
+This means that just as ML is starting to get standardized, regulated, consolidated, and integrated into a whole host of other disciplines, interpretation will soon get a seat at the table.
+ML is
+replacing software in all industries. And as more is getting automated, more models are deployed to the cloud, and it will get worse with
+the
+Artificial Intelligence of Things
+(
+AIoT
+). Deployment is not traditionally in the ML practitioner’s wheelhouse. That is why ML increasingly depends on
+Machine Learning Operations
+(
+MLOps
+). And
+the pace of automation means more tools are needed to build, test, deploy, and monitor these models. At the same time, there’s a need for the standardization of tools, methods, and metrics. Slowly but surely, this is happening. Since 2017, we have had the
+Open Neural Network Exchange
+(
+ONNX
+), an
+open standard for interoperability. And at the time of writing, the
+International Organization for Standardization
+(
+ISO
+) has
+over two dozen AI standards being written (and one published), several of which involve interpretability. Naturally, some things will get standardized because of common use, due to the consolidation of ML model classes, methods, libraries, service providers, and practices. Over time, one or a few in each area will emerge. Lastly, given ML’s outsized role in algorithmic decision-making, it’s only a matter of time before it is regulated. Only some financial markets regulate trading algorithms, such as the
+Securities and Exchange Commission
+(
+SEC
+) in
+the United States and
+the
+Financial Conduct Authority
+(
+FCA
+) in the UK. Besides that, only data privacy and provenance regulations are widely enforced, such as the HIPAA in the US and the LGPD in Brazil. The GDPR in the European Union takes this a bit further with the “right to an explanation” for algorithmic decisions but the intended scope and methodology are still unclear.
+XAI versus IML – which one to use?
+My take: although they are understood as synonyms in industry and
+iML
+is regarded as more of an academic term, ML practitioners, even those in industry, should be wary about using the term
+XAI
+. Words can have outsized suggestive power.
+Explainable
+presumes full understanding, but
+interpretable
+leaves room for error, as there always should be when talking about models, and extraordinarily complex black-box ones at that. Furthermore, AI has captured the public imagination as a panacea or has been vilified as dangerous. Either way, along with the term
+explainable
+, it serves to make it even more filled with hubris for those who think it’s a panacea and perhaps calm some concerns for those who think it’s dangerous. XAI term might be serving a purpose as a marketing term. However, for those who build models, the suggestive power of the word
+explainable
+can make us overconfident in our interpretations. That being said, this is just an opinion.
+ML interpretability
+is growing quickly but is lagging behind ML. Some interpretation tools have been integrated into the cloud ecosystem, from SageMaker to DataRobot. They are yet to be fully automated, standardized, consolidated, and regulated, but there’s no doubt that this will happen.
+Speculating on the future of ML interpretability
+I’m used
+to hearing the metaphor of this period being the “Wild West of AI”, or worse, an “AI Gold Rush!” It conjures images of an unexplored and untamed territory being eagerly conquered, or worse, civilized. Yet, in the 19th century, the United States western areas were not too different from other regions on the planet and had already been inhabited by Native Americans for millennia, so the metaphor doesn’t quite work. Predicting with the accuracy and confidence that we can achieve with ML would spook our ancestors and is not a “natural” position for us humans. It’s more akin to flying than exploring unknown land.
+The article
+Toward the Jet Age of machine learning
+(linked in the
+Further reading
+section at the end of this chapter) presents a much more fitting metaphor of AI being like the dawn of aviation. It’s new and exciting, and people still marvel at what we can do from down below (see
+Figure 14.4
+)!
+However, aviation had yet to fulfill its potential. Decades after the barnstorming era, aviation matured into the safe, reliable, and efficient Jet Age of
+commercial aviation
+. In the case of aviation, the promise was that it could reliably take goods and people halfway around the world in less than a day. In AI’s case, the promise is that it can make fair, accountable, and transparent decisions – maybe not for any decision, but at least those it was designed to make unless it’s an example of
+Artificial General Intelligence
+(
+AGI
+):
+Figure 14.4: Barnstorming during the 1920s (United States Library of Congress’s Prints and Photographs Division)
+So how
+do we get there? The following are a few ideas I anticipate will occur in the pursuit of reaching the Jet Age of ML.
+A new vision for ML
+As
+we intend to go farther with AI than we have ever gone before, the ML practitioners of tomorrow must be more aware of the dangers of the sky. And by the sky, I mean the new frontiers of predictive and prescriptive analytics. The risks are numerous and involve all kinds of biases and assumptions, problems with data both known and potential, and our models’ mathematical properties and limitations. It’s easy to be deceived by ML models thinking they are software. Still, in this analogy, the software is completely deterministic in nature – it’s solidly anchored to the ground, not hovering in the sky!
+For civil aviation to become safe, it required a new mindset – a new culture. The fighter pilots of WWII, as capable as they were, had to be retrained to work in civil aviation. It’s not the same mission because when you know that you are carrying passengers on board and the stakes are high, everything changes.
+Ethical AI, and by extension, iML, ultimately require this awareness that models directly or indirectly carry passengers “on board,” and that models aren’t as robust as they seem. A robust model must be able to reliably
+withstand almost any condition over and over again in the same way the planes of today do. To that end, we need to be using more instruments, and those instruments come in the form of interpretation methods.
+A multidisciplinary approach
+Tighter
+integration with many disciplines is needed for models that comply with the principles of FAT. This means more significant involvement of AI ethicists, lawyers, sociologists, psychologists, human-centered designers, and countless other professions. Along with AI technologists and software engineers, they will help code best practices into standards and regulations.
+Adequate standardization
+New
+standards will be needed not only for code, metrics, and methodologies but also for language. The language behind data has mostly been derived from statistics, math, computer science, and econometrics, which leads to a lot of confusion.
+Enforcing regulation
+It will likely be
+required that all production models fulfill the following specifications:
+Are certifiably robust and fair
+Are capable of explaining their reasoning behind one prediction with a TRACE command and, in some cases, are required to deliver the reasoning with the prediction
+Can abstain from a prediction they aren’t confident about
+Yield confidence levels for all predictions (see the
+conformal prediction
+tutorial and book in the
+Further reading
+section)
+Have metadata with training data provenance (even if anonymized) and authorship and, when needed, regulatory compliance certificates and metadata tied to a public ledger – possibly a blockchain
+Have security certificates much like websites do to ensure a certain level of trust
+Expire, and stop working upon expiration, until they are retrained with new data
+Be taken offline automatically when they fail model diagnostics and only put online again when they pass
+Have
+Continuous Training/Continuous Integration
+(
+CT/CI
+) pipelines that help retrain the model and perform the model diagnostics at regular intervals to avoid any model downtime
+Are diagnosed by a certified AI auditor when they fail catastrophically and cause public damage
+New
+regulations will likely create new professions such as AI auditors and model diagnostics engineers. But they will also prop up MLOps engineers and ML automation tools.
+Seamless machine learning automation with built-in interpretation
+In the future, we
+won’t program an ML pipeline; it will mostly be a drag-and-drop capability with a dashboard offering all kinds of metrics. It will evolve to be mostly automated. Automation shouldn’t come as a surprise because some existing libraries perform automated feature-selection model training. Some interpretability-enhancing procedures may be done automatically, but most of them will require human discretion. However, interpretation ought to be injected throughout the process, much like planes that mostly fly themselves have instruments that alert pilots of issues; the value is in informing the ML practitioner of potential problems and improvements at every step. Did it find a feature to recommend for monotonic constraints? Did it find some imbalances that might need adjusting? Did it find anomalies in the data that might need some correction? Show the practitioner what needs to be seen to make an informed decision and let them make it.
+Tighter integration with MLOps engineers
+Certifiably
+robust models trained, validated, and deployed at a click of a button require more than just cloud infrastructure – they also need the orchestration of tools, configurations, and people trained in MLOps to monitor them and perform maintenance at regular intervals.
+Summary
+Interpretable machine learning is an extensive topic, and this book has only covered some aspects of some of its most important areas on two levels: diagnosis and treatment. Practitioners can leverage the tools offered by the toolkit anywhere in the ML pipeline. However, it’s up to the practitioner to choose when and how to apply them.
+What matters most is to engage with the tools. Not using the interpretable machine learning toolkit is like flying a plane with very few instruments or none at all. Much like flying a plane operates under different weather conditions, machine learning models operate under different data conditions, and to be a skilled pilot or machine learning engineer, we can’t be overconfident and validate or rule out hypotheses with our instruments. And much like aviation took a few decades to become the safest mode of transportation, it will take AI a few decades to become the safest mode of decision-making. It will take a global village to get us there, but it will be an exciting journey! And remember,
+the best way to predict the future is to create it
+.
+Further reading
+Joury, A., 2022, January 6,
+Why 90% of machine learning models never hit the market
+. TNW | Neural. Retrieved December 4, 2022:
+https://thenextweb.com/news/why-most-machine-learning-models-never-hit-market-syndication
+Wiggers, K., 2019, July 8,
+IDC: For 1 in 4 companies, half of all AI projects fail
+. VentureBeat. Retrieved December 4, 2022:
+https://venturebeat.com/ai/idc-for-1-in-4-companies-half-of-all-ai-projects-fail/
+O’Neil, C., 2017,
+Weapons of Math Destruction
+. Penguin Books.
+Talwalkar, A., 2018, April 25,
+Toward the Jet Age of machine learning
+. O’Reilly:
+https://www.oreilly.com/content/toward-the-jet-age-of-machine-learning/
+Rajiv, S., 2022, September 22,
+Getting predictions intervals with conformal inference
+. Getting predictions intervals with conformal inference · Rajiv Shah’s Projects Blog. Retrieved December 4, 2022:
+http://projects.rajivshah.com/blog/2022/09/24/conformal_predictions/
+Angelopoulos, A.N., and Bates, S., 2021,
+A Gentle Introduction to Conformal Prediction and Distribution-Free Uncertainty Quantification
+:
+https://arxiv.org/abs/2107.07511
+Learn more on Discord
+To join the Discord community for this book – where you can share feedback, ask the author questions, and learn about new releases – follow the QR code below:
+https://packt.link/inml
+
+packt.com
+Subscribe to our online digital library for full access to over 7,000 books and videos, as well as industry leading tools to help you plan your personal development and advance your career. For more information, please visit our website.
+Why subscribe?
+Spend less time learning and more time coding with practical eBooks and Videos from over 4,000 industry professionals
+Improve your learning with Skill Plans built especially for you
+Get a free eBook or video every month
+Fully searchable for easy access to vital information
+Copy and paste, print, and bookmark content
+At
+www.packt.com
+, you can also read a collection of free technical articles, sign up for a range of free newsletters, and receive exclusive discounts and offers on Packt books and eBooks.
+Other Books
+You May Enjoy
+If you enjoyed this book, you may be interested in these other books by Packt:
+Causal Inference and Discovery in Python
+Aleksander Molak
+ISBN: 9781804612989
+Master the fundamental concepts of causal inference
+Decipher the mysteries of structural causal models
+Unleash the power of the 4-step causal inference process in Python
+Explore advanced uplift modeling techniques
+Unlock the secrets of modern causal discovery using Python
+Use causal inference for social impact and community benefit
+Transformers for Natural Language Processing – Second Edition
+Denis Rothman
+ISBN: 9781803247335
+Discover new techniques to investigate complex language problems
+Compare and contrast the results of GPT-3 against T5, GPT-2, and BERT-based transformers
+Carry out sentiment analysis, text summarization, casual speech analysis, machine translations, and more using TensorFlow, PyTorch, and GPT-3
+Find out how ViT and CLIP label images (including blurry ones!) and create images from a sentence using DALL-E
+Learn the mechanics of advanced prompt engineering for ChatGPT and GPT-4
+Packt is searching for authors like you
+If you’re interested in becoming an author for Packt, please visit
+authors.packtpub.com
+and apply today. We have worked with thousands of developers and tech professionals, just like you, to help them share their insight with the global tech community. You can make a general application, apply for a specific hot topic that we are recruiting an author for, or submit your own idea.
+Share your thoughts
+Now you’ve finished
+Interpretable Machine Learning with Python 2e
+, we’d love to hear your thoughts! If you purchased the book from Amazon, please
+click here to go straight to the Amazon review page
+for this book and share your feedback or leave a review on the site that you purchased it from.
+Your review is important to us and the tech community and will help us make sure we’re delivering excellent quality content.

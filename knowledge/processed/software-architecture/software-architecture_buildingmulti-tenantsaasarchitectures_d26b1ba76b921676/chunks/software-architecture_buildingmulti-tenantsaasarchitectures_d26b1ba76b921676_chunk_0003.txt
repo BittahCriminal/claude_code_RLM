@@ -1,0 +1,909 @@
+tenant requirements. Within the services, it’s more about focusing on thinking about how you can ensure that your services are implementing the core best practices without undermining the experience or productivity of your builders.
+Now that we have a sense of how multi-tenant is implemented in our services, we can start digging into the various strategies that are used to represent the data used by these services. While I’ve provided glimpses of how you might store data in multi-tenant environments, we mostly looked at this through the lens of other concepts. Now, in the next chapter, we’ll focus exclusively on the different approaches and considerations that are associated with representing, operating, and managing multi-tenant data. This will give you a more complete view of the different factors you should consider when working with multi-tenant data and highlight key points of inflection that will influence how/where you store the data that’s part of your multi-tenant environment.
+
+Chapter 8.
+Data Partitioning
+As we wander deeper into the multi-tenant services of a SaaS environment, we must also begin to look at how these services represent, access, and manage data in a multi-tenant model. While the fundamentals of multi-tenant data are relatively easy to wrap your mind around, there are lots of nuances that come with selecting a multi-tenant storage strategy that aligns with the requirements of your environment.
+There are multiple factors that can
+have a direct influence on how you store data for a given workload in your SaaS environment. Compliance, noisy neighbor, isolation, performance, cost—any of these might have a significant influence on how you choose to represent your data in a multi-tenant setting. Technology also plays a big part in this story. Each storage technology has its own set of constraints, constructs, and mechanisms that will need to be considered as part of your data partitioning strategy.
+In this chapter, we’ll cover the full range of data partitioning considerations, highlighting the different factors that are typically going to shape your data partitioning model. We’ll start by looking at some of the fundamentals of data partitioning, reviewing the common themes and considerations that apply regardless of the storage technology you may be using. We’ll also look at the natural connections between data partitioning and tenant isolation to help you understand how isolation might play a larger role in determining the data partitioning model you ultimately select.
+Once we have a sense of the core concepts, the emphasis will shift to looking at the specifics of how data partitioning is realized across a range of different storage technologies and services. Here, the goal will be to dig into each of these technologies and understand how the nature of each storage service influences your data partitioning design. This will also give you a clearer view into how different storage technologies are able to address key multi-tenant storage challenges (noisy neighbor, tenant isolation, compliance, and so on). We’ll also look at the trade-offs associated with
+multi-tenant
+data models, identifying key areas you’ll want to focus on when storing different types of data (object, relational, NoSQL, and so on).
+Data Partitioning Fundamentals
+Before we can start looking at concrete multi-tenant storage constructs, we need to first review some of the foundational data partitioning concepts. Let’s start by being clear about what I mean when I refer to data partitioning. To me, when I think about storing data in a multi-tenant environment, I’m always thinking about how an individual tenant’s data will be partitioned based on the type of data being stored, the technology that I’ll be using to store and manage it, how the tenant will consume it, and so on.
+The partitioning of data does not presume that each tenant’s data must somehow land in a complete standalone storage construct. This, in fact, is where the silo and pool
+concepts end up playing a key role again. The terms come forward with us as we look at how we describe the representation of tenant data. To help clarify this point, let’s look at how siloed and pooled models are applied to storage.
+Figure 8-1
+provides a basic conceptual view of how siloed and pooled strategies are mapped to the realm of multi-tenant data partitioning.
+Figure 8-1.
+Siloed and pooled data partitioning models
+In this example, I have shown Product and Order services that are both running with pooled compute that is shared by all tenants. However, you’ll also notice that each of these services employs different data partitioning models. On the left, the Product service uses a separate, dedicated storage construct for each tenant. Given this footprint, we would refer to this storage as being siloed.
+On the righthand side, you’ll see that I have an Order service that uses a different data partitioning model. Here there’s only one shared storage construct that is used to store and manage all tenant orders. This is what we would refer to as a pooled storage model.
+You’ll also see that how I mapped tenants to their data is different for each of these data partitioning schemes. For silo, the tenants are generally associated with their siloed storage construct based on some naming model. In this instance, I prepended a tenant identifier to the name of each storage construct. You’ll also note that there’s nothing in the actual product data that references or connects each item to a tenant. It’s not needed. The order table, on the other hand, has data for all tenants and, as such, it needs some way to associate individual items with each tenant. For this example, I introduced a TenantId column to identify the items that belong to each tenant.
+The key is that regardless of which technology you’re using to store your data, you still would use these silo and pool terms to characterize how the data is represented. While these concepts are universal, how they are actually brought to life across different technologies can vary significantly. These variations can play a key role in influencing whether your data ends up being stored in a silo or pool model.
+It’s also worth noting that both of these strategies have different scaling considerations. A siloed strategy, for example, can introduce scaling and management challenges as you attempt to add separate storage constructs for each tenant. Meanwhile, depending on the size of your data, commingling all of your tenant data in a single construct can also introduce scaling limits if you store excessive or poorly distributed data.
+Note
+Throughout this chapter, I’ll be talking about siloed and pooled data partitioning strategies. It is essential to understand the trade-offs, design considerations, and operational impact of adopting each of the models across different storage technologies. It’s also important to understand that these two models should not be viewed as mutually exclusive. You may, for example, choose a pool model for your basic tier tenants and a siloed model for your premium tier tenants. This approach allows you to offer two experiences to your tenants, enabling a broader range of pricing and packaging options for your service.
+Before we get into how these storage models land on specific storage technologies, let’s consider some of the cross-cutting concerns that you should be thinking about as you design your multi-tenant storage strategy.
+Workloads, SLAs, and Experience
+Every multi-tenant storage strategy must be hyper-focused on scale and performance. The nature of multi-tenant data consumption can vary significantly across the services of your
+solution, requiring creative approaches to supporting the shifting workloads and consumption patterns of your tenants. Finding a storage strategy that effectively addresses these needs can be challenging. The workloads and patterns you see today may not be the same tomorrow. New tenants may also be onboarding, adding all-new wrinkles to the storage profile of your system.
+As you sit down to design your data partitioning strategy, you’ll want to be sure you are thinking about how each storage experience is going to perform in a multi-tenant model. How will you meet any SLAs that may be required for a given tenant tier? How will you detect and handle scenarios where a tenant saturates your storage? How will you efficiently size the compute that is running your storage service? These are just a few examples of performance and scale questions you’ll need to consider when you’re picking a data partitioning model.
+Part of this exercise is also about estimating the footprint of your data. Having some sense of the amount of data your tenants will be storing across the different services of your system will allow you to project how your system might be able to scale to meet the SLAs of your tenants. This will also be essential to understanding how your data might be pushing the limits of the storage technologies you’re using. For some services, you might find that the tenants with disproportionately large data could end up undermining your data partitioning strategy and degrading the performance key areas of your system. Knowing this might tip you toward a different partitioning approach that will allow you to effectively scale your multi-tenant data.
+Noisy neighbor is another area you’ll want to focus on as you’re building out your multi-tenant storage strategy. We’ve already discussed this as a more global concern, but noisy neighbor brings its own unique set of nuances to the multi-tenant storage puzzle. It’s here that you’ll have to develop workload profiles and understand how tenants will consume your system’s multi-tenant data, identifying areas where you may need to introduce partitioning, siloing, or throttling mechanisms that can prevent tenants from imposing loads that might impact the experience of other tenants. These same policies will also be essential to managing the availability of your environment—especially if you’re encountering noisy neighbor conditions with your pooled storage.
+Sizing the compute of your storage is also part of this story. It can be challenging to determine what level of compute resources is needed to support the workloads and SLAs of your solutions. It’s often challenging to find a balance that doesn’t end up requiring an overprovisioning of storage resources to meet your throughput
+requirements.
+Blast Radius
+While the goal of any architecture is to ensure that we’ve done all that we can to prevent outages, there
+are still scenarios where teams take additional measures to ensure that one tenant can’t impact the experience of another tenant. This is, of course, especially significant in a multi-tenant environment where an outage could impact every customer in your system.
+Now, as you’re picking a storage model, some teams may factor blast radius into their overall strategy, leaning toward siloing data to reduce the scope of potential outages. This might translate into siloing a particularly critical family of data. In this approach, if a siloed database, for example, were to suffer from some fatal condition, the impact of that failure could be limited to a single tenant. This would also allow the operations team to work on this issue in isolation.
+This can be especially powerful when you look at the deployment footprint of your SaaS environment. As new versions and capabilities are rolled out, the siloed data for each tenant could be updated separately, creating opportunities to gracefully deploy and update the data constructs without impacting all of your tenants.
+While there are merits to siloing your data to limit blast radius issues, this is still something I would consider carefully. This may fit for some environments, but it also can be a crutch that impacts the overall agility, cost efficiency, and operational profile of your environment.
+The Influence of Isolation
+Isolation touches every dimension
+of multi-tenant architecture, and it certainly plays a role in shaping the data partitioning model you select. In fact, this is often where the lines between data partitioning and isolation can get blurry. For example, I might choose a partitioning strategy based, at least partly, on its isolation requirements.
+Where this gets a bit confusing, though, is that teams will sometimes equate their data partitioning strategy with tenant isolation. So, if they’ve chosen to use a siloed model for a particular family of data, they will describe that data as being “isolated.” While you may have chosen a silo model to enable isolation, siloing the data alone does not mean the data is isolated. Isolation, as we’ll see in
+Chapter 9
+, represents a layer of enforcement that goes beyond how the data is stored. It enforces and scopes access to data regardless of whether it is siloed or pooled.
+I prefer to view isolation as influencing the data partitioning model I select while acknowledging that implementing that isolation will still be achieved separately. This influence of isolation on data partitioning is especially important as you look at different storage technologies. If you’re at least partially selecting a data partitioning strategy based on its potential to support a level of isolation, then you must also consider how the storage technology you’re selecting will support enforcement of
+isolation
+at the level you require. For example, I might silo tenant data in a separate database to enable isolation, only to find out that the database doesn’t allow me to define per-tenant isolation policies at the database level. That might persuade me to consider another option.
+This is even more pronounced when you’re thinking about pooled data partitioning strategies and isolation. Here, as you can imagine, strategies that let you enforce your isolation are even
+less frequently supported.
+Management and Operations
+As architects and builders, it’s natural to focus on performance and isolation when picking a data partitioning strategy. However, it’s equally important to consider
+how your data partitioning strategy will influence the management and operational footprint of the SaaS environment. When you’re weighing your silo or pool partitioning options, for example, you should be thinking about how the footprint of your data might impact the experience and agility of your operations team (backup, deployment, migration, telemetry, and so on).
+The pooled data partitioning
+model, for obvious reasons, typically offers the greatest level of operational efficiency. When you have data represented in a pooled model, you have a much cleaner management and operations story. Any updates to data, for example, would be applied to all tenants with a single operation in a pooled model. Also, the effort required to assemble operational views into the performance and health of your storage services is made simpler when all of your tenants are using shared constructs.
+With siloed data
+partitioning, you have a more distributed model that adds a degree of complexity to your management and operations experience. Here, your DevOps tooling must take on the challenge of applying any data changes or migrations to each tenant individually. Synchronizing these changes across a large collection of siloed data constructs certainly adds a level of complexity and timing to this process. Your operational tooling will also take on an added burden in a siloed data partitioning scheme. Your tooling will now be required to assemble a collective view of health and activity from the various siloed tenant databases that are part of your environment.
+Backup and restore
+should also be part of the discussion. How will your partitioning model influence your ability to back up and restore tenant data? With siloed data, this is simpler. However, with pooled data you need to think about how you’d take a snapshot of a tenant’s data from a shared storage service (and consider how you’d restore tenant data without impacting other tenants). There are lots of variables that would shape your approach here. The key is that you have this on your radar as you’re selecting a data partitioning strategy.
+Ultimately, this often comes down to balancing efficiency and manageability. Just know that where you land could have a significant impact on your ability to meet the scale and agility goals of the business.
+The Right Tool for the Job
+Some teams look at data partitioning as an all-or-nothing moment where they’re picking a technology that
+meets the requirements of their solution. For example, teams will do their analysis and then go all-in with the one database technology that seems to best suit the needs of their solution. This may even be driven by developer experience, where teams will pick a storage strategy based on their general familiarity with the technology.
+It’s likely already clear why this is a less than ideal approach to selecting a multi-tenant storage approach. The reality is, there are so many variables that can influence your selection of a storage technology, and—more importantly—these variables may be different for each part of your system.
+If you look at your system as a composed collection of services that encapsulate their underlying storage, then you should be evaluating your storage technology options on a service-by-service basis. The storage technology that fits well with the requirements of one service may not fit well with the requirements of another service. The goal is to consider each service in isolation, allowing the service to deliver the best experience it can based on the workload it supports, its isolation needs, its compliance considerations, its management profile, and all the other factors that might shape its footprint. This includes picking siloed and pooled data partitioning strategies on a service-by-service basis. Yes, you’ll likely find storage patterns that apply universally to many services. However, you still want to ask these questions for each service you build.
+Defaulting to a Pooled Model
+In some cases, it may not be entirely clear which data partitioning model—silo or pool—fits best for a given
+workload. You may need to wait until you’ve been able to observe and profile the scale, performance, and operational behavior of tenant workload to have a better sense of the preferred approach.
+Generally, in these cases, my recommendation is to default to a pooled model for all the storage in your system. The cost, operational, and agility advantages of pooled storage are often so compelling that teams will cling to the model as long as they can. In this mode, you’re essentially forcing any siloed data to earn its way out based on a set of clear requirements that justify taking on the trade-offs that come with managing, operating, and deploying data in a siloed model.
+It’s true that some workloads and data types will be clear candidates for being siloed on day one of your system. The trap you want to avoid, though, is over-rotating to a siloed model for elements of your system that may not demand a siloed experience. Each time you choose to silo any resource in a SaaS environment, you should be challenging your assumptions and ensuring that you have scoped the silo at the
+appropriate boundary.
+Supporting Multiple Environments
+As we dig into the specifics of data partitioning with different technologies and services, you’ll see scenarios
+within the siloed model where we create per-tenant constructs (tables, databases, clusters, etc.). Each time we create one of these tenant-specific constructs, we have to assign them a name that associates the construct with a tenant.
+Solving for this usually means coming up with some naming convention that ensures that the resource is uniquely identified. Where this gets more interesting is when you start thinking about supporting multiple environments (QA, staging, production). Now, you have to figure out whether your naming convention may need to include a reference to the environment that is hosting your siloed storage resource.
+For some services and strategies, you may have a siloing construct that doesn’t create a conflict between names. For example, for some cloud storage services, you might have separate accounts for each environment. In this mode, your resource names may be scoped at the account level, ensuring that they are only accessed from within that account. However, there are also instances where names can be global to all accounts. In this scenario, you’d still need a naming convention that would include support for your different environments.
+This isn’t generally a significant issue. However, it is worth considering as you’re defining your data partitioning model.
+The Rightsizing Challenge
+One theme that you’ll find spanning this book is the notion of aligning infrastructure consumption with the activity of tenants. This is all part of the quest for efficiency that’s fundamental to every SaaS business. One dimension of this scaling challenge that can get overlooked is the efficiency of your storage compute consumption. It’s here that teams have difficulty finding a data partitioning and storage strategy that allows them to optimize their compute consumption footprint.
+The sizing of
+storage compute is trickier in a multi-tenant environment. With our services, we can scale our compute horizontally based on load, which makes it easier to expand and contract their compute footprint based on tenant workloads. However, with storage, you typically don’t have this option. Instead, a storage service will often require you to select a particular compute profile when you are initially configuring your environment. This means your storage compute remains fixed for all tenant workloads.
+This presents a particularly challenging problem for multi-tenant environments.
+Figure 8-2
+provides a clearer view of the storage sizing issues that come with multi-tenant environments.
+Figure 8-2.
+Sizing the compute of your storage
+In this example, I have two tenants that are consuming a service in a pooled model. This service scales out horizontally based on the workloads of the tenants. All of the instances of this service are pointed at some pooled storage service that manages its data. In this example, let’s say that my storage service is some relational database service running in the cloud and that this service, as part of its setup, required us to select a compute size.
+The question is: what size should you choose for the compute of this storage service? In the diagram, you’ll see that I’ve highlighted the dilemma, illustrating how the compute sizing changes throughout the day. At 4 p.m., for example, the compute needs are minimal while at 7 p.m. load increases substantially. To top it off, you have new tenants and new workloads coming into your multi-tenant environment that are continually changing these consumption patterns.
+Tackling this problem looks a bit different for siloed and pooled data partitioning models. In the pooled model, it’s very difficult to rightsize the compute of your storage service. Generally, to accommodate the shifting workloads and spikes of multiple tenants consuming your pooled storage, you’ll need to overprovision the compute and just accept that this will negatively impact the cost efficiency strategies of your overall environment.
+If you’re using a siloed model for your data, there are fewer variables to consider, which should make sizing somewhat easier. The nature of individual tenant loads is likely to be somewhat more predictable and, as such, you may be able to select a compute size that better fits the needs of your siloed tenants. Even in this model, though, you’ll accept some degree of overprovisioning. There will likely be times during the day where a siloed tenant’s storage is idle or very lightly consumed.
+Certainly, profiling your storage consumption will give you more data to better size the compute for your siloed and pooled models. In some cases, teams will use this data to continually size the compute of their storage in an attempt to limit overprovisioning. This constant juggling, however, can also add significant operational complexity and inefficiency.
+Overall, there’s no magic solution to this challenge. If your storage service requires you to bind to a fixed compute profile, you’ll have to accept the challenges that come with it. Ideally, the costs associated with the overprovisioning of your resources will not have
+a significant impact on the overall margins of your SaaS business.
+Throughput and Throttling
+One way to deal with rightsizing issues
+is the use of storage throughput and throttling strategies. These mechanisms allow you to introduce policies that can better manage the consumption of your storage resources, including supporting separate experiences based on tenant tiers and personas. The idea is that you would use the built-in performance configuration options of your storage technology to find the mix of settings that best support the general performance and sizing challenges of your storage workloads.
+The key is that, as part of your data partitioning model, you’ll want to consider how you will apply these policies. This includes thinking about how these policies might differ for pooled and siloed storage models. These two partitioning schemes may require different approaches to configuring the throughput and throttling profile of each storage experience.
+Serverless Storage
+As we look at this sizing problem, it’s entirely concentrated on those storage technologies that rely
+on pre-sizing their compute footprint. The good news is, though, there are more and more storage technologies that are embracing a serverless model that removes any binding to a specific compute profile. With serverless storage, these services hide away the details of the storage compute profile, sizing the underlying compute based on the current level of tenant activity. The compute is essentially auto-sized based on the load of your system, which fits perfectly with the needs of a multi-tenant environment.
+The serverless storage model has surfaced across a range of different storage technologies. At AWS, for example, you’ll find Amazon Aurora Serverless, which is a serverless relational database storage service that employs this serverless model. Amazon DynamoDB is also serverless, providing a managed NoSQL storage service that requires no compute sizing. I suspect that the majority of cloud-based storage technologies will eventually offer some degree of support for the serverless model.
+As we look at the different storage technologies in the remainder of this chapter, you’ll want to keep this serverless model on your radar. Anywhere you’re using the pooled data partitioning model, for example, you’ll find that a serverless model could represent a compelling option. The key is that, given the unpredictable nature of multi-tenant storage consumption, you’ll likely find yourself leaning toward serverless as the preferred approach to aligning your storage consumption and costs with your tenant’s activity. This serverless model also simplifies the operation and management of your storage services, eliminating the need to constantly chase shifting compute sizing requirements.
+With these foundational data partitioning concepts in place, we can now start looking at how these principles are realized through different storage technologies. In the sections that follow, I’ll map the general concepts we reviewed here to more concrete implementation strategies, highlighting the different nuances that come with each storage technology. There are far too many storage options available to cover them all, but I’ve selected a sampling of common storage technologies that should give a good sense of how variations within these individual technologies influence your data partitioning strategies.
+Relational Database Partitioning
+Now that we have a sense of the data partitioning fundamentals, let’s start by looking at how these
+concepts would land in a relational database. When we look at how you can implement data partitioning in a relational database, much of the discussion focuses on the sizing, scale, and operational efficiency.
+Relational databases generally support a range of different constructs that can be used to partition our data. One constant is the dependency on a schema. This means, regardless of which data partitioning model we chose, our data is going to be represented in an environment that has a binding to schema. This can present challenges in multi-tenant environments where we may need to gracefully migrate tenants from one schema representation to the next. This can add complexity to the overall agility story of your storage model.
+This doesn’t mean that relational databases and SaaS are not a fit. In fact, there are compelling use cases where a relational model might better align with a given
+workload
+in your environment. At the same time, you should be sure to weigh the migration and agility impacts of a relational model when selecting a storage strategy.
+Pooled Relational Data Partitioning
+Let’s start by looking at what it
+would take to implement a pooled model with a relational database. The mechanics of storing data in a pooled model with a relational database are pretty straightforward. Here, you’re simply taking your existing database design and introducing a tenant identifier to associate the items in a table with a specific tenant. The end result, shown in
+Figure 8-3
+, is exactly what you would expect.
+Figure 8-3.
+Pooled relational database
+I’ve shown a customer table that stores multi-tenant data in a pooled model. A new TenantId column has been introduced as the foreign key of this table, serving as the primary index for accessing data. The tenant identifier GUIDs in this column represent the ID of each tenant that is associated with a given row.
+The basic idea of any pooled storage model is that we are commingling the data of all tenants within some shared construct. Then, the data that would have previously been the foreign key for this table becomes a secondary index or a filter. In this case, our CustomerId column has become the secondary key for this table. This means that our interactions with this table must now introduce this tenant identifier into the queries that are accessing data from this table.
+For this example, I wanted to include a table with rows that were associated with separate tenants. Rows 1 and 3 are associated with Tenant 1 (as shown on the lefthand side of the diagram). Rows 2 and 6 are associated with Tenant 2. This pattern would be repeated across all the pooled tables in your system that are holding tenant data.
+Introducing a TenantId column also gives us a way to potentially apply policies that will be part of our tenant isolation story. These policies (described in
+Chapter 9
+) will illustrate how we can filter the view of a table and prevent cross-tenant access to data. Each database technology may have its own unique approach to defining these policies. The key is that, in some instances, the partitioning model of your pooled data may influence the isolation strategies that can be applied to your data.
+Siloed Relational Data Partitioning
+While the pooled relational model
+is straightforward, there are often more options to consider when you silo data in a relational database. A relational database technology may offer you multiple constructs to define the siloed boundaries of your data.
+Figure 8-4
+provides a conceptual view of some of the different constructs that can be used when siloing data in a relational database.
+Figure 8-4.
+Picking a relational siloed storage construct
+On the left of this diagram, I’ve shown a database instance per tenant model. With the Amazon Relational Database Service (RDS), for example, this would essentially equate to spinning up entirely separate infrastructure for every tenant. The compute and all the infrastructure resources of the instance would be dedicated to a single
+tenant.
+In the middle, I’ve shown the concept of a database. Here, you have a dedicated database for each tenant running within a database instance. While each database is entirely separate, they all share the underlying compute of their parent database instance. Finally, on the righthand side, you’ll see a model where separate tables are used to silo each tenant’s data. These tables would all be created within a shared
+database.
+With any of these models, it would become the responsibility of your environment to associate names or tags with these siloed relational storage constructs. Then, at runtime, your code would need to map a given tenant request to its corresponding database instance, database, or table.
+For each of these different silo constructs, you’ll need to consider whether the construct can scale to meet your needs. Within RDS, for example, there are limits that will shape the options you have here. You can only have so many databases within a database instance. The same applies to tables. The technology you choose to use may impose other flavors of constraints that should be part of your scaling math. The general guidance is to be sure you’re giving careful consideration to the range of limits that come with your relational technology. Doing some basic modeling of your potential growth will give a better sense of whether you’re safely within the scaling constraints of your relational database environment.
+Your choice to silo might also be driven by a need to achieve isolation based on the security and compliance considerations of your domain. Certainly, the more coarse-grained nature of siloed relational constructs often represents an appealing way to address these needs. However, as you examine different relational technologies, you may find that siloing the storage may still not fully address your isolation needs. In some instances, these siloed relational constructs may not support defining policies that can prevent cross-tenant access. So, even though your data is siloed, there are no mechanisms available to implement a robust isolation policy. The key is that your choice of siloing construct may also be influenced by whether that construct enables you to prevent cross-tenant access through isolation policies (more on this in
+Chapter 9
+).
+With Amazon RDS, you also have a wide array of database engines to choose from: MySQL, PostgreSQL, MariaDB, SQL Server, Oracle, and so on. There are nuances within each of these engines that could add new dimensions to your siloed partitioning model. While each cloud and/or relational database vendor may add their own twist to this story, the mindset and approach generally maps well to the patterns and considerations
+that I outlined here.
+NoSQL Data Partitioning
+The next area we’ll look at is NoSQL storage. There are a number of different NoSQL options to choose from,
+each of which may introduce new constructs that could alter your approach to implementing pooled and siloed data partitioning strategies. To make this a bit more concrete, I’m going to focus on Amazon DynamoDB, which provides builders with a managed NoSQL storage service.
+The schemaless nature of NoSQL storage presents multi-tenant builders with some significant advantages. Imagine running a large pooled environment and deploying a change that includes new data structures. With a relational setup, you might need to orchestrate a series of complex migration steps to update your schema as part of rolling out a new feature. That same change is generally much easier to apply in a NoSQL environment. The absence of a schema often removes the need to navigate a series of complex migration scripts, allowing teams to introduce features at a faster pace with fewer deployments. This fits well with the broader SaaS value proposition, promoting operational agility, innovation, and efficiency.
+With DynamoDB, you’ll
+also see that we have a pretty limited collection of storage constructs that can be used to partition our data. There’s no notion of databases or instances as part of the DynamoDB landscape. DynamoDB also has the advantage of not inheriting all the baggage that comes with supporting different, existing relational database engines. This also means that DynamoDB offers tighter integration with other AWS cloud constructs, providing more granular integration with the identity and access management (IAM) mechanisms that can be used to define isolation policies (covered in
+Chapter 9
+).
+I do get lots of questions about how teams might choose between NoSQL and relational databases for a SaaS solution. This, to me, is driven mostly by a combination of application and consumption use cases—isolation requirements, agility impacts, and performance considerations. Generally, I tend to tell teams to start with NoSQL and let real-world business drivers steer you toward relational where it makes sense.
+Pooled NoSQL Data Partitioning
+Pooling data in NoSQL looks very much
+like it does in a relational database. With DynamoDB, all of our data is stored in tables. The data in these tables will include information for all of the tenants in our system. They are commingled based on a tenant identifier that associates each item in the table with its corresponding tenant.
+Figure 8-5
+provides a simple view of a NoSQL table that is indexed by tenant
+identifiers.
+Figure 8-5.
+Pooled NoSQL data partitioning
+This is a mirror image of the pooled relational storage example we looked at earlier. We have a DynamoDB table that is populated with items, each of which has a JSON document that holds the data for a given item.
+The items listed in this example happen to represent employees. I’ve inserted the
+TenantId
+attribute into each of these items to associate it with a tenant. I have two tenants that have data in this table. Tenant 1 is associated with the first and third items and Tenant 2 is associated with the second item.
+I’ve denoted that each of the tenant identifiers in my table are what DynamoDB refers to as partition keys. This essentially identifies the attribute as the primary key of the table, improving performance when accessing data for individual tenants. The
+EmployeeId
+was the primary key before we introduced tenancy into these tables. It would now be treated as a sort key within DynamoDB.
+Siloed NoSQL Data Partitioning
+With many siloed models, we tend to look for some logical mapping to a database instance that will hold our
+siloed data. However, with DynamoDB (and other managed storage services), these constructs don’t really exist. Instead, our only silo option here is to use a table-per-tenant model to silo our data.
+Figure 8-6
+provides a conceptual view of this siloed DynamoDB model.
+Figure 8-6.
+NoSQL siloed data partitioning
+There’s nothing exotic about the siloed approach with DynamoDB. We’ve essentially created a separate table for each tenant. Then, within the implementation of our service we map each incoming request to the appropriate table.
+In this example, I prepended a tenant identifier to the table name to associate the table to a specific tenant. The naming strategy you adopt must be chosen carefully. Table names in DynamoDB are managed globally which means you’ll need to identify a naming scheme that ensures that your table is assigned a unique name. Some teams opt for a mix of a generated identifier and a “friendly” name.
+Whenever we consider a siloed storage model, we must also consider whether our siloing strategy will support the scaling requirements of our solution. Just as we did with relational databases, we must also consider the limits of DynamoDB (or whichever NoSQL solution you’re using). You’ll also want to think about how the table-per-tenant model will affect the deployment and operational profile of your environment.
+NoSQL Tuning Options
+In general, the data partitioning options for DynamoDB are pretty straightforward. There are, however, some
+additional factors that can come into play when storing multi-tenant data with DynamoDB. For example, DynamoDB offers you options to configure the capacity modes for a table. For each table, you can choose between on-demand or provisioned capacity modes. With on-demand, you’re essentially able to have DynamoDB scale based on the actual load of your tenants. This, as you can imagine, fits very well with the unpredictability of tenant consumption that comes with multi-tenant workloads. This would be especially valuable for instances where you’re running in a pooled partitioning model.
+The provisioned model is a much better fit for environments where you have a better sense of the levels of activity you’ll need to support. Here, you configure the minimum capacity, maximum capacity, and target utilization based on the profile of your workload. Now, the system will have a steady, target level it will maintain while still limiting a tenant’s ability to exceed a maximum. You might be able to apply this strategy to tables that are in key bottlenecks of the system to ensure that you’re maximizing throughput (at the cost of potentially being somewhat overprovisioned). You can also see how, in some cases, this might be aligned with a siloed table where the consumption profile is more predictable.
+Obviously, as you look at other NoSQL solutions, you may have other partitioning and configuration options available. Fundamentally, though, this basically comes down to figuring out which constructs you might be able to use to represent your siloed experience. The pooled model will likely employ a similar implementation across different NoSQL offerings.
+Object Data Partitioning
+Data partitioning with relational and NoSQL storage services is an area that builders easily relate to. For these storage technologies, you have relatively natural mappings to the pooled
+and siloed models. However, as we move into other storage technology, the mappings are not quite as straightforward. To make this clearer, let’s look at how we land these multi-tenant data partitioning models in an object storage service.
+With object storage, we’re not looking at data through the lens of databases and tables. Instead, we view the assets we’re managing as a series of objects that essentially equate to files that are stored and retrieved across a number of different contexts.
+For the purposes of our discussion, I’ll focus on Amazon’s Simple Storage Service (S3), exploring the
+different mechanisms that S3 provides to partition multi-tenant data. The techniques we’ll look at here are specific to S3 and may or may not have good mappings to the other object storage services that are part of other cloud environments. Still, the hope is that this review of S3 strategies will give you a better sense of how your data partitioning approach changes as you move into different storage technologies. The principles stay the same, but the mechanics of implementing these principles often require you to consider a more diverse menu of possibilities.
+Pooled Object Data Partitioning
+With object storage, we’re mostly looking at using a classic hierarchical folder structure to organize
+and access our objects. For example, in S3 all objects are stored in buckets as a top-level construct. These buckets can also use prefix keys to group and access objects. The net effect is something that looks like a traditional file/folder structure.
+With the pooled model, we must start by deciding where our tenant objects will land within S3. Since our tenant objects will all be commingled, we don’t necessarily have to worry about creating separate buckets or prefix keys for each tenant. At the same time, it’s likely that your application services may want to operate on tenant objects in groups. This suggests that we likely want to use the prefix keys to determine where we place each tenant’s objects.
+Let’s look at an example of how you might represent a pooled data partitioning model within S3.
+Figure 8-7
+provides a conceptual view of a series of buckets that are using prefix keys to store tenant objects in a pooled model.
+Figure 8-7.
+S3 pooled data partitioning
+On the left you’ll see the simple bucket hierarchy that I’ve created. At the top level of the tree, I have buckets for each of my environments (prod, dev, and staging). Then, within each bucket, I’ve included prefix keys. For this example, I presumed that my prefix keys corresponded to individual services that are managing their own S3 objects.
+On the right of the diagram, we have a pooled storage representation of a series of objects from the
+saasco-dev-objects
+bucket that are associated with the
+catalog-service prefix
+key. Since this is a pooled model, we named our objects with a prepended tenant identifier that associates each object with its corresponding tenants. Accessing one of these objects would require a caller to prepend the tenant identifier to the name of each object to successfully retrieve a specific tenant object.
+While this approach represents a more purist view of the pooled model and S3, it does seem to add unnecessary complexity. The prepending of tenant identifiers seems difficult to manage and adds friction to any calling client. As we shift now to silo, you’ll see how the advantages of silo provide builders with a slight variation of the pooled model that eliminates some of the naming overhead and mapping that comes
+with this pooled model.
+Siloed Object Data Partitioning
+There are two approaches that you can take with siloing objects with S3. The simplest path to choose is a bucket-per-tenant model. This model would essentially require a new bucket to
+be created for each new tenant and store all of their objects within that bucket.
+Now, if your total number of tenants is less than the upper bucket limit of the S3 service (currently 1,000 buckets), then you could consider this option. It does mean that your onboarding will need to dynamically create new buckets that conform to the naming conventions and uniqueness requirements of S3. You’d also need some part of your system to include a mechanism that maps tenants to their designated buckets.
+If these limits are a problem or you’d like to worry less about naming collisions, you could just add a slight twist to the pooled strategy (discussed earlier) and rely on a prefix key as a way to implement your siloed model.
+Figure 8-8
+provides an example of how you’d alter your prefix key structure to silo your tenant objects.
+Figure 8-8.
+S3 siloed data partitioning
+You’ll notice that there’s a subtle difference between this and the pooled model. I’ve essentially used the prefix key as the boundary of my silo, placing all tenant data under the heading of a single key.
+In most of our prior discussions of siloed versus pooled storage, we talked a lot about the added complexity and overhead that comes with siloing data. With the S3 model, you’re not really absorbing a great deal of added friction. In the pool setup, if I truly commingle the objects, I have to somehow augment object names to achieve my tenant binding. Here, by simply refining the key, I get a model that is easier to use, consume, and manage without really taking on any significant downside.
+There are instances where the siloed story might create better opportunities for implementing isolation via IAM. However, that has little influence on this S3 siloed story. I can configure IAM policies at the bucket or down to the prefix level, enabling me to prevent cross-tenant access across any of these strategies.
+Database Managed Access
+While S3 does provide APIs for accessing your objects, some use cases demand a more dynamic approach to
+locating your tenant objects. There are instances where you may need to support more exotic, metadata-driven ways to locate a tenant’s S3 object. Imagine, for example, wanting to find all the objects that match a user-specified set of criteria. Here, the metadata you want to search would likely live somewhere outside of your object storage.
+It’s here that you may want to introduce a layer between your objects and the database that holds all the metadata and attributes that you want to query on.
+Figure 8-9
+provides a conceptual view of this use case.
+Figure 8-9.
+Using a database to manage access to objects
+At the top of
+Figure 8-9
+, I have a catalog service. This service manages a range of attributes (Active, Category, and so on) for the products that are in a catalog. One of the attributes managed by our catalog is the image associated with each catalog item. The actual objects for these images are stored in S3.
+Now, suppose your service needs to request a collection of objects that have a specific set of product attributes. To support this experience, you’ll see that I have introduced a table that is indexed by tenant identifiers and has other metadata about the items in the catalog. In a complete version of this table, we’d have more attributes. However, for this example, I constrained this to a few attributes that seemed like they might make good search criteria (Active and Category). I’ve also added columns to reference the prefix key and the object filename that maps to the object as it’s stored in S3.
+At the bottom
+Figure 8-9
+is the bucket that holds our catalog image objects (and potentially other service data). With all the pieces in place, my catalog service can now query the table to find a tenant’s objects that match a set of specified criteria. In fact, you’ll notice that the first and last rows of this table are associated with the same tenant. My query could ask for all active catalog items in the clothing category for a tenant and the results would return the prefix and object names that could be used to reference each of the items stored in S3.
+I confess that this represents a bit of a corner case. At the same time, it’s an especially useful way to provide an alternate way to think about how you might partition objects. Here, the partitioning is all done in the table, removing any tenant mapping from the object database. I can use this table to introduce metadata for my objects that can be applied as part of filtering access to the objects I need
+for a given use
+case.
+OpenSearch Data Partitioning
+As you can see by now, the multi-tenant data partitioning story can look quite different as we move between
+different storage services. To round things out, I thought it would be helpful to look at how data partitioning is applied in the search and analytics domain. For this example, we’ll look at Amazon’s OpenSearch service, which is derived from ElasticSearch.
+With OpenSearch, we are now working with new flavors of storage constructs and mechanisms to partition our tenant data. How data lands in OpenSearch, how we maximize cost and operational efficiency, and how we isolate data all look a bit different when we’re mapping siloed and pooled models to the moving parts of an OpenSearch cluster.
+To better understand our OpenSearch data partitioning options, let’s start by looking at the different mechanisms that would be used to store and manage our tenant data in an OpenSearch environment (shown in
+Figure 8-10
+).
+Figure 8-10
+provides a high-level view of the core moving parts of the OpenSearch service. At the outermost edge, we have the domains that represent the most coarse-grained units of data partitioning. These are essentially the clusters that are part of our search and analytics experience. This is where you’ll configure the size and footprint of the nodes that will shape the scaling profile of your experience. Then, on the right, are a series of indexes that are associated with a given domain. These indexes store the documents that will be indexed for our search and analytics
+experience.
+Figure 8-10.
+OpenSearch data partitioning constructs
+Pooled OpenSearch Data Partitioning
+If we look at how we land data in a pooled model in OpenSearch, we’ll need to adopt a model where our
+tenant documents are commingled within a single index. This approach, in many respects, follows the pattern we’ve observed across all the pooled constructs. Any time we have commingled data, we need to have some way to identify the data that is associated with a given tenant.
+If we look inside the various documents that are stored in an index, we’ll see that we must insert a tenant identifier into each tenant document. This identifier will be included in any search that we perform to scope access to a specific tenant’s data.
+Figure 8-11
+provides an example of an OpenSearch pooled model.
+In this example, our pooled storage is running all tenants in a single domain and, for this product sample data, all tenant documents are stored in a shared index. Each of the documents in this index includes a
+TenantId
+attribute that, in this example, is represented by a GUID. The individual products in each of these documents are also assigned a
+ProductId
+that uniquely identifies individual products. I’ve essentially taken the document that would normally represent a product and added a
+TenantId
+attribute.
+Figure 8-11.
+Pooled OpenSearch data partitioning
+With this experience, you get all the upside and downside that comes with a pooled data partitioning model. The economies of scale and operational profile both benefit from the use of shared infrastructure. However, the sizing of the domain can be difficult and may lead to overprovisioning. This represents yet another scenario where leaning on serverless technologies can bring real value and steer you more toward the OpenSearch Serverless service, which can simplify the sizing and scaling profile of your solution.
+You’ll also want to think about how data is being sharded by OpenSearch and determine whether the footprint and distribution of your tenant data is impacting the performance of
+your environment.
+Siloed OpenSearch Data Partitioning
+You have two options when it comes to implementing a siloed OpenSearch data partitioning model. The first
+option we’ll look at is the domain-per-tenant model. With this approach you’ll need to create a completely separate cluster for every tenant. An example of this model is shown in
+Figure 8-12
+.
+Figure 8-12.
+Domain-per-tenant OpenSearch siloed data partitioning
+This is a very straightforward model that relies on the most coarse-grained OpenSearch construct to store each tenant’s data. This will appease those tenants that have concerns about compliance, isolation, noisy neighbor, and so on. At the same time, it will also add operational complexity and impact the cost efficiency of your
+environment.
+The other way to implement siloed data partitioning with OpenSearch is through an index-per-tenant model. This is illustrated in
+Figure 8-13
+.
+Figure 8-13.
+Index-per-tenant siloed OpenSearch data partitioning
+With this approach, we now have a single domain that is shared by all of our siloed tenants. However, each tenant is given its own index. This allows you to achieve isolation without provisioning an entire cluster for every new tenant. It also means that you’re agreeing to share the compute of the domain across these tenant requests. For some, this represents a good compromise in that you’re getting some economies of scale for your compute while still offering tenants a unit of isolation that ensures that their data is not commingled and may benefit from more concrete boundaries of
+isolation.
+This siloed model does come with its downsides, though. While this model is more manageable, we now face a rightsizing problem. The shared compute of the domain must now be sized based on the workloads and activity profiles of multiple tenants. This can lead to noisy neighbor conditions or other performance issues that come with the sharing of your storage compute. Also, as is the case for any siloed resources, you’ll want to consider the scalability of the model. There may be limits on how many
+siloed indexes your service will allow.
+A Mixed Mode Partitioning Model
+In addition to the siloed and
+pooled models shown above, you may also consider implementing a mixed mode model that offers another approach to balancing the requirements of your tenants. With this mixed mode, you’re essentially looking at supporting both siloed and pooled models within a shared domain (shown in
+Figure 8-14
+).
+Figure 8-14.
+Mixed mode OpenSearch data partitioning
+On the left, we are still using a shared domain and eliminating the need to provision a separate cluster for our tenants. What’s different here is that we’re supporting siloed and pooled indexes with this domain. At the top, I have shown two premium tier
+tenants
+that have dedicated indexes. Then, at the bottom, I have a pooled index that commingles all the basic tier data in a single construct.
+This approach certainly allows us to limit the complexity and footprint of our OpenSearch infrastructure while still supporting siloed and pooled models. At the same time, this strategy can present real challenges when it comes to sizing and configuring your domain. You could also consider a model where a separate domain would be used for all your basic tier tenants. This would eliminate scenarios where basic tier tenants impact the scale of your premium tier tenants.
+Sharding Tenant Data
+So far, I’ve mostly concentrated on siloed and pooled data partitioning strategies that rely on the different storage constructs that are part of your environment. In general, it tends to make
+things simpler if you can stay within the built-in capabilities of your storage service. However, there are times when the scale and performance of your storage model cannot meet the needs of your solution. In these instances, you may have to consider introducing your own mechanisms to shard tenant storage. Sharding generally refers to the idea of splitting a resource into multiple parts to address scale, size, and so on.
+One pattern that I’ve seen applied is the idea of custom partitioning where your code owns responsibility for mapping tenants to different storage constructs. Imagine, for example, a scenario where you have a relational database that is using a pooled model. However, you’re finding that the scaling and performance of your tenants are exceeding your ability to adequately address their workload. You prefer to keep your tenants pooled, but it’s impractical to have them all in one storage database.
+In these cases, some teams will consider implementing their own sharding strategy where they distribute pools of tenants to separate constructs.
+Figure 8-15
+provides a conceptual view of the sharding model.
+Figure 8-15.
+Sharding groups of tenants
+In this example, I have two separate shards of tenants running in a pooled model on the righthand side of the diagram. You’ll all notice that I’ve distributed these tenants across separate databases. So, I basically have two sets of pooled tenants. Now, if the service on the lefthand side wants to make a request to a database, its data access library would have to look up the shard that is associated with a given tenant request.
+This is very much like the pod deployment model we discussed in
+Chapter 3
+where we deployed groups of tenants together in pods. Here we have a similar concept, but it’s being applied exclusively at the storage layer of our environment. This allows you to limit the blast radius of tenants and potentially overcome pooled noisy neighbor issues by distributing the workload of these tenants to separate shards. As new tenants are onboarded, you may add new shards to continue distributing the load.
+This is a far from ideal model and certainly adds complexity and friction to your SaaS environment. However, I include it here because some workloads or business requirements may view this as
+a reasonable trade-off.
+Data Lifecycle Considerations
+As part of looking at how data is partitioned and represented, we also have to consider the broader lifecycle of this data. There are different changes in state that your tenant may
+go through that could impact how their data is represented.
+To better understand the implications, let’s look at a specific scenario where you have a tiered environment that uses different storage strategies for your tenant tiers. Your basic tier tenants are using entirely pooled data, while your premium tier tenants have some storage constructs that are siloed. Now, imagine what it will mean if we have a tenant that needs to upgrade from the basic to the premium tier. In this instance, we’d have to have automation in place that could gracefully migrate the data from the pooled environment to a siloed model. The automation would also need to consider how moving this data could impact the overall load on the system. If this adds excess load, it could also impact the availability of your environment. This is a hard problem for which there are few elegant solutions. Still, you need to have this on your radar.
+Decommissioning is another area that can impact your data partitioning strategy. The biggest part of decommissioning a tenant usually centers around what you plan to do with a tenant’s data. Will you traverse the entire system and remove the tenant data? Will you archive the data, allowing the tenant to restore data when they return? These are all factors that you’ll need to consider when you’re thinking about how tenant data will be represented in your environment. This is yet another area where you’ll have to carefully construct the automation tooling that can execute your decommissioning policies, applying them without degrading the performance of your
+environment.
+Backup and restore is also part of this tenant lifecycle discussion. This can be particularly tricky if you have pooled data. Also, you’re likely to have tenant data spread across multiple storage constructs in your environment, potentially using a variety of siloed and pooled models. This, as you can imagine, requires a carefully orchestrated mechanism that can successfully acquire and back up tenant data. For some, there is no concept of per-tenant backup and restore. Instead, the state of data is seen as a global construct. Which mode will work best for your environment
+will depend on the nature of your domain, tenants, and a host of other factors.
+Multi-Tenant Data Security
+Protection of tenant data is a given for any SaaS environment and your architecture should already take strong
+measures to ensure that one tenant can’t access the resources of another tenant. In fact,
+Chapter 9
+will dig squarely into this topic, exploring a range of strategies that can be used to ensure that your resources (including data) are protected from cross-tenant access.
+There are, however, domains that may impose additional security requirements on the storage of their data. For some, this may be more about encrypting the data to be certain it is protected at rest and in transit. Your ability to encrypt data is very much driven by the encryption capabilities of the storage services you’re consuming. Generally, though, many of the AWS storage services offer support for different encryption strategies.
+The encryption of data, for some, may still not be enough. You may have tenants that will require encryption and ownership of the keys that are used to manage access to their data. In these scenarios, you’ll need to introduce constructs to create and deliver these keys to individual tenants. These keys may also have a lifecycle that will need to be managed as part of the operational footprint of your SaaS environment.
+This per-tenant key strategy will also have clear impacts on your siloed versus pooled model considerations. If the tenants want their own keys, you’re most likely to be storing their data in a siloed model.
+Conclusion
+After going through this chapter, you should have a better sense of the different patterns, strategies, and influencing factors that shape your approach to storing data in a multi-tenant environment. We started the chapter by looking at a range of fundamental multi-tenant storage concepts. These models and partitioning terms apply to any technology that might be used to store tenant data.
+We started by revisiting the notion of siloed and pooled resources, reviewing how these multi-tenant models are mapped to data partitioning. As part of this, I
+highlighted
+some of the general pros and cons of these two models. I emphasized the fact that these two options weren’t mutually exclusive and could be combined to address the compliance, performance, and isolation needs of your SaaS environment.
+This core concepts section also identified specific factors that should be weighed across any storage strategy. For example, I talked about scaling and noisy neighbor considerations and how the nature of multi-tenant workloads can impact your tenant’s impact on storage services. I also looked at how blast radius, isolation models, sizing, and operational experience can influence your data partitioning choices. The key is to look beyond the technical profile of your storage and consider how business and operational factors can influence how you choose to represent tenant data. The choices you make here can have a significant impact on the agility and operational and cost efficiency of your SaaS business.
+Once the foundation was established, I shifted to looking at how these concepts land in specific storage services. The goal was to give you a better sense of how the siloed and pooled models are expressed when they are being delivered in the context of a specific storage service. I covered relational, NoSQL, object, and search storage models, highlighting the nuances that come with partitioning data with each of these services. Here, you saw how the different storage constructs of these services could influence the design of your data partitioning model. Each service adds its own twist to the story.
+It would be impractical to look at every type of storage technology. However, my hope is that the concepts and examples we reviewed will give you a mental model that you can use as you consider how to implement data partitioning with the various storage technologies that are part of your architecture. The chapter should have also highlighted the idea that data partitioning is not an all-or-nothing decision. The partitioning choices you make and the technologies you choose should be driven by the specific needs of your application’s services.
+While the design of your storage might be related to your isolation strategy, it’s important to note that siloing storage does not isolate that resource. In the next chapter, we’ll start to dig into the details of isolation and review the constructs and mechanisms that are used to ensure that tenant resources (including storage) are protected from cross-tenant access. The isolation strategies and patterns we’ll cover are foundational to SaaS and critical to providing a multi-tenant experience that secures each tenant’s environment—regardless of how it’s deployed, designed, and realized.
+
+Chapter 9.
+Tenant Isolation
+I’ve referred to the concept of tenant isolation throughout my coverage of the different multi-tenant architecture constructs, patterns, and strategies. Our prior glimpses of this topic stayed mostly high level and conceptual, highlighting how isolation is used to ensure that one tenant can’t access the resources of another tenant. Now, however, it’s time to dig squarely into the details of tenant isolation and look at concrete mechanisms that are used to apply isolation across the different layers of your SaaS architecture.
+In this chapter, my goal is
+to distill the nuances of tenant isolation into a set of terms, patterns, and practices that will provide you with a better framework for thinking about how and when you should be introducing tenant isolation mechanisms into your architecture. I’ll start out by establishing a clear view of the role of tenant isolation and the foundational concepts that shape your approach to building a tenant isolation strategy.
+From there, we can then start to look at the layered nature of tenant isolation, identifying the different areas within your architecture where you would consider introducing mechanisms that will prevent cross-tenant access. This will give you a better sense of the nuances and considerations that come with creating an isolation model for the different technologies and infrastructure constructs that are part of your multi-tenant environment. This will also highlight some of the challenges and advantages that come with different resource deployment models, giving you more data that can shape the choices you make around microservice decomposition, data partitioning, and the other topics we’ve been exploring.
+Our isolation journey will include a deeper look at the role your microservices and application code might play in the enforcement of your isolation policies. We’ll look at the different runtime techniques that use the tenant context of individual requests to scope and control tenant access on a request-by-request basis. This will include highlighting some of the design considerations associated with applying isolation policies at runtime.
+The overall goal is to ensure that you’re making tenant isolation a priority in your SaaS solutions, reviewing the range of different approaches that come with building a robust, non-invasive multi-tenant isolation model.
+Core Concepts
+Throughout the chapters so far, I devoted a significant amount of time to describing the different patterns and deployment models that could be used to compose a multi-tenant SaaS architecture. For microservices and storage, for example, I talked about all the different ways you might use siloed or pooled models as part of the design and implementation of these concepts.
+Each time I touched on siloed and pooled deployment strategies, I highlighted the potential linkage between deployment models and your tenant isolation strategy. At the same time, I also went out of my way to make it clear that there was a clear line between defining how a resource is deployed and how a resource is isolated. It’s essential that you don’t treat these two concepts as synonymous. Yes, you might choose a deployment model to enable a specific isolation experience, but actual realization and enforcement of that isolation is still achieved through an entirely separate mechanism that examines each attempt to access a tenant resource and prevents any cross-tenant isolation violations.
+To better illustrate this point, imagine a scenario where you choose to silo tenant databases as part of your isolation strategy.
+Figure 9-1
+provides a conceptual view of this scenario.
+Figure 9-1.
+Siloed databases with no isolation policies
+In this example, we have a Product service that has chosen to silo each tenant’s product data. Let’s assume that the siloed data model here was chosen based on some customer or domain need that indicated that this data needed to be isolated and could not be commingled with other tenant data. This all fits with the examples of data partitioning and service design that we discussed in earlier chapters.
+At first glance, many may look at this diagram and assume that we’ve already achieved and implemented isolation by putting the tenant data in separate databases. However, being in separate databases just ensured that the data was not commingled. It didn’t necessarily do anything to isolate the data.
+Consider a scenario where Tenant 1 in this diagram requests a list of products. It will be the job of the Product service to acquire the tenant context and process the request, routing the request to the Tenant 1 siloed database. That all makes sense. At this point, it might feel like you’re achieved tenant isolation. However, imagine a scenario where I am processing this same request from Tenant 1, and within the code of my service, I replace Tenant 1 with Tenant 2. What would happen? Well, it turns out that my request from Tenant 1 is still allowed to access the Tenant 2 database. Even though I have separate databases for each tenant, there’s nothing here that would prevent our service from crossing a tenant boundary. Merely separating the databases did nothing to ensure the data was actually isolated. This brings us back to the boundary between deployment and isolation.
+This is where we need to introduce a separate tenant isolation mechanism that will enforce isolation—regardless of how our resources are deployed. The idea is that we need to add some construct that sits between code and the resources being accessed by that code. This construct becomes the gatekeeper, using tenant context to limit the scope of access of any resource.
+Figure 9-2
+provides a slightly modified version of the prior example that illustrates the addition of a tenant isolation layer.
+Figure 9-2.
+Siloed databases with tenant isolation
+The only change is the wrapper around my Product service that represents a conceptual view of tenant isolation. In this mode, whenever the code of the Product service attempts to access data, the isolation layer will ensure that the resources you’re accessing are valid based on the current tenant context. So, no matter what a developer does in their code, the isolation mechanism will prevent any effort to access another tenant’s resources.
+When I outline this to other teams, I often get pushback. Developers will often want to view their code as “trusted” and assume that their teams would never write code that would violate a tenant boundary. It’s not a good policy to presume your code won’t break your isolation rules. Even the most careful and well-intended developers can unintentionally introduce changes that could end up crossing a tenant boundary. The industry is littered with examples of solutions that somehow exposed one tenant’s data to another tenant. Even a single instance of cross-tenant access could represent a significant setback for a SaaS business.
+The key point is that your multi-tenant environment will be required to isolate tenant resources regardless of their deployment model or technology. From a tenant’s perspective, there really shouldn’t be any notion of siloed and pooled resources. Tenants should expect that every resource in their system is isolated and protected from any cross-tenant access.
+Figure 9-3
+provides a visual view of this model in action.
+Figure 9-3.
+The tenant view of isolation
+We have two tenants that are using a combination of siloed and pooled resources. To keep it simple, I just showed these as databases, but imagine this projected across every type of resource in your system. Under the hood of this solution, our implementation is owning responsibility for ensuring that its isolation policies are protecting each tenant’s resources. The basic message here is that from the tenant’s point of view, none of their resources are shared—even when they are running on pooled infrastructure.
+For some, this reality often represents a key point of tension within their multi-tenant architecture. You want to design the preferred footprint of your environment that best matches your operational, scale, cost, performance, and tiering profile. At the same time, you have to consider how that solution is also going to be able to meet its isolation requirements. Finding the right balance can be challenging for some solutions and domains.
+It should also be clear that isolation is created as a very intentional part of your architecture. It is explicitly implemented as a core element of your design that expects to capture
+any intentional or unintentional attempt to cross tenant boundaries.
+Categorizing Isolation Models
+Before we get into the specifics of different isolation strategies, I wanted to first take a step back and define some isolation concepts that will be used to characterize the different flavors of isolation that can be implemented in a SaaS environment. For each of these categories, you’ll see how they generally map to different patterns for realizing and applying isolation policies.
+Figure 9-4
+provides a view of the three primary types of isolation I typically see (allowing for the fact that others may exist).
+Figure 9-4.
+Categorizing isolation models
+If we work this diagram from left to right, it starts with more coarse-grained isolation and progressively becomes narrower. For each type of isolation, I’ve drawn a dashed line that represents the boundary of isolation for each model.
+The first flavor on the left is what I’ve labeled full stack isolation. This correlates
+directly to multi-tenant environments that leverage a full stack deployment model where every tenant is given a dedicated stack of resources. Here, isolating resources is generally a pretty straightforward process that has access to a well-defined set of mechanisms that can isolate your tenant resources.
+As we move to the middle, you’ll notice that we now have what I’ve labeled resource-level isolation. In this
+example, we have a shared compute layer for the service that is consuming resources for multiple tenants. In this model, the unit of isolation is an entire “resource.” For example, Tenant 1 has a dedicated database and Tenant 2 has a dedicated bucket (Amazon S3) and a dedicated queue. The fundamental idea is that the boundary of isolation is an entire resource where the definition of resource could vary based on the services in your environment. With this flavor of isolation, you’re still likely to have some isolation construct that can control access to a resource. There are scenarios where that mapping may be more challenging, but those are less common.
+Finally, on the right is the item-level isolation model. With this model, you’ll see that we’ve gone inside a
+resource where we have items from different tenants that are commingled within the resource. The simplest example of this is a database (the resource) that has a shared table that commingles the data from multiple tenants (a pooled model). While a database represents a simple way to think about this, the same idea can be mapped to other resources. For example, you could have messages in a queue resource that are associated with multiple tenants. The fundamental, defining trait is that tenant data sits alongside other tenant data within some shared infrastructure resource.
+Item-level isolation is clearly the most challenging of all the isolation schemes. Once you move within a resource, the list of available isolation constructs starts to get quite small. Some technologies will give you tools to enforce isolation at this level and others will not. With AWS, for example, there are instances where its identity and access management (IAM) construct can be used to implement item-level isolation. However, there are services where IAM won’t allow you to be granular enough for item-level isolation. This is where you have to get creative with building or introducing one-off tools to apply isolation at the item level.
+So, now, as you design your multi-tenant architecture, you’ll likely find yourself looking at one of these three types of tenant isolation. As you’re figuring out how you want to represent tenant resources in your environment, you’ll have to determine which of these three models you’ll be adopting. You’ll also need to consider whether your technology stack gives you the tools you need to apply isolation at the level you’re targeting.
+Application-Enforced Isolation
+In an ideal world, the technology you’re using would have clear mappings to security constructs that could
+be used to enforce your isolation strategy. For example, most cloud environments provide some built-in notion of IAM controls to configure the policies that builders use to control access to the various resources that are part of their environment. Leaning on these mechanisms to implement your tenant isolation represents a natural fit. These security mechanisms sit directly between you and your resources and allow you to define policies that can limit the scope of your access to infrastructure resources, which fits naturally with the spirit of the isolation models you’re introducing into your architecture.
+The challenge, however, is that these tools don’t always offer you the level of control that you need to express your isolation policies. There are a number of factors that shape the IAM profile of each technology or service. Native services that are built from the ground up by a cloud provider, for example, typically have more granular isolation controls than services that are built around pre-existing technologies.
+At some point, you’re likely to face a scenario where the multi-tenant model you prefer for a resource does not support the level of isolation control you require. This is where you may need to consider introducing your own application-enforced isolation mechanisms to prevent cross-tenant access. I won’t go into too much detail, since the range of possibilities and nuances here is quite long. Generally, though, you’ll need to look at the different policy and access control frameworks, libraries, or tools that allow you to introduce your own layer of controls for these instances where built-in mechanisms don’t support your needs. This is where you might see
+mechanisms like attribute-based access control (ABAC) or Open Policy Agent (OPA) as part of your isolation model. Which tool fits is highly dependent on what you’re isolating, what tool chain you’re using, and what flavor of isolation you’re implementing. The key takeaway is that your solution should isolate
+all resources—even if you need to build the isolation tooling yourself.
+RBAC, Authorization, and Isolation
+There are lots of security mechanisms
+that can be applied across an application’s architecture. Teams, for example, will often use role-based access control (RBAC) and authorization constructs to scope and control access to functionality within their applications. In some instances, I will see teams using these same RBAC tools to implement their tenant isolation policies.
+Let’s look at an example to better understand how this blurs the lines between application access controls and tenant isolation. Suppose we had a scenario where a tenant authenticates into a SaaS application with a tenant administrator role. Now, within your application, let’s say you’re using an RBAC framework to enable or disable this user’s access to specific application features or capabilities. RBAC might also be used across other contexts where it authorizes access to infrastructure.
+For some, it’s natural to want to map RBAC to isolation in this example. However, with RBAC, we’re generally controlling access based on some notion of an individual user’s role within the environment. In fact, I could have many users within a single tenant that would have different roles. RBAC would then offer different experiences to these users based on their role.
+With isolation, the scoping is not associated with individual user roles—it is based exclusively on the tenant context of a user. So, with a multi-tenant environment, we may have multiple users with multiple roles within a tenant, and our isolation story would be the same for all of these users. Isolation’s only job is to ensure that, for the current tenant, you are restricting access to those resources to that tenant. Any other restrictions that may need to be applied based on a role or some other application construct would be addressed outside of the isolation model.
+The main point is that we want to have clear separation between the strategies that are used to isolate tenant resources and the strategies that are used to control access to specific application features and functions. Now, it could be that you have some shared tooling that can cover both of these patterns. That’s fine. However, even if the tool you use is universal, the mindset of isolation and controlling
+application access are very different beasts.
+Application Isolation Versus Infrastructure Isolation
+There’s lots of baggage that comes with the term “tenant isolation.” When I work with security-focused
+teams and I mention tenant isolation, they typically gravitate to a more infrastructure-centric notion of isolation (which makes sense). In their universe, they’re often inside the inner workings of some infrastructure technology or service that needs to prevent users or accounts from crossing some foundational boundary of your security model. This is an entirely valid notion of tenant isolation.
+However, with multi-tenant isolation, the boundaries and nature of the isolation is really an application-defined construct. When you build your SaaS application, it’s up to you to define where these boundaries live and introduce the mechanisms at the application level that will ensure that tenant resources are protected. I view this as another flavor of a shared responsibility model. At the core infrastructure level, I want the technology or service I’m consuming to enforce its notion of tenant isolation. Then, on top of that foundational security model, I am building an application where only my application knows where tenant boundaries exist. Yes, some of these boundaries might correlate to infrastructure boundaries. However, in a multi-tenant setting, your application may also be defining its own set of isolation boundaries on top of that infrastructure.
+The key is that, for the scope of our discussion, I view tenant isolation as something that is defined and enforced by my application’s design and architecture. In some cases, I may be able to leverage existing isolation constructs to implement isolation and, in others, I may have to design and implement my own mechanisms to enforce my application’s isolation policies. It’s also important to note that these application-defined boundaries can and will count on code and application libraries as part of their tenant isolation story. This is a foundational reality of building systems where applications will share resources in ways that can’t be
+protected through classic, native security constructs.
+The Layers of the Isolation Model
+With the core isolation concepts
+behind us, we can turn our attention to more concrete isolation constructs. Let’s start by looking at how isolation is implemented across the various layers of your multi-tenant architecture.
+Figure 9-5
+provides a conceptual view of how layering fits into the isolation story.
+Figure 9-5.
+A layered view of isolation
+In
+Figure 9-5
+, you’ll see an example of the various isolation layers that could exist within a multi-tenant architecture. At the top is the entry or the “front door” of the application services that will need to be isolated. Each request that comes through this API will include the tenant context that the system will use to apply tenant isolation. Here, at the API layer of this experience, you can begin applying the first bits of isolation. Your API could extract the tenant context on each request and determine which downstream paths are valid for the current tenant, and in some cases, the tenant’s role. This can prevent tenants from invoking requests to resources that are not valid for a given tenant context. For this example, an API request that’s accessing the siloed microservice for Tenant 1 should not be able to send requests to the other siloed microservice associated with Tenant 2. At this layer, we’re not really preventing access to a tenant’s data, but we are isolating access to a tenant’s compute resources. This is all part of the layered isolation model where we apply isolation at the outermost layer, which introduces an added level of protection before any microservice attempts to access tenant data or some other downstream tenant resources.
+Once you’re into the compute layer, our next level of isolation is applied as the microservice attempts to access other dependent resources (databases, queues, file systems, etc.). Now, we’ll need isolation policies at this level to ensure that each microservice can only access the resources that are dedicated to that tenant. For the two siloed resources, these policies will be relatively straightforward. However, you’ll notice our pooled microservice will need to implement item-level isolation to control access to the tenant rows within its share table. Your isolation policies will need to ensure that each request from your pooled microservice is constrained to just those items associated with the current tenant context.
+This layered model gives you a better sense of how isolation is applied across multiple dimensions of your multi-tenant architecture. In many respects, this is borrowing from the traditional notion of security at every layer. Here, though, we’re building on top of that concept by adding isolation protections as you move between the different layers of your environment. While the layers of your architecture might vary from the model presented here, the notion of layered isolation should
+still apply universally.
+Deployment-Time Versus Runtime Isolation
+In addition to layering your isolation model, you also have to consider when isolation will be applied
+to your environment. For some scenarios, you’ll find that you can apply your isolation policies when your resources are deployed and configured. In other instances, your isolation will need to be configured and applied at runtime. The choice between these options is very much driven by a combination of the silo or pool footprint of a resource and the isolation mechanisms that are available for those resources.
+Let’s start by taking a conceptual look at the differences between the deployment-time and runtime isolation models. We’ll start with the key elements of the deployment-time model (shown in
+Figure 9-6
+).
+Figure 9-6.
+Deployment-time isolation model
+Figure 9-6
+illustrates the use of a microservice deployed in a siloed model for two tenants. Each of these microservices is represented on the righthand side of the diagram. These microservices both have siloed databases associated with them that are also deployed in a siloed model.
+You’ll notice that the solution’s microservices are also running in a siloed mode. This means that for the lifetime of these deployed microservices, they will be bound to a specific tenant. This binding creates an opportunity to simplify our isolation story for these microservices, allowing us to attach a tenant-scoped policy to the compute of each microservice that prevents that microservice from accessing any resources that belong to other tenants.
+This is where the notion of deployment-time isolation comes in. On the left of the diagram, I have a microservice and a templatized isolation policy that will be used to scope access for our microservices. Now, when my DevOps process provisions the compute resources for each microservice, it can insert the tenant context into the isolation policy template and attach that policy to the compute infrastructure. This is repeated for each microservice, injecting the tenant context into the policy for each tenant microservice deployment.
+The side effect of this is shown on the far right of
+Figure 9-6
+. As our microservices attempt to access their associated siloed databases, their access will be limited to those databases that are appropriate for the current tenant context. As an example, an attempt by Tenant 1 to access Tenant 2’s database is blocked by these deployment-time attached policies.
+There’s lots of power in this deployment-time model. Since the policy is attached at deployment time, the isolation has no dependency on any code in your microservice to comply with the isolation strategy. If your code attempts to cross a tenant boundary, it will be stopped. This, in fact, takes compliance out of the view of your microservice developers and makes it more a part of your DevOps and provisioning process. While this makes for a great isolation story, it also relies on a siloed model to work, and we certainly don’t want to silo every resource simply to realize this benefit.
+So, let’s shift our focus now to those environments where we have pooled resources. This is typically where the runtime isolation model is used. With runtime isolation, we now start looking at strategies that rely on the cooperation of your application code or other constructs to dynamically acquire and apply your isolation policies.
+Figure 9-7
+provides a conceptual view of the moving parts of the runtime isolation model.
+Figure 9-7.
+Runtime isolation model
+With this example, we have compute that is shared amongst all of our tenants. Since this compute must be able to process requests from all tenants, it must be deployed with a policy that covers all tenants (step 1). This means that, at runtime, my microservice must be able to access any of the tenant databases associated with this service (shown at the bottom). In this mode, it becomes the job of our microservice code to use the current tenant context to dynamically scope and control access to these tenant resources.
+The flow of this process starts at the top where my tenants are accessing the microservice, passing in their tenant context (step 2). Now, somewhere in my microservices compute environment, I’ll need to use the tenant context to populate a policy and acquire the tenant-scoped credentials that will be used to access downstream resources. For this conceptual view I included an isolation manager that performs this process (step 3). In reality, how these tenant-scoped credentials are acquired could vary significantly for each technology and language stack. You might put a wrapper around your microservice, you might use a sidecar, you could use aspects—the list of options here is quite long. However, the key is that some mechanism acquires these tenant-scoped credentials from your dynamically populated policy and provides those credentials to your microservice (step 4).
+Once your microservice has these tenant-scoped credentials, it will use them to access its associated tenant resources. In this case, I’ve stuck with a separate database for each tenant and used the credentials to contextually access each database (step 5). In this scenario, I’ve assumed that Tenant 2 made a request and that request inserted Tenant 2 into the policy. Then, with this scope, my access to resources was constrained to the Tenant 2 database. Even if my code attempted to insert another tenant identifier into its database access request, that request would not return another tenant’s data.
+You can see that this approach relies heavily on the code and libraries of my solution. This does leave room for microservices to make choices that go around your isolation mechanisms. However, the more work you put into injecting this isolation context into your code outside the view of developers, the better chances you have of enforcing compliance with your overall isolation strategy.
+It’s also worth noting that there are alternate strategies that you can apply here that move the runtime resolution outside the scope of your microservice.
+Figure 9-8
+provides an example of a scenario where credentials are injected from outside of your microservice.
+Figure 9-8.
+Injecting runtime scoped credentials
+In the example, you’ll see that I’ve put an API Gateway in front of my microservice. This gateway will pre-process requests, sending tenant context to the isolation manager code that will use the context with an isolation policy to acquire tenant-scoped credentials. This is very similar to the process described in our prior example. I’ve just moved the resolution of the scoped credentials out to the API Gateway. Once the gateway has the credentials, it passes them into your microservice where they are used to scope access to tenant resources.
+This model has some advantages in that it moves resolution of the credentials outside the view of microservice developers. It also creates more natural opportunities to cache scoped credentials to address potential latency issues. The downside of this model, though, is that the isolation policies move outside the microservice. Generally, the scoping of policies is seen as part of the microservice and is closely connected to its implementation. This strategy breaks that mental model (at least somewhat). This is especially true if the gateway is used by multiple microservices.
+Isolation Through Interception
+One of our goals with runtime isolation is to remove developers from the isolation equation as much as
+possible. The more you need to rely on developers as part of the isolation story, the more cumbersome and fragile your isolation becomes. This is where teams will often look for opportunities to introduce interception mechanisms that can enforce isolation without relying heavily on developers applying specific conventions and constructs within the body of their microservice code.
+There are a number of different technology and language constructs available that could be used as part of your runtime isolation interception policy. The challenge is that there are simply too many permutations of options to cover them all. That being said, there are some themes that are worth noting.
+Figure 9-9
+provides a conceptual view of two general interception strategies.
+Figure 9-9.
+Isolation through interception strategies
+On the left, you’ll see a more language- or framework-based approach to interception. The tools you apply here tend to insert themselves into the execution path of your code, intercepting and pre-processing requests outside the view of your microservice code. Aspects, middleware, and wrapper libraries are amongst a list of possible options that you could use. With this approach, you’re essentially intercepting inbound requests and using the tenant context to acquire scoped credentials to access tenant resources. This still fits the same runtime applied model I described earlier, but it relies less on the cooperation of developers to apply your isolation
+conventions.
+The other model, shown on the right, takes a slightly different approach. Here, you put a mechanism between your resource and your microservice that intercepts each attempt to access a tenant resource (like a proxy). This mechanism resolves the tenant context and applies it as each resource is being accessed, which is where you’ll see systems using concepts like sidecars to implement this interception scheme.
+This is an evolving area where new constructs and mechanisms are showing up regularly. The broader value proposition is that these strategies—even in a runtime enforced model—yield a more robust and more centrally managed isolation scheme. Whether they
+fit your particular needs, though, will depend on the isolation requirements of your solution, the technology stack you’re using, and, in some cases, the languages or frameworks that are part of your environment.
+Scaling Considerations
+Runtime-applied isolation, while effective, can introduce scaling issues within your environment. If you have
+a pooled service that is processing a high volume of requests and each request is acquiring tenant-scoped credentials, there is a chance that this may introduce an unreasonable level of latency within your environment. This can impact the broader scale of your system.
+In these instances, you may have to consider refining or altering your runtime-applied isolation model to meet the needs of your system. There are caching strategies that you can introduce to hold your scoped credentials. With this approach, some will
+employ a time-to-live (TTL) setting to manage the lifecycle of these credentials.
+Figure 9-10
+provides an example of how you might introduce this caching scheme.
+Figure 9-10.
+Caching isolation credentials
+In
+Figure 9-10
+, we see the full lifecycle acquiring and applying cached isolation credentials. On the top left, I have a series of tenants that are entering the SaaS application services through an API Gateway. In this particular scenario, let’s say that Tenant 3 is making its first request to a service. When that request comes in, the gateway invokes a credentials manager to get the scoped credentials for Tenant 3 (step 1). This credentials manager would attempt to look up the credential in the cache (step 2). In this case, let’s presume Tenant 3 is not found. Now, the credentials manager acquires the tenant-scoped credentials from the policy manager (steps 3 and 4). The scoped credentials are then put into the cache (step 5), returned to the API Gateway (step 6), and injected into our downstream interactions with our services (step 7). At this time, it would also be assigned a TTL when it is placed in the cache. On our next call from Tenant 3, the system calls the credentials manager (step 8) and finds the credentials we stored in the cache (step 9). The cached credentials are returned to the API Gateway (step 10) and injected into our downstream service interactions (step 11).
+In this model, the credentials manager and helpers are not separate services. They are all running within the same process. Some teams will attempt to centralize all of these isolation mechanisms in standalone services. Generally, the overhead of crossing a boundary to another service can add yet another layer of latency to your experience that creates additional performance problems. You can still move these concepts to libraries and other shared constructs, but I lean toward trying to keep the handling of these isolation management requests within the same process.
+Finally, you’ll also need to consider the scaling limits of the services you might be using. If, for example, you’re using IAM policies to implement isolation on AWS, you’ll need to consider whether the number of policies you need could exceed the service limits. This is why you’ll see heavy use of policy templates in my examples where a
+single policy can be used across multiple tenant contexts.
+Real-World Examples
+At this point, you should have a good handle on the core principles that shape the design of your isolation strategy. Let’s shift now to concrete examples that illustrate how isolation can be applied to environments with isolation constructs. The sections that follow will provide a sampling of implementation strategies that span the different flavors of isolation we covered in the preceding sections, connecting concepts to working solutions.
+Full Stack Isolation
+Let’s start by looking at the
+more coarse-grained constructs used to isolate your tenant resource.
+Figure 9-11
+provides a few examples of different isolation constructs utilized to implement a full stack silo deployment model in the AWS cloud.
+In the figure, I have represented a series of full stack silo environments. The basic idea is that each tenant shown here has fully dedicated infrastructure resources. This model, as you might expect, has a natural mapping to the tools and technologies that are already used to place boundaries between resources. For these same reasons, it’s also an area where builders see an easy and clear path to building out their isolation story.
+Figure 9-11.
+Coarse-grained isolation constructs
+For this particular example, I showed three distinct isolation constructs. At the top left, you’ll see an account-per-tenant isolation model where each account in my cloud provider (AWS) is used to define the isolation boundary. Since accounts prevent cross-account access by default, this represents one of the simplest constructs for achieving isolation in a full stack silo setting.
+At the top right, I have shown how a networking construct can be used to isolate my tenant silos. In this case, I used an
+Amazon Virtual Private Cloud (VPC) to isolate my tenant resources. The VPC, like most networking constructs, gives me lots of built-in options to configure the flow of traffic in and out of my network. So, again, we have a relatively basic unit of isolation for each tenant’s resources.
+Finally, at the bottom of the diagram, I’ve shown an example that uses Amazon
+Elastic Kubernetes Service (EKS) to implement a full stack isolation model. Generally, as we move into container environments, you’ll see that you have lots of options when it comes to implementing isolation strategies (we’ll dig into those more in
+Chapter 10
+). For this scenario, though, I’ve opted to go to the extreme of having a separate cluster for each tenant. This means that you’re essentially provisioning an entirely separate EKS environment for each tenant and relying on the natural
+cluster boundaries to enforce your isolation.
+Resource-Level Isolation
+Resource-level isolation tends to have
+good constructs that map well to isolation mechanisms. When we’re working with dedicated resources, our isolation only needs to find a mechanism that can control access to that resource.
+Figure 9-12
+provides an example of a resource-level implementation.
+Figure 9-12.
+Resource-level isolation with Amazon Redshift
+This example outlines a scenario where I’m using Amazon Redshift (a columnar database) in a siloed model where each tenant is assigned its own cluster (shown on the righthand side of the diagram). Within these clusters, I have data that is managed and accessed separately for each tenant. While we have a cluster as our unit of isolation, this cluster still maps conceptually to a resource. The boundaries of a resource in this model could take on multiple forms. A database, a queue, an analytics cluster—these are amongst the different constructs that I would classify as a resource in this scenario.
+On the left of the diagram, you’ll see a microservice that is accessing my tenant resources. The microservice uses a data access library (DAL) to manage its interactions with its associated Redshift clusters. The DAL will, as part of processing each request, use the current tenant context and its isolation policy to acquire tenant-scoped credentials that will limit your access to a specific tenant’s cluster.
+This example of resource-level isolation happens to use pooled compute for its microservice and, as such, it relies on a runtime-applied isolation strategy. For contrast, you can see how this shifts when the solution has siloed compute resources (shown in
+Figure 9-13
+).
+Figure 9-13.
+A deployment-time view of resource-level isolation
+In
+Figure 9-13
+, we have most of the same moving parts as in the prior example. What’s different now is that we have separate siloed microservices that are dedicated to each tenant. The siloed nature of this model allows me to alter my isolation approach. Instead of acquiring and resolving the isolation scope at runtime, this solution can attach a specific isolation strategy during the provisioning and configuration of the compute that’s running our microservices. Now, there’s no need for the DAL to absorb any extra overhead or complexity to apply our isolation policies—they are already applied
+by the policy attached to the compute during deployment.
+Item-Level Isolation
+Item-level isolation represents
+one of the most challenging isolation models mostly because it requires a level of granularity that is not often supported by many technologies. At the same time, in multi-tenant environments where there’s a significant push for pooled infrastructure, you’ll find lots of scenarios where you’ll need to improvise strategies that will let you implement policies that can isolate individual items running in shared infrastructure.
+The good news is that there are scenarios—especially in the cloud—where some services include built-in support for item-level isolation. To give you a better sense of what this might look like in a working solution, let’s look at the item-level isolation model shown in
+Figure 9-14
+.
+Figure 9-14.
+Item-level isolation with DynamoDB
+On the righthand side of this diagram, you’ll see I have a DynamoDB table that’s populated with a few items. It also has a partition key that holds the tenant identifiers that associate each item in the table with a specific tenant (to simplify things, I showed these as Tenant1, Tenant2, etc.). Now, to apply isolation to this table, I need to restrict requests to just those items that are associated with a given tenant.
+The policy that enforces this isolation is shown on the left. This uses AWS’s IAM mechanism to define the scope of access for a DynamoDB table. I’ve highlighted the “Condition” portion of this policy because it declares the scope of access that will be granted for anyone using this policy. I bolded
+"dynamodb:LeadingKeys"
+, which, for this scenario, is being used to scope access to Tenant1.
+If we put all the pieces together, the flow would go as follows: (1) your microservice populates the policy based on the current tenant context (Tenant1 in this case); (2) your code assumes an IAM role using this policy and gets back a set of credentials; and (3) the credentials are used by your code to access the table, limiting its access to only items that are associated with Tenant1. If another request came through for Tenant2, we’d plug that into the policy, assume the role, and get a set of credentials for Tenant2.
+This is the basic theme you’d need to apply across any item-level isolation. You may, however, not have something as straightforward as this IAM policy to implement your isolation. The tools you use here might introduce some new wrinkles into your item-level isolation strategy. Mainly, we’re trying to avoid having a model that is entirely dependent
+on assuming our code simply won’t cross any tenant boundaries.
+Managing Isolation Policies
+Once you have settled on an isolation strategy, you still have to think about the lifecycle of the policies
+that are typically part of this story. Where your policies are stored, who owns and manages them, when and how are they deployed, how they are versioned—these are all questions you’ll need to consider as part of creating and building a deployment experience for the infrastructure and microservices of your application.
+Figure 9-15
+provides a view of two potential approaches to managing your isolation policies.
+Figure 9-15.
+The deployment, managing, and versioning of your isolation policies
+The model on the left of
+Figure 9-15
+represents an approach that is more centered around the development of individual microservices. Here, developers view their isolation policies as an extension of their microservice, applying strategies that are directly bound to the implementation of their solution. With this mindset, any change to a microservice’s implementation or infrastructure will directly shape the scope and nature of the isolation policies associated with that microservice.
+This approach most resonates with me. I tend to fall into the camp that views an isolation policy as one of the deliverables that is bound to my microservice. As the owner of a microservice, my team also owns the maintenance and definition of the policies that are needed to ensure that the microservice is complying with its isolation requirements. That means I’ll version, manage, and check in my policy configuration somewhere in the scope of the microservice’s repository. In this mode, ownership and management of your policies is distributed to the various services of your system.
+The other school of thought (shown on the righthand side of the diagram) prefers a model that has all of these policies managed and versioned through a centralized mechanism. With this approach, teams would still own the update of their policies, but they would all be versioned and managed outside the scope of any microservices. They would get deployed to some centralized location that would be referenced by all microservices. This gives a common home and standalone deployment model to policies that makes them easier to manage and provides a uniform scheme for referencing the services from each part of your architecture.
+Both models are valid, and you could consider using a mix of these strategies. The key is that you need to look beyond how these isolation policies are being applied and evaluate how and where they fit into your broader build, versioning, and deployment lifecycle.
+As you think about operationalizing isolation management and deployment, you also need to think about how you’ll introduce tests that will validate that your isolation is actually working. This, surprisingly, has been one of the more challenging aspects of isolation. It turns out that there aren’t natural mechanisms that allow you to simulate a tenant crossing a boundary. If you’ve done everything you can to prevent cross-tenant access, you may find it especially challenging to identify strategies that allow you to effectively mimic real-world, cross-tenant access.
+While testing for these conditions can be difficult, not testing this doesn’t seem like an option. Having isolation tests in place allows you to potentially detect an unintended leak in your policies or isolation implementation. They also confirm that the principles, when combined, are delivering the desired effect. Generally, given the business impact of any cross-tenant event, it’s hard to justify not investing in this area.
+The real question is: what can you do to simulate a cross-tenant event within your environment? This really has to happen somewhere within the internals of your application services. There’s a point at which your code will be accessing a tenant resource based on a provided tenant context and it’s here that you’ll need to somehow inject an invalid tenant context. This will likely mean creating special paths or cases in your code to allow for this injection of an invalid tenant. It’s also an area where you might consider using classic chaos engineering strategies to generate isolation
+exceptions.
+A simple example might be a scenario where you’re fetching a collection of items from a database for Tenant 1. This means that your surrounding isolation constructs are limiting the view of data to resources that belong to Tenant 1. However, in your test, you replace the tenant identifier in your request with the ID that belongs to Tenant 2. This should return no data or an error indicating that you’ve crossed a boundary. You may also add logs and operational policies that trigger alerts within your operations console, indicating that an attempt was made to cross the tenant
+boundary.
+This may feel a bit artificial,
+and you may find more creative ways to simulate these cross-tenant conditions. However, even if this feels a bit unnatural, it’s still essential to validating the isolation model of your environment.
+Conclusion
+Isolation is one of the most foundational topics that every multi-tenant developer will need to address. It is essential to creating any environment where tenants will be running their systems and storing their resources alongside other tenants. It becomes your job to ensure that your architecture takes every measure necessary to protect your system’s resources from any cross-tenant access.
+Implementing these isolation strategies, as you’ve seen in this chapter, can prove to be challenging. To help navigate the isolation landscape, I introduced a series of patterns and terminology that provided a mental model for the various flavors of isolation you might need to address in a multi-tenant environment. I separated isolation into three distinct categories: full-stack, resource-level, and item-level isolation, highlighting the nuances of each of these models. As part of reviewing these core isolation principles, I also highlighted some of the nuances that come with adopting each of these isolation strategies. This included a review of the misconceptions that are commonly associated with the notion of tenant isolation.
+Once the foundation was in place, I looked at different approaches to applying these isolation patterns to your multi-tenant architecture. I started with a general look at how isolation is applied in a solution, illustrating the various layers that could play a role in your isolation model. I also looked at different approaches to introducing isolation policies. This included examining the implications of applying isolation at deployment time and runtime. From there, I started bringing all these concepts together and illustrating how they could be realized with specific technologies or services.
+Based on this review, it should be clear that there’s no one-size-fits-all approach to isolation. For many environments, you’ll need to evaluate the mix of business and technology considerations that will inform the isolation strategies that are applied to the different components of your system. The strategy you apply for one area of the system may not apply to another. It’s also important to note that, in some cases, you may not be able to identify a ready-made tool or mechanism that can support your isolation needs. This is where you’ll need to be creative and introduce your own mechanisms to implement parts of your isolation model.
+At this point, I’ve carved the multi-tenant landscape up into targeted topics that outline the overall principles and landscape of the multi-tenant SaaS architecture. Now, in the next chapter, I want to start looking at how these principles are realized with specific technology stacks. This will give you a better sense of how the realities and constructs of a given stack will directly impact how you design and build a SaaS environment. The first stack we’re going to look at is the container-based model of Amazon Elastic Kubernetes Service (EKS). I’ll review the key areas where EKS can influence the deployment, isolation, routing, and other dimensions of your multi-tenant environment.
+
+Chapter 10.
+EKS (Kubernetes) SaaS:
+Architecture Patterns
+and Strategies
+Up to this point, most of the topics we’ve covered have been focused on building a foundation of core concepts that would apply to any multi-tenant SaaS architecture. This information should have equipped you with a clear view of the multi-tenant landscape. Now it’s time to shift gears a bit and move from best practices strategies to looking more at how these concepts are influenced by the realities of different technology stacks. More specifically, in this chapter I’ll be focusing on how multi-tenant principles are landed within a Kubernetes environment. For our scope, I’ll actually be looking at Kubernetes through the lens of
+the Amazon Elastic Kubernetes Service (EKS). Much of what’s here will be applicable to any Kubernetes environment. However, there are areas where the managed nature of EKS influences our options.
+I’ll start this chapter off by reviewing some of the key areas where I see good alignment between the EKS stack and SaaS architecture principles. The goal is to better illuminate some of the key factors that have teams selecting EKS as their preferred technology for building and developing their SaaS solutions. With that foundation in place, we’ll shift to exploring the different EKS deployment patterns that SaaS environments use to address their tiering, noisy neighbor, and isolation needs. We’ll look at a range of possibilities here, highlighting the different constructs you can use to define the footprint of the tenant environments that are hosted within an EKS cluster. This will be followed by a look at some of the key tools and mechanisms you can use to add tenant-contextual routing to your architecture, allowing you to support different deployment models, authentication strategies, and so on.
+Next, I’ll dig into EKS onboarding and deployment automation. This is where we’ll see how EKS directly shapes your approach to provisioning, configuring, and updating tenant environments. I’ll look at how tools like Helm, Argo Workflows, and Flux can be combined to describe and automate all the moving parts of your provisioning and deployment lifecycle. This sampling of the DevOps toolchain will give you a taste of some of the possibilities that come with creating a single automation experience that can address the unique tiering and deployment models that you may need to support your SaaS environment.
+I’ll then shift to looking at how tenant isolation is realized in EKS architecture. I’ll start by looking at how the different EKS deployment strategies can influence your approach to preventing cross-tenant access. As part of this, we’ll explore the different EKS constructs that are used to implement deployment- and runtime isolation strategies. Finally, I’ll wrap the chapter with a look at how you can optimize the different compute nodes that are running in your underlying EKS cluster, introducing new techniques you can use to align the profile of your compute instance types with the demands of your multi-tenant workloads.
+This look at multi-tenancy and EKS should give you a better sense of just how your technology choices can directly shape the design of your overall architecture. It should also highlight the range of possibilities that come with building SaaS solutions with EKS. The current and emerging list of tools, strategies, and patterns can be daunting. At the same time, these tools also introduce you to new and creative ways to address multi-tenant architecture problems.
+The EKS–SaaS Fit
+It’s probably fair to start by asking ourselves why EKS and SaaS represent such a good pairing. I think
+there are a broad range of factors that, collectively, make EKS a compelling model for teams that are migrating or building SaaS solutions. For some, the appeal starts with the programming model. While EKS brings in a diverse range of new concepts and constructs, how you write and build the services of your application remains mostly unchanged. In most cases, the languages, tools, and libraries you use can come with you. This may seem like an awfully basic advantage, but it can represent a significant upside for many teams. This is especially valuable to organizations that are migrating solutions to a SaaS delivery model. It allows them to lift bits of their system directly into EKS, focusing more of their energy on how to get the core elements of multi-tenancy put into place.
+The scaling model of EKS also
+represents another area where we see solid alignment between SaaS and EKS. Throughout this book I’ve highlighted some of the complexities that come with supporting the unpredictable needs of tenants and how, for some environments, this can lead to overprovisioning of compute resources. In some cases, this overprovisioning is needed to offset the possibility of rapid spikes in tenant activity. With EKS, new compute resources can be scaled up rapidly to support spiky workloads. It can also scale down efficiently. This can enable some teams to get closer to their goal of achieving greater alignment between tenant activity and compute
+consumption.
+Beyond the basics of EKS scale, you’ll also discover a rich and evolving set of mechanisms and tools that will allow you to optimize how tenant workloads are mapped to different instance types within your cluster. The number of knobs and dials open up a broad range of possibilities. It’s worth noting that there are some legitimate overprovisioning realities that can still surface in an EKS environment since an EKS cluster still needs to add and remove compute nodes to meet the demands of your multi-tenant workloads. Still, overall, I do see EKS offering scaling advantages that might not be found with other compute stacks.
+With SaaS architectures, we’ve also seen how important it is to support a variety of deployment models, enabling resources to be run in siloed and pooled models. This represents another area where EKS fits well with the profile of SaaS environments. As you’ll see in the sections that follow, EKS includes grouping constructs that let you determine how the compute resources of your solution are managed, deployed, and landed in your SaaS environment. These grouping constructs fit nicely with our need to selectively group the different compute resources in a multi-tenant architecture.
+The EKS deployment tooling is
+also very appealing to SaaS builders, with a vibrant and continually growing list of tools that address the often complex deployment automation requirements of SaaS environments. These tools, many of which are community driven, enable powerful and highly configurable mechanisms that fit nicely with much of the heavy lifting associated with provisioning and updating a multi-tenant setting. These tools and libraries are able to more naturally support the sometimes complex combinations of tier-based onboarding and deployment, limiting the need to create custom, one-off solutions. This represents a huge advantage to many SaaS teams and enables them to connect their SaaS deployment automation needs with a set of tools that are better suited to the challenges imposed by provisioning and deploying the elements of SaaS environments.
+Isolation is another area where EKS introduces another layer of mechanisms that enable you to
+define your isolation policies. This equips builders with a new set of tools and strategies that are used to prevent cross-tenant access. Sidecars, service meshes, and other EKS constructs give builders a range of new options when thinking about how and where they want to inject and enforce their isolation policies. It’s also here that we often see greater opportunities to push isolation to more centralized mechanisms. This can simplify the lives of service developers, removing much of the isolation detail from their view. It can also lead to a stronger isolation profile for your overall system.
+Much of the SaaS goodness of EKS (and Kubernetes in general) is rooted in the strength and depth of its community. So many of the mechanisms you’ll find to support multi-tenancy are byproducts of community-driven solutions that are continually enriching the multi-tenant possibilities within EKS. AWS is also adding new wrinkles that add new dimensions to the EKS story. This means you’ll want to pay close attention to the community to figure out which new options are emerging. Every time I talk about SaaS and EKS, some new tool or mechanism has been added to my multi-tenant toolbag. In some respects, this could be considered both the blessing and the curse of adopting EKS; the architecture strategy you picked might be superseded by the introduction of some Kubernetes tool or construct that didn’t exist when you started.
+Note
+For the scope of this chapter, the line between EKS and Kubernetes will be blurry. In many cases, the architecture strategies and mechanisms that I’ve outlined here are part of the native capabilities of Kubernetes. There are, however, some areas where EKS adds a set of considerations and tools to the menu of options. To simplify matters, I’ll be referencing everything as EKS in this chapter knowing that significant parts of
+what I’m covering would apply to any Kubernetes setting.
+Deployment Patterns
+Whenever I look at a technology stack, the first area I tend to focus on is deployment patterns. For me, once the business has defined a target deployment model, I can start figuring out
+how this model will be realized within my architecture. It also directly shapes the different strategies and constructs that I’ll use to bring this deployment model to life with my chosen technology stack. In this case, where we’re focused on EKS, we want to understand what options we have to implement the different siloed and pooled deployments of our SaaS application’s compute resources. Typically, this list of options is pretty limited. However, with EKS, we have a slightly more diverse set of strategies that enable you to determine how our compute resources are deployed.
+Before we start exploring these models, though, let’s start by labeling some of the core EKS constructs to get a better sense of the moving parts of the puzzle.
+Figure 10-1
+provides a conceptual view of some of the key EKS concepts that will be part of our broader deployment patterns discussion.
+Figure 10-1.
+Core deployment pattern concepts
+At the outer edge of
+Figure 10-1
+, you’ll notice that I have a cluster that groups and scales all the underlying compute resources of our EKS environment. At the bottom of the diagram, I’ve also included a reference to the nodes that will be running within this cluster. Each node corresponds to an EC2 instance. These nodes will scale elastically within our cluster based on the load that’s being placed on our EKS
+environment.
+The pods that you see here are the EKS units of compute that will be running the services of our solution. EKS will do all the heavy lifting of scheduling how these pods get mapped onto the nodes that are in the cluster. These pods represent the smallest unit of execution within an EKS environment.
+Finally, you’ll also see
+that I’ve created sets of these pods using namespaces. A namespace enables EKS to isolate and group the resources that are in a cluster. Some might think of a namespace as a sub-cluster within an EKS cluster. For our purposes, we’ll focus on how this namespace grouping construct is used to support the deployment needs of our SaaS environment.
+This is a
+very
+high-level view of some basic EKS constructs. As you can imagine, there’s far more detail here than I can afford to cover in the scope of this book. For our purposes, though, this will give us enough room to start looking at how these concepts can be connected to deployment patterns. The sections that follow will outline how these different EKS mechanisms are used to group, isolate, and scale the compute layer of your multi-tenant environment.
+Pooled Deployment
+Pooled represents the most straightforward of the EKS SaaS deployment models. In this mode, you’re
+essentially adopting an approach where all tenants will share all the compute resources that are running within your EKS cluster, relying on the collective scaling capabilities of EKS to support the varying compute workloads of your tenants.
+Figure 10-2
+provides a view of a fully pooled multi-tenant compute footprint realized with EKS.
+Figure 10-2.
+Pooled deployment pattern
+At the top of
+Figure 10-2
+, I’ve shown a set of tenants that are consuming a single EKS cluster, indicating that all the compute resources are shared by all tenants. The pods in this cluster are also running a single, shared namespace. There are no other grouping constructs that are being applied to separate the workloads that are running in this environment.
+At the bottom of the diagram, you’ll see where nodes come into play. Our cluster, as noted earlier, is
+running across a dynamically scaling set of nodes. EKS will be responsible for creating the pods that will execute on these nodes. As more load is placed on the system, more nodes will be added to support these evolving demands. In many respects, the cluster is essentially applying classic cloud elasticity mechanisms to grow and shrink the cluster size to align consumption with tenant activity. It’s here that you could see some overprovisioning of the nodes to ensure that you have enough capacity to support spikes in tenant activity. It may take some work to refine your scaling policy to optimize the consumption and sizing of your EKS
+cluster.
+Within EKS you do have lots of knobs and dials that could influence how this pooled environment scales to meet the distinct needs of your system and its services. You might, for example, configure the number of replicas for a pod based on its scale and availability profile. Or you might align the memory settings of a pod to meet the needs of a specific service. My point is that, within the pooled model, it becomes especially important to leverage the different EKS configuration options to ensure that your environment will respond effectively to the realities that come with supporting the continually shifting needs of a fully pooled
+compute model.
+Siloed Deployments
+EKS provides builders with a growing
+list of options when it comes to siloing its compute resources. Many of these strategies can be achieved through the application of EKS grouping constructs, leveraging the natural built-in mechanism of EKS to draw boundaries between your compute resources and enabling them to operate in a per-tenant model. Other silo strategies align more to traditional models where tenants are assigned dedicated infrastructure (cluster per tenant, for example). Let’s go through some of the common EKS techniques that are used to implement a siloed deployment model.
+As you might suspect, the namespaces grouping model I mentioned earlier represents one of the more commonly used siloing constructs.
+Figure 10-3
+provides a conceptual view of a namespace-per-tenant silo model.
+Figure 10-3.
+Namespace-per-tenant siloed deployments
+In this example, I’ve used the basic grouping capabilities that are provided by namespaces to associate the pods and computing services of my application with specific tenant loads. This means that we’ll essentially deploy separate copies of our application’s microservices into each tenant namespace. It also means that the pods in these tenant namespaces will only process requests for their assigned tenant. There are multiple advantages to placing our tenant compute resources in a namespace. First, it gives you a mechanism that allows you to collectively manage, configure, and operate an individual tenant’s compute environment. It also gives you a construct for attaching policies that can control and limit access between the namespaces. You can imagine how these policies would play a role in defining your overall tenant isolation model.
+For this deployment strategy, you’ll notice that our cluster’s nodes (shown at the bottom of
+Figure 10-3
+) are scaled up and down based on the load placed on the namespaces. There’s no real correlation between the namespaces and the nodes that are part of our cluster. The nodes will scale collectively to meet the loads that are being placed on the namespaces.
+There is an alternate approach that creates more of a binding between the namespace pods and the underlying compute nodes.
+Figure 10-4
+provides a conceptual view of the node-per-tenant model.
+Figure 10-4.
+Node-per-tenant siloed deployments
+In
+Figure 10-4
+, we have a series of separate siloed pod collections that are associated with specific tenants. Each of the tenants are also configured to run on a given compute node that’s running in the cluster. Now, the silo tenant boundary includes both the namespace, its pods, and the nodes that are running each of these pods. This adds, for some, another layer to your siloed deployment story, ensuring that tenants aren’t sharing any compute resources. For some scenarios, this could help address some specific concerns about compliance and the nature of the boundaries between your compute resources.
+Now, there is another approach to siloing EKS compute resources that’s a bit more heavy-handed. Instead of attempting to silo resources with a common cluster, you could also consider having separate EKS clusters for each tenant. While this might be appealing and applicable for some environments, I generally prefer avoiding this path. To me, the more distributed nature of this approach can introduce operational and cost efficiency challenges. If you’re anticipating supporting a large collection of tenants, this approach could also present scaling challenges. Again, it’s not invalid, it just feels a bit like overkill given the other options you may have. One variation of this approach would be to employ a pod-based deployment where you distribute groups of tenants across a collection of clusters (the term “pod” gets a bit overloaded here). You might, for example, have a separate cluster for a handful of premium tier tenants and place your remaining basic tier tenants into a shared cluster. You could imagine multiple variations of this theme.
+Another variation of siloed that’s been on my radar is the notion of virtual clusters. The mental model
+is one where you get all the isolation that comes with a cluster without needing to actually use physical clusters for each tenant. In this model, you’d have some siloed constructs within the cluster but your workloads would
+still run on shared nodes. This may represent a compelling option for some teams.
+Mixing Pooled and Siloed Deployments
+As noted throughout this book, there is no one-size-fits-all to choosing deployment models. So, as we think
+about how we might map these different deployment models to EKS, we must also consider what it would mean to support a mixture of siloed and pooled models within a single EKS architecture.
+Figure 10-5
+provides an example of how you might implement a mixed mode deployment model.
+Figure 10-5.
+Mixed mode deployments
+There are no major surprises here. You’ll see that I’ve essentially used the same namespace model to create individual groupings for each flavor of deployment. The siloed tenants (Tenants 1 and 2) are deployed into their own namespaces and our remaining tenants are deployed into a separate “pooled” namespace.
+As you can imagine, supporting these models side by side doesn’t add a ton of complexity to your overall architecture. Yes, there are other factors (deployment, onboarding, isolation) that will influence the footprint of these namespaces, but, overall, the ability to simply use the namespace construct to create different deployment patterns ends up being relatively straightforward. Much of what is used to describe one namespace can be reused to describe the next (with caveats).
+The Control Plane
+So far this discussion of multi-tenant EKS deployment patterns has focused primarily on how the various services
+of your application plane could be grouped and landed in an EKS cluster to support the silo and pool requirements of your workloads. There is one more piece of the puzzle. Somewhere within our EKS environment, we must also place the control plane of our SaaS architecture (assuming our entire environment is EKS-based).
+There are few absolutes about how the control plane should be deployed. We do know, however, that its services should be managed, versioned, and deployed separately from the application plane—even if it’s running in the same EKS cluster as your application plane. We basically need to select from amongst the different EKS grouping mechanisms, identifying the construct that best aligns with the needs of our SaaS environment.
+Figure 10-6
+provides a view of two different approaches you might use for landing the control plane in your EKS architecture.
+Figure 10-6.
+Control plane deployment strategies
+On the righthand side of
+Figure 10-6
+, you’ll see a cluster that is meant to host our application plane. The application plane supports both siloed and pooled deployments, using namespaces to group the compute resources that are needed for each of these tenant profiles. Now, the question is: where do we place the control plane?
+The first example is shown on the far left where all the services of the control plane are deployed into a completely separate cluster. In this model, the interactions between the control plane and the application plane would need to be allowed to cross cluster boundaries. Some may like having these services deployed entirely on their own. This certainly allows the configuration, deployment, scaling profile, and other attributes of the control plane to be managed and operated exclusively based on the needs of the control plane services.
+In contrast, I’ve also shown (on the far right) an example of a control plane that is hosted within the same cluster as our application plane namespaces. Here I’ve introduced another namespace that would be used to group all the services that would be associated with the control plane. Placing the control plane within the same cluster would certainly simplify things a bit, reusing many of the mechanisms and automation strategies that are used to deploy and configure the other namespaces that are within the cluster. Some may like that these control plane resources would get scaled within the same cluster, enabling them to use the scale of one shared cluster to maximize operational and cost efficiency. Others might prefer to keep the needs of the control plane more separate. Again, there are no absolutes here. You’ll have to sort through the trade-offs and find a good balance
+that works well with your architecture goals and requirements.
+Routing Considerations
+As you introduce different per-tenant resources into your deployments, you’ll also need to consider how this
+distribution of tenant compute resources will impact the routing experience of your multi-tenant environment. We explored this concept in some detail in
+Chapter 6
+, looking at how different technology stacks might employ different tools and strategies to route tenant-specific traffic to the appropriate compute resources.
+This happens to be an area where EKS offers a myriad of mechanisms that can influence how tenant traffic flows within your architecture. There’s a long list of vendor and open source tools that are able to proxy your EKS compute services, adding custom handling functionality that can be quite useful in a multi-tenant environment. Ingress controllers (NGINX, Contour, Kong), for example, are used as
+inbound load balancers that can route activity to your tenant-specific resources. A service mesh (Istio, Linkerd, AWS App Mesh) can also be used to introduce a range of highly configurable routing controls. The key concept is that you’re essentially placing some layer of tenant-contextual processing at the front of your environment that can be applied to routing, authentication, and a host of other possibilities.
+How you apply these routing technologies will depend heavily on the nature of your solution. This, to me, is one the areas that highlights the multi-tenant strengths of the EKS experience. There are so many existing and emerging tools that you can apply here that it can be difficult to identify which tool best addresses the needs of your environment.
+Figure 10-7
+provides one example of how these different constructs could shape the flow of tenant traffic within your SaaS architecture.
+Figure 10-7.
+Applying EKS routing tools
+In this particular example, I’ve shown two tenants that are interacting with the resources that are in my EKS environment. These tenants both use a subdomain to convey their tenant context as part of the URL that’s used to access the environment via Amazon’s Route 53 service. Now, as they flow into the environment, this is where you would introduce one of the tenant-aware routing constructs that we’ve been discussing. These tools would extract and apply the context of individual tenants.
+The diagram highlights two specific examples of how you might apply these routing mechanisms. First, I used tenant-contextual routing as part of my authentication model. The idea is that I could extract the subdomain and use it to determine which tenant identity provider would be used to authenticate a given tenant. This is especially powerful when you have a mix of siloed and pooled identity resources. For example, imagine having a dedicated Amazon Cognito User Pool for each siloed, premium tier tenant. Meanwhile, all of our basic tier tenants would share a common User Pool. In this instance, your authentication flow would need to map incoming requests to the appropriate identity provider. Instead of handling this in my application services, I’ve offloaded these routing policies to one of these proxy tools.
+If you move further down the path of our inbound requests, you’ll also see that tenant-aware routing is applied here to direct traffic to the appropriate namespace.
+Figure 10-8
+provides an example of how this might be configured using an NGINX ingress controller.
+Figure 10-8.
+Routing tenants to namespaces
+At the top of
+Figure 10-8
+, you’ll see two different tenants coming into our SaaS environment with per-tenant subdomains. As each request flows in from these tenants, they will be routed through the NGINX ingress controller, sending requests to individual tenant microservices based on their ingress resource configuration.
+This routing process actually sends requests to the specific tenant microservices that are running in each namespace. For example, on the bottom left, you’ll see that I have a namespace that groups the microservices for Tenant 1. Each of these microservices is configured with an ingress resource that includes the paths that connect a given microservice to the appropriate inbound request. For example, you’ll see that there is an
+/tenant1/order
+path on the lefthand side of the diagram that illustrates the routing of order requests for the Tenant 1 namespace.
+These examples only represent a small sampling of the routing possibilities. Each tool you use brings its own unique set of considerations and mechanisms that can impact the footprint of your architecture. The list of available configuration options and patterns goes well beyond the scope of this chapter. That being said, I do feel like this is an area where, as a SaaS architect, you need to lean into the tooling community and determine which of these technologies best supports the specific
+needs of your multi-tenant architecture.
+Onboarding and Deployment Automation
+The provisioning, configuration, and deployment of your multi-tenant resources can be heavily influenced by
+the technologies that you’re using. Tiering requirements, deployment models, and a host of other factors will directly shape how you build the onboarding and deployment elements of your SaaS solution. This, again, is another area where EKS offers a long list of tools that can address the potentially complex
+set of automation
+requirements that are typically associated with multi-tenant
+environments.
+To get a sense of the challenge, let’s start by looking at the moving parts that could be part of your onboarding and deployment processes.
+Figure 10-9
+highlights some of the key conceptual elements that could be included in your overall automation
+strategy.
+Figure 10-9.
+The onboarding and deployment challenge
+On the righthand side of the diagram you’ll see the application plane of a sample multi-tenant environment. It includes two namespaces, one that is for siloed, premium tier tenants and another that is pooled for basic tier tenants. I’ve added a
+bit more detail
+to these tenant configurations, showing the different microservices and their associated storage. The Order service, for example, has dependencies on DynamoDB and Amazon S3. The Product service stores its data in an RDS instance. For the siloed environments, I’m presuming these storage constructs are also siloed
+(per-tenant)
+resources—even though they don’t have to be. Then, for the pooled
+namespace,
+the Order service shares storage for all tenants while the Product service siloes its storage, providing a separate RDS instance for each tenant.
+Now, we need to look at how the footprint of the application plane will influence the onboarding and deployment of our environment. At the top left (step 1), I’ve shown a tenant onboarding via the control plane. While there’s no detail included here, you can imagine all the underlying automation and tooling that is needed to contextually provision and configure each new tenant environment. Your tenant onboarding code will need to know which new resources are needed for each tenant based on their tier. For example, the siloed onboarding will need to create a namespace, deploy services, and provision the associated storage. For the pool, we’ll mostly be configuring the environment and only creating one-off infrastructure where it’s needed. In this case, since the basic tier Product service requires a separate RDS instance for each tenant, your automation will need to create and configure this instance for each newly onboarded tenant.
+The other piece of the puzzle is the development CI/CD pipeline, which will need to deploy service updates
+to the application plane (step 2). Here, the focus is more on the day-to-day developer experience where builders are updating and releasing new versions of services that need to go through their build and deployment pipeline. What’s different with this approach is that our CI/CD pipeline must be able to deploy an updated microservice to each tenant namespace. This is where you’ll need to assemble a process that can automate deployments across these environments,
+supporting the various siloed and pooled tenant configurations.
+Configuring Onboarding with Helm
+With this as our backdrop, we can now turn our attention to figuring out which combination of tools
+might best support the needs of this particular environment. We certainly have the option of simply using AWS CodePipeline, Terraform, AWS Cloud Development Kit (CDK), and a
+host of other classic DevOps tooling to automate these processes. This would be entirely valid. At the same time, there’s a rich collection of build and deployment tooling that’s purpose-built for the EKS and Kubernetes universe that can target these requirements in a way that pushes more of the complexity to the tooling.
+To support the various configuration options that are required by our environment, we’ll need to start by figuring out how we can best capture and characterize the nuances of the different onboarding configurations. A tool that could be a good fit here is Helm, which enables you to create “charts” that outline all the different attributes of a Kubernetes environment. These charts provide us with a mechanism that naturally addresses our need to define our different tiered configurations.
+Figure 10-10
+provides an example of how these charts could be used to describe the onboarding configuration characteristics of our application plane.
+Figure 10-10.
+Using Helm to describe tenant environments
+The design I’ve settled on here is one where I create a baseline Helm template that describes the core elements that are part of any tenant environment. Here you’ll find the bits of configuration that describe all the services and their default settings without any notion of silo or pool being added to the mix. With this baseline template in place, we then generate tier-specific Helm charts that apply the parameters that are associated with each tier. For this example, I’ve included basic and premium tier parameters that are used to create their corresponding Helm charts.
+The beauty of this model is that we’re essentially expressing the attributes of our tiering and deployment models through tooling that lets us characterize the attributes of each environment. We’re also getting the goodness out of having everything that’s common here captured in one baseline template. This lets us maintain, manage, and version all the common settings in one place. The other upside is that we’re leaning into tooling that can be woven somewhat seamlessly into our onboarding experience, automating these provisioning and configuration steps through tools that have built-in constructs that allow them to shape and mold the footprint of our multi-tenant EKS environment.
+There is one twist you’ll need to factor into your approach. While Helm is great at describing our EKS environment, there are typically non-EKS constructs or services that are part of our environment that can’t be configured with Helm. For example, the onboarding experience outlined in
+Figure 10-10
+will need to provision and configure S3, DynamoDB, and RDS resources. It’s here that you’ll likely have to leverage a combination of tools, mixing in CDK, Terraform, or other infrastructure automation tooling to target these non-Kubernetes assets. The net of this is that the full automation and characterization of our environments will end up being packaged as Helm plus whatever other assets are needed to support the other elements of our infrastructure configuration
+and provisioning model.
+Automating with Argo Workflows and Flux
+So far, I’ve mostly talked about how we package and describe the onboarding profiles of our basic and
+premium tier tenants. Now, we still need to consider what it would mean to automate all the moving parts of the onboarding experience. This is where we can fold in more tools from the DevOps universe, introducing Argo Workflows and Flux into our onboarding flow to orchestrate and reconcile the application of our onboarding configurations. It’s the application of these tools that help connect all the dots in this process and deal with the nuances of automating the deployments to these per-tenant environments.
+Let’s look at a specific example of how you might use Helm, Argo Workflows, and Flux together.
+Figure 10-11
+provides a sample view of how these tools can handle the complexities that come with supporting a tier-based onboarding experience.
+Figure 10-11.
+Orchestrating onboarding with Argo Workflows and Flux
+At the bottom-left corner of the diagram, you’ll see the initiation of the onboarding experience (step 1). Here a tenant (or some internal process) triggers the onboarding process, supplying the tier and other attributes of the tenant. This request is
+processed
+by the onboarding service that’s part of the control plane. At some point in your onboarding flow, the service will invoke the
+Tenant Provisioning service, which owns responsibility for creating and configuring any infrastructure that’s needed for the new tenant. For this example, we have basic and premium tier tenants, each of which require different infrastructure footprints.
+This is where Helm and Argo Workflow come into the picture. Our Tenant Provisioning service will invoke a workflow that will be responsible for executing all the steps to complete the tier-aware provisioning of tenant resources (step 2). The workflow has two distinct toolchains it must use to get our tenant environment created. For one half of the process, it must use classic infrastructure automation tooling (Terraform, CDK, CloudFormation) to provision the non-EKS infrastructure resources. In this particular case, this means provisioning the different storage resources that are needed for our microservices. To achieve this, the workflow invokes an infrastructure automation tool, say Terraform, to execute this part of the process (step 3). The automation scripts and code employed here will invoke all the tier-contextual operations needed to create the siloed storage for any new premium tier tenant or it will provision just the one siloed RDS instance for any new basic tier tenant (step 4). If you recall, basic tier tenants are mostly pooled but offer siloed storage for the product services (shown at the bottom right).
+Up to this point, we’ve mostly just executed a classic infrastructure automation process that happens to be triggered as part of an Argo Workflow. For the second half of this process, though, we’re more focused on how to get the EKS cluster and tenant constructs configured. Here we’ll rely heavily on the Helm charts to drive the configuration and creation of our tenant’s EKS assets. First, we’ll clone the baseline template that we used for all of our tenants (step 5). Then our Argo Workflow will generate a tenant-specific Helm release configuration, merging in the configuration settings for each individual tier (step 6). The end result is a tier-specific Helm release configuration that contains all the information/settings needed to onboard tenants for a given tier.
+At this point, we have a Helm chart that represents the configuration we want for our tenant, but it has not been applied to our EKS cluster. This is where Flux comes into the picture. Once our Helm chart is ready, we can commit to our repository (step 7). Flux will be listening to that repository to detect any updates. When it sees the new Helm chart, it will use this configuration to create the EKS resources that are needed for my new tenant (step 8). This is where you’ll see the creation and configuration of your namespace, microservices, and other EKS-specific constructs.
+In reviewing this approach, you
+should be able to see how this moves much of the complexity of our tenant provisioning process into a set of tools that fit well with the needs of our tier-based onboarding experience.
+Tenant-Aware Service Deployments
+Getting tenants onboarded is only half of this story. Once we have these tenant-specific environments and
+resources, we still have to think about how the developer pipelines will incorporate support for these different deployment configurations. The release of an update to a microservice, for example, must include some ability to deploy that new microservice to multiple namespaces within your EKS cluster. It’s here that you need to find a way to accommodate these multi-tenant deployment requirements without adding any burden to the developer experience. Developers should be able to simply build and release a new microservice without needing to be aware of these deployment complexities.
+With EKS tooling you do have access to constructs that can help automate these deployments.
+Figure 10-12
+provides a conceptual view of how Helm and Flux can support your deployment of services.
+Figure 10-12.
+Deployment with Helm and Flux
+Let’s start by looking at the righthand side of this diagram where we have a cluster with multiple tenants onboarded. There are two premium tier tenants that are running in separate namespaces (Tenants 1 and 2). And we have a pooled namespace that’s running all the basic tier tenants. Each of these namespaces are all running the same Order and Product microservices that have specific versions (shown at the top right above each microservice).
+Now, imagine you’re a builder who’s rolling out a new version of the Order service, moving it from v3.1 to v4.0. As a developer, I just want to build it, test, and release it. However, something needs to deploy this updated service to each of the three namespaces on the right. This is where Flux can deal with 1-to-many mapping and address the rollout of the new version of the Order service.
+Making this work first starts with the Helm charts illustrated in the top left. Within these charts, there are references to the microservices that need to be deployed. My build process can clone the current chart, update the product microservice version, and update the version of the Helm chart to indicate that there are changes that need to be applied. When this updated Helm chart (v1.6) is packaged and checked into the repository, our Flux process will detect the presence of this new version. It will then determine how to apply this updated chart to all of the environments that are running the previous version, moving all of them to the v1.6 configuration. The end result will be that my new v4.0 Order service will be deployed to all namespaces.
+For this particular example, I focused on updating the microservice. However, there are other settings that can be configured with Helm charts. This same mechanism can change any number of different settings that are part of the EKS
+environment.
+Note
+The challenge of digging into this EKS DevOps space is that there are simply too many tools and options to consider. For this chapter, I tried to give a sense of the multi-tenant DevOps challenges, providing a glimpse into how some of the common tools can address your multi-tenant deployment requirements. However, I would encourage you to dig more deeply into the options and assess which tools and strategies are going to best fit the profile of your team and solution. The broader takeaway here is that the tiering, deployment models, and general nature of multi-tenant environments may require targeted approaches to automate
+the onboarding and deployment of your SaaS environment.
+Tenant Isolation
+In a multi-tenant EKS environment, we have lots of new constructs and mechanisms that describe how our
+compute is deployed. Now we need to think about what it means to layer tenant isolation on top of these constructs. How and where do we insert policies into an EKS cluster to ensure that one tenant can’t access the resources of another tenant?
+As you might suspect, there are multiple dimensions to the EKS isolation story. To get a better sense of the fundamentals of the EKS SaaS isolation strategy, let’s start by looking at a more conceptual view of the fundamental isolation boundaries of the environment (shown in
+Figure 10-13
+).
+Figure 10-13.
+EKS SaaS isolation boundaries
+In this diagram, there are essentially three flavors of isolation. At the top, where I have the different siloed tenant namespaces, I need some isolation construct that can ensure that microservices running in one tenant namespace can’t access the microservices running in another tenant namespace. Isolating at this level can be achieved fairly easily through the use of natural Kubernetes constructs. When each namespace is provisioned for a new tenant, the onboarding process will configure a network policy for the namespace that limits its ability to access other namespaces. Here’s a sample policy that can be applied when provisioning tenant namespaces:
+# tenant-service-policy.yaml
+kind
+:
+NetworkPolicy
+apiVersion
+:
+networking.k8s.io/v1
+metadata
+:
+namespace
+:
+TENANT_NAME
+name
+:
+TENANT_NAME-policy-deny-other-namespace
+spec
+:
+podSelector
+:
+matchLabels
+:
+ingress
+:
+-
+from
+:
+-
+podSelector
+:
+{}
+The area to focus on here is the metadata, which has placeholders for the name of the tenant namespace and the policy name. This policy essentially prevents any tenant from another tenant namespace from accessing the namespace we’re creating for this new tenant.
+In
+Figure 10-13
+we have also introduced policies to isolate the storage being accessed by our microservices. In this scenario, you’ll see that I have introduced two microservices, one that uses pooled storage (product) and one that uses siloed storage (order). These siloed and pooled storage models require different isolation constructs to prevent cross-tenant access.
+Let’s start by looking at how we’ll isolate the order table. For this data, we know that each tenant will have its own dedicated table. This means that we can use a deployment-time isolation approach that configures our isolation when each tenant namespace is provisioned. To get a better sense of how this isolation works, we need to start with the policy that will enforce the siloed isolation of our order tables. The following policy represents the template that is populated with tenant context and applied as each order table is provisioned for a new tenant:
+{
+"Version"
+:
+"2012-10-17"
+,
+"Statement"
+:
+[
+{
+"Sid"
+:
+"TENANT_NAME"
+,
+"Effect"
+:
+"Allow"
+,
+"Action"
+:
+"dynamodb:*"
+,
+"Resource"
+:
+"arn:aws:dynamodb:us-east-1:ACCOUNT_ID:table/Order-TENANT_NAME"
+}
+]
+}
+This represents an AWS Identity and Access Management (IAM) policy that declares the privileges for a
+resource, in this case a DynamoDB table. Here, we’re essentially allowing our tenant’s Order microservice to have access to its corresponding order table. Again, this file represents the template. The
+TENANT_NAME
+placeholders will be replaced with specific tenant values when the tenant provisioning process creates a tenant namespace.
+This policy is applied to our tenant
+namespaces using what is labeled as IAM Roles for Service Accounts (IRSA). The idea is that the populated IAM policy will be attached to the service account associated with its target tenant namespace (as shown in
+Figure 10-14
+).
+Figure 10-14.
+Order table isolation with IRSA
+At the top of this diagram, you’ll see Tenant 1 and Tenant 2 namespaces, each running the Order microservice. Within each namespace, there are references to service accounts. These service accounts are configured with the tenant-specific order IAM policies that were defined earlier. The configuration of these policies is applied when these namespaces are provisioned as part of tenant onboarding.
+Now, when an Order microservice attempts to access the Order table, the tenant-scoping of our namespace’s service account will automatically enforce the policies that are associated with that namespace. This means that Tenant 1 can only access the Order table associated with Tenant 1. Any attempt to access Tenant 2’s Order table will be prevented. Here, we’re getting the full benefits of deployment-time isolation, which means our isolation policies are applied entirely outside the view of the Order microservice builder.
+This strategy works well for our siloed order tables. However, for our pooled Product table, we have to look at how we can implement item-level isolation since our tenant data is commingled within the same DynamoDB table. It’s here that we have to adopt a runtime enforced isolation model that examines the tenant context of each request, using this context to determine which policies must be applied to prevent cross-tenant access to the tenant items within the Product table.
+Figure 10-15
+provides an example of the moving parts of the Product table isolation that could be applied as part of your multi-tenant EKS architecture.
+Figure 10-15.
+Item-level isolation with the Product table
+On the top left of this diagram, I’ve shown our Product microservices running in separate, siloed namespaces. The compute may be siloed, but the diagram also shows a shared Product table that stores data for all tenants. Because this data is pooled, we cannot use the IRSA mechanism that was used to isolate our order tables. Instead, the code in our Product microservice is required to examine the tenant context of each request and acquire tenant-scoped credentials for that tenant that constrain its view to just those items in the table that belong to the current tenant.
+Acquiring these credentials is achieved by assuming a role based on the policy you see on the righthand side of this diagram. Here, we have another IAM policy for our DynamoDB table, but this version has a
+"Condition"
+section that limits access to items based on a leading key. This leading key is populated, contextually, based on the current tenant (in this example, it’s populated with Tenant 1).
+As you can imagine, there are multiple ways that you can implement your runtime isolation. You might, for example, use shared libraries that will capture the tenant context, map to the appropriate policies, and assume a role that is valid for the current tenant. Generally, for any runtime isolation model, we’d like to find some way to move this resolution of the isolation policy outside the view of developers.
+EKS includes another construct that can be used as part of a runtime isolation strategy: sidecars, which are separate processes that can run alongside our services within the EKS network. The mental model is that of a motorcycle that has a sidecar attached. For our discussion, the value of the sidecar is that it sits between our microservices as a proxy, allowing us to collect telemetry, apply policies, and so on.
+Figure 10-16
+provides an example of a sidecar applied to our tenant isolation
+problem.
+Figure 10-16.
+Runtime isolation with a sidecar
+In this diagram we have the same Product microservice (for Tenant 1) that consumes the same pooled table that holds all product data for all tenants. What’s different is that I’ve introduced a sidecar into the equation. It sits next to my Product service and intercepts all the traffic flowing from it. Now, when my Product service requests data, the sidecar can assume a role using the appropriate IAM policies to restrict access to just those items in the table that belong to Tenant 1.
+The beauty of this approach is that it sits in the middle of all the interactions with our microservice, serving as the perfect traffic isolation cop. For many, having isolation sit at this level can be very appealing. Now, what’s less obvious is how the sidecar interacts with the storage. In the model I proposed, the calls to the Product table would have to originate from the sidecar since it needs to apply the scoped credential to the request. This would essentially mean that you would need to put a data access library in the sidecar to make this work. That may not be the best division of labor or how you want your microservice code distributed.
+An alternate approach would be to have the sidecar acquire the scoped credentials and return them back to the microservice. Then, the microservice would use the credentials. With that approach, though, the sidecar is more of a glorified library. So, while I think sidecars have a place here there’s more work to be done to figure out how best to apply them to this isolation problem.
+The examples we reviewed here provide a sampling of the various isolation techniques that are available with EKS. You’ll likely find yourself applying a mix of these strategies to cover the varying needs of your solution.
+Note
+When we talk about isolation in any multi-tenant container environment, it’s natural for teams to have questions about whether the “escapability” of containers will impact your overall isolation story. This is a basic security concern for any container-based solution. The focus is on the impact of malicious code escaping the container and gaining access to resources and operations that should not be accessible. The technologies and strategies used to mitigate this risk go beyond the scope of this chapter. To me, it’s something to be aware
+of as you assess the overall security footprint of your environment.
+Node Type Selection
+Within our EKS cluster, our pods are always running on compute nodes that must scale to meet the needs of
+your multi-tenant workloads. The nature and configuration of these nodes is part of what you configure with your EKS cluster. Do you need CPU- or memory-intensive nodes? Do you need GPUs? This notion of selecting a node type represents yet another variable in our overall multi-tenant compute strategy. If you’re landing in an EKS environment, it will be your job to figure out which combination of node types best align with the workloads imposed by your tenants.
+One approach to this could be to hand-pick different nodes for the different services that are part of your application. You could look across the services of your application and decide certain services might map better to a specific node type. If you take this approach, you’d need to configure your cluster to launch multiple node types and then associate these services to their target node type (as shown in
+Figure 10-17
+).
+Figure 10-17.
+Mapping workloads to node types
+For this example, I’ve created three separate managed node groups. The grouping construct lets me configure the profile of a set of nodes within my cluster, which includes defining the EC2 instance type that will be associated with each group. To illustrate the extremes, I’ve selected a range of different AWS instance types for each of these node groups. One group is using an R5 instance type that is optimized for memory. The next uses C5 nodes, which are optimized for compute. Finally, the last group is using a GPU instance type (G5).
+The assumption here is that the workloads running on the pods within these node groups are aligned well with the capabilities of each instance type. While I think this is a strategy that has some merit, I’d also be careful to be sure that you have a clear set of requirements that justify the extra complexity that comes with adopting this model. It may be that you’ll have a handful of key services that happen to need a targeted instance type. Then, the rest of your services can run with one common instance type that can effectively support your remaining workloads.
+There are, however, other more creative ways to determine which instance types are needed to support your system’s workloads. In an ideal scenario, you could have this whole notion of node type selection be a more dynamic process that examined real-time activity and determined node types on the fly. This is where Karpenter comes into the picture. With Karpenter, I can configure a set of node types that are available to my cluster without connecting them to any specific node or managed node group.
+Figure 10-18
+provides a view of how Karpenter can optimize the alignment between my cluster and the activity of my tenants.
+In
+Figure 10-18
+, I have two running nodes, both of which were launched with a C5 instance type. Now, as part of setting up my environment, I also configured Karpenter, providing it with a list of candidate node types that I’ve deemed as being valid for my cluster (shown at the top right). This means that Karpenter can assign any of these instance types to a node; which instance types get assigned becomes the job of Karpenter. It will evaluate and profile the current activity in the system and decide which instance types should be assigned to individual nodes.
+Figure 10-18.
+Optimizing node types with Karpenter
+This is a powerful construct on its own and can be especially useful in a multi-tenant context where the activity of your cluster can vary wildly. Being able to push the node selection to Karpenter frees you up from trying to define your own strategies that associate workloads with instance types. It can also yield optimizations that could bring greater efficiencies to your SaaS environment.
+The node selection and optimization strategies are powerful, but this approach still requires you to define the policies that will determine how your cluster will scale these nodes. This adds a layer of complexity to your EKS architecture and, in some cases, can lead teams to overprovision the nodes in their cluster. This can impact the cost efficiency of your environment and
+undermine your economies of scale.
+Mixing Serverless Compute with EKS
+Most of the strategies we’ve looked at here are centered around a model where the nodes in your cluster are
+very much in your view. Node selection, for example, was very much focused on optimizing node and workload alignment. Across all these models, you must still have policies and strategies that determine how these nodes will scale to meet the overall needs of your environment.
+There is, however, another compute strategy that you can pick for your EKS cluster. EKS gives you the option of choosing AWS Fargate as the compute model for your EKS environment. Fargate allows you to adopt a serverless compute strategy, removing any awareness of the nodes in your cluster. This simplifies the scaling compute model of your EKS environment, allowing you to lean on Fargate’s managed compute model to deliver the compute resources required for your environment. It can also limit overprovisioning concerns, allowing you to only pay for the compute you
+consume.
+The real challenge is figuring out which of these compute strategies will best support the needs of your environment. For some, Fargate may be a perfect fit. For others, the ability to have more control over the nodes and instance types could represent a more compelling option. In reality, you’ll have to weigh the cost and other considerations to figure out which option is best for your architecture and operational model.
+An EKS SaaS Reference Solution
+This chapter looked more broadly at the general patterns and considerations that you can apply when
+architecting your own EKS SaaS solution. The team I work with at AWS, the SaaS Factory, has also produced an EKS SaaS reference architecture that grants access to the code of an end-to-end working multi-tenant EKS environment. It provides you with a more concrete view of some of these strategies in action.
+I’ve placed the code in a
+GitHub repository
+. The strategies and techniques that are referenced in this repository represent a single example that doesn’t cover the full spectrum of topics we’ve explored in this chapter. The nature of the solution also continues to evolve to support new approaches. So, some of what’s in the solution might be a bit behind the curve. Still, overall, you may find the resource valuable if you’re interested in getting into the next level of detail. Just know that what we covered here is meant to expose you more to patterns, while the reference architecture represents a sample implementation that provides a view of one specific approach.
+Conclusion
+This chapter provides you with your first look at the intersection between some of the core SaaS principles we’ve been discussing and the possibilities introduced by the EKS technology stack. By looking at SaaS through an EKS lens, I was able to highlight some of the key areas where the features of EKS could be used to describe, configure, and deploy a multi-tenant environment. This process should have also surfaced some of the power and elegance that EKS enables for SaaS builders, equipping them with a diverse set of tools and constructs that give them a broad palette of options. This review of EKS and SaaS should also make it abundantly clear why there is simply no one blueprint for building SaaS on EKS.
+Our exploration of the EKS SaaS strategies started with a high-level look at the fundamental alignment between SaaS and EKS. I included this to emphasize the strengths of EKS and outline some of the areas that make it particularly compelling for some SaaS teams. From there, I picked a few key areas where I thought EKS surfaced new possibilities and considerations that could shape how you approached fundamental aspects of your SaaS architecture. This started with a look at deployment models where I went through a range of different strategies that could be used to describe how tenant workloads could be deployed using various siloed and pooled models and constructs. This also included a brief look at tenant-contextual routing, reviewing some of the tools and mechanisms that could be used to route tenants within clusters.
+A big part of the chapter focused on deployment and onboarding automation. To me, this is an area where EKS shines. By looking at one flavor of the EKS DevOps tool experience, I was able to provide a glimpse into the rich set of mechanisms that can address some of the key challenges that come with automating onboarding and deployment in a multi-tenant environment. I really only scratched the surface here, but my hope is that the insights we covered will inspire you to dig deeper into the EKS community and tools that can be applied to the SaaS DevOps domain.
+The last bits of the chapter looked at tenant isolation and node selection. For tenant isolation, I focused on the nuances of how EKS can influence the isolation model of your SaaS architecture. This meant looking at how we could isolate EKS compute resources, limiting any cross-tenant access between dedicated tenant namespaces. This also included a look into how you could introduce dynamic policies via classic techniques as well as sidecars. Finally, I wrapped up by looking at how node selection could better align your EKS cluster’s node types with your tenant tiers and workloads. This mechanism provides a view into how you might tune and optimize the compute profile of your architecture.
+EKS tools and constructs allow me to move up a level from the underlying infrastructure, equipping me with logical grouping, management, and deployment mechanisms that seem to be well-positioned to address many of the needs I have in a multi-tenant environment. Namespaces, service meshes, ingress controllers, sidecars—the list of options seems to be long and continually growing. This depth and diversity paired with a vibrant community is likely to continue to represent a compelling option for many SaaS builders.
+Now that you have a sense of the EKS possibilities, I want to look at how these same concepts might be applied with a different technology stack. In the next chapter, we’ll explore the nuances associated with building SaaS solutions with serverless technologies. The serverless model brings new tools, strategies, and considerations to the table. Seeing the influence of serverless will broaden your perspective and equip you with a view of how core multi-tenant SaaS principles are realized through the constructs and mechanisms enabled by a different technology stack.

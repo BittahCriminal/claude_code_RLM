@@ -1,0 +1,3066 @@
+s discussed.
+The projects in this section have been designed to be adaptable and customizable, enabling readers to apply them to other datasets and tasks with ease. This makes it an ideal resource for readers who wish to build a portfolio of applications and showcase their work
+on GitHub.
+By the end of this part, you will know how to implement GNNs for traffic forecasting, anomaly detection, and recommender systems. These projects have been selected to demonstrate the versatility and potential of GNNs in solving real-world problems. The knowledge and skills gained from these projects will prepare readers for developing their own applications and contributing to the field of
+graph learning.
+This part comprises the
+following chapters:
+Chapter 15
+, Forecasting Traffic Using A3T-GCN
+Chapter 16
+, Detecting Anomalies Using Heterogeneous Graph Neural Networks
+Chapter 17
+, Recommending Books Using LightGCN
+Chapter 18
+, Unlocking the Potential of Graph Neural Networks for Real-Word Applications
+
+15
+Forecasting Traffic Using A3T-GCN
+We
+introduced T-GNNs in
+Chapter 13
+, but we did not elaborate on their main application:
+traffic forecasting
+. In recent years, the concept of smart cities has become increasingly popular. This idea refers to cities where data is used to manage and improve operations and services. In this context, one of the main sources of appeal is the creation of intelligent transportation systems. Accurate traffic forecasts can help traffic managers to optimize traffic signals, plan infrastructure, and reduce congestion. However, traffic forecasting is a challenging problem due to complex spatial and
+temporal dependencies.
+In this chapter, we will apply T-GNNs to a particular case of traffic forecasting. First, we will explore and process a new dataset to create a temporal graph from raw CSV files. We will then apply a new type of T-GNN to predict future traffic speed. Finally, we will visualize and compare the results to a baseline solution to verify that our architecture
+is relevant.
+By the end of this chapter, you will know how to create a temporal graph dataset from tabular data. In particular, we will see how to create a weighted adjacency matrix that will provide us with edge weights. Finally, you will learn how to apply a T-GNN to a traffic forecasting task and evaluate
+the results.
+In this chapter, we will cover the following
+main topics:
+Exploring the
+PeMS-M dataset
+Processing
+the dataset
+Implementing a
+temporal GNN
+Technical requirements
+All the code examples from this chapter can be found on GitHub
+at
+https://github.com/PacktPublishing/Hands-On-Graph-Neural-Networks-Using-Python/tree/main/Chapter15
+.
+Installation steps required to run the code on your local machine can be found in the
+Preface
+of this book. This chapter requires a large amount of GPU. You can lower it by decreasing the size of the training set in
+the code.
+Exploring the PeMS-M dataset
+In this section, we
+will explore our dataset to find patterns and get insights that will be useful to the task
+of interest.
+The dataset we will use for this application is the medium variant of the
+PeMSD7
+dataset [1]. The original dataset was obtained by collecting traffic speed from 39,000 sensor stations on the
+weekdays of May and June 2012 using the Caltrans
+Performance Measurement System
+(
+PeMS
+). We will only consider 228 stations across District 7 of California in the medium variant. These stations output 30-second speed measurements that are aggregated into 5-minute intervals in this dataset. For example, the following figure shows the Caltrans PeMS (
+pems.dot.ca.gov
+) with various
+traffic speeds:
+Figure 15.1 – Traffic data from Caltrans PeMS with high speed (>60 mph) in green and low speed (<35 mph) in red
+We
+can directly load the dataset from GitHub and
+unzip it:
+from io import BytesIOfrom urllib.request import urlopen
+from zipfile import ZipFile
+url = 'https://github.com/VeritasYin/STGCN_IJCAI-18/raw/master/data_loader/PeMSD7_Full.zip'
+with urlopen(url) as zurl:
+    with ZipFile(BytesIO(zurl.read())) as zfile:
+        zfile.extractall('.')
+The resulting folder contains two files:
+V_228.csv
+and
+W_228.csv
+. The
+V_228.csv
+file contains the traffic speed collected by the 228 sensor stations, and
+W_228.csv
+stores the distances between
+these stations.
+Let’s load them using
+pandas
+. We will rename the columns using
+range()
+for
+easy access:
+import pandas as pdspeeds = pd.read_csv('PeMSD7_V_228.csv', names=range(0,228))
+distances = pd.read_csv('PeMSD7_W_228.csv.csv', names=range(0,228))
+The first thing we want to do with this dataset is to visualize the evolution of traffic speed. This is a classic in time series forecasting since characteristics such as seasonality can be extremely helpful. On the other hand, non-stationary time series might need further processing before they can
+be used.
+Let’s plot the traffic speed over time
+using
+matplotlib
+:
+We import
+NumPy
+and
+matplotlib
+:
+import numpy as npimport matplotlib.pyplot as plt
+We
+use
+plt.plot()
+to create a line plot for every row in
+our DataFrame:
+plt.figure(figsize=(10,5))plt.plot(speeds)plt.grid(linestyle=':')plt.xlabel('Time (5 min)')plt.ylabel('Traffic speed')
+We obtain the
+following plot:
+Figure 15.2 – Traffic speed over time for each of the 228 sensor stations
+Unfortunately, the data is too noisy to give us any insight using this approach. Instead, we could plot the data corresponding to a few sensor stations. However, it might not be representative of the entire dataset. There is another option: we can plot the mean traffic speed with standard deviation. That way, we can visualize a summary of
+the dataset.
+In practice, we would use both approaches, but let’s try the second
+option now:
+We
+calculate the mean traffic speed with the corresponding standard deviation for each column (
+time step):
+mean = speeds.mean(axis=1)std = speeds.std(axis=1)
+We plot the mean values in black with a
+solid line:
+plt.plot(mean, 'k-')
+We plot the standard deviation around the mean values using
+plt.fill_between()
+in
+light red:
+plt.fill_between(mean.index, mean-std, mean+std, color='r', alpha=0.1)plt.grid(linestyle=':')plt.xlabel('Time (5 min)')plt.ylabel('Traffic speed')
+The code generates the
+following plot:
+Figure 15.3 – Mean traffic speed over time with a standard deviation
+This figure is much more comprehensible. We can see a clear seasonality (pattern) in the time series data, except around the 5,800
+th
+data sample. The traffic speed has a lot of variability with important spikes. This is understandable because the sensor stations are spread throughout District 7 of California: traffic might be jammed for some sensors but not
+for others.
+We can
+verify that by plotting the correlation between the speed values from every sensor. In addition to that, we can compare it with the distances between each station. Stations close to each other should display similar values more often than
+distant ones.
+Let’s compare these two plots on the
+same figure:
+We create a figure with two horizontal subplots and some padding
+between them:
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(8, 8))fig.tight_layout(pad=3.0)
+First, we use the
+matshow()
+function to plot the
+distance matrix:
+ax1.matshow(distances)ax1.set_xlabel("Sensor station")ax1.set_ylabel("Sensor station")ax1.title.set_text("Distance matrix")
+Then, we calculate the Pearson correlation coefficients for each sensor station. We must transpose the speed matrix or we will get the correlation coefficients for each time step instead. Finally, we invert them, so the two plots are easier
+to compare:
+ax2.matshow(-np.corrcoef(speeds.T))ax2.set_xlabel("Sensor station")ax2.set_ylabel("Sensor station")ax2.title.set_text("Correlation matrix")
+We obtain the
+following plot:
+Figure 15.4 – Distance and correlation matrices with darker colors representing short distances and high correlation, while brighter colors represent long distances and low correlation
+Interestingly, long
+distances between stations do not mean they are not highly correlated (and vice versa). This is particularly important if we only consider a subset of this dataset: close stations might have very different outputs, making traffic forecasting more difficult. In this chapter, we will take into account every sensor station in
+the dataset.
+Processing the dataset
+Now that we have more information about this dataset, it is time to process it before we can feed it to
+a T-GNN.
+The first
+step consists of transforming the tabular dataset into a temporal graph. So, first, we need to create a graph from the raw data. In other words, we must connect the different sensor stations in a meaningful way. Fortunately, we have access to the distance matrix, which should be a good way to connect
+the stations.
+There are several options to compute the adjacency matrix from the distance matrix. For example, we could assign a link when the distance between two stations is inferior to the mean distance. Instead, we will perform a more advanced processing introduced in [2] to calculate a weighted adjacency matrix. Instead of binary values, we calculate weights between 0 (no connection) and 1 (strong connection) using the
+following formula:
+Here,
+represents
+the weight of the edge from node
+to node
+,
+is the distance between these two nodes, and
+and
+are two thresholds to control the distribution and sparsity of the adjacency matrix. The official implementation of [2] is available on GitHub (
+https://github.com/VeritasYin/STGCN_IJCAI-18
+). We will reuse the same threshold values
+and
+.
+Let’s implement it in Python and plot the resulting
+adjacency matrix:
+We create a function to compute the adjacency matrix that takes three parameters: the distance matrix and the two thresholds
+and
+. Like in the official implementation, we divide the distances by 10,000 and
+calculate
+:
+def compute_adj(distances, sigma2=0.1, epsilon=0.5):    d = distances.to_numpy() / 10000.    d2 = d * d
+Here, we
+want weights when their values are greater than or equal to
+(otherwise, they should be equal to zero). When we test whether the weights are greater than or equal to
+, the results are
+True
+or
+False
+statements. This is why we need a mask of ones (
+w_mask
+) to convert it back into 0 and 1 values. We multiply it a second time so that we only obtain the real values of weights that are greater than or equal
+to
+:
+n = distances.shape[0]    w_mask = np.ones([n, n]) - np.identity(n)    return np.exp(-d2 / sigma2) * (np.exp(-d2 / sigma2) >= epsilon) * w_mask
+Let’s compute our adjacency matrix and print the result for
+one line:
+adj = compute_adj(distances)adj[0]
+array([0.       , 0.       , 0.        , 0.       , 0.  ,
+0.       , 0.       , 0.61266012, 0.       , ...
+We can see a value of
+0.61266012
+, representing the weight of the edge from node 1 to
+node 2.
+A more
+efficient way to visualize this matrix is to use
+matplotlib
+’s
+matshow
+again:
+plt.figure(figsize=(8, 8))cax = plt.matshow(adj, False)plt.colorbar(cax)plt.xlabel("Sensor station")plt.ylabel("Sensor station")
+We get the
+following figure:
+Figure 15.5 – The PeMS-M dataset’s weighted adjacency matrix
+This is a great way to summarize this first processing step. We can compare it to the distance matrix we previously plotted to
+find similarities.
+We can also
+directly plot it as a graph using
+networkx
+. In this case, connections are binary, so we can simply consider every weight higher than 0. We could display these values using edge labels, but the graph would be extremely difficult
+to read:
+import networkx as nxdef plot_graph(adj):    plt.figure(figsize=(10,5))    rows, cols = np.where(adj > 0)    edges = zip(rows.tolist(), cols.tolist())    G = nx.Graph()    G.add_edges_from(edges)    nx.draw(G, with_labels=True)    plt.show()
+Even without labels, the resulting graph is not easy
+to read:
+plot_graph(adj)
+It gives us the
+following output:
+Figure 15.6 – The PeMS-M dataset as a graph (every node represents a sensor station)
+Indeed, many nodes are
+interconnected because they are very close to each other. Yet, despite that, we can distinguish several branches that could correspond to
+actual roads.
+Now that we have a graph, we can focus on the time series aspect of this problem. The first step consists of normalizing the speed values so they can be fed to a neural network. In the traffic forecasting literature, many authors choose a z-score normalization (or standardization), which we will
+implement here:
+We create a function to
+calculate z-scores:
+def zscore(x, mean, std):    return (x - mean) / std
+We apply it to our dataset to create a normalized version
+of it:
+speeds_norm = zscore(speeds, speeds.mean(axis=0), speeds.std(axis=0))
+We can check
+the result:
+speeds_norm.head(1)
+We get the
+following output:
+0
+1
+2
+3
+4
+5
+6
+…
+0
+0.950754
+0.548255
+0.502211
+0.831672
+0.793696
+1.193806
+…
+Figure 15.7 – An example of standardized speed values
+These values are correctly standardized. Now, we can use them to create time series for each node. We want
+input data samples at each time step,
+, to predict the speed value at
+. A high number of input data samples also increases the memory footprint of the dataset. The
+value for
+, also called the horizon, depends on the task we want to perform: short-term or long-term
+traffic forecasting.
+In this example, let’s take a high value of 48 to predict the traffic speed in
+4 hours:
+We initialize the variables: the number of
+lags
+(number of input data samples),
+horizon
+, the input matrix, and the
+ground-truth matrix:
+lags = 24horizon = 48xs = []ys = []
+For each time step
+, we store the 12 (lags) previous values in
+xs
+and the value at
+in
+ys
+:
+for i in range(lags, speeds_norm.shape[0]-horizon):    xs.append(speeds_norm.to_numpy()[i-lags:i].T)    ys.append(speeds_norm.to_numpy()[i+horizon-1])
+Finally, we
+can create the temporal graph using PyTorch Geometric Temporal. We need to give the edge index in COO format and the edge weight from the weighted
+adjacency matrix:
+from torch_geometric_temporal.signal import StaticGraphTemporalSignaledge_index = (np.array(adj) > 0).nonzero()edge_weight = adj[adj > 0]dataset = StaticGraphTemporalSignal(edge_index, adj[adj > 0], xs, ys)
+Let’s print information about the first graph to see whether everything
+looks good:
+dataset[0]
+Data(x=[228, 12], edge_index=[2, 1664], edge_attr=[1664], y=[228])
+Let’s not forget the train/test split to finalize
+our dataset:
+from torch_geometric_temporal.signal import temporal_signal_splittrain_dataset, test_dataset = temporal_signal_split(dataset, train_ratio=0.8)
+The final temporal graph
+has 228 nodes with 12 values and 1,664 connections. We are now ready to apply a T-GNN to
+predict traffic.
+Implementing the A3T-GCN architecture
+In this section, we will train an
+Attention Temporal Graph Convolutional Network
+(
+A3T-GCN
+), designed
+for traffic forecasting. This architecture allows us to consider complex spatial and
+temporal dependencies:
+Spatial dependencies refer to the fact that the traffic condition of a location can be influenced by the traffic condition of nearby locations. For example, traffic jams often spread to
+neighboring roads.
+Temporal dependencies refer to the fact that the traffic condition of a location at a time can be influenced by the traffic condition of the same location at previous times. For example, if a road is congested during the morning peak, it is likely to remain congested until the
+evening peak.
+A3T-GCN is an improvement over the
+temporal GCN
+(
+TGCN
+) architecture. The TGCN is a combination of a GCN and GRU that
+produces hidden vectors from each input time series. The combination of these two layers captures spatial and temporal information from the input. An attention model is then used to calculate weights and output a context vector. The final prediction is based on the resulting context vector. The addition of this attention model is motivated by the need to understand
+global trends.
+Figure 15.8 – The A3T-GCN framework
+We will now implement it using the PyTorch Geometric
+Temporal library:
+First, we import the
+required libraries:
+import torchfrom torch_geometric_temporal.nn.recurrent import A3TGCN
+We
+create a T-GNN with an
+A3TGCN
+layer and a linear layer with 32 hidden dimensions. The
+edge_attr
+parameter will store our
+edge weights:
+class TemporalGNN(torch.nn.Module):    def __init__(self, dim_in, periods):        super().__init__()        self.tgnn = A3TGCN(in_channels=dim_in, out_channels=32, periods=periods)        self.linear = torch.nn.Linear(32, periods)    def forward(self, x, edge_index, edge_attr):        h = self.tgnn(x, edge_index, edge_attr).relu()        h = self.linear(h)        return h
+We instantiate the T-GNN and the
+Adam
+optimizer with a learning rate of
+0.005
+. Due to implementation details, we will train this model using a CPU instead of a GPU, which is faster in
+this case:
+model = TemporalGNN(lags, 1).to('cpu')optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
+We train the model for 30 epochs using
+the
+Mean Squared Error
+(
+MSE
+) as the
+loss
+function. The
+loss
+value is backpropagated after
+each epoch:
+model.train()for epoch in range(30):    loss = 0    step = 0    for i, snapshot in enumerate(train_dataset):        y_pred = model(snapshot.x.unsqueeze(2), snapshot.edge_index, snapshot.edge_attr)        loss += torch.mean((y_pred-snapshot.y)**2)        step += 1    loss = loss / (step + 1)    loss.backward()    optimizer.step()    optimizer.zero_grad()    if epoch % 10 == 0:        print(f"Epoch {epoch+1:>2} | Train MSE: {loss:.4f}")
+We
+obtain the
+following output:
+Epoch  1 | Train MSE: 1.0209
+Epoch 10 | Train MSE: 0.9625
+Epoch 20 | Train MSE: 0.9143
+Epoch 30 | Train MSE: 0.8905
+Now that our model is trained, we have to evaluate it. Beyond classic
+metrics such as
+Root Mean Squared Error
+(
+RMSE
+) and
+Mean Absolute Error
+(
+MAE
+), it is particularly
+helpful to compare our model to a baseline solution with time series data. In the following list, we will introduce
+two methods:
+Using
+Random Walk
+(
+RW
+) as a
+naïve forecaster. In this case, RW refers to using the last
+observation as the predicted value. In other words, the value at
+is the same one as
+at
+.
+Using
+Historical Average
+(
+HA
+) as
+a slightly more evolved solution. In this case, we calculate the mean traffic speed of
+previous samples as the value at
+. In this example, we will use the number of lags as our
+value, but we could also take the overall
+historical average.
+Let’s start by evaluating the model’s predictions on the
+test set:
+We create a function to invert the z-score and get back to the
+original values:
+def inverse_zscore(x, mean, std):    return x * std + mean
+We use it to recalculate the speeds we want to predict from their normalized values. The following loop is not very efficient, but it is clearer to understand than more
+optimized code:
+y_test = []for snapshot in test_dataset:    y_hat = snapshot.y.numpy()    y_hat = inverse_zscore(y_hat, speeds.mean(axis=0), speeds.std(axis=0))    y_test = np.append(y_test, y_hat)
+We apply the same strategy to the predictions made by
+the GNN:
+gnn_pred = []model.eval()for snapshot in test_dataset:    y_hat = model(snapshot.x.unsqueeze(2), snapshot.edge_index, snapshot.edge_weight).squeeze().detach().numpy()    y_hat = inverse_zscore(y_hat, speeds.mean(axis=0), speeds.std(axis=0))    gnn_pred = np.append(gnn_pred, y_hat)
+We do
+the same thing for the RW and
+HA techniques:
+rw_pred = []for snapshot in test_dataset:    y_hat = snapshot.x[:,-1].squeeze().detach().numpy()    y_hat = inverse_zscore(y_hat, speeds.mean(axis=0), speeds.std(axis=0))    rw_pred = np.append(rw_pred, y_hat)ha_pred = []for i in range(lags, speeds_norm.shape[0]-horizon):    y_hat = speeds_norm.to_numpy()[i-lags:i].T.mean(axis=1)    y_hat = inverse_zscore(y_hat, speeds.mean(axis=0), speeds.std(axis=0))    ha_pred.append(y_hat)ha_pred = np.array(ha_pred).flatten()[-len(y_test):]
+We create
+functions to calculate the
+MAE, RMSE, and the
+Mean Absolute Percentage
+Error
+(
+MAPE
+):
+def MAE(real, pred):    return np.mean(np.abs(pred - real))def RMSE(real, pred):    return np.sqrt(np.mean((pred - real) ** 2))def MAPE(real, pred):    return np.mean(np.abs(pred - real) / (real + 1e-5))
+We evaluate the GNN’s predictions in the following block and repeat this process for
+every technique:
+print(f'GNN MAE  = {MAE(gnn_pred, y_test):.4f}')print(f'GNN RMSE = {RMSE(gnn_pred, y_test):.4f}')print(f'GNN MAPE = {MAPE(gnn_pred, y_test):.4f}')
+In the end, we obtain the
+following table:
+RMSE
+MAE
+MAPE
+A3T-GCN
+11.9396
+8.3293
+14.95%
+Random Walk
+17.6501
+11.0469
+29.99%
+Historical Average
+17.9009
+11.7308
+28.93%
+Figure 15.9 – Output table of predictions
+We see that the
+baseline techniques are outperformed by the A3T-GCN model in every metric. This is an important result because baselines can often be difficult to beat. It would be interesting to compare these metrics to the predictions provided by LSTM or GRU networks to measure the importance of the
+topological information.
+Finally, we can plot the mean predictions to obtain a visualization that is similar to
+Figure 15
+.3
+:
+We obtain the mean predictions using a list comprehension that is a little faster than the previous method (but harder
+to read):
+y_preds = [inverse_zscore(model(snapshot.x.unsqueeze(2), snapshot.edge_index, snapshot.edge_weight).squeeze().detach().numpy(), speeds.mean(axis=0), speeds.std(axis=0)).mean() for snapshot in test_dataset]
+We calculate the mean and standard deviation of the
+original dataset:
+mean = speeds.mean(axis=1)std = speeds.std(axis=1)
+We plot the mean traffic speed with standard deviation and compare it to the predicted values (
+hours):
+plt.figure(figsize=(10,5), dpi=300)plt.plot(mean, 'k-', label='Mean')plt.plot(range(len(speeds)-len(y_preds), len(speeds)), y_preds, 'r-', label='Prediction')plt.grid(linestyle=':')plt.fill_between(mean.index, mean-std, mean+std, color='r', alpha=0.1)plt.axvline(x=len(speeds)-len(y_preds), color='b', linestyle='--')plt.xlabel('Time (5 min)')plt.ylabel('Traffic speed to predict')plt.legend(loc='upper right')
+We
+obtain the
+following figure:
+Figure 15.10 – Mean traffic speeds predicted by the A3T-GCN model on the test set
+The T-GNN
+correctly predicts spikes and follows the general trend. However, the predicted speeds are closer to the overall average value, as it is more costly for the model to make serious mistakes due to the MSE loss. Despite that, the GNN is quite accurate and could be fine-tuned to output more
+extreme values.
+Summary
+This chapter focused on a traffic forecasting task using T-GNNs. First, we explored the PeMS-M dataset and converted it from tabular data into a static graph dataset with a temporal signal. In practice, we created a weighted adjacency matrix based on the input distance matrix and converted the traffic speeds into time series. Finally, we implemented an A3T-GCN model, a T-GNN designed for traffic forecasting. We compared the results to two baselines and validated the predictions made by
+our model.
+In
+Chapter 16
+, Building a Recommender System Using LightGCN
+, we will see the most popular application of GNNs. We will implement a lightweight GNN on a massive dataset and evaluate it using techniques from
+recommender systems.
+Further reading
+[1] B. Yu, H. Yin, and Z. Zhu.
+Spatio-Temporal Graph Convolutional Networks: A Deep Learning Framework for Traffic Forecasting
+. Jul. 2018. doi: 10.24963/ijcai.2018/505. Available
+at
+https://arxiv.org/abs/1709.04875
+.
+[2] Y. Li, R. Yu, C. Shahabi, and Y. Liu.
+Diffusion Convolutional Recurrent Neural Network: Data-Driven Traffic Forecasting
+. arXiv, 2017. doi: 10.48550/ARXIV.1707.01926. Available
+at
+https://arxiv.org/abs/1707.01926
+.
+
+16
+Detecting Anomalies Using Heterogeneous GNNs
+In machine learning, anomaly detection
+is a popular task that aims to identify patterns or observations in data that deviate from the expected behavior. This is a fundamental problem that arises in many real-world applications, such as detecting fraud in financial transactions, identifying defective products in a manufacturing process, and detecting cyber attacks in a
+computer network.
+GNNs can be trained to learn the normal behavior of a network and then identify nodes or patterns that deviate from that behavior. Indeed, their ability to understand complex relationships makes them particularly appropriate to detect weak signals. Additionally, GNNs can be scaled to large datasets, making them an efficient tool for processing large amounts
+of data.
+In this chapter, we will build a GNN application for anomaly detection in computer networks. First, we will introduce the
+CIDDS-001
+dataset, which contains attacks and benign traffic in a computer network. Next, we will process the dataset, preparing it for input into GNNs. We will then move on to implementing a heterogenous GNN to handle different types of nodes and edges. Finally, we will train the network using the processed dataset and evaluate the results to see how well it detects anomalies in the
+network traffic.
+By the end of this chapter, you will know how to implement a GNN for intrusion detection. In addition, you will know how to build relevant features to detect attacks and process them to feed them to a GNN. Finally, you will learn how to implement and evaluate a heterogenous GNN to detect
+rare attacks.
+In this chapter, we will cover the following
+main topics:
+Exploring the
+CIDDS-001 dataset
+Preprocessing the
+CIDDS-001 dataset
+Implementing a
+heterogeneous GNN
+Technical requirements
+All the code examples from this chapter can be found on GitHub
+at
+https://github.com/PacktPublishing/Hands-On-Graph-Neural-Networks-Using-Python/tree/main/Chapter16
+.
+The installation steps required to run the code on your local machine can be found in the
+Preface
+of this book. This chapter requires a large amount of GPU. You can lower it by decreasing the size of the training set in
+the code.
+Exploring the CIDDS-001 dataset
+This section will explore the dataset and get more insights about feature importance
+and scaling.
+The
+CIDDS-001
+dataset [1] is designed
+to train and evaluate anomaly-based network intrusion detection systems. It provides realistic traffic that includes up-to-date attacks to assess these systems. It was created by collecting and labeling 8,451,520 traffic flows in a virtual environment using OpenStack. Precisely, each row corresponds to a NetFlow connection, describing
+Internet Protocol
+(
+IP
+) traffic statistics, such as the number of
+bytes exchanged.
+The following figure provides an overview of the simulated network environment
+in
+CIDDS-001
+.
+Figure 16.1 – Overview of the virtual network simulated by CIDDS-001
+We see four
+different subnets (developer, office, management, and server) with their respective IP address ranges. All these subnets are linked to a single server connected to the internet through a firewall. An external server is also present and provides two services: a file synchronization service and a web server. Finally, attackers are represented outside of the
+local network.
+Connections in
+CIDDS-001
+were collected from the local and external servers. The goal of this dataset is to correctly classify these connections into five categories: benign (no attack), brute-force, denial of service, ping scan, and
+port scan.
+Let’s download the
+CIDDS-001
+dataset and explore its
+input features:
+We
+download
+CIDDS-001
+:
+from io import BytesIOfrom urllib.request import urlopenfrom zipfile import ZipFileurl = 'https://www.hs-coburg.de/fileadmin/hscoburg/WISENT-CIDDS-001.zip'with urlopen(url) as zurl:    with ZipFile(BytesIO(zurl.read())) as zfile:        zfile.extractall('.')
+We
+import the
+required libraries:
+import numpy as npimport pandas as pdimport matplotlib.pyplot as pltimport itertoolsfrom sklearn.model_selection import train_test_splitfrom sklearn.preprocessing import PowerTransformerfrom sklearn.metrics import f1_score, classification_report, confusion_matrixfrom torch_geometric.loader import DataLoaderfrom torch_geometric.data import HeteroDatafrom torch.nn import functional as Ffrom torch.optim import Adamfrom torch import nnimport torch
+We load the dataset
+using
+pandas
+:
+df = pd.read_csv("CIDDS-001/traffic/OpenStack/CIDDS-001-internal-week1.csv")
+Let’s look
+at the data corresponding to the first
+five connections:
+df.head(5)
+Date first seen Duration Proto Src IP Addr Src Pt Dst IP Addr Dst Pt Packets Bytes Flows Flags Tos class attackType attackID attackDescription
+2017-03-15 00:01:16.632 0.000 TCP 192.168.100.5 445 192.168.220.16 58844.0 1 108 1 .AP... 0 normal --- --- ---
+2017-03-15 00:01:16.552 0.000 TCP 192.168.100.5 445 192.168.220.15 48888.0 1 108 1 .AP... 0 normal --- --- ---
+2017-03-15 00:01:16.551 0.004 TCP 192.168.220.15 48888 192.168.100.5 445.0 2 174 1 .AP... 0 normal --- --- ---
+2017-03-15 00:01:16.631 0.004 TCP 192.168.220.16 58844 192.168.100.5 445.0 2 174 1 .AP... 0 normal --- --- ---
+2017-03-15 00:01:16.552 0.000 TCP 192.168.100.5 445 192.168.220.15 48888.0 1 108 1 .AP... 0 normal --- --- ---
+There are a few interesting features we can use for
+our model:
+The date first seen is a timestamp we can process to extract information about the day of the week and the time of day. In general, network traffic is seasonal, and connections that occur at night or on unusual days
+are suspicious.
+IP addresses (such as
+192.168.100.5
+) are notoriously difficult to process because they are not numerical values and follow a complex set of rules. We could bin them into a few categories since we know how our local network is set up. Another popular and more generalizable solution is to convert them into a binary representation (“192”
+becomes “11000000”).
+Duration, the number of packets, and the number of bytes are features that usually display heavy-tailed distributions. Therefore, they will require special processing if that is
+the case.
+Let’s check this
+last point and look closely at the distribution of attacks in
+this dataset:
+We start by removing features we will not consider in this project: ports, the number of flows, type of service, class, attack ID, and
+attack description:
+df = df.drop(columns=['Src Pt', 'Dst Pt', 'Flows', 'Tos', 'class', 'attackID', 'attackDescription'])
+We rename the benign class and convert the “date first seen” feature into the timestamp
+data type:
+df['attackType'] = df['attackType'].replace('---', 'benign')df['Date first seen'] = pd.to_datetime(df['Date first seen'])
+We count the labels and make a pie chart with the three most represented classes (the two others are
+under 0.1%):
+count_labels = df['attackType'].value_counts() / len(df) * 100plt.pie(count_labels[:3], labels=df['attackType'].unique()[:3], autopct='%.0f%%')
+We obtain the
+following plot:
+Figure 16.2 – Proportion of each class in the CIDDS-001 dataset
+As you can
+see, benign traffic represents the immense majority of this dataset. On the contrary, brute-force attacks and ping scans have very few samples in comparison. This imbalanced learning setting could negatively impact the model’s performance when dealing with
+rare classes.
+Finally, we can display the duration distribution, number of packets, and number of bytes. This allows us to see whether they really need a specific
+rescaling process:
+fig, ((ax1, ax2, ax3)) = plt.subplots(1, 3, figsize=(20,5))df['Duration'].hist(ax=ax1)ax1.set_xlabel("Duration")df['Packets'].hist(ax=ax2)ax2.set_xlabel("Number of packets")pd.to_numeric(df['Bytes'], errors='coerce').hist(ax=ax3)ax3.set_xlabel("Number of bytes")plt.show()
+It outputs the
+following figure:
+Figure 16.3 – Distributions of duration, the number of packets, and number of bytes
+We can see that most
+values are close to zero, but there is also a long tail of rare values stretching along the
+x
+axes. We will use a power transform to make these features more Gaussian-like, which should help the model
+during training.
+Now that we have explored the main characteristics of the
+CIDDS-001
+dataset, we can move on to the
+preprocessing stage.
+Preprocessing the CIDDS-001 dataset
+In the last section, we identified some
+issues with the dataset we need to address to improve the accuracy of
+our model.
+The
+CIDDS-001
+dataset includes diverse types of data: we have numerical values such as duration, categorical features such as protocols (TCP, UDP, ICMP, and IGMP), and others such as timestamps or IP addresses. In the following exercise, we will choose how to represent these data types based on the information from the previous section and
+expert knowledge:
+First, we can one-hot-encode the day of the week by retrieving this information from the timestamp. We will rename the resulting columns to make them
+more readable:
+df['weekday'] = df['Date first seen'].dt.weekdaydf = pd.get_dummies(df, columns=['weekday']).rename(columns = {'weekday_0': 'Monday','weekday_1': 'Tuesday','weekday_2': 'Wednesday', 'weekday_3': 'Thursday','weekday_4': 'Friday','weekday_5': 'Saturday','weekday_6': 'Sunday',})
+Another important type of information we can get using timestamps is the time of day. We also normalize it between
+0
+and
+1
+:
+df['daytime'] = (df['Date first seen'].dt.second +df['Date first seen'].dt.minute*60 + df['Date first seen'].dt.hour*60*60)/(24*60*60)
+We have not talked about TCP flags yet. Each flag indicates a particular state during a TCP connection. For example,
+F
+or
+FIN
+signifies that the TCP peer has finished sending data. We can extract each flag, and one-hot-encode them
+as follows:
+df = df.reset_index(drop=True)ohe_flags = one_hot_flags(df['Flags'].to_numpy())ohe_flags = df['Flags'].apply(one_hot_flags).to_list()df[['ACK', 'PSH', 'RST', 'SYN', 'FIN']] = pd.DataFrame(ohe_flags, columns=['ACK', 'PSH', 'RST', 'SYN', 'FIN'])
+Let’s now
+process the IP addresses. In this example, we will use binary encoding. Instead of taking 32 bits to encode the complete IPv4 address, we will only keep the last 16 bits, which are the most significant here. Indeed, the 16 first bits either correspond to
+192.168
+if the host belongs to the internal network or another value if
+it’s external:
+temp = pd.DataFrame()temp['SrcIP'] = df['Src IP Addr'].astype(str)temp['SrcIP'][~temp['SrcIP'].str.contains('\d{1,3}\.', regex=True)] = '0.0.0.0'temp = temp['SrcIP'].str.split('.', expand=True).rename(columns = {2: 'ipsrc3', 3: 'ipsrc4'}).astype(int)[['ipsrc3', 'ipsrc4']]temp['ipsrc'] = temp['ipsrc3'].apply(lambda x: format(x, "b").zfill(8)) + temp['ipsrc4'].apply(lambda x: format(x, "b").zfill(8))df = df.join(temp['ipsrc'].str.split('', expand=True)            .drop(columns=[0, 17])            .rename(columns=dict(enumerate([f'ipsrc_{i}' for i in range(17)])))            .astype('int32'))
+We repeat this process for destination
+IP addresses:
+temp = pd.DataFrame()temp['DstIP'] = df['Dst IP Addr'].astype(str)temp['DstIP'][~temp['DstIP'].str.contains('\d{1,3}\.', regex=True)] = '0.0.0.0'temp = temp['DstIP'].str.split('.', expand=True).rename(columns = {2: 'ipdst3', 3: 'ipdst4'}).astype(int)[['ipdst3', 'ipdst4']]temp['ipdst'] = temp['ipdst3'].apply(lambda x: format(x, "b").zfill(8)) + temp['ipdst4'].apply(lambda x: format(x, "b").zfill(8))df = df.join(temp['ipdst'].str.split('', expand=True)            .drop(columns=[0, 17])            .rename(columns=dict(enumerate([f'ipdst_{i}' for i in range(17)])))            .astype('int32'))
+There is an
+issue with the ‘
+Bytes
+’ feature: millions are represented as
+m
+instead of a numerical value. We can fix it by multiplying the numerical part of these non-numerical values by
+one million:
+m_index = df[pd.to_numeric(df['Bytes'], errors='coerce').isnull() == True].indexdf['Bytes'].loc[m_index] = df['Bytes'].loc[m_index].apply(lambda x: 10e6 * float(x.strip().split()[0]))df['Bytes'] = pd.to_numeric(df['Bytes'], errors='coerce', downcast='integer')
+The last features we need to encode are the easiest ones: categorical features such as protocols and attack types. We use the
+get_dummies()
+function
+from
+pandas
+:
+df = pd.get_dummies(df, prefix='', prefix_sep='', columns=['Proto', 'attackType'])
+We create a train/validation/test split with
+80/10/10 ratios:
+labels = ['benign', 'bruteForce', 'dos', 'pingScan', 'portScan']df_train, df_test = train_test_split(df, random_state=0, test_size=0.2, stratify=df[labels])df_val, df_test = train_test_split(df_test, random_state=0, test_size=0.5, stratify=df_test[labels])
+Finally, we need to
+address the scaling of three features: duration, the number of packets, and the number of bytes. We use
+PowerTransformer()
+from
+scikit-learn
+to modify
+their distributions:
+scaler = PowerTransformer()df_train[['Duration', 'Packets', 'Bytes']] = scaler.fit_transform(df_train[['Duration', 'Packets', 'Bytes']])df_val[['Duration', 'Packets', 'Bytes']] = scaler.transform(df_val[['Duration', 'Packets', 'Bytes']])df_test[['Duration', 'Packets', 'Bytes']] = scaler.transform(df_test[['Duration', 'Packets', 'Bytes']])
+Let’s plot the new distributions to see how
+they compare:
+fig, ((ax1, ax2, ax3)) = plt.subplots(1, 3, figsize=(15,5))df_train['Duration'].hist(ax=ax1)ax1.set_xlabel("Duration")df_train['Packets'].hist(ax=ax2)ax2.set_xlabel("Number of packets")df_train['Bytes'].hist(ax=ax3)ax3.set_xlabel("Number of bytes")plt.show()
+We obtain the
+following figure:
+Figure 16.4 – Rescaled distributions of duration, the number of packets, and the number of bytes
+These new distributions
+are not Gaussian, but the values are more spread out, which should help
+the model.
+Note that the dataset we processed is purely tabular. We still need to convert it into a graph dataset before we can feed it to a GNN. In our case, there is no obvious way of converting our traffic flows into nodes. Ideally, flows between the same computers should be connected. This can be achieved using a heterogeneous graph with two types
+of nodes:
+Hosts
+, which
+correspond to computers and use IP addresses as features. If we had more information, we could add other computer-related features, such as logs or
+CPU utilization.
+Flows
+, which
+correspond to connections between two hosts. They consider all the other features from the dataset. They also have the label we want to predict (a benign or
+malicious flow).
+In this example, flows are unidirectional, which is why we also define two types of edges: host-to-flow (source), and flow-to-host (destination). A single graph would require too much memory, so we will divide it into subgraphs and place them into
+data loaders:
+We define the
+batch size and the features we want to consider for host and
+flow nodes:
+BATCH_SIZE = 16features_host = [f'ipsrc_{i}' for i in range(1, 17)] + [f'ipdst_{i}' for i in range(1, 17)]features_flow = ['daytime', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Duration', 'Packets', 'Bytes', 'ACK', 'PSH', 'RST', 'SYN', 'FIN', 'ICMP ', 'IGMP ', 'TCP  ', 'UDP  ']
+We define the function that will create our data loaders. It takes two parameters: the tabular DataFrame we created, and the subgraph size (
+1024
+nodes in
+this example):
+def create_dataloader(df, subgraph_size=1024):
+We initialize a list called
+data
+to store our subgraphs, and we count the number of subgraphs we
+will create:
+data = []    n_subgraphs = len(df) // subgraph_size
+For each subgraph, we retrieve the corresponding samples in the DataFrame, the list of source IP addresses, and the list of destination
+IP addresses:
+for i in range(1, n_batches+1):        subgraph = df[(i-1)*subgraph_size:i*subgraph_size]        src_ip = subgraph['Src IP Addr'].to_numpy()        dst_ip = subgraph['Dst IP Addr'].to_numpy()
+We create a dictionary that maps the IP addresses to a
+node index:
+ip_map = {ip:index for index, ip in enumerate(np.unique(np.append(src_ip, dst_ip)))}
+This dictionary will help us to create the edge index from the host to the flow and vice versa. We use a function called
+get_connections()
+, which we will create after
+this one.
+host_to_flow, flow_to_host = get_connections(ip_map, src_ip, dst_ip)
+We use all
+the data we have collected so far to create a heterogeneous graph for each subgraph and append it to
+the list:
+batch = HeteroData()        batch['host'].x = torch.Tensor(subgraph[features_host].to_numpy()).float()        batch['flow'].x = torch.Tensor(subgraph[features_flow].to_numpy()).float()        batch['flow'].y = torch.Tensor(subgraph[labels].to_numpy()).float()        batch['host','flow'].edge_index = host_to_flow        batch['flow','host'].edge_index = flow_to_host        data.append(batch)
+Finally, we return the data loader with the appropriate
+batch size:
+return DataLoader(data, batch_size=BATCH_SIZE)
+There is one function we still need to implement –
+get_connections()
+– which calculates two edge indices from the list of source and destination IP addresses and their
+corresponding map:
+def get_connections(ip_map, src_ip, dst_ip):
+We get indexes from the IP addresses (both source and destination) and
+stack them:
+src1 = [ip_map[ip] for ip in src_ip]    src2 = [ip_map[ip] for ip in dst_ip]    src = np.column_stack((src1, src2)).flatten()
+The connections are unique, so we can easily index them with the appropriate range
+of numbers:
+dst = list(range(len(src_ip)))    dst = np.column_stack((dst, dst)).flatten()
+Finally, we return the two following
+edge indexes:
+return torch.Tensor([src, dst]).int(), torch.Tensor([dst, src]).int()
+Now that we have everything we need, we can call the first function to create the training, validation, and test
+data loaders:
+train_loader = create_dataloader(df_train)val_loader = create_dataloader(df_val)test_loader = create_dataloader(df_test)
+We now have
+three data loaders corresponding to our training, validation, and test sets. The next step consists of implementing the
+GNN model.
+Implementing a heterogeneous GNN
+In this section, we
+will implement a heterogeneous GNN using a
+GraphSAGE
+operator. This architecture will allow us to consider both node types (hosts and flows) to build better embeddings. This is done by duplicating and sharing messages across different layers, as shown in the
+following figure.
+Figure 16.5 – Architecture of the heterogeneous GNN
+We will implement
+three layers of
+SAGEConv
+with
+LeakyRELU
+for each node type. Finally, a linear layer will output a five-dimensional vector, where each dimension corresponds to a class. Furthermore, we will train this model in a supervised way using the cross-entropy loss and the
+Adam
+optimizer:
+We import the relevant neural network layers from
+PyTorch Geometric:
+import torch_geometric.transforms as Tfrom torch_geometric.nn import Linear, HeteroConv, SAGEConv
+We define the heterogeneous GNN with three parameters: the number of hidden dimensions, the number of output dimensions, and the number
+of layers:
+class HeteroGNN(torch.nn.Module):    def __init__(self, dim_h, dim_out, num_layers):        super().__init__()
+We define a
+heterogenous version of the
+GraphSAGE
+operator for each layer and edge type. Here, we could apply a different GNN layer to each edge type, such as
+GCNConv
+or
+GATConv
+. The
+HeteroConv()
+wrapper manages the messages between layers, as shown in
+Figure 16
+.5
+:
+self.convs = torch.nn.ModuleList()        for _ in range(num_layers):            conv = HeteroConv({                ('host', 'to', 'flow'): SAGEConv((-1,-1), dim_h, add_self_loops=False),                ('flow', 'to', 'host'): SAGEConv((-1,-1), dim_h, add_self_loops=False),            }, aggr='sum')            self.convs.append(conv)
+We define a linear layer that will output the
+final classification:
+self.lin = Linear(dim_h, dim_out)
+We create the
+forward()
+method, which computes embeddings for host and flow nodes (stored in the
+x_dict
+dictionary). The flow embeddings are then used to predict
+a class:
+def forward(self, x_dict, edge_index_dict):        for conv in self.convs:            x_dict = conv(x_dict, edge_index_dict)            x_dict = {key: F.leaky_relu(x) for key, x in x_dict.items()}        return self.lin(x_dict['flow'])
+We instantiate the heterogeneous GNN with 64 hidden dimensions, 5 outputs (our 5 classes), and 3 layers. If available, we place it on a GPU and create an
+Adam
+optimizer with a learning rate
+of
+0.001
+:
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')model = HeteroGNN(dim_h=64, dim_out=5, num_layers=3).to(device)optimizer = Adam(model.parameters(), lr=0.001)
+We define
+the
+test()
+function and create arrays to store predictions and
+true
+labels. We also want to count the number of subgraphs and the total loss, so we create the
+corresponding variables:
+@torch.no_grad()def test(loader):    model.eval()    y_pred = []    y_true = []    n_subgraphs = 0    total_loss = 0
+We get the model’s prediction for each batch and compute the
+cross-entropy loss:
+for batch in loader:        batch.to(device)        out = model(batch.x_dict, batch.edge_index_dict)        loss = F.cross_entropy(out, batch['flow'].y.float())
+We append the predicted class to the list of predictions and do the same with the
+true
+labels:
+y_pred.append(out.argmax(dim=1))        y_true.append(batch['flow'].y.argmax(dim=1))
+We count the number of subgraphs and the total loss
+as follows:
+n_subgraphs += BATCH_SIZE        total_loss += float(loss) * BATCH_SIZE
+Now that the
+batch loop is over, we compute the
+F1
+score (macro) using the prediction and
+true
+label lists. The macro-averaged
+F1
+score is a good metric in this imbalanced learning setting because it treats all classes equally regardless of the number
+of samples:
+y_pred = torch.cat(y_pred).cpu()    y_true = torch.cat(y_true).cpu()    f1score = f1_score(y_true, y_pred, average='macro')
+We return the final loss, the macro-averaged
+F1
+score, the list of predictions, and the list of
+true
+labels:
+return total_loss/n_subgraphs, f1score, y_pred, y_true
+We create the training loop to train the model for
+101
+epochs:
+model.train()for epoch in range(101):    n_subgraphs = 0    total_loss = 0
+We train the heterogenous GNN on each batch using the
+cross-entropy loss:
+for batch in train_loader:        optimizer.zero_grad()        batch.to(device)        out = model(batch.x_dict, batch.edge_index_dict)        loss = F.cross_entropy(out, batch['flow'].y.float())        loss.backward()        optimizer.step()        n_subgraphs += BATCH_SIZE        total_loss += float(loss) * BATCH_SIZE
+Every 10 epochs, we
+evaluate the model on the validation set and display relevant metrics (the training loss, validation loss, and validation macro-averaged
+F1
+score):
+if epoch % 10 == 0:        val_loss, f1score, _, _ = test(val_loader)        print(f'Epoch {epoch} | Loss: {total_loss/n_subgraphs:.4f} | Val loss: {val_loss:.4f} | Val F1 score: {f1score:.4f}')
+We obtain the following output
+during training:
+Epoch 0 | Loss: 0.1006 | Val loss: 0.0072 | Val F1 score: 0.6044
+Epoch 10 | Loss: 0.0020 | Val loss: 0.0021 | Val F1-score: 0.8899
+Epoch 20 | Loss: 0.0015 | Val loss: 0.0015 | Val F1-score: 0.9211
+...
+Epoch 90 | Loss: 0.0004 | Val loss: 0.0008 | Val F1-score: 0.9753
+Epoch 100 | Loss: 0.0004 | Val loss: 0.0009 | Val F1-score: 0.9785
+Finally, we
+evaluate the model on the test set. We also print
+scikit-learn
+’s classification report, which includes the macro-averaged
+F1 score:
+_, _, y_pred, y_true = test(test_loader)print(classification_report(y_true, y_pred, target_names=labels, digits=4))
+precision    recall  f1-score   support
+benign     0.9999    0.9999    0.9999    700791
+bruteForce     0.9811    0.9630    0.9720       162
+dos     1.0000    1.0000    1.0000    125164
+pingScan     0.9413    0.9554    0.9483       336
+portScan     0.9947    0.9955    0.9951     18347
+accuracy                         0.9998    844800
+macro avg     0.9834    0.9827    0.9831    844800
+weighted avg     0.9998    0.9998    0.9998    844800
+We obtained a macro-averaged
+F1
+score of
+0.9831
+. This excellent result shows that our model has learned to predict each
+class reliably.
+The approach we adopted would be even more relevant if we could access more host-related features, but it shows how you can expand it to fit your needs. The other main advantage of GNNs is their ability to process large amounts of data. This approach makes even more sense when dealing with millions of flows. To finish this project, let’s plot the model’s errors to see how we could
+improve it.
+We create
+a dataframe to store the predictions (
+y_pred
+) and the true labels (
+y_true
+). We use this new dataframe to plot the proportion of
+misclassified samples:
+df_pred = pd.DataFrame([y_pred.numpy(), y_true.numpy()]).Tdf_pred.columns = ['pred', 'true']
+plt.pie(df_pred['true'][df_pred['pred'] != df_pred['true']].value_counts(), labels=labels, autopct='%.0f%%')
+This gives us the
+following chart:
+Figure 16.6 – Proportion of each misclassified class
+If we compare this pie chart to the original proportions in the dataset, we see that the model performs better for the majority classes. This is not surprising since minority classes are harder to learn (fewer samples), and not detecting them is less penalizing (with 700,000 benign flows versus 336 ping scans). Port and ping scan detection could be improved with techniques such as oversampling and introducing class weights
+during training.
+We can gather even
+more information by looking at the confusion matrix (the code can be found
+on GitHub).
+Figure 16.7 – Confusion matrix for multi-class flow classification
+This confusion matrix displays interesting results, such as a bias toward the benign class or errors between ping and port scans. These errors can be attributed to the similarity between these attacks. Engineering additional features could help the model distinguish
+these classes.
+Summary
+In this chapter, we explored the use of GNNs for detecting anomalies in a new dataset, the
+CIDDS-001
+dataset. First, we preprocessed the dataset and converted it into a graph representation, allowing us to capture the complex relationships between the different components of the network. We then implemented a heterogeneous GNN with
+GraphSAGE
+operators. It captured the heterogeneity of the graph and allowed us to classify the flows as benign
+or malicious.
+The application of GNNs in network security has shown promising results and opened up new avenues for research. As technology continues to advance and the amount of network data increases, GNNs will become an increasingly important tool for detecting and preventing
+security breaches.
+In
+Chapter 17
+,
+Recommending Books Using LightGCN
+, we will explore the most popular application of GNNs with recommender systems. We will implement a lightweight GNN on a large dataset and produce book recommendations for
+given users.
+Further reading
+[1] M. Ring, S. Wunderlich, D. Grüdl, D. Landes, and A. Hotho,
+Flow-based benchmark data sets for intrusion detection
+, in
+Proceedings of the 16th European Conference on Cyber Warfare and Security
+(ECCWS), ACPI, 2017,
+pp. 361–369.
+
+17
+Building a Recommender System Using LightGCN
+Recommender systems have become an integral part of modern online platforms, with the goal of providing personalized recommendations to users based on their interests and past interactions. These systems can be found in a variety of applications, including suggesting products to purchase on e-commerce websites, recommending content to watch on streaming services, and suggesting connections to make on social
+media platforms.
+Recommendation systems are one of the main applications of GNNs. Indeed, they can effectively incorporate the complex relationships between users, items, and their interactions into a unified model. In addition, the graph structure allows for the incorporation of side information, such as user and item metadata, into the
+recommendation process.
+In this chapter, we will introduce a new GNN architecture
+called
+LightGCN
+, specifically designed for recommender systems. We will also introduce a new dataset, the
+Book-Crossing
+dataset, which contains users, books, and over a million ratings. Using this dataset, we will build a book recommender system with collaborative filtering and apply it to get recommendations for a specific user. Through this process, we will demonstrate how to use the LightGCN architecture to build a practical
+recommendation system.
+By the end of this chapter, you will be able to create your own recommender system using LightGCN. You will learn how to process any dataset with users, items, and scores for a collaborative filtering approach. Finally, you will learn how to implement and evaluate this architecture and get recommendations for
+individual users.
+In this chapter, we will cover the following
+main topics:
+Exploring the
+Book-Crossing dataset
+Preprocessing the
+Book-Crossing dataset
+Implementing the
+LightGCN architecture
+Technical requirements
+All the code examples from this chapter can be found on GitHub at
+https://github.com/PacktPublishing/Hands-On-Graph-Neural-Networks-Using-Python/tree/main/Chapter17
+. The installation steps required to run the code on your local machine can be found in the
+Preface
+of
+this book.
+This chapter requires a large amount of GPU. You can lower it by decreasing the size of the training set in
+the code.
+Exploring the Book-Crossing dataset
+In this section, we
+will perform exploratory data analysis on a new dataset and visualize its
+main characteristics.
+The
+Book-Crossing
+dataset [1] is a collection of book ratings provided by 278,858 users in
+the
+BookCrossing community
+(
+www.bookcrossing.com
+). The ratings, which are both explicit (rating between 1 and 10) and implicit (users interacted with the book), total 1,149,780 and pertain to 271,379 books. The dataset was collected by Cai-Nicolas Ziegler during a four-week crawl in August and September 2004. We will use the
+Book-Crossing
+dataset to build a book recommender system in
+this chapter.
+Let’s download the dataset and unzip it with the
+following commands:
+from io import BytesIOfrom urllib.request import urlopen
+from zipfile import ZipFile
+url = 'http://www2.informatik.uni-freiburg.de/~cziegler/BX/BX-CSV-Dump.zip'
+with urlopen(url) as zurl:
+    with ZipFile(BytesIO(zurl.read())) as zfile:
+        zfile.extractall('.')
+This will unzip
+three files:
+The
+BX-Users.csv
+file
+contains data on individual BookCrossing users. User IDs have been anonymized and are represented as integers. Demographic information, such as location and age, is also included for some users. If this information is not available, the corresponding fields contain
+NULL
+values.
+The
+BX-Books.csv
+file
+contains data on the books included in the dataset, identified by their ISBN. Invalid ISBNs have been removed from the dataset. In addition to content-based information, such as the book title, author, year of publication, and publisher. This file also includes URLs linking to cover images of the books of three
+different sizes.
+The
+BX-Book-Ratings.csv
+file includes
+information on the ratings given to books
+in the dataset. Ratings are either explicit, given on a scale from 1-10 with higher values indicating a greater appreciation, or implicit, indicated by a rating
+of 0.
+The following figure is a graph representation made with Gephi using a subsample of
+this dataset.
+Figure 17.1 – Graph representation of the Book-Crossing dataset, with books represented as blue nodes and users represented as red nodes
+The size of the
+nodes is proportional to the number of connections (degree) in the graph. We can see popular books such as
+The Da Vinci Code
+that act like hubs thanks to their high number
+of connections.
+Now, let’s explore the dataset to get
+more insight:
+We import
+pandas
+and load every file with the
+;
+separator and the
+latin-1
+encoding for compatibility issues.
+BX-Books.csv
+also requires the
+error_bad_lines
+parameter:
+import pandas as pdratings = pd.read_csv('BX-Book-Ratings.csv', sep=';', encoding='latin-1')users = pd.read_csv('BX-Users.csv', sep=';', encoding='latin-1')books = pd.read_csv('BX-Books.csv', sep=';', encoding='latin-1', error_bad_lines=False)
+Let’s
+print these DataFrames to see the columns and the number
+of rows:
+ratings           User-ID    ISBN            Book-Rating0          276725     034545104X      01          276726     0155061224      5...        ...        ...             ...1149777    276709     0515107662      101149778    276721     0590442449      101149779    276723     05162443314     81149780 rows × 3 columns
+Let’s repeat the process with the
+users
+DataFrame:
+users
+User-ID         Location                         Age
+0       1       nyc, new york, usa               NaN
+1       2       stockton, california, usa        18.0
+2       3       moscow, yukon territory, russia  NaN
+...     ...     ...                              ...
+278855  278856  brampton, ontario, canada        NaN
+278856  278857  knoxville, tennessee, usa  NaN
+278857  278858  dublin, n/a, ireland  NaN
+278858 rows × 3 columns
+Finally, the
+books
+DataFrame has too many columns to be printed like the two others. Let’s print the column
+names instead:
+list(books.columns)
+['ISBN', 'Book-Title', 'Book-Author', 'Year-Of-Publication', 'Publisher', 'Image-URL-S', 'Image-URL-M', 'Image-URL-L']
+The
+ratings
+DataFrame links the
+users
+and
+books
+DataFrames using
+User-ID
+and
+ISBN
+information and includes a rating, which could be considered a weight. The
+users
+DataFrame includes demographic information, such as
+location and age, for each user when available. The
+books
+DataFrame includes content-related information about the books, such as the title, author, year of publication, publisher, and URLs linking to cover images of three
+different sizes.
+Let’s visualize the rating distribution to see whether we can use this information. We can plot it using
+matplotlib
+and
+seaborn
+as follows:
+import matplotlib.pyplot as pltimport seaborn as snssns.countplot(x=ratings['Book-Rating'])
+This gives us the
+following plot:
+Figure 17.2 – Rating distribution (interaction with a book is represented as a rating of zero, while ratings between 1 and 10 are real ratings)
+Do these
+ratings correspond to the data we have in the
+books
+and
+users
+DataFrames? We can compare the number of unique
+User-ID
+and
+ISBN
+entries in
+ratings
+to the number of rows in these DataFrames as a
+quick check:
+print(len(ratings['User-ID'].unique()))print(len(ratings['ISBN'].unique()))
+105283
+340556
+Interestingly, there are fewer unique users in
+ratings
+compared to
+users
+(105,283 versus 278,858) but more unique ISBNs compared to
+books
+(340,556 versus 271,379). This means that our database is missing a lot of values, so we will need to be careful when
+joining tables.
+Let’s finish
+by plotting the number of books that have been rated only once, twice, and so on. First, we calculate the number of times each ISBN appears in the
+ratings
+DataFrame using the
+groupby()
+and
+size()
+functions:
+isbn_counts = ratings.groupby('ISBN').size()
+This creates a new DataFrame,
+isbn_counts
+, which contains the count of each unique ISBN in the
+ratings
+DataFrame.
+We calculate the number of occurrences of each count value using the
+value_counts()
+function. This new DataFrame will contain the count of occurrences of each count value
+in
+isbn_counts
+:
+count_occurrences = isbn_counts.value_counts()
+Finally, we can plot the distribution using
+pandas
+’
+.plot()
+method. In this case, we will only plot the first
+15 values:
+count_occurrences[:15].plot(kind='bar')plt.xlabel("Number of occurrences of an ISBN number")plt.ylabel("Count")
+We obtain the
+following plot:
+Figure 17.3 – Distribution of the number of times each book (ISBN) appears in ratings (15 first values)
+We
+see that a lot of books have only been rated once or twice. It is very rare to see books with a lot of ratings, which makes things more difficult for us since we rely on
+these connections.
+We repeat the same process to obtain the distribution of the number of times each user (
+User-ID
+) appears
+in
+ratings
+:
+userid_counts = ratings.groupby('User-ID').size()count_occurrences = userid_counts.value_counts()count_occurrences[:15].plot(kind='bar')plt.xlabel("Number of occurrences of a User-ID")plt.ylabel("Count")
+We obtain a
+similar distribution:
+Figure 17.4 – Distribution of the number of times each user (User-ID) appears in ratings (15 first values)
+This also
+means that most users only rate one or two books, but a few of them rate a lot
+of books.
+There are different issues with this dataset, such as mistakes in the year of publication or the name of the publishers, and other missing or incorrect values. However, we will not directly use metadata from the
+books
+and
+users
+DataFrames in this chapter. We will rely on the connections between
+User-ID
+and
+ISBN
+values, which is why we don’t need to clean the
+dataset here.
+In the next section, we will see how to process the dataset to prepare it before feeding it to
+the LightGCN.
+Preprocessing the Book-Crossing dataset
+We
+want to process the dataset for a particular task: recommending items, and more
+specifically using a
+collaborative filtering
+approach. Collaborative filtering is a technique used to make personalized recommendations to users. It is based on the idea that users who have similar preferences or behaviors are more likely to have similar interests. Collaborative filtering algorithms use this information to identify patterns and make recommendations to users based on the preferences of
+similar users.
+This is
+different from content-based filtering, which is a recommendation approach that relies on the features of the items being recommended. It generates recommendations by identifying the characteristics of an item and matching them to the characteristics of other items that have been liked by the user in the
+past.
+Content-based filtering
+approaches are typically based on the idea that if a user likes an item with certain characteristics, they will also like items with
+similar characteristics.
+In this chapter, we will focus on collaborative filtering. Our objective is to determine which book to recommend to a user based on the preferences of other users. This problem can be represented as a bipartite graph as in the
+following figure.
+Figure 17.5 – Example of a user-item bipartite graph
+Knowing that user
+1
+liked items
+A
+and
+B
+, and user
+3
+liked items
+B
+and
+D
+, we should probably recommend item
+B
+to user
+2
+, who also enjoyed items
+A
+and
+D
+.
+This is the type of graph we want to build from the
+Book-Crossing
+dataset. More precisely, we also want to include negative samples. In this context, negative samples refer to items that have not been rated by a given user. Items that have been rated by a particular user are also referred to as positive items. We will explain why we use this negative sampling technique when we implement the
+loss
+function.
+In the rest
+of the chapter, the
+LightGCN
+code is mostly based on the official implementation and the excellent work of Hotta and Zhou [2] and Li et al. [3] on a
+different dataset:
+We import the
+following libraries:
+import numpy as npfrom sklearn.model_selection import train_test_splitimport torchimport torch.nn.functional as Ffrom torch import nn, optim, Tensorfrom torch_geometric.utils import structured_negative_samplingfrom torch_geometric.nn.conv.gcn_conv import gcn_normfrom torch_geometric.nn import LGConv
+We re-load
+the datasets:
+df = pd.read_csv('BX-Book-Ratings.csv', sep=';', encoding='latin-1')users = pd.read_csv('BX-Users.csv', sep=';', encoding='latin-1')books = pd.read_csv('BX-Books.csv', sep=';', encoding='latin-1', error_bad_lines=False)
+We only keep rows where
+ISBN
+information can be found in the
+books
+DataFrame and
+User-ID
+information can be found in the
+users
+DataFrame:
+df = df.loc[df['ISBN'].isin(books['ISBN'].unique()) & df['User-ID'].isin(users['User-ID'].unique())]
+We only keep high ratings (>= 8/10) so the connections we create correspond to books that were liked by users. Then, we filter out even more samples and keep a limited number of rows (100,000) to speed
+up training:
+df = df[df['Book-Rating'] >= 8].iloc[:100000]
+We
+create mappings from
+user
+and
+item
+identifiers to
+integer indices:
+user_mapping = {userid: i for i, userid in enumerate(df['User-ID'].unique())}item_mapping = {isbn: i for i, isbn in enumerate(df['ISBN'].unique())}
+We count the number of users, items, and total entities in
+the dataset:
+num_users = len(user_mapping)num_items = len(item_mapping)num_total = num_users + num_items
+We create a tensor of
+user
+and
+item
+indices based on the user ratings in the dataset. The
+edge_index
+tensor is created by stacking these
+two tensors:
+user_ids = torch.LongTensor([user_mapping[i] for i in df['User-ID']])item_ids = torch.LongTensor([item_mapping[i] for i in df['ISBN']])edge_index = torch.stack((user_ids, item_ids))
+We split
+edge_index
+into training, validation, and test sets using the
+train_test_split()
+function
+from
+scikit-learn
+:
+train_index, test_index = train_test_split(range(len(df)), test_size=0.2, random_state=0)val_index, test_index = train_test_split(test_index, test_size=0.5, random_state=0)
+We generate a batch of random indices using the
+np.random.choice()
+function. This generates
+BATCH_SIZE
+random indices from a range of
+0
+to
+edge_index.shape[1]-1
+. These indices will be used to select rows from the
+edge_index
+tensor:
+def sample_mini_batch(edge_index):    index = np.random.choice(range(edge_index.shape[1]), size=BATCH_SIZE)
+We
+generate negative samples using the
+structured_negative_sampling()
+function from PyTorch Geometric. Negative samples are items with which the corresponding user has not interacted. We use the
+torch.stack()
+function to add a dimension at
+the beginning:
+edge_index = structured_negative_sampling(edge_index)    edge_index = torch.stack(edge_index, dim=0)
+We select the user, positive item, and negative item indices for the batch using the
+index
+array and the
+edge_index
+tensor:
+user_index = edge_index[0, index]    pos_item_index = edge_index[1, index]    neg_item_index = edge_index[2, index]    return user_index, pos_item_index, neg_item_index
+The
+user_index
+tensor contains the user indices for the batch, the
+pos_item_index
+tensor contains the positive item indices for the batch, and the
+neg_item_index
+tensor contains the negative item indices for
+the batch.
+We now have three sets and a function to return mini-batches. The next step is to understand and implement the
+LightGCN architecture.
+Implementing the LightGCN architecture
+The
+LightGCN [4] architecture aims to learn representations for nodes by smoothing features over the graph. It iteratively performs graph convolution, where neighboring nodes’ features are aggregated as the new representation of a target node. The entire architecture is summarized in
+Figure 17
+.6
+.
+Figure 17.6 – LightGCN model architecture with convolution and layer combination
+However,
+LightGCN
+adopts a simple weighted sum aggregator rather than using feature transformation or nonlinear activation as seen in other models such as the GCN or GAT. The light graph convolution operation calculates the
+-th user and item embedding
+and
+as follows:
+The
+symmetric normalization term ensures that the scale of embeddings does not increase with graph convolution operations. In contrast to other models,
+LightGCN
+only aggregates the connected neighbors and does not
+include self-connections.
+Indeed, it achieves the same effect by using a layer combination operation. This mechanism consists of a weighted sum using user and item embeddings at each layer. It produces the final embeddings
+and
+with the
+following equations:
+Here, the contribution of
+-th layer is weighted by the variable
+. The authors of
+LightGCN
+recommend setting it
+to
+.
+The
+prediction shown in
+Figure 17
+.6
+corresponds to ratings or ranking scores. It is obtained using the inner product of user and item
+final representations:
+Let’s now implement this
+architecture in
+PyTorch Geometric:
+We create a
+LightGCN
+class with four arguments:
+num_users
+,
+num_items
+,
+num_layers
+, and
+dim_h
+. The
+num_users
+and
+num_items
+arguments specify the number of users and items in the dataset, respectively.
+num_layers
+indicates the number of
+LightGCN
+layers that will be used, and the
+dim_h
+argument specifies the size of the embedding vectors (for the users
+and items):
+class LightGCN(nn.Module):    def __init__(self, num_users, num_items, num_layers=4, dim_h=64):        super().__init__()
+We store the number of users and items and create user and item embedding layers. The shape of the
+emb_users
+or
+is
+and the shape of the
+emb_items
+or
+is
+:
+self.num_users = num_users        self.num_items = num_items        self.emb_users = nn.Embedding(num_embeddings=self.num_users, embedding_dim=dim_h)        self.emb_items = nn.Embedding(num_embeddings=self.num_items, embedding_dim=dim_h)
+We
+create a list of
+num_layers
+(previously called
+)
+LightGCN
+layers using PyTorch Geometric’s
+LGConv()
+. This will be used to perform the light graph
+convolution operations:
+self.convs = nn.ModuleList(LGConv() for _ in range(num_layers))
+We initialize the user and item embedding layers with normal distributions with a standard deviation of
+0.01
+. This helps to prevent the model from getting stuck in poor local optima when it
+is trained:
+nn.init.normal_(self.emb_users.weight, std=0.01)        nn.init.normal_(self.emb_items.weight, std=0.01)
+The
+forward()
+method takes in an edge index tensor and returns the final user and item embedding vectors,
+and
+. It starts by concatenating the user
+and item embedding layers and storing the result in the
+emb
+tensor. It then creates a list,
+embs
+, with
+emb
+as its
+first element:
+def forward(self, edge_index):        emb = torch.cat([self.emb_users.weight, self.emb_items.weight])        embs = [emb]
+We then apply the
+LightGCN
+layers in a loop and store the output of each layer in the
+embs
+list:
+for conv in self.convs:            emb = conv(x=emb, edge_index=edge_index)            embs.append(emb)
+We perform layer combination by calculating the final embedding vectors by taking the mean of the tensors in the
+embs
+list along the
+second dimension:
+emb_final = torch.mean(torch.stack(embs, dim=1), dim=1)
+We split
+emb_final
+into user and item embedding vectors (
+and
+) and return them along with
+and
+:
+emb_users_final, emb_items_final = torch.split(emb_final, [self.num_users, self.num_items])        return emb_users_final, self.emb_users.weight, emb_items_final, self.emb_items.weight
+Finally, the
+model is created by calling the
+LightGCN()
+class with the
+appropriate arguments:
+model = LightGCN(num_users, num_items)
+Before
+we can train the model, we need a loss function. The
+LightGCN
+architecture employs
+Bayesian Personalized Ranking
+(
+BPR
+) loss, which optimizes the model’s ability to rank positive items higher than negative items for a given user. It is implemented
+as follows:
+Here,
+is the
+th-layer embedding matrix (concatenation of the initial user and item embeddings),
+weighs the regularization strength,
+corresponds to the predicted rating of a positive item, and
+represents the predicted rating of a
+negative item.
+We implement it in PyTorch with the
+following function:
+We calculate the regularization loss based on the embeddings that are stored in the
+LightGCN
+model:
+def bpr_loss(emb_users_final, emb_users, emb_pos_items_final, emb_pos_items, emb_neg_items_final, emb_neg_items):    reg_loss = LAMBDA * (emb_users.norm().pow(2) +                        emb_pos_items.norm().pow(2) +                        emb_neg_items.norm().pow(2))
+We
+calculate the ratings for the positive and negative items as the dot product between the user and
+item embeddings:
+pos_ratings = torch.mul(emb_users_final, emb_pos_items_final).sum(dim=-1)    neg_ratings = torch.mul(emb_users_final, emb_neg_items_final).sum(dim=-1)
+Unlike the log sigmoid in the previous equation, we calculate the BPR loss as the mean of the
+softplus
+function applied to the difference between the positive and negative scores. This variant was chosen because it gave better
+experimental results:
+bpr_loss = torch.mean(torch.nn.functional.softplus(pos_ratings - neg_ratings))
+We return the BPR loss and the regularization loss
+as follows:
+return -bpr_loss + reg_loss
+On top of the BPR loss, we use two metrics to evaluate the performance of
+our model:
+Recall@k
+is the
+proportion of relevant recommended items in top
+k
+among all possible relevant items. However, this metric does not consider the order of relevant items in
+top
+k
+:
+Normalized Discounted Cumulative Gain
+(
+NDGC
+) measures the effectiveness
+of the system’s ranking of the recommendations, taking into account the relevance of the items, where relevance is usually represented by a score or a binary relevance (relevant
+or not).
+The
+implementation is not included in this chapter for improved readability. However, it can be found in the GitHub repository along with the rest of
+the code.
+We can now create a training loop and start training the
+LightGCN
+model:
+We define the following constants. They can be tuned as hyperparameters to improve the performance of
+the model:
+K = 20LAMBDA = 1e-6BATCH_SIZE = 1024
+We try to select a GPU if one is available. Otherwise, we use a CPU instead. The model and data are moved to
+this device:
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')model = model.to(device)edge_index = edge_index.to(device)train_edge_index = train_edge_index.to(device)val_edge_index = val_edge_index.to(device)
+We create an
+Adam
+optimizer with a learning rate
+of
+0.001
+:
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+Let’s start the training loop. First, we calculate
+num_batch
+, the number of
+BATCH_SIZE
+batches in an epoch. Then, we create two loops: one of 31 epochs, and a second one the length
+of
+num_batch
+:
+num_batch = int(len(train_index)/BATCH_SIZE)for epoch in range(31):    model.train()    for _ in range(num_batch):
+The
+model is run on the training data and returns the initial and final user and
+item embeddings:
+optimizer.zero_grad()        emb_users_final, emb_users, emb_items_final, emb_items = model.forward(train_edge_index)
+The training data is then sampled in mini-batches using the
+sample_mini_batch()
+function, which returns the indices of the sampled user, positive item, and negative
+item embeddings:
+user_indices, pos_item_indices, neg_item_indices = sample_mini_batch(train_edge_index)
+The embeddings for the sampled users, positive items, and negative items are
+then retrieved:
+emb_users_final, emb_users = emb_users_final[user_indices], emb_users[user_indices]    emb_pos_items_final, emb_pos_items = emb_items_final[pos_item_indices], emb_items[pos_item_indices]    emb_neg_items_final, emb_neg_items = emb_items_final[neg_item_indices], emb_items[neg_item_indices]
+The loss is then computed using the
+bpr_loss()
+function:
+train_loss = bpr_loss(emb_users_final, emb_users, emb_pos_items_final, emb_pos_items, emb_neg_items_final, emb_neg_items)
+The optimizer is then used to perform the backward pass and update the
+model parameters:
+train_loss.backward()    optimizer.step()
+The
+model’s performance is evaluated every 250 epochs on the validation set using the
+test()
+function. The evaluation metrics
+are printed:
+if epoch % 5 == 0:        model.eval()        val_loss, recall, ndcg = test(model, val_edge_index, [train_edge_index])        print(f"Epoch {epoch} | Train loss: {train_loss.item():.5f} | Val loss: {val_loss:.5f} | Val recall@{K}: {recall:.5f} | Val ndcg@{K}: {ndcg:.5f}")
+This gives us the
+following output:
+Epoch 0 | Train loss: -0.69320 | Val loss: -0.69302 | Val recall@20: 0.00700 | Val ndcg@20: 0.00388
+Epoch 5 | Train loss: -0.70283 | Val loss: -0.68329 | Val recall@20: 0.01159 | Val ndcg@20: 0.00631
+Epoch 10 | Train loss: -0.73299 | Val loss: -0.64598 | Val recall@20: 0.01341 | Val ndcg@20: 0.00999
+...
+Epoch 25 | Train loss: -1.53056 | Val loss: -0.19498 | Val recall@20: 0.01507 | Val ndcg@20: 0.01016
+Epoch 30 | Train loss: -1.95703 | Val loss: 0.06340 | Val recall@20: 0.01410 | Val ndcg@20: 0.00950
+We
+evaluate the model’s performance on the test set
+as follows:
+test_loss, test_recall, test_ndcg = test(model, test_edge_index.to(device), [train_edge_index, val_edge_index])print(f"Test loss: {test_loss:.5f} | Test recall@{K}: {test_recall:.5f} | Test ndcg@{K}: {test_ndcg:.5f}")
+Test loss: 0.06827 | Test recall@20: 0.01936 | Test ndcg@20: 0.01119
+We obtain a
+recall@20
+value of
+0.01936
+and an
+ndcg@20
+value of
+0.01119
+, which is close to the results obtained by the authors of
+LightGCN
+on
+other datasets.
+Now that the model is trained, we want to get recommendations for a given user. The recommendation function we want to create has
+two components:
+First, we want to retrieve a list of books the user liked. This will help us to contextualize the recommendations for our
+own understanding.
+Secondly, we want to generate a list of recommendations. These recommendations cannot be books the user has already rated (it cannot be a
+positive item).
+Let’s write this function step
+by step:
+We create a function called
+recommend
+that takes in two arguments:
+user_id
+(the identifier for a user), and
+num_recs
+(the number of recommendations we want
+to generate):
+def recommend(user_id, num_recs):
+We create the
+user
+variable by looking up the user’s identifier in the
+user_mapping
+dictionary, which maps user IDs to
+integer indices:
+user = user_mapping[user_id]
+We retrieve the
+dim_h
+dim vector learned by the
+LightGCN
+model for this
+particular user:
+emb_user = model.emb_users.weight[user]
+We
+can use it to calculate the corresponding ratings. As seen previously, we use the dot product of the embeddings for all items stored in the
+LightGCN
+’s
+emb_items
+attribute and the
+emb_user
+variable:
+ratings = model.emb_items.weight @ emb_user
+We apply the
+topk()
+function to the
+ratings
+tensor, which returns the top 100 values (scores calculated by the model) and their
+corresponding indices:
+values, indices = torch.topk(ratings, k=100)
+Let’s get a list of this user’s favorite books. We create a new list of indices by filtering the
+indices
+list to only include those that are present in the
+user_items
+dictionary for the given user. In other words, we only keep books that this user rated. This list is then sliced to keep the first
+num_recs
+items:
+ids = [index.cpu().item() for index in indices if index in user_items[user]][:num_recs]
+We convert these book IDs
+into ISBNs:
+item_isbns = [list(item_mapping.keys())[list(item_mapping.values()).index(book)] for book in ids]
+We can now use these ISBNs to retrieve more information about the books. Here, we want to obtain the titles and the authors so that we can
+print them:
+titles = [bookid_title[id] for id in item_isbns]    authors = [bookid_author[id] for id in item_isbns]
+We print this information
+as follows:
+print(f'Favorite books from user n°{user_id}:')    for i in range(len(item_isbns)):        print(f'- {titles[i]}, by {authors[i]}')
+We
+repeat this process, but with IDs of books that were not rated by the user (
+not
+in user_pos_items[user]
+):
+ids = [index.cpu().item() for index in indices if index not in user_pos_items[user]][:num_recs]    item_isbns = [list(item_mapping.keys())[list(item_mapping.values()).index(book)] for book in ids]    titles = [bookid_title[id] for id in item_isbns]    authors = [bookid_author[id] for id in item_isbns]    print(f'\nRecommended books for user n°{user_id}')    for i in range(num_recs):        print(f'- {titles[i]}, by {authors[i]}')
+Let’s get
+5
+recommendations for a user in our database. Let’s
+use
+277427
+:
+recommend(277427, 5)
+This is the output
+we obtain:
+Favorite books from user n°277427:
+- The Da Vinci Code, by Dan Brown
+- Lord of the Flies, by William Gerald Golding
+- The Cardinal of the Kremlin (Jack Ryan Novels), by Tom Clancy
+- Into the Wild, by Jon Krakauer
+Recommended books for user n°277427
+- The Lovely Bones: A Novel, by Alice Sebold
+- The Secret Life of Bees, by Sue Monk Kidd
+- The Red Tent (Bestselling Backlist), by Anita Diamant
+- Harry Potter and the Sorcerer's Stone (Harry Potter (Paperback)), by J. K. Rowling
+- To Kill a Mockingbird, by Harper Lee
+We can
+now generate recommendations for any user from the original
+df
+DataFrame. You can test other IDs and explore how that changes
+the recommendations.
+Summary
+This chapter presented a detailed exploration of using
+LightGCN
+for book recommendation tasks. We used the
+Book-Crossing
+dataset, preprocessed it to form a bipartite graph, and implemented a
+LightGCN
+model with BPR loss. We trained the model and evaluated it using the
+recall@20
+and
+ndcg@20
+metrics. We demonstrated the effectiveness of the model by generating recommendations for a
+given user.
+Overall, this chapter has provided valuable insight into the usage of
+LightGCN
+models in recommendation tasks. It is a state-of-the-art architecture that performs better than more complex models. You can expand this project by trying other techniques we discussed in previous chapters, such as matrix factorization
+and
+node2vec
+.
+Further reading
+[1] C.-N. Ziegler, S. M. McNee, J. A. Konstan, and G. Lausen,
+Improving Recommendation Lists through Topic Diversification
+, in
+Proceedings of the 14th International Conference on World Wide Web
+, 2005, pp. 22–32. doi: 10.1145/1060745.1060754.
+Available:
+https://dl.acm.org/doi/10.1145/1060745.1060754
+[2] D. Li, P. Maldonado, A. Sbaih,
+Recommender Systems with GNNs in PyG
+,
+Stanford CS224W GraphML Tutorials
+, 2022.
+Available:
+https://medium.com/stanford-cs224w/recommender-systems-with-gnns-in-pyg-d8301178e377
+[3] X. He, K. Deng, X. Wang, Y. Li, Y. Zhang, and M. Wang,
+LightGCN: Simplifying and Powering Graph Convolution Network for Recommendation
+. arXiv, 2020. doi: 10.48550/ARXIV.2002.02126.
+Available:
+https://arxiv.org/abs/2002.02126
+[4] H. Hotta and A. Zhou,
+LightGCN with PyTorch Geometric
+.
+Stanford CS224W GraphML Tutorials
+, 2022.
+Available:
+https://medium.com/stanford-cs224w/lightgcn-with-pytorch-geometric-91bab836471e
+
+18
+Unlocking the Potential of Graph Neural Networks for Real-World Applications
+Thank you for taking the time to read
+Hands-On Graph Neural Networks Using Python
+. We hope that it has provided you with valuable insights into the world of graph neural networks and
+their applications.
+As we conclude this book, we would like to leave you with some final pieces of advice on how to effectively use GNNs. GNNs
+can be incredibly performant in the right conditions, but
+they suffer from the same pros and cons as other deep learning techniques. Knowing when and where to apply these models is a crucial skill to master, as over-engineered solutions can result in
+poor performance.
+First, GNNs are especially effective when a large amount of data is available for training. This is because deep learning algorithms require a lot of data to learn complex patterns and relationships effectively. With a large enough dataset, GNNs can achieve high levels of accuracy
+and generalization.
+For similar reasons, GNNs are most valuable when dealing with complex, high-dimensional data (node and edge features). They can automatically learn intricate patterns and relationships between features that would be difficult or impossible for humans to identify. Traditional machine learning algorithms, such as linear regression or decision trees, rely on handcrafted features that are often limited in their ability to capture the complexity of
+real-world data.
+Finally, when working with GNNs, it is important to ensure that the graph representation adds value to the features. This is particularly applicable when the graph is an artificially constructed representation rather than a natural one, such as social networks or protein structures. The connections between nodes should not be arbitrary but represent meaningful relationships between
+the nodes.
+You might notice that some examples in this book did not follow the previous rules. This is mostly due to the technical limitation of being able to run the code in Google Colab, and a general lack of high-quality datasets. However, this is also reflective of real-life datasets, which can be messy and difficult to obtain in large quantities. Most of this data also tends to be tabular, where excellent tree-based models such as XGBoost are difficult
+to beat.
+More generally, sound baseline solutions are crucial, as they can be challenging to outperform, even in the right conditions. A powerful strategy when working with GNNs is to implement multiple
+types of GNNs and compare their performance. For example, a convolutional-based GNN such as GCN (
+Chapter 6
+) might work well for certain types of graphs, while an attention-based GNN such as GAT (
+Chapter 7
+) might be better suited for others. Additionally, a message-passing GNN such as MPNN (
+Chapter 12
+) might excel in certain contexts. Note how each approach is more expressive than the previous one, and each has different strengths
+and weaknesses.
+If you’re working on a more specific problem, there are several GNN approaches covered in this book that may be more appropriate. For example, if you’re dealing with small graph data that lacks node and edge features, you may want to consider using Node2Vec (
+Chapter 4
+). On the contrary, if you’re dealing with large graphs, GraphSAGE and LightGCN can help manage the computational time and memory storage requirements (
+Chapters 8
+and
+17
+).
+Additionally, GIN and global pooling layers may be suitable for graph classification tasks (
+Chapter 9
+), while Variational Graph Autoencoders and SEAL can be used for link prediction (
+Chapter 10
+). For generating new graphs, you can explore GraphRNN and MolGAN (
+Chapter 11
+). If you’re working with heterogeneous graphs, you may want to consider one of the many flavors of heterogeneous GNNs (
+Chapters 12
+and
+16
+). For spatio-temporal graphs, Graph WaveNet, STGraph, and other temporal GNNs can be useful (
+Chapters 13
+and
+15
+). Finally, if you need to explain the predictions made by your GNN, you can turn to the graph explainability techniques covered in
+Chapter 14
+.
+By reading this book, you will have gained a deep understanding of GNNs and how they can be applied to solve real-world problems. As you continue to work in this field, we encourage you to put this knowledge into practice, experiment with new approaches, and continue to grow your expertise. The field of machine learning is constantly evolving, and your skills will only become more valuable as time goes on. We hope that you will apply what you have learned to tackle challenges and have a positive impact on the world. Thank you again for reading this book, and we wish you all the best in your
+future endeavors.
+
+Index
+As this ebook edition doesn't have fixed pagination, the page numbers below are hyperlinked for reference only, based on the printed edition of this book.
+A
+activation function
+107
+Adamic-Adar index
+165
+adjacency list
+22
+adjacency matrix
+20
+-
+22
+adjacent
+18
+aggregate function
+148
+aggregation
+129
+aggregator
+129
+LSTM aggregator
+129
+mean aggregator
+129
+pooling aggregator
+129
+anomaly detection
+275
+A* search
+25
+attention scores
+106
+Attention Temporal Graph Convolutional Network (A3T-GCN)
+implementing
+267
+-
+273
+autoregressive models
+190
+,
+191
+average precision (AP)
+169
+averaging
+108
+B
+batch gradient descent
+126
+Bayesian Personalized Ranking (BPR)
+309
+BERT
+105
+betweenness centrality
+19
+,
+20
+bidirectional BFS
+24
+binary bag of words
+68
+BookCrossing community
+URL
+296
+Book-Crossing dataset
+296
+-
+302
+preprocessing
+302
+-
+305
+breadth-first search (BFS)
+11
+,
+23
+,
+51
+implementing
+23
+-
+25
+C
+canonical form
+146
+Captum
+241
+,
+248
+reference link
+248
+centrality
+19
+CIDDS-001 dataset
+276
+-
+280
+preprocessing
+281
+-
+287
+classification
+95
+closeness centrality
+19
+,
+20
+Cluster-GCN
+142
+collaborative filtering
+302
+combine function
+148
+common neighbors
+165
+complete graph
+16
+concatenation
+108
+connected graphs
+14
+,
+15
+Constrained Graph Variational Autoencoder (CGVAE)
+190
+content-based filtering
+303
+context size
+32
+continuous bag-of-words (CBOW) model
+31
+versus skip-gram
+31
+Convolutional Neural Networks (CNNs)
+85
+Cora dataset
+68
+analyzing, with PyTorch Geometric
+69
+,
+70
+cosine similarity
+30
+COVID-19 case prediction
+231
+,
+232
+MPNN-LSTM architecture
+232
+-
+238
+cycle
+19
+D
+decomposition methods
+242
+Deep Deterministic Policy Gradient (DDPG) algorithm
+192
+Deep Graph Convolutional Neural Network (DGCNN)
+174
+deep graph generative models
+autoregressive models
+190
+,
+191
+generative adversarial networks (GANs)
+191
+-
+193
+Graph Variational Autoencoder (GVAE) model
+188
+-
+190
+deep learning
+7
+DeepWalk
+29
+,
+37
+,
+52
+applications
+45
+goal
+38
+implementing
+40
+-
+44
+random walks
+29
+Word2Vec
+29
+degree
+17
+,
+19
+degree centrality
+19
+,
+20
+dense graph
+20
+density
+20
+depth-first search (DFS)
+11
+,
+25
+,
+51
+implementing
+25
+,
+26
+digraph
+12
+directed acyclic graph (DAG)
+16
+directed graphs
+12
+,
+13
+Double-Radius Node Labeling (DRNL) algorithm
+working
+174
+dynamic graphs
+220
+with temporal signals
+220
+E
+edge-conditional graph convolutions (ECC)
+189
+edge-level RNN
+190
+edge list
+22
+edges
+4
+,
+12
+,
+17
+embeddings
+30
+enclosing subgraph
+173
+England Covid dataset
+231
+enzymes
+150
+Erdos-Rényi model
+184
+-
+186
+evidence lower bound (ELBO)
+169
+EvolveGCN architecture
+221
+-
+223
+EvolveGCN-H
+221
+EvolveGCN-O
+221
+implementing
+223
+-
+231
+explainability (XAI)
+241
+explainable model
+242
+explanation techniques
+242
+,
+243
+decomposition methods
+242
+gradient-based methods
+242
+perturbation-based methods
+242
+surrogate methods
+242
+explanation techniques, metrics
+fidelity
+242
+sparsity
+243
+Exponential Linear Unit (ELU) function
+114
+expressiveness
+defining
+146
+F
+Facebook Page-Page dataset
+70
+importing
+72
+,
+73
+versus Cora dataset
+71
+flows
+284
+G
+Gated Graph Convolutional Network (GGCN)
+190
+Gated Recurrent Unit (GRU)
+190
+,
+221
+GATv2
+109
+generative adversarial networks (GANs)
+191
+-
+193
+Gephi
+reference link
+68
+GINE layer
+154
+global heuristics
+165
+Katz index
+165
+random walk with restart
+166
+global pooling
+149
+max global pooling
+149
+mean global pooling
+149
+sum global pooling
+150
+GNNExplainer
+243
+,
+244
+implementing
+244
+-
+248
+GNN explanation
+242
+goal-directed graph generation
+183
+GPT-3
+105
+gradient-based methods
+242
+gradient descent
+126
+batch gradient descent
+126
+mini-batch gradient descent
+126
+stochastic gradient descent
+126
+graph
+11
+,
+12
+bipartite graph
+16
+complete graph
+16
+connected graphs
+14
+,
+15
+density
+20
+directed acyclic graph (DAG)
+16
+directed graphs
+12
+,
+13
+fundamental objects
+17
+-
+19
+generating, with GNNs
+188
+generating, with traditional techniques
+184
+need for
+4
+,
+5
+properties
+12
+rooted tree
+16
+tree
+16
+types
+17
+use cases
+4
+weighted graphs
+14
+with transition probabilities
+53
+graph algorithms
+23
+breadth-first search (BFS)
+23
+-
+25
+depth-first search (DFS)
+25
+,
+26
+Graph Attentional Operator
+109
+graph attention layer
+106
+activation function
+107
+implementing, in NumPy
+109
+-
+113
+improved graph attention layer
+109
+linear transformation
+106
+,
+107
+multi-head attention
+108
+,
+109
+softmax normalization
+107
+Graph Attention Networks (GATs)
+105
+implementing, in PyTorch Geometric
+113
+-
+121
+Graph Autoencoder (GAE)
+168
+decoder
+168
+encoder
+168
+graph classification
+6
+Graph Convolutional Network (GCN)
+85
+designing
+86
+-
+90
+versus graph linear layers
+90
+-
+95
+graph datasets
+7
+,
+8
+,
+68
+Cora dataset
+68
+-
+70
+Facebook Page-Page dataset
+70
+-
+73
+graph generation
+6
+Graph Isomorphism Network (GIN)
+148
+graph classification
+149
+,
+150
+implementing
+150
+-
+160
+graph isomorphism problem
+146
+graph learning
+deep learning
+7
+graph classification
+6
+graph generation
+6
+graph signal processing
+6
+link prediction
+6
+matrix factorization
+7
+need for
+6
+node classification
+6
+random walk
+7
+graph-level readout
+149
+graph-level RNN
+190
+GraphLIME
+242
+graph linear layer
+78
+graph measures
+betweenness centrality
+19
+,
+20
+closeness centrality
+19
+,
+20
+degree centrality
+19
+,
+20
+graph neural network layer-wise relevance propagation (GNN-LRP)
+242
+Graph Neural Networks (GNNs)
+3
+,
+29
+for real-world applications
+317
+need for
+8
+-
+10
+simplifying
+142
+types
+318
+usage
+317
+GraphRNN
+190
+,
+191
+GraphSAGE
+125
+,
+126
+aggregation
+129
+implementing, with PyTorch Geometric
+138
+-
+142
+neighbor sampling
+126
+-
+128
+graph signal processing
+6
+graph theory
+4
+,
+11
+Graph Variational Autoencoder (GVAE) model
+188
+-
+190
+H
+halicin
+9
+heterogeneous GNN
+implementing
+287
+-
+292
+heterogeneous graphs
+202
+-
+205
+heuristic techniques
+164
+global heuristics
+165
+,
+166
+local heuristics
+165
+hierarchical self-attention network (HAN)
+implementing
+212
+-
+216
+levels
+212
+hierarchical softmax (H-Softmax)
+29
+,
+37
+Historical Average (HA)
+270
+homogeneous GNNs
+transforming, to heterogeneous GNNs
+205
+-
+212
+homophily
+51
+hosts
+284
+hub nodes
+128
+I
+incident
+17
+indegree
+18
+inductive learning
+137
+on protein-protein interaction network
+137
+-
+142
+injective function
+148
+mapping diagram
+149
+integrated gradients
+242
+,
+248
+implementing
+249
+-
+253
+integrated gradients, axioms
+implementation invariance
+248
+sensitivity
+248
+interpretable model
+242
+J
+Jaccard’s coefficient
+165
+jumping knowledge
+206
+K
+Katz index
+165
+k-GNN
+149
+Kullback-Leibler (KL) divergence
+169
+k-WL test
+149
+L
+Leaky Rectified Linear Unit (ReLU) activation function
+107
+LightGCN
+295
+implementing
+306
+-
+315
+linear transformation
+106
+,
+107
+link prediction
+6
+,
+163
+with SEAL
+173
+link prediction, with node embeddings
+167
+Graph Autoencoder (GAE)
+168
+Variational Graph Autoencoder (VGAE)
+168
+,
+169
+VGAE implementation
+169
+-
+172
+link prediction, with traditional methods
+heuristic techniques
+164
+-
+166
+matrix factorization
+166
+,
+167
+local heuristics
+165
+Adamic-Adar index
+165
+common neighbors
+165
+Jaccard’s coefficient
+165
+Long Short-Term Memory (LSTM)
+190
+,
+221
+loop
+17
+M
+machine learning (ML)
+29
+matrix factorization
+7
+,
+163
+for link prediction
+166
+,
+167
+max global pooling
+149
+Mean Absolute Error (MAE)
+101
+,
+270
+Mean Absolute Percentage Error (MAPE)
+271
+mean aggregator
+129
+mean global pooling
+149
+Mean Squared Error (MSE)
+99
+,
+269
+Message Passing Neural Network (MPNN)
+200
+-
+202
+operations
+200
+mini-batch gradient descent
+126
+mini-batching
+126
+,
+127
+molecular GAN (MolGAN)
+192
+architecture
+192
+discriminator
+192
+generator
+192
+implementing
+193
+-
+196
+reward network
+192
+molecules
+generating, with MolGAN
+193
+-
+196
+movie RecSys
+building
+60
+-
+64
+multi-head attention
+108
+,
+109
+Multilayer Perceptron (MLP)
+73
+,
+74
+,
+189
+mutual information (MI)
+244
+N
+natural language processing (NLP)
+29
+neighbors
+18
+neighbor sampling technique
+125
+-
+128
+network homophily hypothesis
+38
+Node2Vec
+49
+,
+50
+biased random walks
+51
+-
+56
+implementing
+57
+-
+60
+neighborhood, defining
+50
+,
+51
+node classification
+6
+node-level attention
+212
+node regression
+85
+web traffic, predicting with
+95
+-
+102
+nodes
+4
+,
+12
+classifying, on PubMed
+130
+-
+137
+classifying, with Vanilla Graph Neural Networks
+78
+-
+82
+classifying, with Vanilla Neural Networks
+73
+-
+77
+Normalized Discounted Cumulative Gain (NDGC)
+310
+NumPy
+graph attention layer, implementing in
+109
+-
+113
+O
+outdegree
+18
+P
+path
+18
+,
+19
+PeMS-M dataset
+258
+-
+262
+processing
+263
+-
+267
+Performance Measurement System (PeMS)
+258
+perturbation-based methods
+242
+pooling aggregator
+129
+protein-protein interaction network
+inductive learning
+137
+-
+142
+PubMed
+nodes, classifying
+130
+-
+137
+PyTorch Geometric (PyG)
+105
+GAT, implementing in
+113
+-
+121
+LightGCN architecture, implementing
+307
+R
+Random Walk (RW)
+7
+,
+270
+implementing
+38
+-
+40
+importance
+38
+realistic graph generation
+183
+Recall@k
+310
+recommender systems
+6
+Rectified Linear Unit (ReLU)
+75
+Recurrent Neural Networks (RNNs)
+190
+,
+221
+regression
+95
+RMSprop
+127
+ROC AUC score
+74
+rooted tree
+16
+Root Mean Squared Error (RMSE)
+270
+S
+sampling strategy
+51
+scalability
+125
+SEAL framework
+173
+,
+174
+enclosing subgraph extraction
+173
+GNN training
+173
+implementing
+175
+-
+181
+node information matrix construction
+173
+search bias
+52
+self-attention
+105
+self-loop
+17
+semantic-level attention
+212
+shared layers
+206
+simple path
+19
+simplified molecular-input line-entry system (SMILES) representations
+194
+skip-connections
+206
+skip-gram model
+34
+-
+37
+creating
+32
+,
+33
+fully connected layer
+35
+projection layer
+35
+versus CBOW
+31
+small-world model
+186
+high clustering coefficients
+187
+short paths
+186
+Watts-Strogatz model
+187
+softmax normalization
+107
+sparse graph
+20
+Spatio-Temporal GNNs
+219
+static graphs
+with temporal signals
+220
+stochastic gradient descent
+126
+structural equivalence
+51
+sum global pooling
+150
+surrogate methods
+242
+T
+tabular datasets
+7
+,
+8
+t-distributed stochastic neighbor embedding (t-SNE)
+43
+temporal GCN (TGCN) architecture
+268
+Temporal Graph Neural Networks (T-GNNs)
+219
+traditional graph generation techniques
+184
+Erdos-Rényi model
+184
+-
+186
+small-world model
+186
+traffic forecasting
+6
+,
+257
+transductive learning
+137
+transformer
+105
+tree
+16
+V
+Vanilla Graph Neural Networks
+nodes, classifying with
+78
+-
+82
+Vanilla Neural Networks
+nodes, classifying with
+73
+-
+77
+Variational Graph Autoencoder (VGAE)
+168
+decoder
+169
+encoder
+168
+implementing
+169
+-
+172
+vertices
+4
+,
+12
+W
+Wasserstein GAN (WGAN)
+191
+Watts-Strogatz model
+187
+,
+188
+web traffic
+predicting, with node regression
+95
+-
+103
+web traffic, forecasting
+220
+EvolveGCN architecture, using
+221
+-
+223
+weighted graph
+14
+Weisfeiler-Leman (WL) test
+146
+working
+147
+WikiMaths dataset
+223
+WL algorithm
+147
+Word2Vec
+30
+CBOW, versus skip-gram
+31
+skip-grams, creating
+32
+,
+33
+Y
+yEd Live
+reference link
+68
+
+www.packtpub.com
+Subscribe to our online digital library for full access to over 7,000 books and videos, as well as industry leading tools to help you plan your personal development and advance your career. For more information, please visit our website.
+Why subscribe?
+Spend less time learning and more time coding with practical eBooks and Videos from over 4,000 industry professionals
+Improve your learning with Skill Plans built especially for you
+Get a free eBook or video every month
+Fully searchable for easy access to vital information
+Copy and paste, print, and bookmark content
+Did you know that Packt offers eBook versions of every book published, with PDF and ePub files available? You can upgrade to the eBook version at
+www.packtpub.com
+and as a print book customer, you are entitled to a discount on the eBook copy. Get in touch with us at
+customercare@packtpub.com
+for more details.
+At
+www.packtpub.com
+, you can also read a collection of free technical articles, sign up for a range of free newsletters, and receive exclusive discounts and offers on Packt books and eBooks.
+Other Books You May Enjoy
+If you enjoyed this book, you may be interested in these other books by Packt:
+Network Science with Python
+David Knickerbocker
+ISBN: 9781801073691
+Explore NLP, network science, and social network analysis
+Apply the tech stack used for NLP, network science, and analysis
+Extract insights from NLP and network data
+Generate personalized NLP and network projects
+Authenticate and scrape tweets, connections, the web, and data streams
+Discover the use of network data in machine learning projects
+3D Deep Learning with Python
+Xudong Ma, Vishakh Hegde, Lilit Yolyan
+ISBN: 9781803247823
+Develop 3D computer vision models for interacting with the environment
+Get to grips with 3D data handling with point clouds, meshes, ply, and obj file format
+Work with 3D geometry, camera models, and coordination and convert between them
+Understand concepts of rendering, shading, and more with ease
+Implement differential rendering for many 3D deep learning models
+Advanced state-of-the-art 3D deep learning models like Nerf, synsin, mesh RCNN
+Packt is searching for authors like you
+If you’re interested in becoming an author for Packt, please visit
+authors.packtpub.com
+and apply today. We have worked with thousands of developers and tech professionals, just like you, to help them share their insight with the global tech community. You can make a general application, apply for a specific hot topic that we are recruiting an author for, or submit your own idea.
+Share your thoughts
+Now you’ve finished Hands-On Graph Neural Networks Using Python, we’d love to hear your thoughts! If you purchased the book from Amazon, please
+click here to go straight to the Amazon review page
+for this book and share your feedback or leave a review on the site that you purchased it from.
+Your review is important to us and the tech community and will help us make sure we’re delivering excellent quality content.
+Download a free PDF copy of this book
+Thanks for purchasing this book!
+Do you like to read on the go but are unable to carry your print books everywhere?
+Is your eBook purchase not compatible with the device of your choice?
+Don’t worry, now with every Packt book you get a DRM-free PDF version of that book at no cost.
+Read anywhere, any place, on any device. Search, copy, and paste code from your favorite technical books directly into your application.
+The perks don’t stop there, you can get exclusive access to discounts, newsletters, and great free content in your inbox daily
+Follow these simple steps to get the benefits:
+Scan the QR code or visit the link below
+https://packt.link/free-ebook/9781804617526
+Submit your proof of purchase
+That’s it! We’ll send your free PDF and other benefits to your email directly
+
+Contents
+Hands-On Graph Neural Networks Using Python
+Contributors
+About the author
+About the reviewers
+Preface
+Who this book is for
+What this book covers
+To get the most out of this book
+Download the example code files
+Download the color images
+Conventions used
+Get in touch
+Share your thoughts
+Download a free PDF copy of this book
+Part 1: Introduction to Graph Learning
+Chapter 1: Getting Started with Graph Learning
+Why graphs?
+Why graph learning?
+Why graph neural networks?
+Summary
+Further reading
+Chapter 2: Graph Theory for Graph Neural Networks
+Technical requirements
+Introducing graph properties
+Directed graphs
+Weighted graphs
+Connected graphs
+Types of graphs
+Discovering graph concepts
+Fundamental objects
+Graph measures
+Adjacency matrix representation
+Exploring graph algorithms
+Breadth-first search
+Depth-first search
+Summary
+Chapter 3: Creating Node Representations with DeepWalk
+Technical requirements
+Introducing Word2Vec
+CBOW versus skip-gram
+Creating skip-grams
+The skip-gram model
+DeepWalk and random walks
+Implementing DeepWalk
+Summary
+Further reading
+Part 2: Fundamentals
+Chapter 4: Improving Embeddings with Biased Random Walks in Node2Vec
+Technical requirements
+Introducing Node2Vec
+Defining a neighborhood
+Introducing biases in random walks
+Implementing Node2Vec
+Building a movie RecSys
+Summary
+Further reading
+Chapter 5: Including Node Features with Vanilla Neural Networks
+Technical requirements
+Introducing graph datasets
+The Cora dataset
+The Facebook Page-Page dataset
+Classifying nodes with vanilla neural networks
+Classifying nodes with vanilla graph neural networks
+Summary
+Further reading
+Chapter 6: Introducing Graph Convolutional Networks
+Technical requirements
+Designing the graph convolutional layer
+Comparing graph convolutional and graph linear layers
+Predicting web traffic with node regression
+Summary
+Further reading
+Chapter 7: Graph Attention Networks
+Technical requirements
+Introducing the graph attention layer
+Linear transformation
+Activation function
+Softmax normalization
+Multi-head attention
+Improved graph attention layer
+Implementing the graph attention layer in NumPy
+Implementing a GAT in PyTorch Geometric
+Summary
+Part 3: Advanced Techniques
+Chapter 8: Scaling Up Graph Neural Networks  with GraphSAGE
+Technical requirements
+Introducing GraphSAGE
+Neighbor sampling
+Aggregation
+Classifying nodes on PubMed
+Inductive learning on protein-protein interactions
+Summary
+Further reading
+Chapter 9: Defining Expressiveness for Graph Classification
+Technical requirements
+Defining expressiveness
+Introducing the GIN
+Classifying graphs using GIN
+Graph classification
+Implementing the GIN
+Summary
+Further reading
+Chapter 10: Predicting Links with Graph Neural Networks
+Technical requirements
+Predicting links with traditional methods
+Heuristic techniques
+Matrix factorization
+Predicting links with node embeddings
+Introducing Graph Autoencoders
+Introducing VGAEs
+Implementing a VGAE
+Predicting links with SEAL
+Introducing the SEAL framework
+Implementing the SEAL framework
+Summary
+Further reading
+Chapter 11: Generating Graphs Using Graph Neural Networks
+Technical requirements
+Generating graphs with traditional techniques
+The Erdős–Rényi model
+The small-world model
+Generating graphs with graph neural networks
+Graph variational autoencoders
+Autoregressive models
+Generative adversarial networks
+Generating molecules with MolGAN
+Summary
+Further reading
+Chapter 12: Learning from Heterogeneous Graphs
+Technical requirements
+The message passing neural network framework
+Introducing heterogeneous graphs
+Transforming homogeneous GNNs to heterogeneous GNNs
+Implementing a hierarchical self-attention network
+Summary
+Further reading
+Chapter 13: Temporal Graph Neural Networks
+Technical requirements
+Introducing dynamic graphs
+Forecasting web traffic
+Introducing EvolveGCN
+Implementing EvolveGCN
+Predicting cases of COVID-19
+Introducing MPNN-LSTM
+Implementing MPNN-LSTM
+Summary
+Further reading
+Chapter 14: Explaining Graph Neural Networks
+Technical requirements
+Introducing explanation techniques
+Explaining GNNs with GNNExplainer
+Introducing GNNExplainer
+Implementing GNNExplainer
+Explaining GNNs with Captum
+Introducing Captum and integrated gradients
+Implementing integrated gradients
+Summary
+Further reading
+Part 4: Applications
+Chapter 15: Forecasting Traffic Using A3T-GCN
+Technical requirements
+Exploring the PeMS-M dataset
+Processing the dataset
+Implementing the A3T-GCN architecture
+Summary
+Further reading
+Chapter 16: Detecting Anomalies Using Heterogeneous GNNs
+Technical requirements
+Exploring the CIDDS-001 dataset
+Preprocessing the CIDDS-001 dataset
+Implementing a heterogeneous GNN
+Summary
+Further reading
+Chapter 17: Building a Recommender System Using LightGCN
+Technical requirements
+Exploring the Book-Crossing dataset
+Preprocessing the Book-Crossing dataset
+Implementing the LightGCN architecture
+Summary
+Further reading
+Chapter 18: Unlocking the Potential of Graph Neural Networks for Real-World Applications
+Index
+Why subscribe?
+Other Books You May Enjoy
+Packt is searching for authors like you
+Share your thoughts
+Download a free PDF copy of this book
+Landmarks
+Cover
+Table of Contents
+Index
