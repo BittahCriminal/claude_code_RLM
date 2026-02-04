@@ -1,18 +1,20 @@
 """Knowledge Base Importer for RLM Agents.
 
-Imports content from epub, pdf, and text files, processes them,
+Imports content from epub, pdf, text, and video files, processes them,
 and tags with metadata for agent-specific knowledge bases.
 
 Supported formats:
 - EPUB: E-books (requires ebooklib)
 - PDF: Documents (requires pypdf or pdfplumber)
 - TXT/MD: Plain text and markdown files
+- MP4/MKV/WEBM: Video files (requires whisper or faster-whisper)
 
 Usage:
     from knowledge.importer import KnowledgeImporter
 
     importer = KnowledgeImporter()
     importer.import_file("book.epub", agent="azure-architecture", tags=["networking", "vnet"])
+    importer.import_file("tutorial.mp4", agent="kubernetes", tags=["aks", "deployment"])
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import tempfile
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from enum import Enum
@@ -34,6 +38,11 @@ class SourceFormat(Enum):
     PDF = "pdf"
     TXT = "txt"
     MD = "md"
+    MP4 = "mp4"
+    MKV = "mkv"
+    WEBM = "webm"
+    WAV = "wav"
+    MP3 = "mp3"
 
 
 class AgentDomain(Enum):
@@ -45,6 +54,11 @@ class AgentDomain(Enum):
     SBOM_ANALYSIS = "sbom-analysis"
     CSHARP_ENGINEERING = "csharp-engineering"
     ARGOCD = "argocd"
+    KUBERNETES = "kubernetes"
+
+
+# Video/audio formats that require transcription
+MEDIA_FORMATS = {SourceFormat.MP4, SourceFormat.MKV, SourceFormat.WEBM, SourceFormat.WAV, SourceFormat.MP3}
 
 
 @dataclass
@@ -61,6 +75,8 @@ class KnowledgeMetadata:
     chunk_count: int = 0
     char_count: int = 0
     checksum: str = ""
+    duration_seconds: Optional[float] = None  # For video/audio
+    transcription_model: Optional[str] = None  # For video/audio
     custom_metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -85,6 +101,18 @@ class KnowledgeChunk:
     end_pos: int
     section: Optional[str] = None
     page: Optional[int] = None
+    timestamp_start: Optional[float] = None  # For video/audio
+    timestamp_end: Optional[float] = None    # For video/audio
+
+
+@dataclass
+class TranscriptionResult:
+    """Result from video/audio transcription."""
+    text: str
+    segments: List[Dict[str, Any]]
+    duration: float
+    model: str
+    language: Optional[str] = None
 
 
 class KnowledgeImporter:
@@ -117,6 +145,8 @@ class KnowledgeImporter:
         custom_metadata: Optional[Dict[str, Any]] = None,
         chunk_size: int = 200000,
         chunk_overlap: int = 1000,
+        whisper_model: str = "base",
+        language: Optional[str] = None,
     ) -> KnowledgeMetadata:
         """Import a file into the knowledge base.
 
@@ -129,6 +159,8 @@ class KnowledgeImporter:
             custom_metadata: Optional additional metadata
             chunk_size: Size of each chunk in characters
             chunk_overlap: Overlap between chunks
+            whisper_model: Whisper model for transcription (tiny, base, small, medium, large)
+            language: Language hint for transcription (e.g., "en", "es")
 
         Returns:
             KnowledgeMetadata for the imported content
@@ -152,9 +184,19 @@ class KnowledgeImporter:
                 raise ValueError(f"Unknown agent domain: {agent}")
 
         # Extract content based on format
-        content, extracted_title, extracted_author = self._extract_content(
-            file_path, source_format
-        )
+        if source_format in MEDIA_FORMATS:
+            transcription = self._extract_media(file_path, whisper_model, language)
+            content = transcription.text
+            extracted_title = None
+            extracted_author = None
+            duration = transcription.duration
+            trans_model = transcription.model
+        else:
+            content, extracted_title, extracted_author = self._extract_content(
+                file_path, source_format
+            )
+            duration = None
+            trans_model = None
 
         # Generate ID
         content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
@@ -171,13 +213,20 @@ class KnowledgeImporter:
             author=author or extracted_author,
             char_count=len(content),
             checksum=hashlib.sha256(content.encode()).hexdigest(),
+            duration_seconds=duration,
+            transcription_model=trans_model,
             custom_metadata=custom_metadata or {},
         )
 
         # Chunk content
-        chunks = self._chunk_content(
-            content, knowledge_id, chunk_size, chunk_overlap
-        )
+        if source_format in MEDIA_FORMATS:
+            chunks = self._chunk_transcription(
+                transcription, knowledge_id, chunk_size, chunk_overlap
+            )
+        else:
+            chunks = self._chunk_content(
+                content, knowledge_id, chunk_size, chunk_overlap
+            )
         metadata.chunk_count = len(chunks)
 
         # Save processed content
@@ -298,6 +347,199 @@ class KnowledgeImporter:
 
         return content, title, None
 
+    def _extract_media(
+        self,
+        file_path: Path,
+        model: str = "base",
+        language: Optional[str] = None,
+    ) -> TranscriptionResult:
+        """Extract content from video/audio file via transcription.
+
+        Supports multiple transcription backends:
+        1. faster-whisper (recommended, faster)
+        2. openai-whisper (original)
+        3. whisper.cpp via CLI
+
+        Args:
+            file_path: Path to media file
+            model: Whisper model size (tiny, base, small, medium, large)
+            language: Language hint (e.g., "en")
+
+        Returns:
+            TranscriptionResult with text, segments, and metadata
+        """
+        # Try faster-whisper first (recommended)
+        try:
+            return self._transcribe_faster_whisper(file_path, model, language)
+        except ImportError:
+            pass
+
+        # Try openai-whisper
+        try:
+            return self._transcribe_openai_whisper(file_path, model, language)
+        except ImportError:
+            pass
+
+        # Try whisper.cpp CLI
+        try:
+            return self._transcribe_whisper_cpp(file_path, model, language)
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            pass
+
+        raise ImportError(
+            "Video/audio transcription requires one of:\n"
+            "  pip install faster-whisper  (recommended)\n"
+            "  pip install openai-whisper\n"
+            "  Or whisper.cpp installed and in PATH"
+        )
+
+    def _transcribe_faster_whisper(
+        self,
+        file_path: Path,
+        model: str,
+        language: Optional[str],
+    ) -> TranscriptionResult:
+        """Transcribe using faster-whisper."""
+        from faster_whisper import WhisperModel
+
+        # Load model (uses CTranslate2, much faster)
+        whisper_model = WhisperModel(model, device="auto", compute_type="auto")
+
+        # Transcribe
+        segments_iter, info = whisper_model.transcribe(
+            str(file_path),
+            language=language,
+            beam_size=5,
+            vad_filter=True,  # Filter out silence
+        )
+
+        # Collect segments
+        segments = []
+        text_parts = []
+        for segment in segments_iter:
+            segments.append({
+                "start": segment.start,
+                "end": segment.end,
+                "text": segment.text.strip(),
+            })
+            text_parts.append(segment.text.strip())
+
+        return TranscriptionResult(
+            text="\n".join(text_parts),
+            segments=segments,
+            duration=info.duration,
+            model=f"faster-whisper-{model}",
+            language=info.language,
+        )
+
+    def _transcribe_openai_whisper(
+        self,
+        file_path: Path,
+        model: str,
+        language: Optional[str],
+    ) -> TranscriptionResult:
+        """Transcribe using openai-whisper."""
+        import whisper
+
+        # Load model
+        whisper_model = whisper.load_model(model)
+
+        # Transcribe
+        result = whisper_model.transcribe(
+            str(file_path),
+            language=language,
+        )
+
+        # Extract segments
+        segments = []
+        for seg in result.get("segments", []):
+            segments.append({
+                "start": seg["start"],
+                "end": seg["end"],
+                "text": seg["text"].strip(),
+            })
+
+        # Calculate duration from last segment
+        duration = segments[-1]["end"] if segments else 0.0
+
+        return TranscriptionResult(
+            text=result["text"],
+            segments=segments,
+            duration=duration,
+            model=f"openai-whisper-{model}",
+            language=result.get("language"),
+        )
+
+    def _transcribe_whisper_cpp(
+        self,
+        file_path: Path,
+        model: str,
+        language: Optional[str],
+    ) -> TranscriptionResult:
+        """Transcribe using whisper.cpp CLI."""
+        # Check for whisper.cpp binary
+        whisper_bin = "whisper" if os.name != "nt" else "whisper.exe"
+
+        # Convert to WAV if needed (whisper.cpp prefers WAV)
+        if file_path.suffix.lower() not in [".wav"]:
+            wav_path = self._convert_to_wav(file_path)
+        else:
+            wav_path = file_path
+
+        try:
+            # Run whisper.cpp
+            cmd = [
+                whisper_bin,
+                "-m", f"ggml-{model}.bin",
+                "-f", str(wav_path),
+                "-oj",  # Output JSON
+            ]
+            if language:
+                cmd.extend(["-l", language])
+
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            output = json.loads(result.stdout)
+
+            # Parse output
+            segments = []
+            text_parts = []
+            for seg in output.get("transcription", []):
+                segments.append({
+                    "start": seg["timestamps"]["from"] / 1000,
+                    "end": seg["timestamps"]["to"] / 1000,
+                    "text": seg["text"].strip(),
+                })
+                text_parts.append(seg["text"].strip())
+
+            return TranscriptionResult(
+                text="\n".join(text_parts),
+                segments=segments,
+                duration=segments[-1]["end"] if segments else 0.0,
+                model=f"whisper-cpp-{model}",
+                language=language,
+            )
+        finally:
+            # Clean up temp WAV if we created it
+            if wav_path != file_path and wav_path.exists():
+                wav_path.unlink()
+
+    def _convert_to_wav(self, file_path: Path) -> Path:
+        """Convert media file to WAV using ffmpeg."""
+        wav_path = Path(tempfile.mktemp(suffix=".wav"))
+
+        try:
+            subprocess.run([
+                "ffmpeg", "-i", str(file_path),
+                "-ar", "16000",  # 16kHz sample rate
+                "-ac", "1",      # Mono
+                "-y",            # Overwrite
+                str(wav_path)
+            ], check=True, capture_output=True)
+        except FileNotFoundError:
+            raise ImportError("ffmpeg required for video conversion. Install from https://ffmpeg.org")
+
+        return wav_path
+
     def _chunk_content(
         self,
         content: str,
@@ -337,6 +579,67 @@ class KnowledgeImporter:
 
         return chunks
 
+    def _chunk_transcription(
+        self,
+        transcription: TranscriptionResult,
+        knowledge_id: str,
+        chunk_size: int,
+        overlap: int,
+    ) -> List[KnowledgeChunk]:
+        """Split transcription into chunks with timestamp metadata."""
+        chunks = []
+        current_chunk_text = []
+        current_chunk_start = 0.0
+        current_char_count = 0
+        index = 0
+
+        for segment in transcription.segments:
+            segment_text = segment["text"]
+            segment_chars = len(segment_text)
+
+            # Check if adding this segment would exceed chunk size
+            if current_char_count + segment_chars > chunk_size and current_chunk_text:
+                # Save current chunk
+                chunk_content = "\n".join(current_chunk_text)
+                chunk_id = f"{knowledge_id}_chunk_{index:04d}"
+
+                chunks.append(KnowledgeChunk(
+                    id=chunk_id,
+                    knowledge_id=knowledge_id,
+                    index=index,
+                    content=chunk_content,
+                    start_pos=0,  # Not applicable for transcriptions
+                    end_pos=len(chunk_content),
+                    timestamp_start=current_chunk_start,
+                    timestamp_end=segment["start"],
+                ))
+
+                index += 1
+                current_chunk_text = []
+                current_chunk_start = segment["start"]
+                current_char_count = 0
+
+            current_chunk_text.append(segment_text)
+            current_char_count += segment_chars
+
+        # Don't forget the last chunk
+        if current_chunk_text:
+            chunk_content = "\n".join(current_chunk_text)
+            chunk_id = f"{knowledge_id}_chunk_{index:04d}"
+
+            chunks.append(KnowledgeChunk(
+                id=chunk_id,
+                knowledge_id=knowledge_id,
+                index=index,
+                content=chunk_content,
+                start_pos=0,
+                end_pos=len(chunk_content),
+                timestamp_start=current_chunk_start,
+                timestamp_end=transcription.duration,
+            ))
+
+        return chunks
+
     def _save_knowledge(
         self,
         metadata: KnowledgeMetadata,
@@ -366,6 +669,17 @@ class KnowledgeImporter:
         for chunk in chunks:
             chunk_path = chunks_dir / f"{chunk.id}.txt"
             chunk_path.write_text(chunk.content)
+
+            # Save chunk metadata if it has timestamps
+            if chunk.timestamp_start is not None:
+                chunk_meta = {
+                    "id": chunk.id,
+                    "index": chunk.index,
+                    "timestamp_start": chunk.timestamp_start,
+                    "timestamp_end": chunk.timestamp_end,
+                }
+                meta_path = chunks_dir / f"{chunk.id}.json"
+                meta_path.write_text(json.dumps(chunk_meta, indent=2))
 
     def list_knowledge(self, agent: Optional[str | AgentDomain] = None) -> List[KnowledgeMetadata]:
         """List all imported knowledge, optionally filtered by agent."""
@@ -398,24 +712,33 @@ def import_knowledge(
     agent: str,
     tags: Optional[str] = None,
     title: Optional[str] = None,
+    whisper_model: str = "base",
 ) -> None:
     """CLI-friendly import function."""
     importer = KnowledgeImporter()
     tag_list = tags.split(",") if tags else []
     metadata = importer.import_file(
-        file_path, agent, title=title, tags=tag_list
+        file_path, agent, title=title, tags=tag_list, whisper_model=whisper_model
     )
     print(f"Imported: {metadata.title}")
     print(f"  ID: {metadata.id}")
+    print(f"  Format: {metadata.source_format}")
     print(f"  Chunks: {metadata.chunk_count}")
     print(f"  Characters: {metadata.char_count}")
+    if metadata.duration_seconds:
+        mins = int(metadata.duration_seconds // 60)
+        secs = int(metadata.duration_seconds % 60)
+        print(f"  Duration: {mins}m {secs}s")
+        print(f"  Transcription model: {metadata.transcription_model}")
 
 
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 3:
-        print("Usage: python importer.py <file_path> <agent> [tags] [title]")
+        print("Usage: python importer.py <file_path> <agent> [tags] [title] [whisper_model]")
         print("\nAgents:", ", ".join(a.value for a in AgentDomain))
+        print("\nSupported formats:", ", ".join(f.value for f in SourceFormat))
+        print("\nWhisper models: tiny, base, small, medium, large")
         sys.exit(1)
 
     import_knowledge(
@@ -423,4 +746,5 @@ if __name__ == "__main__":
         sys.argv[2],
         sys.argv[3] if len(sys.argv) > 3 else None,
         sys.argv[4] if len(sys.argv) > 4 else None,
+        sys.argv[5] if len(sys.argv) > 5 else "base",
     )

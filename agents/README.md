@@ -1,6 +1,6 @@
 # RLM Sub-Agents
 
-Domain-specific agents that process knowledge from imported sources (epub, pdf, txt).
+Domain-specific agents that process knowledge from imported sources (epub, pdf, txt, video/audio).
 
 ## Available Agents
 
@@ -13,6 +13,7 @@ Domain-specific agents that process knowledge from imported sources (epub, pdf, 
 | [sbom-analysis](./sbom-analysis/agent.md) | SBOM Analysis | Docker Scout, Trivy, CVE analysis, supply chain |
 | [csharp-engineering](./csharp-engineering/agent.md) | C# Engineering | .NET, ASP.NET Core, Clean Architecture, DDD |
 | [argocd](./argocd/agent.md) | Argo CD | GitOps, Kubernetes CD, ApplicationSets |
+| [kubernetes](./kubernetes/agent.md) | Kubernetes | MicroK8s, K3s, standard K8s, AKS |
 
 ## Adding Knowledge
 
@@ -20,15 +21,27 @@ Domain-specific agents that process knowledge from imported sources (epub, pdf, 
    - `epub/` - E-books
    - `pdf/` - PDF documents
    - `txt/` - Text/markdown files
+   - `video/` - Video files (mp4, mkv, webm) - transcribed via Whisper
 
 2. Import using the knowledge importer:
    ```bash
+   # Text/document files
    python knowledge/importer.py <file> <agent-domain> [tags] [title]
+
+   # Video files (with transcription)
+   python knowledge/importer.py video.mp4 kubernetes "aks,tutorial" "AKS Tutorial" base
    ```
 
-   Example:
+   Examples:
    ```bash
-   python knowledge/importer.py sources/epub/azure-waf.epub azure-architecture "waf,reliability" "Azure Well-Architected Framework"
+   # EPUB book
+   python knowledge/importer.py sources/epub/azure-waf.epub azure-architecture "waf,reliability"
+
+   # PDF document
+   python knowledge/importer.py sources/pdf/k8s-patterns.pdf kubernetes "patterns,deployments"
+
+   # Video tutorial (transcribed)
+   python knowledge/importer.py sources/video/microk8s-setup.mp4 kubernetes "microk8s,setup" "MicroK8s Setup Guide" small
    ```
 
 3. Imported knowledge appears in `knowledge/processed/<agent>/`
@@ -43,6 +56,28 @@ See [agent-schema.md](./agent-schema.md) for the full agent definition schema.
 2. **Knowledge Lookup**: Agent retrieves relevant chunks from its knowledge base
 3. **Subcall**: Copilot CLI processes the query with knowledge context
 4. **Response**: Agent formats response according to its output schema
+
+## Video/Audio Transcription
+
+Video and audio files are automatically transcribed using Whisper:
+
+```bash
+# Install transcription support (choose one)
+pip install faster-whisper  # Recommended - faster
+pip install openai-whisper  # Original OpenAI implementation
+
+# Also requires ffmpeg for video conversion
+# Windows: winget install ffmpeg
+# macOS: brew install ffmpeg
+# Linux: apt install ffmpeg
+```
+
+Whisper models (size vs accuracy trade-off):
+- `tiny` - Fastest, lowest accuracy
+- `base` - Good balance (default)
+- `small` - Better accuracy
+- `medium` - High accuracy
+- `large` - Best accuracy, slowest
 
 ## Creating New Agents
 
