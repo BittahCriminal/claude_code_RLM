@@ -2,26 +2,33 @@
 
 This directory contains domain-specific expert agents for analyzing Azure architectures, platform engineering patterns, Score workload specifications, and technical books.
 
-## Available Agents (7 total)
+## Available Agents (8 total)
 
 ### Core RLM
 1. **rlm-subcall** - Generic chunk analyzer for any large context
 
-### Azure Experts (3)
+### Azure Experts (4)
 2. **azure-architecture-expert** - Cloud Adoption Framework, Well-Architected, landing zones
 3. **azure-iam-expert** - Entra ID, RBAC, Managed Identities, authentication
 4. **azure-networking-expert** - VNets, VPN Gateway, ExpressRoute, hybrid connectivity
+5. **azure-security-expert** - Defender for Cloud, Sentinel, security posture, best practices
 
 ### Specialized Domains (3)
-5. **books-expert** - Technical books on cloud, Kubernetes, platform engineering
-6. **platform-engineering-expert** - IDPs, Backstage, golden paths, developer experience
-7. **score-expert** - Score workload specifications, platform-agnostic deployments
+6. **books-expert** - Technical books on cloud, Kubernetes, platform engineering
+7. **platform-engineering-expert** - IDPs, Backstage, golden paths, developer experience
+8. **score-expert** - Score workload specifications, platform-agnostic deployments
 
 ## Context/Knowledge Base
 
 ### Azure Contexts
 - **azure_radius_full.txt** (19KB) - Azure Radius, Landing Zones, CAF
   - Usage: Azure architecture questions
+
+### Azure Security Contexts
+- **Azure-Sentinel.pdf** - Azure Sentinel best practices whitepaper
+  - Path: `/Users/bittahcriminal/workspace/Platform-Engineering-RLM/Docs/Azure-Sentinel.pdf`
+  - Usage: Sentinel incident response and data ingestion guidance
+  - Latest guidance: query Azure MCP server (container `magical_zhukovsky`) and pass inline
   
 ### Platform Engineering
 - **platform_engineering_full.txt** (1.6MB) - IDP patterns, Backstage, Team Topologies

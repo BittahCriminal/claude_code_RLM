@@ -37,6 +37,25 @@ This implementation maps to the RLM paper architecture as follows:
 
 The root LLM orchestrates the overall task, while delegating chunk-level analysis to the faster, lighter sub-LLM (Haiku). The Python REPL maintains state across invocations and provides utilities for chunking, searching, and managing the large context.
 
+## Capabilities
+
+- RLM chunking via a persistent Python REPL with reusable state.
+- Domain expert routing for Azure, platform engineering, Score, and books via `AGENTS.md`.
+- Non-interactive RLM runner supporting OpenCode, Claude, Codex, Copilot, and Gemini CLIs.
+- Provider model selection by explicit `--model`, domain presets, env vars, or defaults.
+
+## How It Works (Detailed Diagram)
+
+```mermaid
+flowchart TD
+    A[User Query] --> B[Root CLI<br/>Claude/Copilot/OpenCode/Codex/Gemini]
+    B -->|1) init context| C[rlm_repl.py<br/>persistent state]
+    C -->|2) chunk context| D[.claude/rlm_state/chunks<br/>chunk_0000...chunk_N]
+    D -->|3) per-chunk analysis| E[Sub-LLM calls<br/>rlm-subcall or provider run]
+    E -->|4) JSON findings| F[Aggregated chunk analyses]
+    F -->|5) synthesize| G[Root CLI response]
+```
+
 ## Prerequisites
 
 **Choose one CLI:**
@@ -107,6 +126,35 @@ python3 scripts/rlm_copilot_helper.py prepare-chunks "your query" .claude/rlm_st
 - Delegate chunk analysis to the sub-LLM (Haiku)
 - Synthesize results in the main conversation
 
+### Non-Interactive RLM Runner (OpenCode/Claude/Codex)
+
+If you want to run the RLM loop non-interactively via a CLI provider, use:
+
+```bash
+python3 scripts/opencode_rlm_runner.py --context path/to/context.txt --query "your question"
+```
+
+Options:
+- `--provider opencode|claude|codex|copilot|gemini|auto` (default: opencode)
+- `--model provider/model` (optional)
+- `--domain general|software|extra-thinking|security|cloud-architecture|devops|data-engineering|ml-ai|frontend|backend|testing|code-review|docs` (optional)
+- `--agent <agent>` (optional)
+- `--chunk-size 200000` and `--overlap 0`
+
+Gemini support assumes a `gemini` CLI that accepts the prompt as the last argument and optional `--model`.
+
+Model resolution order:
+- `--model` flag
+- `--domain` preset
+- Provider-specific env var: `OPENCODE_MODEL`, `CLAUDE_MODEL`, `CODEX_MODEL`, `COPILOT_MODEL`, `GEMINI_MODEL`
+- Built-in defaults (see `scripts/opencode_rlm_runner.py`)
+
+Auto provider selection (when `--provider auto`):
+- Picks the first available CLI on PATH in this order: `opencode`, `claude`, `codex`, `copilot`, `gemini`.
+
+The script writes its full output to:
+`.claude/rlm_state/opencode_run.json`
+
 ## Working with Long Files
 
 When using RLM to process large context files, it is recommended to save them in a dedicated `context/` folder within this project directory. This keeps your working files organized and separate from the RLM implementation code.
@@ -156,6 +204,7 @@ cd claude_code_RLM
 │   └── agent_templates/
 │       └── rlm-subcall.txt           # Agent template for Copilot CLI (manually loaded)
 ├── scripts/
+│   ├── opencode_rlm_runner.py        # Non-interactive RLM runner
 │   └── rlm_copilot_helper.py         # Helper for Copilot CLI workflows
 ├── context/                           # Recommended location for large context files
 └── README.md
@@ -170,6 +219,7 @@ cd claude_code_RLM
 | `AGENTS.md` | ❌ Ignored | ✅ Used | Agent routing logic |
 | `.claude/skills/rlm/scripts/rlm_repl.py` | ✅ Used | ✅ Used | **Shared** REPL |
 | `scripts/rlm_copilot_helper.py` | ❌ N/A | ✅ Used | Copilot-specific helper |
+| `scripts/opencode_rlm_runner.py` | ❌ N/A | ✅ Used | Non-interactive RLM loop |
 
 ## License
 

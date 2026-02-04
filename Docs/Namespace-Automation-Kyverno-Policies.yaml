@@ -1,0 +1,76 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: enforce-namespace-owner-label
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: require-owner-label
+      match:
+        resources:
+          kinds:
+            - Namespace
+      validate:
+        message: "Namespace must include owner label."
+        pattern:
+          metadata:
+            labels:
+              owner: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: restrict-lab-admins-to-owned-namespaces
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: allow-only-owned-namespace-changes
+      match:
+        resources:
+          kinds:
+            - Namespace
+            - ResourceQuota
+            - LimitRange
+      preconditions:
+        all:
+          - key: "{{ request.userInfo.groups }}"
+            operator: AnyIn
+            value:
+              - "<entra-lab-admins-group-object-id>"
+      validate:
+        message: "Lab admins can only modify namespaces they own."
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.kind == 'Namespace' ? request.object.metadata.labels.ownerGroupId : namespace.labels.ownerGroupId }}"
+                operator: NotIn
+                value: "{{ request.userInfo.groups }}"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: prevent-storage-decrease
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: block-storage-quota-decrease
+      match:
+        resources:
+          kinds:
+            - ResourceQuota
+      preconditions:
+        all:
+          - key: "{{ request.operation }}"
+            operator: Equals
+            value: UPDATE
+      validate:
+        message: "Storage requests cannot be decreased."
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.spec.hard['requests.storage'] || '' }}"
+                operator: LessThan
+                value: "{{ request.oldObject.spec.hard['requests.storage'] || '' }}"

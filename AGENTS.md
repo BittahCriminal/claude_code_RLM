@@ -78,7 +78,29 @@ This file enables GitHub Copilot CLI to use the RLM (Recursive Language Model) p
 
 ---
 
-### 5. books-expert
+### 5. azure-security-expert
+
+**Purpose**: Analyzes Azure security best practices across Defender for Cloud, Sentinel, identity, network, data, and governance controls.
+
+**Model**: Claude Haiku 4.5
+
+**Context**:
+- `/Users/bittahcriminal/workspace/Platform-Engineering-RLM/Docs/Azure-Sentinel.pdf`
+- Azure MCP server (`mcr.microsoft.com/azure-sdk/azure-mcp`, container: `magical_zhukovsky`) for latest guidance
+
+**Expertise**:
+- Defender for Cloud (Secure Score, recommendations, compliance)
+- Microsoft Sentinel (SIEM/SOAR, connectors, analytics rules)
+- Entra ID security (MFA, Conditional Access, PIM)
+- Network security (NSG, Azure Firewall, WAF, DDoS)
+- Data protection (Key Vault, encryption, secrets)
+- DevSecOps (secure CI/CD, supply chain controls)
+
+**Trigger keywords**: azure security, defender for cloud, sentinel, security posture, zero trust, SOC, SIEM, SOAR
+
+---
+
+### 6. books-expert
 
 **Purpose**: Analyzes content from ingested technical books covering cloud platforms, networking, DevOps, Kubernetes, and platform engineering.
 
@@ -102,7 +124,7 @@ This file enables GitHub Copilot CLI to use the RLM (Recursive Language Model) p
 
 ---
 
-### 6. platform-engineering-expert
+### 7. platform-engineering-expert
 
 **Purpose**: Analyzes Internal Developer Platforms (IDP), golden paths, Backstage, developer experience, and platform engineering principles.
 
@@ -123,7 +145,7 @@ This file enables GitHub Copilot CLI to use the RLM (Recursive Language Model) p
 
 ---
 
-### 7. score-expert
+### 8. score-expert
 
 **Purpose**: Analyzes Score workload specifications, score-compose, score-k8s, and platform-agnostic workload definitions.
 
@@ -141,6 +163,114 @@ This file enables GitHub Copilot CLI to use the RLM (Recursive Language Model) p
 - Service connections
 
 **Trigger keywords**: score, score.yaml, workload specification, score-compose, score-k8s, score spec
+
+---
+
+### 9. azure-devops-expert
+
+**Purpose**: Analyzes Azure DevOps practices across Pipelines, Repos, Boards, Artifacts, and Test Plans.
+
+**Model**: Claude Haiku 4.5
+
+**Context**: `.claude/rlm_contexts/books/azure-devops-explained-unknown-author-db1ecf5b_full.txt`
+
+**Expertise**:
+- Azure Pipelines (YAML, classic, agents, environments)
+- Azure Repos (Git workflows, branching, code review)
+- Azure Boards (work items, sprints, backlogs)
+- Azure Artifacts (feeds, packages, retention)
+- Azure Test Plans (manual, automated testing)
+- Service connections, permissions, governance
+
+**Trigger keywords**: azure devops, azure pipelines, azure repos, azure boards, azure artifacts, azure test plans
+
+---
+
+### 10. csharp-engineering-expert
+
+**Purpose**: Extracts C# and .NET engineering guidance, language features, and performance practices.
+
+**Model**: Claude Haiku 4.5
+
+**Context**: `.claude/rlm_contexts/books/c-13-and-net-9-modern-cross-platform-development-f-aa3a7aab_full.txt`
+
+**Expertise**:
+- C# language features (C# 13)
+- .NET 9 runtime and libraries
+- async/await, LINQ, collections, generics
+- ASP.NET Core patterns and APIs
+- Performance, diagnostics, testing
+
+**Trigger keywords**: c#, dotnet, .net, asp.net, roslyn, nuget
+
+---
+
+### 11. golang-engineering-expert
+
+**Purpose**: Extracts Go software engineering guidance from provided content.
+
+**Model**: Claude Haiku 4.5
+
+**Context**: none (use user-provided content or MCP server backups)
+
+**Expertise**:
+- Go language basics, concurrency, and standard library usage
+- API design, testing, and performance
+- Tooling (go mod, go test, go fmt)
+
+**Trigger keywords**: go, golang, goroutine, gopher, go modules
+
+---
+
+### 12. ruby-engineering-expert
+
+**Purpose**: Extracts Ruby software engineering guidance from provided content.
+
+**Model**: Claude Haiku 4.5
+
+**Context**: none (use user-provided content or MCP server backups)
+
+**Expertise**:
+- Ruby language features and idioms
+- Rails architecture, testing, and performance
+- Gems, Bundler, and tooling
+
+**Trigger keywords**: ruby, rails, rake, bundler, active record
+
+---
+
+### 13. typescript-engineering-expert
+
+**Purpose**: Extracts TypeScript software engineering guidance from provided content.
+
+**Model**: Claude Haiku 4.5
+
+**Context**: none (use user-provided content or MCP server backups)
+
+**Expertise**:
+- TypeScript types, generics, and inference
+- Node.js and frontend tooling
+- Testing, linting, and build pipelines
+
+**Trigger keywords**: typescript, ts, tsconfig, node, tsc
+
+---
+
+### 14. security-scanning-expert
+
+**Purpose**: Analyzes container security scanning practices and uses Trivy results for vulnerability reporting.
+
+**Model**: Claude Haiku 4.5
+
+**Context**: none (use user-provided content or MCP server backups)
+
+**Expertise**:
+- Trivy image scanning for pulled Docker images
+- CVE severity triage and remediation guidance
+- SBOM generation and vulnerability reporting
+- Integrating security scans into CI pipelines
+
+**Trigger keywords**: trivy, container scan, vulnerability scan, sbom, cve, image security
 
 ---
 
@@ -284,6 +414,46 @@ Step 6: Synthesize final answer:
 - **Context isolation**: Each chunk is analyzed independently with no cross-chunk awareness
 - **Synthesis happens in main conversation**: The root LLM (you) combines results
 - **State persistence**: REPL maintains state across invocations via pickle file
+- **Sequential orchestration**: For workflows that depend on intermediate outputs (e.g., build/pull an image → Trivy scan → threat model), run steps in order and pass artifacts between agents.
+
+---
+
+## Sequential Orchestration Rules
+
+When a workflow involves Docker images, the orchestrator must execute the following in order:
+1. Build or pull the Docker image.
+2. Run `trivy image <image>` and record vulnerabilities.
+3. Generate an SBOM (via Trivy or the configured tooling).
+4. Produce a threat model assessment (TMA) for the system where the image is used.
+
+Use the `security-scanning-expert` for scan interpretation and threat model assessment. If additional system context is required, gather it first and then proceed with the ordered steps.
+
+---
+
+## MCP Server Backups
+
+MCP servers available in Docker Desktop (currently created, not running):
+- `mcp/grafana` (container: `youthful_newton`)
+- `stickerdaniel/linkedin-mcp-server:1.4.0` (container: `confident_heisenberg`)
+- `mcr.microsoft.com/azure-sdk/azure-mcp` (container: `magical_zhukovsky`)
+- `mcp/notion` (container: `intelligent_shaw`)
+- `ghcr.io/github/github-mcp-server` (container: `youthful_bhabha`)
+- `mcp/git` (container: `festive_satoshi`)
+- `mcp/jetbrains` (container: `funny_grothendieck`)
+
+When a knowledge base chunk is insufficient, the root agent should:
+1. Start the relevant MCP container with `docker start <container_name>`.
+2. Query the MCP server using the configured MCP client.
+3. Provide results to sub-agents as inline content for extraction.
+
+For `azure-security-expert`, always pull latest security guidance from the Azure MCP server and pass it inline alongside the Sentinel PDF chunks.
+
+---
+
+## Next Steps
+
+- Add dedicated Go/Ruby/TypeScript context files under `.claude/rlm_contexts/` for richer extraction.
+- Extend `scripts/rlm_copilot_helper.py` if you want it to auto-recognize the new agents.
 
 ---
 
@@ -295,9 +465,16 @@ When the user asks a question, analyze keywords to determine which agent(s) to i
 - **Azure architecture** → `azure-architecture-expert`
 - **Azure IAM/identity** → `azure-iam-expert`
 - **Azure networking** → `azure-networking-expert`
+- **Azure security** → `azure-security-expert`
+- **Azure DevOps** → `azure-devops-expert`
 - **Books/references** → `books-expert`
 - **Platform engineering** → `platform-engineering-expert`
 - **Score workloads** → `score-expert`
+- **C#** → `csharp-engineering-expert`
+- **Golang** → `golang-engineering-expert`
+- **Ruby** → `ruby-engineering-expert`
+- **TypeScript** → `typescript-engineering-expert`
+- **Security scanning** → `security-scanning-expert`
 - **Generic large file** → `rlm-subcall`
 
 ### Multi-Domain Queries (invoke multiple agents in parallel)
@@ -305,6 +482,8 @@ When the user asks a question, analyze keywords to determine which agent(s) to i
 - "Platform engineering best practices from books" → `platform-engineering-expert` + `books-expert`
 - "Score workload for Azure" → `score-expert` + `azure-architecture-expert`
 - "Kubernetes platform engineering" → `platform-engineering-expert` + `books-expert` (filter K8s books)
+- "Azure DevOps from books" → `azure-devops-expert` + `books-expert`
+- "Docker image security" → `security-scanning-expert` + `platform-engineering-expert`
 
 ### Context Loading Strategy
 
@@ -314,11 +493,23 @@ For each agent, load the appropriate context:
 // Azure architecture queries
 context_path = ".claude/rlm_contexts/azure_radius_full.txt"
 
+// Azure security queries
+context_paths = [
+  "/Users/bittahcriminal/workspace/Platform-Engineering-RLM/Docs/Azure-Sentinel.pdf"
+]
+// Pull latest guidance via Azure MCP server (container: magical_zhukovsky)
+
+// Azure DevOps queries
+context_path = ".claude/rlm_contexts/books/azure-devops-explained-unknown-author-db1ecf5b_full.txt"
+
 // Platform engineering queries  
 context_path = ".claude/rlm_contexts/platform_engineering_full.txt"
 
 // Score workload queries
 context_path = ".claude/rlm_contexts/score_full.txt"
+
+// C# queries
+context_path = ".claude/rlm_contexts/books/c-13-and-net-9-modern-cross-platform-development-f-aa3a7aab_full.txt"
 
 // Books queries - load specific books or all
 context_paths = [
@@ -374,6 +565,17 @@ Copilot CLI:
 5. Combine Score spec guidance with Azure AKS patterns
 ```
 
+### Example 4: Docker Image Threat Model
+```
+User: "Scan our Docker image and provide a threat model"
+
+Copilot CLI:
+1. Build or pull the Docker image using the appropriate pipeline or tooling
+2. Run `trivy image <image>` to collect vulnerabilities
+3. Route results to: security-scanning-expert
+4. Produce a threat model assessment based on scan findings
+```
+
 ## Agent Template Location
 
 All agent prompts are in `.github/agent_templates/`:
@@ -381,6 +583,13 @@ All agent prompts are in `.github/agent_templates/`:
 - `azure-architecture-expert.txt`
 - `azure-iam-expert.txt`
 - `azure-networking-expert.txt`
+- `azure-security-expert.txt`
+- `azure-devops-expert.txt`
+- `csharp-engineering-expert.txt`
+- `golang-engineering-expert.txt`
+- `ruby-engineering-expert.txt`
+- `typescript-engineering-expert.txt`
+- `security-scanning-expert.txt`
 - `books-expert.txt`
 - `platform-engineering-expert.txt`
 - `score-expert.txt`
