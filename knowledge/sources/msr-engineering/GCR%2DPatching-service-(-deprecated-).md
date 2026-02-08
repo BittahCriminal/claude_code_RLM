@@ -1,0 +1,1 @@
+Everything for GCR-patching has been included in the sub pages of this GCR-patching service page. This has been deprecated in favor of new Azure update manager but we are still using this for some of the DSVM until the migration is complete. Omid 5/3/2024

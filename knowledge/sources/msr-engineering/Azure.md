@@ -1,0 +1,2 @@
+The ADO team maintains a contact list for who to contact about various aspects of the system. It can be found at:
+https://dev.azure.com/mseng/AzureDevOps/_wiki/wikis/AzureDevOps.wiki?pagePath=%2FAzure%20DevOps%20Organization%20Info%20and%20Resources%2FOrganizational%20Info%2FTeam%20Contacts&wikiVersion=GBwikiMaster&pageId=231&anchor=agile

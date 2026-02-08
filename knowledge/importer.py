@@ -76,6 +76,13 @@ class AgentDomain(Enum):
     KRATIX = "kratix"
     DAGGER = "dagger"
     RADIUS = "radius"
+    # Internal platforms
+    TRAPI = "trapi"
+    TRAPI_BATCH = "trapi-batch"
+    TRAPI_PYTHON_LIB = "trapi-python-lib"
+    MSR_ENGINEERING = "msr-engineering"
+    # DevOps
+    DEVOPS = "devops"
 
 
 # Video/audio formats that require transcription
@@ -685,7 +692,7 @@ class KnowledgeImporter:
 
         # Save full content
         content_path = knowledge_dir / "content.txt"
-        content_path.write_text(content)
+        content_path.write_text(content, encoding="utf-8")
 
         # Save chunks
         chunks_dir = knowledge_dir / "chunks"
@@ -693,7 +700,7 @@ class KnowledgeImporter:
 
         for chunk in chunks:
             chunk_path = chunks_dir / f"{chunk.id}.txt"
-            chunk_path.write_text(chunk.content)
+            chunk_path.write_text(chunk.content, encoding="utf-8")
 
             # Save chunk metadata if it has timestamps
             if chunk.timestamp_start is not None:
